@@ -125,6 +125,15 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Third-party integration transparency drawer (CODEX, owner-directed 2026-07-11).** Branch
+  `provider-integration-transparency`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-integration-transparency`, based on `c8ccd7f`. IMPLEMENTED and
+  ready for parent integration: typed exhaustive built-in/system/custom/manual catalog; accurate
+  credential/config fields; push/manual providers no longer solicit unused keys; accessible,
+  focus-trapped responsive drawer with per-instance connection state that exposes field names and
+  last-four/booleans only; dashboard, Settings, detail, and Add Provider affordances; compile-time
+  adapter/definition coverage. Focused 6/6, TypeScript, ESLint, and production build green. Browser
+  runtime had no available backend in this subagent; rendered QA remains with the parent integration.
 - **Production maintenance script hardening (CODEX, owner-directed 2026-07-11).** Branch
   `maintenance-script-hardening`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-maintenance-hardening`, based on `e736bf1`. Scope: make
@@ -262,6 +271,9 @@ _2026-07-06 (CLAUDE): "Monitor the agent-sync relay endpoint" moved to Completed
 PR #63's `agent-sync-relay` health-check adapter (issue #55)._
 
 ## Changelog of this log
+- 2026-07-11 — CODEX reserved third-party integration transparency catalog/drawer implementation.
+- 2026-07-11 — CODEX implemented integration transparency catalog/drawer; focused tests,
+  typecheck, lint, and build green; handed rendered QA to parent because this lane had no browser backend.
 - 2026-07-04 — bootstrapped by CLAUDE (effort-log standardization).
 - 2026-07-04 — CLAUDE: OTLP ingest + Sentry health card implementation complete, PR pending.
 - 2026-07-04 — CLAUDE: PR #13 merged (OTLP ingest + Sentry health card); moved to Completed.

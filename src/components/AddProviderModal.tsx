@@ -2,6 +2,12 @@
 
 import { useEffect, useState } from "react";
 import ModalDialog from "@/components/ModalDialog";
+import ProviderIntegrationInfo from "@/components/ProviderIntegrationInfo";
+import {
+  BUILT_IN_PROVIDERS,
+  PROVIDER_CATEGORIES,
+  type ProviderDefinition,
+} from "@/lib/provider-definitions";
 
 type BillingMode = "actual" | "estimated" | "manual";
 
@@ -39,96 +45,6 @@ interface AddProviderModalProps {
   editProvider?: Provider | null;
   existingProviders?: Provider[];
 }
-
-interface ProviderDef {
-  name: string;
-  displayName: string;
-  type: string;
-  category: string;
-  needsAccountId?: boolean;
-  needsOrgId?: boolean;
-  needsOrgSlug?: boolean;
-  creditBased?: boolean;
-  helpNote?: string;
-  needsConfig?: {
-    fields: {
-      key: string;
-      label: string;
-      placeholder: string;
-      required?: boolean;
-      type?: string;
-    }[];
-  };
-}
-
-const BUILT_IN_PROVIDERS: ProviderDef[] = [
-  // LLM/AI
-  { name: "openai", displayName: "OpenAI", type: "builtin", category: "LLM/AI", helpNote: "For authoritative organization cost, add an Organization Admin key below. It is encrypted separately from the normal API key.", needsConfig: { fields: [{ key: "adminApiKey", label: "Organization Admin key (optional)", placeholder: "sk-admin-...", type: "password" }] } },
-  { name: "anthropic", displayName: "Anthropic", type: "builtin", category: "LLM/AI", helpNote: "The Usage & Cost API requires an organization Admin API key. A standard Messages API key cannot read billing.", needsConfig: { fields: [{ key: "adminApiKey", label: "Organization Admin API key (optional)", placeholder: "sk-ant-admin...", type: "password" }] } },
-  { name: "google-ai", displayName: "Google AI", type: "builtin", category: "LLM/AI", helpNote: "Google AI Studio has no public usage API. Usage is visible at aistudio.google.com/app/apikey. Configure Google Cloud Billing for spend tracking." },
-  { name: "deepseek", displayName: "DeepSeek", type: "builtin", category: "LLM/AI", helpNote: "Reads the official prepaid/granted balance endpoint; DeepSeek does not expose invoice or subscription status here." },
-  { name: "xai", displayName: "xAI (Grok)", type: "builtin", category: "LLM/AI", helpNote: "Reads prepaid balance, postpaid invoice preview, billing cycle, and spending limits through the Management API.", needsConfig: { fields: [{ key: "teamId", label: "Team ID", placeholder: "xAI team ID", required: true }, { key: "managementKey", label: "Management API key (optional)", placeholder: "Management API key", type: "password" }] } },
-  { name: "mistral", displayName: "Mistral AI", type: "builtin", category: "LLM/AI", helpNote: "Reads organization usage, payment/limit status, spend cap, and rate limits with a Backoffice Admin key.", needsConfig: { fields: [{ key: "adminApiKey", label: "Backoffice Admin API key (optional)", placeholder: "Admin API key", type: "password" }] } },
-
-  // Developer platforms
-  { name: "github", displayName: "GitHub", type: "builtin", category: "Developer Platform", helpNote: "Uses GitHub billing APIs for plan and metered-usage data. Enter the organization login the token can read.", needsConfig: { fields: [{ key: "org", label: "Organization", placeholder: "GitHub organization login", required: true }] } },
-  { name: "vercel", displayName: "Vercel", type: "builtin", category: "Developer Platform", helpNote: "Reads account/team billing and usage. Leave Team ID blank for the token owner's personal scope.", needsConfig: { fields: [{ key: "teamId", label: "Team ID (optional)", placeholder: "team_..." }] } },
-  { name: "render", displayName: "Render", type: "builtin", category: "Developer Platform", helpNote: "Reads the service plan and suspended/active state. Render's service API does not expose invoice cost, so none is inferred.", needsConfig: { fields: [{ key: "serviceId", label: "Service ID", placeholder: "srv-...", required: true }] } },
-
-  // Vector DB & Embeddings
-  { name: "pinecone", displayName: "Pinecone", type: "builtin", category: "Vector DB", helpNote: "Fetches index stats (record count, dimension). No billing API." },
-  { name: "voyage", displayName: "Voyage AI", type: "builtin", category: "Vector DB", creditBased: true, helpNote: "Credit-based embedding service. Check dashboard at voyageai.com." },
-
-  // Market Data
-  { name: "fmp", displayName: "FMP", type: "builtin", category: "Market Data", helpNote: "No public usage API. Track calls via dashboard. Rate limits in response headers." },
-  { name: "finnhub", displayName: "Finnhub", type: "builtin", category: "Market Data", helpNote: "No public usage API. Free: 60 calls/min. Check finnhub.io." },
-  { name: "alphavantage", displayName: "Alpha Vantage", type: "builtin", category: "Market Data", helpNote: "No public usage API. Free: 25 calls/day. Check dashboard." },
-  { name: "tradier", displayName: "Tradier", type: "builtin", category: "Market Data", helpNote: "Reads documented API rate-limit headers and brokerage account status; portfolio value is not treated as provider spend." },
-  { name: "marketstack", displayName: "Marketstack", type: "builtin", category: "Market Data", helpNote: "No public usage API. Check marketstack.com dashboard." },
-  { name: "intrinio", displayName: "Intrinio", type: "builtin", category: "Market Data", helpNote: "Reads the official per-feed current-usage, limit, remaining-call, and reset-window endpoint. Pricing remains manual." },
-  { name: "tiingo", displayName: "Tiingo", type: "builtin", category: "Market Data", helpNote: "No public usage API. Freemium. Check tiingo.com." },
-  { name: "twelvedata", displayName: "Twelve Data", type: "builtin", category: "Market Data", helpNote: "Reads the documented plan response and real-time credits-used/remaining headers. Price and renewal remain manual." },
-  { name: "fintech-studios", displayName: "Fintech Studios", type: "builtin", category: "Market Data", helpNote: "No public usage API. Paid service." },
-  { name: "massive", displayName: "Massive", type: "builtin", category: "Market Data", helpNote: "No public usage API. Paid unlimited plan available." },
-  { name: "fred", displayName: "FRED", type: "builtin", category: "Market Data", helpNote: "Free federal data. No usage limits or billing." },
-
-  // Observability
-  { name: "sentry", displayName: "Sentry", type: "builtin", category: "Observability", needsOrgSlug: true, helpNote: "Enter your Sentry org slug to fetch error/transaction quotas." },
-  { name: "langfuse", displayName: "Langfuse", type: "builtin", category: "Observability", creditBased: true, helpNote: "LLM observability. Usage visible at cloud.langfuse.com." },
-
-  // Notifications
-  { name: "twilio", displayName: "Twilio", type: "builtin", category: "Notifications", needsAccountId: true, helpNote: "Reads account balance and the official ThisMonth Usage Record total price. Use an Auth Token or restricted key with billing usage read access." },
-  { name: "resend", displayName: "Resend", type: "builtin", category: "Notifications", helpNote: "Email provider. Free: 100/day. Check resend.com dashboard." },
-  { name: "pushover", displayName: "Pushover", type: "builtin", category: "Notifications", helpNote: "Reads the application message limit, remaining messages, and reset date. The API does not expose subscription price." },
-
-  // Infrastructure
-  { name: "cloudflare", displayName: "Cloudflare", type: "builtin", category: "Infrastructure", needsAccountId: true, helpNote: "Reads fixed subscriptions and, for eligible PayGo accounts, billing-grade usage cost. A Billing Read API token needs no email; email is only for a Global API key." },
-  { name: "hetzner", displayName: "Hetzner Cloud", type: "builtin", category: "Infrastructure", helpNote: "Reads server plan, status, location, and provider-published monthly run-rate. The API does not expose accrued invoice cost." },
-
-  // Data
-  { name: "apify", displayName: "Apify", type: "builtin", category: "Data", creditBased: true, helpNote: "Reads billing cycle, usage USD, maximum usage, active plan, base price, and included credits from official account APIs." },
-  { name: "llamaindex", displayName: "LlamaIndex Cloud", type: "builtin", category: "Data", creditBased: true, helpNote: "Credit-based OCR/parsing (free: 10k credits/mo). Check cloud.llamaindex.ai." },
-
-  // Payments
-  { name: "stripe", displayName: "Stripe", type: "builtin", category: "Payments", helpNote: "Tracks merchant balance and actual month-to-date Stripe processing fees. Customer subscriptions and merchant revenue are never counted as provider cost." },
-
-  // Brokerage
-  { name: "robinhood", displayName: "Robinhood", type: "builtin", category: "Brokerage", helpNote: "Portfolio tracking. Best-effort via MCP. No public usage API." },
-  { name: "alpaca", displayName: "Alpaca", type: "builtin", category: "Brokerage", helpNote: "Tracks portfolio value and day trade count via account endpoint." },
-];
-
-const CATEGORIES = [
-  "LLM/AI",
-  "Developer Platform",
-  "Vector DB",
-  "Market Data",
-  "Observability",
-  "Notifications",
-  "Infrastructure",
-  "Data",
-  "Payments",
-  "Brokerage",
-];
 
 type Tab = "builtin" | "custom" | "generic";
 
@@ -187,7 +103,9 @@ export default function AddProviderModal({
     stringFieldsFromConfig(editProvider?.config)
   );
 
-  const selectedDef = BUILT_IN_PROVIDERS.find((p) => p.name === selectedBuiltin);
+  const selectedDef: ProviderDefinition | undefined = BUILT_IN_PROVIDERS.find(
+    (provider) => provider.name === selectedBuiltin
+  );
 
   const matchingExisting = existingProviders.filter(
     (p) => p.name === selectedBuiltin && p.id !== editProvider?.id
@@ -375,7 +293,7 @@ export default function AddProviderModal({
           name: selectedDef.name,
           displayName: builtinDisplayName.trim(),
           type: "builtin",
-          apiKey: apiKey || undefined,
+          apiKey: selectedDef.usesApiKey === false ? undefined : apiKey || undefined,
           config: Object.keys(config).length > 0 ? config : undefined,
           label: label.trim() || null,
           plan,
@@ -828,7 +746,7 @@ export default function AddProviderModal({
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
                 >
                   <option value="">Select a provider...</option>
-                  {CATEGORIES.map((cat) => (
+                  {PROVIDER_CATEGORIES.map((cat) => (
                     <optgroup key={cat} label={cat}>
                       {BUILT_IN_PROVIDERS.filter((p) => p.category === cat).map(
                         (p) => (
@@ -845,6 +763,15 @@ export default function AddProviderModal({
                   <p className="text-xs text-purple-600 mt-1">
                     Credit-based provider — credits tracking enabled
                   </p>
+                )}
+                {selectedDef && (
+                  <ProviderIntegrationInfo
+                    providerName={selectedDef.name}
+                    providerType="builtin"
+                    displayName={selectedDef.displayName}
+                    variant="button"
+                    className="mt-2"
+                  />
                 )}
               </div>
 
@@ -885,6 +812,7 @@ export default function AddProviderModal({
                 </div>
               )}
 
+              {selectedDef?.usesApiKey !== false && (
               <div>
                 <label htmlFor="provider-builtin-api-key" className="block text-sm font-medium text-gray-700 mb-1">
                   API Key
@@ -906,6 +834,7 @@ export default function AddProviderModal({
                   </p>
                 )}
               </div>
+              )}
 
               <div>
                 <label htmlFor="provider-builtin-label" className="block text-xs font-medium text-gray-500 mb-1">

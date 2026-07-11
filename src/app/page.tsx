@@ -19,6 +19,8 @@ interface Provider {
   groupId: string | null;
   label: string | null;
   keyPreview?: string | null;
+  config?: Record<string, unknown>;
+  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   estimatedMonthlyCostUsd: number;
   projectedEomUsd: number;
   spentUsd?: number;
@@ -319,6 +321,9 @@ export default function DashboardPage() {
               name={provider.name}
               displayName={provider.displayName}
               type={provider.type}
+              isActive={provider.isActive}
+              config={provider.config}
+              secretConfigMeta={provider.secretConfigMeta}
               refreshIntervalMin={provider.refreshIntervalMin}
               label={provider.label}
               keyPreview={provider.keyPreview}

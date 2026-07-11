@@ -5,6 +5,7 @@ import {
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 import type { Provider } from "@prisma/client";
+import type { BuiltInProviderName } from "@/lib/provider-definitions";
 import type { UsageResult } from "./openai";
 
 type AdapterFn = (
@@ -73,60 +74,49 @@ async function loadAdapters() {
     render,
   ] = modules;
 
-  // LLM/AI
-  adapters["openai"] = openai.fetchUsage;
-  adapters["anthropic"] = anthropic.fetchUsage;
-  adapters["google-ai"] = googleAi.fetchUsage;
+  // Keep the Add Provider catalog and poll registry compile-time exhaustive.
+  const builtInAdapters: Record<BuiltInProviderName, AdapterFn> = {
+    openai: openai.fetchUsage,
+    anthropic: anthropic.fetchUsage,
+    "google-ai": googleAi.fetchUsage,
+    deepseek: deepseek.fetchUsage,
+    xai: xai.fetchUsage,
+    mistral: mistral.fetchUsage,
+    github: github.fetchUsage,
+    vercel: vercel.fetchUsage,
+    render: render.fetchUsage,
+    pinecone: pinecone.fetchUsage,
+    voyage: voyage.fetchUsage,
+    fmp: fmp.fetchUsage,
+    finnhub: finnhub.fetchUsage,
+    alphavantage: alphavantage.fetchUsage,
+    tradier: tradier.fetchUsage,
+    marketstack: marketstack.fetchUsage,
+    intrinio: intrinio.fetchUsage,
+    tiingo: tiingo.fetchUsage,
+    twelvedata: twelvedata.fetchUsage,
+    "fintech-studios": fintech_studios.fetchUsage,
+    massive: massive.fetchUsage,
+    fred: fred.fetchUsage,
+    sentry: sentry.fetchUsage,
+    langfuse: langfuse.fetchUsage,
+    twilio: twilio.fetchUsage,
+    resend: resend.fetchUsage,
+    pushover: pushover.fetchUsage,
+    cloudflare: cloudflare.fetchUsage,
+    hetzner: hetzner.fetchUsage,
+    apify: apify.fetchUsage,
+    llamaindex: llamaindex.fetchUsage,
+    stripe: stripe.fetchUsage,
+    robinhood: robinhood.fetchUsage,
+    alpaca: alpaca.fetchUsage,
+  };
+  Object.assign(adapters, builtInAdapters);
+
+  // Historical aliases retained for existing rows.
   adapters["google_ai"] = googleAi.fetchUsage;
   adapters["googleai"] = googleAi.fetchUsage;
   adapters["google"] = googleAi.fetchUsage;
-  adapters["deepseek"] = deepseek.fetchUsage;
-  adapters["xai"] = xai.fetchUsage;
-  adapters["mistral"] = mistral.fetchUsage;
-  adapters["llamaindex"] = llamaindex.fetchUsage;
-
-  // Vector DB
-  adapters["pinecone"] = pinecone.fetchUsage;
-  adapters["voyage"] = voyage.fetchUsage;
-
-  // Market Data
-  adapters["fmp"] = fmp.fetchUsage;
-  adapters["finnhub"] = finnhub.fetchUsage;
-  adapters["alphavantage"] = alphavantage.fetchUsage;
-  adapters["tradier"] = tradier.fetchUsage;
-  adapters["marketstack"] = marketstack.fetchUsage;
-  adapters["intrinio"] = intrinio.fetchUsage;
-  adapters["tiingo"] = tiingo.fetchUsage;
-  adapters["twelvedata"] = twelvedata.fetchUsage;
-  adapters["fintech-studios"] = fintech_studios.fetchUsage;
-  adapters["massive"] = massive.fetchUsage;
-  adapters["fred"] = fred.fetchUsage;
-
-  // Observability
-  adapters["sentry"] = sentry.fetchUsage;
-  adapters["langfuse"] = langfuse.fetchUsage;
-
-  // Notifications
-  adapters["twilio"] = twilio.fetchUsage;
-  adapters["resend"] = resend.fetchUsage;
-  adapters["pushover"] = pushover.fetchUsage;
-
-  // Infrastructure
-  adapters["cloudflare"] = cloudflare.fetchUsage;
-  adapters["hetzner"] = hetzner.fetchUsage;
-  adapters["github"] = github.fetchUsage;
-  adapters["vercel"] = vercel.fetchUsage;
-  adapters["render"] = render.fetchUsage;
-
-  // Data
-  adapters["apify"] = apify.fetchUsage;
-
-  // Payments
-  adapters["stripe"] = stripe.fetchUsage;
-
-  // Brokerage
-  adapters["robinhood"] = robinhood.fetchUsage;
-  adapters["alpaca"] = alpaca.fetchUsage;
 
   // Custom
   adapters["custom"] = custom.fetchUsage;

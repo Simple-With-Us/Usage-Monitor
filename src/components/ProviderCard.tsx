@@ -3,12 +3,16 @@
 import Link from "next/link";
 import BalanceBadge from "./BalanceBadge";
 import { isExternalBillingStale, type ExternalBillingRecord } from "./ExternalBillingDetails";
+import ProviderIntegrationInfo, { publicConfigFieldNames } from "./ProviderIntegrationInfo";
 
 interface ProviderCardProps {
   id: string;
   name: string;
   displayName: string;
   type: string;
+  isActive: boolean;
+  config?: Record<string, unknown>;
+  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   refreshIntervalMin?: number;
   label?: string | null;
   keyPreview?: string | null;
@@ -65,6 +69,9 @@ export default function ProviderCard({
   displayName,
   name,
   type,
+  isActive,
+  config,
+  secretConfigMeta,
   refreshIntervalMin = 60,
   label,
   keyPreview,
@@ -117,9 +124,27 @@ export default function ProviderCard({
           )}
         </div>
         <div className="ml-auto flex flex-col items-end gap-1 flex-shrink-0">
-          <span className="text-xs font-medium text-gray-400 uppercase bg-gray-50 px-2 py-0.5 rounded">
-            {type}
-          </span>
+          <div className="flex items-center gap-1">
+            <ProviderIntegrationInfo
+              providerName={name}
+              providerType={type}
+              displayName={displayName}
+              instanceState={{
+                isActive,
+                primaryCredentialConfigured: Boolean(keyPreview),
+                keyPreview,
+                publicConfigFields: publicConfigFieldNames(config),
+                protectedConfigFields: secretConfigMeta?.fields ?? [],
+                protectedConfigReadable: secretConfigMeta?.readable,
+                lastSnapshotAt: latestSnapshot?.fetchedAt ?? null,
+                externalBillingRecordCount: externalBilling.length,
+                externalBillingSources: [...new Set(externalBilling.map((record) => record.source))].sort(),
+              }}
+            />
+            <span className="text-xs font-medium text-gray-400 uppercase bg-gray-50 px-2 py-0.5 rounded">
+              {type}
+            </span>
+          </div>
           {openAlerts.length > 0 && (
             <span
               className={`text-xs font-medium px-2 py-0.5 rounded ${
