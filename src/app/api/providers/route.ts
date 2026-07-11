@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { encrypt, decrypt, encryptJson } from "@/lib/crypto";
+import { encrypt, encryptJson } from "@/lib/crypto";
 import { parseProviderCreateInput, readJsonBody } from "@/lib/provider-input";
 import { buildProviderAlertState } from "@/lib/provider-alerts";
 import { computeBudgetStatus } from "@/lib/budget-status";
@@ -11,18 +11,7 @@ import {
   providerConfigForClient,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
-
-function buildKeyPreview(encryptedKey: string | null): string | null {
-  if (!encryptedKey) return null;
-  try {
-    const decrypted = decrypt(encryptedKey);
-    if (decrypted.length < 4) return null;
-    const last = decrypted.slice(-4);
-    return `••••${last}`;
-  } catch {
-    return null;
-  }
-}
+import { providerApiKeyState } from "@/lib/provider-api-key-state";
 
 export async function GET() {
   const [providers, budget] = await Promise.all([prisma.provider.findMany({
@@ -123,6 +112,7 @@ export async function GET() {
       latestSnapshot,
     });
     const canonicalBudget = budgetByProviderId.get(p.id);
+    const apiKeyState = providerApiKeyState(apiKey);
     const duplicateProviderIds = duplicateIdsByName.get(
       p.name.trim().toLowerCase()
     ) ?? [];
@@ -130,7 +120,7 @@ export async function GET() {
     return {
       ...rest,
       ...clientConfig,
-      keyPreview: buildKeyPreview(apiKey),
+      ...apiKeyState,
       latestSnapshot,
       alerts: canonicalBudget?.alerts ?? alertState.alerts,
       estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,

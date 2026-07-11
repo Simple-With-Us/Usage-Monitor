@@ -28,3 +28,18 @@ describe("provider allocation input", () => {
     ).toHaveLength(2);
   });
 });
+
+describe("provider type input", () => {
+  const base = { name: "private-service", displayName: "Private service" };
+
+  it("normalizes supported provider types before persistence", () => {
+    expect(parseProviderCreateInput({ ...base, type: " Custom " }).type).toBe("custom");
+    expect(parseProviderCreateInput({ ...base, type: "GENERIC" }).type).toBe("generic");
+  });
+
+  it("rejects unknown provider types instead of creating an unroutable row", () => {
+    expect(() => parseProviderCreateInput({ ...base, type: "proxy" })).toThrowError(
+      /type must be one of/
+    );
+  });
+});

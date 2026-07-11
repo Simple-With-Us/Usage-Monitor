@@ -3,7 +3,7 @@ import { SUBSCRIPTION_INTERVALS } from "@/lib/subscriptions";
 export interface ProviderInput {
   name: string;
   displayName: string;
-  type: string;
+  type: ProviderType;
   apiKey?: string;
   config?: Record<string, unknown>;
   refreshIntervalMin: number;
@@ -12,6 +12,9 @@ export interface ProviderInput {
   plan?: ProviderPlanInput;
   allocations?: { projectId: string; percentage: number }[];
 }
+
+export const PROVIDER_TYPES = ["builtin", "custom", "generic"] as const;
+export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 export interface ProviderUpdateInput {
   displayName?: string;
@@ -41,6 +44,7 @@ export interface ProviderPlanInput {
 const MAX_REFRESH_INTERVAL_MIN = 60 * 24 * 7;
 const BILLING_MODES = new Set(["actual", "estimated", "manual"]);
 const BILLING_INTERVALS = new Set(SUBSCRIPTION_INTERVALS);
+const PROVIDER_TYPE_SET = new Set<string>(PROVIDER_TYPES);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -237,10 +241,14 @@ export async function readJsonBody(request: Request): Promise<Record<string, unk
 export function parseProviderCreateInput(body: Record<string, unknown>): ProviderInput {
   const name = cleanOptionalString(body.name);
   const displayName = cleanOptionalString(body.displayName);
-  const type = cleanOptionalString(body.type) ?? "builtin";
+  const rawType = cleanOptionalString(body.type) ?? "builtin";
+  const type = rawType.toLowerCase();
 
   if (!name || !displayName) {
     throw new Error("name and displayName are required");
+  }
+  if (!PROVIDER_TYPE_SET.has(type)) {
+    throw new Error(`type must be one of: ${PROVIDER_TYPES.join(", ")}`);
   }
 
   let config: Record<string, unknown> | undefined;
@@ -253,7 +261,7 @@ export function parseProviderCreateInput(body: Record<string, unknown>): Provide
   return {
     name: name.toLowerCase(),
     displayName,
-    type,
+    type: type as ProviderType,
     apiKey: cleanOptionalString(body.apiKey),
     config,
     refreshIntervalMin: parseRefreshInterval(body.refreshIntervalMin),

@@ -60,6 +60,15 @@ describe("dashboard session signing", () => {
     expect(verifySessionToken(token)).toBe(false);
   });
 
+  it("fails closed instead of falling back when the session version is invalid", () => {
+    const token = createSessionToken();
+    process.env.SESSION_VERSION = "2!";
+
+    expect(isSessionAuthConfigured()).toBe(false);
+    expect(() => createSessionToken()).toThrow(/SESSION_VERSION/);
+    expect(verifySessionToken(token)).toBe(false);
+  });
+
   it("rejects expired and implausibly long-lived tokens", () => {
     const token = createSessionToken();
     vi.advanceTimersByTime(31 * 24 * 60 * 60 * 1_000);

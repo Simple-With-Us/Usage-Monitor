@@ -29,13 +29,15 @@ export function buildContentSecurityPolicy(
 
 function nextWithNonce(request: NextRequest): NextResponse {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  const contentSecurityPolicy = buildContentSecurityPolicy(nonce);
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
+  // Next.js reads the nonce from the CSP request header while rendering its
+  // framework scripts. Forward the exact policy returned to the browser so
+  // every generated script receives the nonce that the response enforces.
+  requestHeaders.set("Content-Security-Policy", contentSecurityPolicy);
   const response = NextResponse.next({ request: { headers: requestHeaders } });
-  response.headers.set(
-    "Content-Security-Policy",
-    buildContentSecurityPolicy(nonce)
-  );
+  response.headers.set("Content-Security-Policy", contentSecurityPolicy);
   return response;
 }
 

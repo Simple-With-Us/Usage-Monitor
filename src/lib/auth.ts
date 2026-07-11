@@ -22,13 +22,16 @@ function validSessionSecret(value: string | undefined): string | null {
   return secret.length >= MIN_SESSION_SECRET_LENGTH ? secret : null;
 }
 
-function sessionVersion(): string {
+function validSessionVersion(): string | null {
   const version = process.env.SESSION_VERSION?.trim() || "1";
-  return /^[A-Za-z0-9_-]{1,32}$/.test(version) ? version : "1";
+  return /^[A-Za-z0-9_-]{1,32}$/.test(version) ? version : null;
 }
 
 export function isSessionAuthConfigured(): boolean {
-  return validSessionSecret(process.env.SESSION_SECRET) != null;
+  return (
+    validSessionSecret(process.env.SESSION_SECRET) != null &&
+    validSessionVersion() != null
+  );
 }
 
 function signSessionPayload(payload: string, secret: string): string {
@@ -42,11 +45,17 @@ export function createSessionToken(): string {
       `SESSION_SECRET must be at least ${MIN_SESSION_SECRET_LENGTH} characters`
     );
   }
+  const version = validSessionVersion();
+  if (!version) {
+    throw new Error(
+      "SESSION_VERSION must contain 1-32 letters, numbers, underscores, or hyphens"
+    );
+  }
   const expiresAt = Date.now() + SESSION_MAX_AGE * 1000;
   const nonce = crypto.randomBytes(16).toString("base64url");
   const payload = [
     SESSION_TOKEN_FORMAT,
-    sessionVersion(),
+    version,
     String(expiresAt),
     nonce,
   ].join(".");
@@ -55,12 +64,14 @@ export function createSessionToken(): string {
 
 export function verifySessionToken(token: string | undefined | null): boolean {
   if (!token) return false;
+  const expectedVersion = validSessionVersion();
+  if (!expectedVersion) return false;
   const parts = token.split(".");
   if (parts.length !== 5) return false;
   const [format, version, expiresAtRaw, nonce, sig] = parts;
   if (
     format !== SESSION_TOKEN_FORMAT ||
-    version !== sessionVersion() ||
+    version !== expectedVersion ||
     !/^[A-Za-z0-9_-]{16,64}$/.test(nonce) ||
     !/^[A-Za-z0-9_-]{32,64}$/.test(sig)
   ) {

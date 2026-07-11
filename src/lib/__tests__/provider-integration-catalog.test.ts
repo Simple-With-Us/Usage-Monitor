@@ -41,6 +41,9 @@ describe("provider integration catalog", () => {
     expect(getProviderIntegrationProfile("private-service", "custom").name).toBe("custom");
     expect(getProviderIntegrationProfile("manual-service", "generic").name).toBe("generic");
     expect(getProviderIntegrationProfile("unknown").name).toBe("generic");
+    expect(getProviderIntegrationProfile("openai", " Custom ").name).toBe("custom");
+    expect(getProviderIntegrationProfile("openai", "MANUAL").name).toBe("generic");
+    expect(getProviderIntegrationProfile("openai", "unsupported").name).toBe("generic");
   });
 
   it("exposes required adapter config and does not solicit unused blind-adapter keys", () => {

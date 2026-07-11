@@ -13,6 +13,7 @@ describe("ProviderIntegrationDrawer", () => {
         instanceState: {
           isActive: true,
           primaryCredentialConfigured: true,
+          primaryCredentialReadable: true,
           keyPreview: "1234",
           publicConfigFields: ["accountId", "r2BucketName"],
           protectedConfigFields: ["apiToken"],
@@ -39,6 +40,31 @@ describe("ProviderIntegrationDrawer", () => {
     expect(html).toContain("Billing and subscription coverage");
     expect(html).toContain("Confidence and source date");
     expect(html).toContain("Close Cloudflare Production integration details");
+  });
+
+  it("distinguishes an unreadable stored key from an absent key", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProviderIntegrationDrawer, {
+        providerName: "openai",
+        providerType: "builtin",
+        displayName: "OpenAI",
+        instanceState: {
+          isActive: true,
+          primaryCredentialConfigured: true,
+          primaryCredentialReadable: false,
+          keyPreview: null,
+          publicConfigFields: [],
+          protectedConfigFields: [],
+          lastSnapshotAt: null,
+          externalBillingRecordCount: 0,
+          externalBillingSources: [],
+        },
+        onClose: vi.fn(),
+      })
+    );
+
+    expect(html).toContain("Configured · stored credential is not currently readable");
+    expect(html).not.toContain(">Not configured<");
   });
 
   it("uses custom/manual semantics for arbitrary provider slugs", () => {

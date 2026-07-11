@@ -457,8 +457,13 @@ export function getProviderIntegrationProfile(
   providerName: string,
   providerType?: string
 ): ProviderIntegrationProfile {
-  if (providerType === "custom") return CATALOG.custom;
-  if (providerType === "generic") return CATALOG.generic;
+  const normalizedType = providerType?.trim().toLowerCase();
+  if (normalizedType === "custom") return CATALOG.custom;
+  if (normalizedType === "generic" || normalizedType === "manual") return CATALOG.generic;
+  // A non-built-in type is not allowed to inherit claims solely from a name
+  // collision with a known adapter. The adapter router also fails these types
+  // closed; the drawer should be at least as conservative.
+  if (normalizedType && normalizedType !== "builtin") return CATALOG.generic;
   const normalized = providerName.trim().toLowerCase();
   const canonical = ALIASES[normalized] ?? normalized;
   return CATALOG[canonical as CatalogProviderName] ?? CATALOG.generic;
