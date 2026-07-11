@@ -17,9 +17,10 @@
 # error. This prevents a deploy from silently running without its intended
 # backup path.
 #
-# backup-sqlite-before-migrate.mjs then migrate-safe.mjs run exactly once in
-# both paths, before the server starts, and always against the post-restore (or
-# existing) database file. An existing database cannot be migrated unless a
+# backup-sqlite-before-migrate.mjs, migrate-safe.mjs, then an explicitly gated
+# release-maintenance plan run exactly once in both paths before the server
+# starts, and always against the post-restore (or existing) database file. An
+# existing database cannot be migrated or maintained unless a
 # transaction-consistent local backup passes SQLite integrity verification.
 #
 # Uses `exec` for the final process in each branch so it becomes PID 1 (or
@@ -78,6 +79,10 @@ elif [[ "${LITESTREAM_REQUIRED:-false}" == "true" ]]; then
   exit 1
 fi
 
+# Validate the exact release-maintenance opt-in before touching the database.
+# Unset/blank is a no-op; any unknown plan ID fails startup closed.
+node "${REPO_ROOT}/scripts/run-release-maintenance.mjs" --validate-config
+
 if [[ "${STARTUP_PREFLIGHT_ONLY:-false}" == "true" ]]; then
   log "preflight OK (replication ${litestream_enabled})."
   exit 0
@@ -103,6 +108,12 @@ log "creating and verifying pre-migration SQLite backup when a database exists."
 node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs"
 
 node "${REPO_ROOT}/scripts/migrate-safe.mjs"
+
+# Business-data maintenance is allowed only after the existing database has a
+# verified backup and the additive schema (including ReleaseMaintenanceRun) is
+# live. The selected plan performs its own dry preflight, atomic write,
+# postcondition verification, and receipt-last transaction before returning.
+node "${REPO_ROOT}/scripts/run-release-maintenance.mjs"
 
 if [[ "${litestream_enabled}" == "true" ]]; then
   log "starting litestream replicate (wraps npm start as its supervised process)."

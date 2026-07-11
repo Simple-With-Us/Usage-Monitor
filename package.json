@@ -19,11 +19,14 @@
     "audit:subscription-currency": "node scripts/audit-subscription-currency.mjs",
     "migrate:provider-secrets": "node scripts/migrate-provider-config-secrets.mjs",
     "audit:provider-duplicates": "node scripts/audit-provider-duplicates.mjs",
+    "seed:provider-subscriptions": "node scripts/seed-provider-subscriptions.mjs",
+    "release:maintenance": "node scripts/run-release-maintenance.mjs",
     "test": "vitest run",
     "test:migrate-safe": "node scripts/test-migrate-safe-repro.mjs",
     "test:sqlite-backup": "node scripts/test-sqlite-pre-migration-backup.mjs",
+    "test:release-maintenance": "node scripts/test-release-maintenance.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:startup-config && npm run build"
+    "verify": "npm run lint && npm run typecheck && npm test && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:release-maintenance && npm run test:startup-config && npm run build"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",

@@ -125,6 +125,12 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Deterministic provider-subscription release plan (CODEX, owner-directed 2026-07-11).** Branch
+  `release-plan-hardening`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-release-plan`, based on `e736bf1`. Scope: transactional
+  `provider-subscriptions-2026-07-10-v1` seed with fixed billing anchors, exact-plan startup gate,
+  database receipt written only after postconditions, ambiguity/manual-row preservation, and
+  startup ordering after verified backup + migration. No production writes or deploys.
 - **Alert-delivery channel reliability (CODEX, owner-directed 2026-07-11).** Branch
   `codex-alert-delivery-reliability`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-alert-delivery`, based on app-wide hardening commit `2dd8ad8`.

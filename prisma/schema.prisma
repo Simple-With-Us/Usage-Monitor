@@ -398,3 +398,15 @@ model ProviderProjectAllocation {
 
   @@unique([providerId, projectId])
 }
+
+// Durable receipt for an explicitly selected, immutable release-maintenance
+// plan. Business-data writes and this receipt are committed in one SQLite
+// transaction, with the receipt inserted only after postconditions pass.
+// A matching receipt makes later deploys a no-op; reusing a planId with a
+// different planHash fails closed.
+model ReleaseMaintenanceRun {
+  planId      String   @id
+  planHash    String
+  receipt     Json
+  completedAt DateTime @default(now())
+}

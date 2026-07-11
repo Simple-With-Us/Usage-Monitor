@@ -133,9 +133,11 @@ usage — no special-casing. Idempotent by `(subscriptionId, periodStart)` hash 
   while that subscription is active/considering. `GET /api/subscriptions` returns both the
   effective value (`knobEnv`: the subscription's own override, else the provider's free tier) and
   `freeTierKnobEnv` (always the provider's free-tier map) per row, so a consumer can diff "what I'd
-  get free" vs "what this plan implies." `scripts/seed-provider-subscriptions.mjs` is the standalone
-  idempotent one-time seed for the real data (massive/fmp/tiingo/fmp-Premium subscriptions +
-  tiingo/twelvedata/alphavantage/finnhub free-tier maps) — see
+  get free" vs "what this plan implies." `scripts/seed-provider-subscriptions.mjs` is the
+  dry-run-first interface to the immutable `provider-subscriptions-2026-07-10-v1` release plan for
+  the real data (massive/fmp/tiingo/fmp-Premium subscriptions +
+  tiingo/twelvedata/alphavantage/finnhub free-tier maps). Apply requires that exact plan ID;
+  startup is opt-in through `RELEASE_MAINTENANCE_PLAN_ID`. See `docs/release-maintenance.md` and
   `docs/rollouts/2026-07-10-subscription-knob-linkage.md`.
 
 ## Sentry Health card

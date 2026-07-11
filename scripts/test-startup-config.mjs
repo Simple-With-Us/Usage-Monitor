@@ -17,7 +17,12 @@ const keys = [
 
 function run(overrides = {}) {
   const env = { ...process.env, STARTUP_PREFLIGHT_ONLY: "true" };
-  for (const key of [...keys, "LITESTREAM_REQUIRED", "LITESTREAM_BIN_PATH"]) {
+  for (const key of [
+    ...keys,
+    "LITESTREAM_REQUIRED",
+    "LITESTREAM_BIN_PATH",
+    "RELEASE_MAINTENANCE_PLAN_ID",
+  ]) {
     delete env[key];
   }
   Object.assign(env, overrides);
@@ -39,11 +44,38 @@ try {
     'node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs"'
   );
   const migrationIndex = startupSource.indexOf('node "${REPO_ROOT}/scripts/migrate-safe.mjs"');
-  if (backupIndex < 0 || migrationIndex < 0 || backupIndex >= migrationIndex) {
-    throw new Error("startup wrapper must run the SQLite backup before migrate-safe");
+  const maintenanceIndex = startupSource.lastIndexOf(
+    'node "${REPO_ROOT}/scripts/run-release-maintenance.mjs"'
+  );
+  const appStartIndex = startupSource.lastIndexOf("\nexec npm start");
+  if (
+    backupIndex < 0 ||
+    migrationIndex < 0 ||
+    maintenanceIndex < 0 ||
+    appStartIndex < 0 ||
+    backupIndex >= migrationIndex ||
+    migrationIndex >= maintenanceIndex ||
+    maintenanceIndex >= appStartIndex
+  ) {
+    throw new Error(
+      "startup wrapper order must be backup -> migrate-safe -> release maintenance -> app"
+    );
   }
 
   expectStatus("disabled backup", run(), 0);
+  expectStatus(
+    "known release plan",
+    run({
+      RELEASE_MAINTENANCE_PLAN_ID:
+        "provider-subscriptions-2026-07-10-v1",
+    }),
+    0
+  );
+  expectStatus(
+    "unknown release plan",
+    run({ RELEASE_MAINTENANCE_PLAN_ID: "run-everything" }),
+    1
+  );
   expectStatus(
     "partial configuration",
     run({ LITESTREAM_S3_BUCKET: "bucket" }),

@@ -61,6 +61,12 @@ services:
       # closed for an existing DB if backup or integrity verification fails.
       - key: SQLITE_PRE_MIGRATION_BACKUP_RETENTION
         value: "3"
+      # Optional exact release-maintenance gate. Leave unset for a no-op. Set
+      # only to provider-subscriptions-2026-07-10-v1 after reviewing its dry
+      # run; unknown IDs fail startup closed, and a matching durable receipt
+      # makes later deploys a no-op.
+      - key: RELEASE_MAINTENANCE_PLAN_ID
+        sync: false
       - key: ENCRYPTION_KEY
         generateValue: true
       - key: CRON_SECRET
