@@ -131,7 +131,14 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
   provider-secret migration transactional with encrypted-value precedence and classifier parity;
   constrain historical Claude repair to cost-only, preserve newer OTLP checkpoints, and add
   production-safety/idempotency regression coverage. Implementation complete locally: focused
-  suite 6/6, ESLint, TypeScript, script syntax, and diff checks green. No production writes or deploys.
+  suite 6/6, full suite 46 files/258 tests, ESLint, TypeScript, script syntax, diff checks, and
+  production build green. No production writes or deploys.
+- **Deterministic provider-subscription release plan (CODEX, owner-directed 2026-07-11).** Branch
+  `release-plan-hardening`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-release-plan`, based on `e736bf1`. Scope: transactional
+  `provider-subscriptions-2026-07-10-v1` seed with fixed billing anchors, exact-plan startup gate,
+  database receipt written only after postconditions, ambiguity/manual-row preservation, and
+  startup ordering after verified backup + migration. No production writes or deploys.
 - **Alert-delivery channel reliability (CODEX, owner-directed 2026-07-11).** Branch
   `codex-alert-delivery-reliability`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-alert-delivery`, based on app-wide hardening commit `2dd8ad8`.
