@@ -1,4 +1,11 @@
 import { SUBSCRIPTION_INTERVALS } from "@/lib/subscriptions";
+import {
+  assertSafeProviderConfigKey,
+  isSecretConfigKey,
+  normalizeProviderConfigInput,
+  type ProviderCredentialAction,
+  type ProviderSecretConfigOperation,
+} from "@/lib/provider-secret-config";
 
 export interface ProviderInput {
   name: string;
@@ -18,8 +25,9 @@ export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 export interface ProviderUpdateInput {
   displayName?: string;
-  apiKey?: string;
+  apiKeyOperation: ApiKeyOperation;
   config?: Record<string, unknown> | null;
+  secretConfigOperations?: ProviderSecretConfigOperation[];
   isActive?: boolean;
   refreshIntervalMin?: number;
   groupId?: string | null;
@@ -27,6 +35,11 @@ export interface ProviderUpdateInput {
   plan?: ProviderPlanInput;
   allocations?: { projectId: string; percentage: number }[];
 }
+
+export type ApiKeyOperation =
+  | { action: "preserve" }
+  | { action: "clear" }
+  | { action: "replace"; value: string };
 
 export interface ProviderPlanInput {
   billingMode?: "actual" | "estimated" | "manual";
@@ -45,6 +58,9 @@ const MAX_REFRESH_INTERVAL_MIN = 60 * 24 * 7;
 const BILLING_MODES = new Set(["actual", "estimated", "manual"]);
 const BILLING_INTERVALS = new Set(SUBSCRIPTION_INTERVALS);
 const PROVIDER_TYPE_SET = new Set<string>(PROVIDER_TYPES);
+const MAX_API_KEY_LENGTH = 16_384;
+const MAX_SECRET_CONFIG_OPERATIONS = 50;
+const MAX_SECRET_VALUE_LENGTH = 4_096;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -60,6 +76,138 @@ function cleanOptionalString(value: unknown): string | undefined {
 function cleanNullableString(value: unknown): string | null | undefined {
   if (value === null) return null;
   return cleanOptionalString(value);
+}
+
+function parseApiKeyValue(value: unknown, required: boolean): string | undefined {
+  if (value == null || value === "") {
+    if (required) throw new Error("apiKey is required when apiKeyAction is replace");
+    return undefined;
+  }
+  if (typeof value !== "string") throw new Error("apiKey must be a string");
+  const apiKey = value.trim();
+  if (!apiKey) {
+    if (required) throw new Error("apiKey is required when apiKeyAction is replace");
+    return undefined;
+  }
+  if (apiKey.length > MAX_API_KEY_LENGTH) {
+    throw new Error(`apiKey must be ${MAX_API_KEY_LENGTH} characters or fewer`);
+  }
+  return apiKey;
+}
+
+function parseApiKeyOperation(body: Record<string, unknown>): ApiKeyOperation {
+  const rawAction = body.apiKeyAction;
+  if (rawAction === undefined) {
+    const value = parseApiKeyValue(body.apiKey, false);
+    return value ? { action: "replace", value } : { action: "preserve" };
+  }
+  if (
+    typeof rawAction !== "string" ||
+    !(["preserve", "replace", "clear"] as ProviderCredentialAction[]).includes(
+      rawAction as ProviderCredentialAction
+    )
+  ) {
+    throw new Error("apiKeyAction must be preserve, replace, or clear");
+  }
+  if (rawAction === "replace") {
+    return { action: "replace", value: parseApiKeyValue(body.apiKey, true)! };
+  }
+  if (parseApiKeyValue(body.apiKey, false)) {
+    throw new Error(`apiKey must be omitted when apiKeyAction is ${rawAction}`);
+  }
+  return { action: rawAction as "preserve" | "clear" };
+}
+
+function parseSecretConfigOperations(
+  value: unknown
+): ProviderSecretConfigOperation[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error("secretConfigOperations must be an array");
+  }
+  if (value.length > MAX_SECRET_CONFIG_OPERATIONS) {
+    throw new Error(
+      `secretConfigOperations must contain ${MAX_SECRET_CONFIG_OPERATIONS} items or fewer`
+    );
+  }
+  const seen = new Set<string>();
+  return value.map((raw, index) => {
+    const operation = asRecord(raw);
+    if (!operation) {
+      throw new Error(`secretConfigOperations[${index}] must be an object`);
+    }
+    if (
+      !Array.isArray(operation.path) ||
+      operation.path.length < 1 ||
+      operation.path.length > 6 ||
+      operation.path.some((segment) => typeof segment !== "string")
+    ) {
+      throw new Error(
+        `secretConfigOperations[${index}].path must contain 1 to 6 string segments`
+      );
+    }
+    const path = operation.path as string[];
+    path.forEach((segment, pathIndex) =>
+      assertSafeProviderConfigKey(
+        segment,
+        `secretConfigOperations[${index}].path[${pathIndex}]`
+      )
+    );
+    if (!path.some(isSecretConfigKey)) {
+      throw new Error(
+        `secretConfigOperations[${index}].path must identify a protected config field`
+      );
+    }
+    const protectedIndex = path.findIndex(isSecretConfigKey);
+    const protectedContainer = path[protectedIndex]
+      .replace(/[_-]/g, "")
+      .toLowerCase();
+    if (
+      protectedIndex < path.length - 1 &&
+      protectedContainer !== "extraheaders"
+    ) {
+      throw new Error(
+        `secretConfigOperations[${index}].path cannot descend below a scalar protected field`
+      );
+    }
+    const pathKey = JSON.stringify(path);
+    if (seen.has(pathKey)) {
+      throw new Error(`secretConfigOperations contains duplicate path ${path.join(".")}`);
+    }
+    seen.add(pathKey);
+
+    const action = operation.action;
+    if (action !== "preserve" && action !== "replace" && action !== "clear") {
+      throw new Error(
+        `secretConfigOperations[${index}].action must be preserve, replace, or clear`
+      );
+    }
+    if (action === "replace") {
+      if (protectedContainer === "extraheaders" && protectedIndex === path.length - 1) {
+        throw new Error(
+          `secretConfigOperations[${index}] must replace an individual extraHeaders entry`
+        );
+      }
+      if (typeof operation.value !== "string" || !operation.value.trim()) {
+        throw new Error(
+          `secretConfigOperations[${index}].value is required for replace`
+        );
+      }
+      const replacement = operation.value.trim();
+      if (replacement.length > MAX_SECRET_VALUE_LENGTH) {
+        throw new Error(
+          `secretConfigOperations[${index}].value must be ${MAX_SECRET_VALUE_LENGTH} characters or fewer`
+        );
+      }
+      return { path, action, value: replacement };
+    }
+    if (operation.value !== undefined) {
+      throw new Error(
+        `secretConfigOperations[${index}].value must be omitted for ${action}`
+      );
+    }
+    return { path, action };
+  });
 }
 
 function parseRefreshInterval(value: unknown, fallback = 60): number {
@@ -253,16 +401,19 @@ export function parseProviderCreateInput(body: Record<string, unknown>): Provide
 
   let config: Record<string, unknown> | undefined;
   if (body.config !== undefined) {
-    const parsedConfig = asRecord(body.config);
-    if (!parsedConfig) throw new Error("config must be an object");
-    config = parsedConfig;
+    config = normalizeProviderConfigInput(body.config);
+  }
+  if (body.apiKeyAction !== undefined || body.secretConfigOperations !== undefined) {
+    throw new Error(
+      "apiKeyAction and secretConfigOperations are only supported when updating a provider"
+    );
   }
 
   return {
     name: name.toLowerCase(),
     displayName,
     type: type as ProviderType,
-    apiKey: cleanOptionalString(body.apiKey),
+    apiKey: parseApiKeyValue(body.apiKey, false),
     config,
     refreshIntervalMin: parseRefreshInterval(body.refreshIntervalMin),
     groupId: cleanOptionalString(body.groupId),
@@ -275,7 +426,9 @@ export function parseProviderCreateInput(body: Record<string, unknown>): Provide
 export function parseProviderUpdateInput(
   body: Record<string, unknown>
 ): ProviderUpdateInput {
-  const update: ProviderUpdateInput = {};
+  const update: ProviderUpdateInput = {
+    apiKeyOperation: parseApiKeyOperation(body),
+  };
 
   if (body.displayName !== undefined) {
     const displayName = cleanOptionalString(body.displayName);
@@ -283,18 +436,21 @@ export function parseProviderUpdateInput(
     update.displayName = displayName;
   }
 
-  if (body.apiKey !== undefined) {
-    update.apiKey = cleanOptionalString(body.apiKey);
-  }
-
   if (body.config !== undefined) {
     if (body.config === null) {
       update.config = null;
     } else {
-      const config = asRecord(body.config);
-      if (!config) throw new Error("config must be an object");
-      update.config = config;
+      update.config = normalizeProviderConfigInput(body.config);
     }
+  }
+
+  update.secretConfigOperations = parseSecretConfigOperations(
+    body.secretConfigOperations
+  );
+  if (update.config === null && update.secretConfigOperations?.length) {
+    throw new Error(
+      "secretConfigOperations cannot be combined with config: null (which clears all config)"
+    );
   }
 
   if (body.isActive !== undefined) {
