@@ -22,9 +22,11 @@ interface HetznerServer {
 }
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const response = await fetchJson("https://api.hetzner.cloud/v1/servers", {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  const headers = { Authorization: `Bearer ${apiKey}` };
+  const [response, pricingResponse] = await Promise.all([
+    fetchJson("https://api.hetzner.cloud/v1/servers", { headers }),
+    fetchJson("https://api.hetzner.cloud/v1/pricing", { headers }),
+  ]);
   if (!response.ok) return errorResult(response.status);
 
   const data = (response.data ?? {}) as { servers?: HetznerServer[] };
@@ -34,7 +36,14 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     });
   }
 
-  let monthlyRunRateUsd = 0;
+  const pricing = pricingResponse.ok && pricingResponse.data &&
+      typeof pricingResponse.data === "object"
+    ? (pricingResponse.data as { pricing?: { currency?: string } }).pricing
+    : null;
+  const currency = typeof pricing?.currency === "string"
+    ? pricing.currency.trim().toUpperCase()
+    : null;
+  let monthlyRunRate = 0;
   let foundPrice = false;
   let totalBandwidthBytes = 0;
   const records: AdapterExternalBillingRecord[] = [];
@@ -42,9 +51,9 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     const location = server.datacenter?.location?.name;
     const prices = server.server_type?.prices ?? [];
     const price = prices.find((entry) => entry.location === location) ?? prices[0];
-    const monthlyPriceUsd = parseNumber(price?.price_monthly?.net);
-    if (monthlyPriceUsd != null) {
-      monthlyRunRateUsd += monthlyPriceUsd;
+    const monthlyPrice = parseNumber(price?.price_monthly?.net);
+    if (monthlyPrice != null) {
+      monthlyRunRate += monthlyPrice;
       foundPrice = true;
     }
     if (typeof server.outgoing_traffic === "number") {
@@ -56,8 +65,11 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
         kind: "service_plan",
         planName: server.server_type?.name ?? null,
         status: server.status ?? "unknown",
-        amountUsd: monthlyPriceUsd,
-        currency: "USD",
+        // Hetzner documents that resource prices use the project owner's
+        // account currency. Populate the USD-specific field only when the
+        // pricing endpoint explicitly reports USD.
+        amountUsd: currency === "USD" ? monthlyPrice : null,
+        currency,
         billingInterval: "monthly",
       });
     }
@@ -68,7 +80,8 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       type: server.server_type?.name ?? null,
       location: location ?? null,
       outgoingTrafficBytes: server.outgoing_traffic ?? null,
-      monthlyPlanPriceUsd: monthlyPriceUsd,
+      monthlyPlanPrice: monthlyPrice,
+      currency,
     };
   });
 
@@ -83,11 +96,13 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       servers,
       serverCount: servers.length,
       totalBandwidthBytes,
-      monthlyRunRateUsd: foundPrice ? monthlyRunRateUsd : null,
+      monthlyRunRate: foundPrice
+        ? { amount: monthlyRunRate, currency }
+        : null,
       capabilities: {
         servicePlan: true,
         serviceStatus: true,
-        monthlyRunRate: foundPrice,
+        monthlyRunRate: foundPrice && currency != null,
         actualInvoiceCost: false,
       },
     },

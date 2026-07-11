@@ -73,6 +73,16 @@ export async function fetchUsage(
     totalCost: typeof totalCost === "number" ? totalCost : null,
     totalRequests: typeof totalRequests === "number" ? totalRequests : null,
     credits: typeof credits === "number" ? credits : null,
-    rawData: data,
+    // Custom endpoints may return arbitrary personal or operational data.
+    // Persist only whether each explicitly mapped numeric output was found,
+    // never the complete upstream response.
+    rawData: {
+      mappedFields: {
+        balance: typeof balance === "number",
+        cost: typeof totalCost === "number",
+        requests: typeof totalRequests === "number",
+        credits: typeof credits === "number",
+      },
+    },
   };
 }

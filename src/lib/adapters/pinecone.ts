@@ -40,10 +40,9 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   const { indexes = [] } = (indexesRes.data ?? {}) as {
     indexes?: PineconeIndex[];
   };
-  const rawData: Record<string, unknown> = { indexes };
-
   let totalVectorCount = 0;
-  const stats: unknown[] = [];
+  let statsRead = 0;
+  let statsFailed = 0;
 
   for (const idx of indexes) {
     try {
@@ -70,22 +69,17 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
 
       if (statsRes.ok) {
         const indexStats = statsRes.data as { totalVectorCount?: number };
-        stats.push({ name: idx.name, stats: indexStats });
+        statsRead++;
         if (typeof indexStats.totalVectorCount === "number") {
           totalVectorCount += indexStats.totalVectorCount;
         }
       } else {
-        stats.push({ name: idx.name, error: `HTTP ${statsRes.status}` });
+        statsFailed++;
       }
-    } catch (err) {
-      stats.push({
-        name: idx.name,
-        error: err instanceof Error ? err.message : "Unknown",
-      });
+    } catch {
+      statsFailed++;
     }
   }
-
-  rawData.stats = stats;
 
   return {
     balance: null,
@@ -93,7 +87,9 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     totalRequests: null,
     credits: null,
     rawData: {
-      ...rawData,
+      indexCount: indexes.length,
+      statsRead,
+      statsFailed,
       totalVectorCount,
       capabilities: {
         indexInventory: true,

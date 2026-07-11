@@ -63,9 +63,6 @@ export async function fetchUsage(
     tokens_limits_by_model?: unknown;
   };
   const completion = limits.limits?.completion;
-  const reportedCost = limitsResponse.ok
-    ? parseNumber(completion?.total_usage) ?? parseNumber(completion?.usage)
-    : null;
   const spendLimitUsd =
     parseNumber(completion?.usage_limit) ??
     parseNumber(completion?.usage_limit_organization);
@@ -83,19 +80,20 @@ export async function fetchUsage(
     periodEnd != null &&
     Date.parse(periodEnd) > Date.parse(periodStart) &&
     Boolean(usageCurrency);
-  const billingComplete = usageShapeComplete && reportedCost != null;
   const spendLimitComplete =
     limitsResponse.ok && spendLimitUsd != null && limitsCurrency === "USD";
   const requestLimit = rateResponse.ok
     ? parseNumber(rate.requests_per_second)
     : null;
   const rateLimitComplete = requestLimit != null;
-  const totalCost =
-    billingComplete && usageCurrency === "USD" ? reportedCost : null;
-  const balance =
-    totalCost != null && spendLimitComplete
-      ? Math.max(0, spendLimitUsd - totalCost)
-      : null;
+  // The Admin API documents /usage as the cost/consumption source and
+  // /spend-limit as limits/status. Its category payload is intentionally
+  // open-shaped, however, and the public schema does not define a reliable
+  // monetary total field. Never reinterpret spend-limit usage counters as
+  // dollars. Until a documented category-cost shape is available, preserve
+  // the report for operator inspection but leave monetary totals unknown.
+  const totalCost = null;
+  const balance = null;
   const status = limits.limits?.last_payment_failure
     ? "payment_failed"
     : completion?.monthly_limit_reached
@@ -103,24 +101,6 @@ export async function fetchUsage(
       : "active";
   const billingSyncs: AdapterExternalBillingSync[] = [];
 
-  if (billingComplete && periodStart && periodEnd && usageCurrency) {
-    billingSyncs.push({
-      source: "mistral-usage-billing",
-      authoritative: true,
-      records: [
-        {
-          externalId: periodStart.slice(0, 7),
-          kind: "billing_period",
-          planName: "Mistral organization usage",
-          status,
-          amountUsd: usageCurrency === "USD" ? reportedCost : null,
-          currency: usageCurrency,
-          currentPeriodStart: periodStart,
-          currentPeriodEnd: periodEnd,
-        },
-      ],
-    });
-  }
   if (spendLimitComplete) {
     billingSyncs.push({
       source: "mistral-spend-limits",
@@ -157,21 +137,53 @@ export async function fetchUsage(
   return {
     balance,
     totalCost,
-    costWindowStart: totalCost != null ? periodStart : null,
-    costWindowEnd: totalCost != null ? periodEnd : null,
-    costScope: totalCost != null ? "calendar_month_to_date" : "unknown",
+    costWindowStart: null,
+    costWindowEnd: null,
+    costScope: "unknown",
     totalRequests: null,
-    credits: balance,
+    credits: null,
     rawData: {
-      usage: usageResponse.ok ? usage : null,
-      spendLimit: limitsResponse.ok ? limits : null,
-      rateLimit: rateResponse.ok ? rate : null,
+      usageReport: usageResponse.ok
+        ? {
+            startDate: periodStart,
+            endDate: periodEnd,
+            currency: usageCurrency,
+            categoriesPresent: [
+              "chat",
+              "completion",
+              "ocr",
+              "audio",
+              "connectors",
+              "libraries_api",
+              "fine_tuning",
+              "vibe_usage",
+            ].filter((key) => usage[key] != null),
+            pricesCount: Array.isArray(usage.prices) ? usage.prices.length : null,
+          }
+        : null,
+      spendLimit: limitsResponse.ok
+        ? {
+            amount: spendLimitUsd,
+            currency: limitsCurrency,
+            noMonthlyLimit: completion?.no_monthly_limit ?? null,
+            monthlyLimitReached: completion?.monthly_limit_reached ?? null,
+            lastPaymentFailure: limits.limits?.last_payment_failure ?? null,
+          }
+        : null,
+      rateLimit: rateResponse.ok
+        ? {
+            requestsPerSecond: requestLimit,
+            modelTokenLimitsAvailable: rate.tokens_limits_by_model != null,
+          }
+        : null,
       capabilities: {
-        actualCost: billingComplete,
+        actualCost: false,
         usageBreakdown: usageShapeComplete,
         spendLimit: spendLimitComplete,
         rateLimit: rateLimitComplete,
         credential: "Mistral Backoffice Admin API key",
+        costNote:
+          "The public Admin API schema does not define a stable monetary-total field inside category usage data; spend-limit counters are not treated as cost.",
       },
     },
     externalBillingSyncs: billingSyncs.length > 0 ? billingSyncs : undefined,

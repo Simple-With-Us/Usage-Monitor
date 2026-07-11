@@ -16,10 +16,9 @@ function buildKeyPreview(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
   try {
     const decrypted = decrypt(encryptedKey);
-    if (decrypted.length <= 10) return null;
-    const first = decrypted.slice(0, 6);
+    if (decrypted.length < 4) return null;
     const last = decrypted.slice(-4);
-    return `${first}...${last}`;
+    return `••••${last}`;
   } catch {
     return null;
   }
@@ -174,27 +173,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let groupId = input.groupId;
-
-  if (!groupId) {
-    const existingWithSameName = await prisma.provider.findFirst({
-      where: { name: input.name },
-      orderBy: { createdAt: "asc" },
-    });
-
-    if (existingWithSameName) {
-      if (existingWithSameName.groupId) {
-        groupId = existingWithSameName.groupId;
-      } else {
-        groupId = input.name;
-        await prisma.provider.updateMany({
-          where: { name: input.name, groupId: null },
-          data: { groupId },
-        });
-      }
-    }
-  }
-
   const encryptedKey = input.apiKey ? encrypt(input.apiKey) : null;
   const splitConfig = splitProviderConfig(input.config);
 
@@ -211,7 +189,10 @@ export async function POST(request: NextRequest) {
         ? encryptJson(splitConfig.secretConfig)
         : null,
       refreshIntervalMin: input.refreshIntervalMin,
-      groupId,
+      // Account sharing is explicit. Duplicate provider slugs can represent
+      // different projects, workspaces, or credentials and must never be
+      // auto-linked merely because their adapter name matches.
+      groupId: input.groupId,
       label: input.label,
       plan: input.plan
         ? { create: toPrismaProviderPlanData(input.plan) }

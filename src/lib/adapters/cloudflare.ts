@@ -192,11 +192,15 @@ export async function fetchUsage(
     );
     if (analyticsRes.ok) {
       const analytics = analyticsRes.data as AnalyticsDashboardResponse;
-      rawData.analytics = analytics;
       successfulCalls++;
       if (analytics.result?.totals?.requests != null) {
         totalRequests = analytics.result.totals.requests;
       }
+      rawData.accountAnalytics = {
+        requests: analytics.result?.totals?.requests ?? null,
+        bandwidthBytes: analytics.result?.totals?.bandwidth ?? null,
+        window: "rolling_30_days",
+      };
       if (analytics.result?.totals?.bandwidth != null) {
         rawData.totalBandwidth_bytes = analytics.result.totals.bandwidth;
       }
@@ -216,11 +220,18 @@ export async function fetchUsage(
     );
     if (workersRes.ok) {
       const workersData = workersRes.data as AnalyticsDashboardResponse;
-      rawData.workers = workersData;
       successfulCalls++;
-      if (workersData.result?.totals?.requests != null) {
-        totalRequests =
-          (totalRequests ?? 0) + workersData.result.totals.requests;
+      const workerRequests = workersData.result?.totals?.requests ?? null;
+      rawData.workersAnalytics = {
+        requests: workerRequests,
+        window: "rolling_30_days",
+        includedInTotalOnlyWhenAccountAnalyticsUnavailable: true,
+      };
+      // Worker-routed requests can also appear in account/zone analytics.
+      // Prefer the broader account total and use Workers only as a fallback;
+      // adding the two silently double-counted overlapping traffic.
+      if (totalRequests == null && workerRequests != null) {
+        totalRequests = workerRequests;
       }
     } else {
       failedStatuses.push(workersRes.status);
@@ -418,7 +429,8 @@ export async function fetchUsage(
     };
   }
 
-  // 5. D1 database metrics
+  // 5. D1 resource readability. This endpoint returns database metadata, not
+  // billing or query metrics, so retain only the capability result.
   const databaseId = config?.databaseId as string | undefined;
   if (databaseId) {
     try {
@@ -427,14 +439,14 @@ export async function fetchUsage(
       });
       if (d1Res.ok) {
         successfulCalls++;
-        rawData.d1 = d1Res.data;
+        rawData.d1Resource = { configured: true, readable: true };
       }
     } catch {
       // best effort
     }
   }
 
-  // 6. R2 storage bytes
+  // 6. R2 resource readability. The bucket endpoint is metadata-only.
   const r2BucketName = config?.r2BucketName as string | undefined;
   if (r2BucketName) {
     try {
@@ -444,14 +456,14 @@ export async function fetchUsage(
       );
       if (r2Res.ok) {
         successfulCalls++;
-        rawData.r2 = r2Res.data;
+        rawData.r2Resource = { configured: true, readable: true };
       }
     } catch {
       // best effort
     }
   }
 
-  // 7. KV namespace
+  // 7. KV namespace readability. The namespace endpoint is metadata-only.
   const kvNamespaceId = config?.kvNamespaceId as string | undefined;
   if (kvNamespaceId) {
     try {
@@ -461,14 +473,14 @@ export async function fetchUsage(
       );
       if (kvRes.ok) {
         successfulCalls++;
-        rawData.kv = kvRes.data;
+        rawData.kvResource = { configured: true, readable: true };
       }
     } catch {
       // best effort
     }
   }
 
-  // 8. Queue message counts
+  // 8. Queue readability. The queue endpoint returns metadata, not counts.
   const queueId = config?.queueId as string | undefined;
   if (queueId) {
     try {
@@ -477,7 +489,7 @@ export async function fetchUsage(
       });
       if (queueRes.ok) {
         successfulCalls++;
-        rawData.queue = queueRes.data;
+        rawData.queueResource = { configured: true, readable: true };
       }
     } catch {
       // best effort

@@ -7,8 +7,8 @@ describe("hetzner adapter", () => {
   });
 
   it("syncs server plans without misclassifying run-rate as accrued spend", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({
+    const fetchSpy = vi.spyOn(global, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
         servers: [
           {
             id: 1,
@@ -45,12 +45,14 @@ describe("hetzner adapter", () => {
             },
           },
         ],
-      }), { status: 200, headers: { "content-type": "application/json" } })
-    );
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        pricing: { currency: "EUR" },
+      }), { status: 200, headers: { "content-type": "application/json" } }));
 
     const result = await fetchUsage("fake-key");
 
-    expect(fetchSpy).toHaveBeenCalledWith("https://api.hetzner.cloud/v1/servers", {
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, "https://api.hetzner.cloud/v1/servers", {
       headers: { Authorization: "Bearer fake-key" },
       redirect: "error",
       signal: expect.any(AbortSignal),
@@ -61,15 +63,19 @@ describe("hetzner adapter", () => {
     
     const rawData = result.rawData as Record<string, unknown>;
     expect(rawData.totalBandwidthBytes).toBe(1500);
-    expect(rawData.monthlyRunRateUsd).toBe(8.5);
+    expect(rawData.monthlyRunRate).toEqual({ amount: 8.5, currency: "EUR" });
     expect(rawData.servers).toHaveLength(2);
     expect(result.externalBilling?.records).toHaveLength(2);
+    expect(result.externalBilling?.records[0]).toMatchObject({
+      amountUsd: null,
+      currency: "EUR",
+    });
   });
 
   it("handles fetch errors", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response("Unauthorized", { status: 401 })
-    );
+    vi.spyOn(global, "fetch")
+      .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }))
+      .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }));
 
     await expect(fetchUsage("bad-key")).rejects.toMatchObject({
       code: "HTTP_ERROR",

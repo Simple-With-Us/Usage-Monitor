@@ -23,6 +23,12 @@ describe("Pinecone discovered-host security", () => {
     const result = await fetchUsage("secret-key");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(result.rawData)).toContain("outside the allowed");
+    expect(result.rawData).toMatchObject({
+      indexCount: 1,
+      statsRead: 0,
+      statsFailed: 1,
+    });
+    expect(JSON.stringify(result.rawData)).not.toContain("metadata.google.internal");
+    expect(JSON.stringify(result.rawData)).not.toContain("bad");
   });
 });

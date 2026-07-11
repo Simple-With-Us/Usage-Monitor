@@ -41,7 +41,7 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     totalRequests: used,
     credits: remaining,
     rawData: {
-      usage: data,
+      planName,
       apiCreditsUsed: used,
       apiCreditsRemaining: remaining,
       apiCreditsLimit: creditLimit,

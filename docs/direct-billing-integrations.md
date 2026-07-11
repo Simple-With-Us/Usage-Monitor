@@ -42,7 +42,7 @@ These APIs are useful direct replacements for manually typed status/limits, but 
 | Provider | Direct state | Boundary | Official source |
 |---|---|---|---|
 | Render | Service plan and suspended/active status (`serviceId`) | Service API has no invoice amount/cadence, so no cost is invented | [Retrieve service](https://api-docs.render.com/reference/retrieve-service) and [service fields](https://api-docs.render.com/reference/service-fields) |
-| Hetzner Cloud | Server type, status, location and provider-published monthly plan run-rate per server | `/servers` exposes resource prices, not accrued invoice cost; run-rate stays metadata | [Cloud API](https://docs.hetzner.cloud/reference/cloud) |
+| Hetzner Cloud | Server type, status, location and provider-published monthly plan run-rate per server | `/servers` exposes resource prices, not accrued invoice cost; `/pricing` supplies the project owner's actual account currency, so non-USD values are never mislabeled as dollars | [Cloud API](https://docs.hetzner.cloud/reference/cloud) |
 | Twelve Data | Current plan body plus real-time credits used/remaining from documented response headers | No billing price or renewal API | [API usage endpoint](https://twelvedata.com/docs/advanced/api-usage) |
 | Intrinio | Per-feed current usage, limit, remaining calls and reset window | No subscription price/invoice API | [Current usage](https://docs.intrinio.com/documentation/web_api/get_account_current_usage_v2) |
 | Pushover | Monthly application message limit, remaining messages and reset | No subscription price/status in the application limits API | [Application limits](https://pushover.net/api) |

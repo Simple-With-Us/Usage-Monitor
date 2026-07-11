@@ -62,7 +62,14 @@ describe("cloudflare adapter", () => {
 
     expect(result.totalCost).toBe(7);
     expect(result.fixedCostIncludedUsd).toBe(5);
-    expect(result.totalRequests).toBe(15);
+    expect(result.totalRequests).toBe(10);
+    expect(result.rawData).toMatchObject({
+      accountAnalytics: { requests: 10 },
+      workersAnalytics: {
+        requests: 5,
+        includedInTotalOnlyWhenAccountAnalyticsUnavailable: true,
+      },
+    });
     const subscriptionSync = result.externalBillingSyncs?.find(
       (sync) => sync.source === "cloudflare-subscriptions"
     );
@@ -78,6 +85,20 @@ describe("cloudflare adapter", () => {
     expect(requestHeaders["X-Auth-Key"]).toBe("global-key");
     expect(requestHeaders["X-Auth-Email"]).toBe("owner@example.com");
     expect(requestHeaders.Authorization).toBeUndefined();
+  });
+
+  it("uses Worker requests only when account analytics is unavailable", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({}, 403))
+      .mockResolvedValueOnce(json({ result: { totals: { requests: 5 } } }))
+      .mockResolvedValueOnce(json({}, 403))
+      .mockResolvedValueOnce(json({}, 403));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchUsage("token", { accountId: "account-id" });
+
+    expect(result.totalRequests).toBe(5);
   });
 
   it("fetches every subscription page before authoritative reconciliation", async () => {

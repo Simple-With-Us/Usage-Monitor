@@ -118,22 +118,6 @@ export default function DashboardPage() {
     fetchProviders();
   }, [fetchProviders]);
 
-  // Deduplicate balance by groupId: only count each group's balance once
-  const seenGroups = new Set<string | null>();
-  const totalBalance = providers.reduce((sum, p) => {
-    const balance = p.latestSnapshot?.balance || 0;
-    if (!p.groupId) {
-      return sum + balance;
-    }
-    if (seenGroups.has(p.groupId)) {
-      return sum;
-    }
-    seenGroups.add(p.groupId);
-    // Use the first non-null balance in the group
-    const groupProviders = providers.filter((x) => x.groupId === p.groupId);
-    const groupBalance = groupProviders.find((x) => x.latestSnapshot?.balance != null)?.latestSnapshot?.balance;
-    return sum + (groupBalance ?? 0);
-  }, 0);
   const totalCost = providers.reduce(
     (sum, p) => sum + (p.spentUsd ?? p.latestSnapshot?.totalCost ?? 0),
     0
@@ -142,13 +126,7 @@ export default function DashboardPage() {
     (sum, p) => sum + (p.projectedEomUsd || 0),
     0
   );
-  const totalCredits = providers.reduce(
-    (sum, p) => sum + (p.latestSnapshot?.credits || 0),
-    0
-  );
-  const hasAnyCredits = providers.some(
-    (p) => p.latestSnapshot?.credits != null
-  );
+  const activeProviderCount = providers.filter((provider) => provider.isActive).length;
   const attentionItems = providers.flatMap((provider) =>
     provider.alerts
       .filter((alert) => alert.severity !== "info")
@@ -227,13 +205,12 @@ export default function DashboardPage() {
       )}
 
       <DashboardSummaryCards
-        totalBalance={totalBalance}
+        providerCount={providers.length}
+        activeProviderCount={activeProviderCount}
         totalProjectedMonthlyCost={totalProjectedMonthlyCost}
         totalCost={totalCost}
         attentionItemsCount={attentionItems.length}
         criticalCount={criticalCount}
-        hasAnyCredits={hasAnyCredits}
-        totalCredits={totalCredits}
       />
 
       {usageSummary && <ExternalTelemetryPanel usageSummary={usageSummary} />}

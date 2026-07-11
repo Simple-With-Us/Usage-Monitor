@@ -11,7 +11,7 @@ function json(body: unknown, status = 200): Response {
 describe("Mistral billing adapter", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("uses the official Admin API and exposes spend/rate limits", async () => {
+  it("uses the official Admin API without treating spend-limit counters as cost", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(json({ start_date: "2026-07-01T00:00:00Z", end_date: "2026-07-11T00:00:00Z", currency: "USD", chat: {} }))
@@ -21,8 +21,8 @@ describe("Mistral billing adapter", () => {
 
     const result = await fetchUsage("inference-key", { adminApiKey: "admin-key" });
 
-    expect(result.totalCost).toBe(12);
-    expect(result.balance).toBe(88);
+    expect(result.totalCost).toBeNull();
+    expect(result.balance).toBeNull();
     const spendSync = result.externalBillingSyncs?.find(
       (sync) => sync.source === "mistral-spend-limits"
     );
@@ -35,6 +35,9 @@ describe("Mistral billing adapter", () => {
     expect(rateSync?.records[0]).toMatchObject({
       requestLimit: 5,
     });
+    expect(result.externalBillingSyncs?.map((sync) => sync.source)).not.toContain(
+      "mistral-usage-billing"
+    );
     expect(fetchMock.mock.calls[0][0]).toContain("https://console.mistral.ai/api/admin/usage?");
     expect(fetchMock.mock.calls[0][1].headers["x-api-key"]).toBe("admin-key");
   });
