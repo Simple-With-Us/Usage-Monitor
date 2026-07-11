@@ -1,9 +1,12 @@
 import {
+  AdapterError,
   centsToDollars,
   errorResult,
   fetchJson,
   type UsageResult,
 } from "./helpers";
+
+const MAX_TRANSACTION_PAGES = 10_000;
 
 interface StripeAmount {
   amount?: number;
@@ -30,6 +33,12 @@ interface StripeTransactionPage {
   has_more?: boolean;
 }
 
+function invalidResponse(message: string): never {
+  throw new AdapterError(`Stripe balance transactions: ${message}`, {
+    code: "INVALID_RESPONSE",
+  });
+}
+
 function usdTotal(rows: StripeAmount[] | undefined): number | null {
   const usd = (rows ?? []).filter((row) => row.currency === "usd");
   if (usd.length === 0) return null;
@@ -49,12 +58,19 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     headers,
   });
 
-  const transactions: StripeBalanceTransaction[] = [];
   let startingAfter: string | null = null;
   let pageCount = 0;
-  let truncated = false;
+  let feeCents = 0;
+  let feeTransactionCount = 0;
+  let transactionCount = 0;
+  const seenCursors = new Set<string>();
 
-  do {
+  while (true) {
+    if (pageCount >= MAX_TRANSACTION_PAGES) {
+      invalidResponse(
+        `pagination exceeded the ${MAX_TRANSACTION_PAGES}-page safety limit`
+      );
+    }
     const params = new URLSearchParams({
       "created[gte]": String(monthStartSeconds),
       limit: "100",
@@ -70,31 +86,47 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       });
     }
 
-    const page = (response.data ?? {}) as StripeTransactionPage;
-    const rows = Array.isArray(page.data) ? page.data : [];
-    transactions.push(...rows);
-    startingAfter = page.has_more && rows.length > 0
-      ? rows[rows.length - 1].id ?? null
-      : null;
+    if (!response.data || typeof response.data !== "object") {
+      invalidResponse("expected a response object");
+    }
+    const page = response.data as StripeTransactionPage;
+    if (!Array.isArray(page.data) || typeof page.has_more !== "boolean") {
+      invalidResponse("expected data[] and boolean has_more fields");
+    }
+    const rows = page.data;
+    transactionCount += rows.length;
+    for (const transaction of rows) {
+      if (!transaction || typeof transaction !== "object") {
+        invalidResponse("transaction entry was not an object");
+      }
+      if (
+        typeof transaction.id !== "string" || !transaction.id.trim() ||
+        typeof transaction.currency !== "string" ||
+        typeof transaction.fee !== "number" || !Number.isFinite(transaction.fee)
+      ) {
+        invalidResponse("transaction id, currency, or fee was missing or invalid");
+      }
+      if (transaction.currency === "usd" && typeof transaction.fee === "number") {
+        feeCents += transaction.fee;
+        if (transaction.fee !== 0) feeTransactionCount++;
+      }
+    }
     pageCount++;
-    if (startingAfter && pageCount >= 10) truncated = true;
-  } while (startingAfter && pageCount < 10);
 
-  if (!balanceResponse.ok && transactions.length === 0) {
-    return errorResult(balanceResponse.status, {
-      note: "Stripe balance and balance transactions were unavailable",
-    });
+    if (!page.has_more) break;
+    const lastId = rows.at(-1)?.id;
+    const nextCursor = typeof lastId === "string" ? lastId.trim() : "";
+    if (!nextCursor) {
+      invalidResponse("has_more was true but the next cursor was missing");
+    }
+    if (seenCursors.has(nextCursor)) {
+      invalidResponse(`pagination repeated cursor ${nextCursor}`);
+    }
+    seenCursors.add(nextCursor);
+    startingAfter = nextCursor;
   }
 
   const balanceData = (balanceResponse.data ?? {}) as StripeBalance;
-  let feeCents = 0;
-  let feeTransactionCount = 0;
-  for (const transaction of transactions) {
-    if (transaction.currency === "usd" && typeof transaction.fee === "number") {
-      feeCents += transaction.fee;
-      if (transaction.fee !== 0) feeTransactionCount++;
-    }
-  }
 
   return {
     balance: balanceResponse.ok ? usdTotal(balanceData.available) : null,
@@ -112,10 +144,9 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       fees: {
         monthStart: new Date(monthStartSeconds * 1000).toISOString(),
         totalUsd: feeCents / 100,
-        transactionCount: transactions.length,
+        transactionCount,
         transactionsWithFees: feeTransactionCount,
         pages: pageCount,
-        truncated,
       },
       capabilities: {
         actualProcessingFees: true,
@@ -134,7 +165,7 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
             .slice(0, 7),
           kind: "billing_period",
           planName: "Stripe processing fees",
-          status: truncated ? "partial" : "open",
+          status: "open",
           amountUsd: feeCents / 100,
           currency: "USD",
           currentPeriodStart: new Date(monthStartSeconds * 1000).toISOString(),

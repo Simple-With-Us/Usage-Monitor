@@ -41,4 +41,48 @@ describe("stripe adapter", () => {
     });
     expect(String(fetchMock.mock.calls[2][0])).toContain("starting_after=txn_2");
   });
+
+  it("rejects a malformed 200 instead of booking an authoritative zero", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ available: [], pending: [] }))
+        .mockResolvedValueOnce(json({ has_more: false }))
+    );
+
+    await expect(fetchUsage("sk_test_key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("fails closed when pagination repeats a cursor", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ available: [], pending: [] }))
+        .mockResolvedValueOnce(
+          json({ data: [{ id: "txn_1", currency: "usd", fee: 30 }], has_more: true })
+        )
+        .mockResolvedValueOnce(
+          json({ data: [{ id: "txn_1", currency: "usd", fee: 20 }], has_more: true })
+        )
+    );
+
+    await expect(fetchUsage("sk_test_key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("fails closed when has_more has no next cursor", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ available: [], pending: [] }))
+        .mockResolvedValueOnce(json({ data: [], has_more: true }))
+    );
+
+    await expect(fetchUsage("sk_test_key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
 });

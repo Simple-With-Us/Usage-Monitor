@@ -23,10 +23,12 @@ for (const arg of args) {
 const apply = args.has("--apply");
 const ALWAYS_SECRET_KEYS = new Set([
   "adminapikey",
+  "apikeysid",
   "apitoken",
   "apisecret",
   "accesstoken",
   "authtoken",
+  "authusername",
   "bearertoken",
   "clientsecret",
   "extraheaders",

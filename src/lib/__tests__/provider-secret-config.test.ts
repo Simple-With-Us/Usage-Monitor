@@ -22,6 +22,8 @@ describe("provider secret config", () => {
         publicKey: "pk",
         apiSecret: "alpaca-secret",
         apiToken: "future-secret",
+        apiKeySid: "SK123",
+        authUsername: "restricted-user",
         nested: { region: "us", password: "pw" },
         extraHeaders: { Authorization: "Bearer hidden" },
       })
@@ -34,6 +36,8 @@ describe("provider secret config", () => {
       secretConfig: {
         apiSecret: "alpaca-secret",
         apiToken: "future-secret",
+        apiKeySid: "SK123",
+        authUsername: "restricted-user",
         nested: { password: "pw" },
         extraHeaders: { Authorization: "Bearer hidden" },
       },

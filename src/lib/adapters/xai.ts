@@ -3,7 +3,7 @@ import {
   errorResult,
   fetchJson,
   parseNumber,
-  type AdapterExternalBillingRecord,
+  type AdapterExternalBillingSync,
   type UsageResult,
 } from "./helpers";
 
@@ -75,43 +75,78 @@ export async function fetchUsage(
     };
   };
 
-  const balanceCents = parseNumber(balanceData.total?.val);
-  const balance = balanceResponse.ok && balanceCents != null
+  const balanceCents = balanceResponse.ok
+    ? parseNumber(balanceData.total?.val)
+    : null;
+  const balance = balanceCents != null
     ? Math.abs(balanceCents) / 100
     : null;
   const previewCost = invoiceResponse.ok
     ? cents(invoiceData.coreInvoice?.totalWithCorr?.val)
     : null;
-  const totalCost = previewCost == null ? null : Math.max(0, previewCost);
+  const window = invoiceResponse.ok
+    ? billingWindow(invoiceData.billingCycle)
+    : null;
+  const invoiceComplete = previewCost != null && window != null;
+  const totalCost = invoiceComplete ? Math.max(0, previewCost) : null;
   const spendLimitUsd =
     cents(limitsData.spendingLimits?.effectiveSl?.val) ??
-    cents(limitsData.spendingLimits?.softSl?.val) ??
-    cents(invoiceData.effectiveSpendingLimit);
-  const window = billingWindow(invoiceData.billingCycle);
+    cents(limitsData.spendingLimits?.softSl?.val);
+  const limitsComplete = limitsResponse.ok && spendLimitUsd != null;
+  const invoiceSpendLimitUsd = invoiceResponse.ok
+    ? cents(invoiceData.effectiveSpendingLimit)
+    : null;
 
-  const records: AdapterExternalBillingRecord[] = [
-    {
-      externalId: teamId,
-      kind: "account",
-      planName: "xAI API billing account",
-      status: "active",
-      spendLimitUsd,
-      spendLimitWindow: "month",
-    },
-  ];
-  if (window && invoiceResponse.ok) {
-    records.push({
-      externalId: `${teamId}:${window.id}`,
-      kind: "invoice",
-      planName: "xAI postpaid invoice preview",
-      status: "open",
-      amountUsd: totalCost,
-      currency: "USD",
-      currentPeriodStart: window.start,
-      currentPeriodEnd: window.end,
-      nextRenewalAt: window.end,
-      spendLimitUsd,
-      spendLimitWindow: "month",
+  const billingSyncs: AdapterExternalBillingSync[] = [];
+  if (balance != null) {
+    billingSyncs.push({
+      source: "xai-prepaid-balance",
+      authoritative: true,
+      records: [
+        {
+          externalId: teamId,
+          kind: "account",
+          planName: "xAI prepaid billing account",
+          status: "active",
+        },
+      ],
+    });
+  }
+  if (invoiceComplete && window) {
+    billingSyncs.push({
+      source: "xai-postpaid-invoice",
+      authoritative: true,
+      records: [
+        {
+          externalId: `${teamId}:${window.id}`,
+          kind: "invoice",
+          planName: "xAI postpaid invoice preview",
+          status: "open",
+          amountUsd: totalCost,
+          currency: "USD",
+          currentPeriodStart: window.start,
+          currentPeriodEnd: window.end,
+          nextRenewalAt: window.end,
+          spendLimitUsd: invoiceSpendLimitUsd,
+          spendLimitWindow: invoiceSpendLimitUsd == null ? null : "month",
+        },
+      ],
+    });
+  }
+  if (limitsComplete) {
+    billingSyncs.push({
+      source: "xai-spending-limits",
+      authoritative: true,
+      records: [
+        {
+          externalId: teamId,
+          kind: "account",
+          planName: "xAI postpaid spending limits",
+          status: "active",
+          spendLimitUsd,
+          spendLimitWindow: "month",
+        },
+      ],
     });
   }
 
@@ -122,32 +157,34 @@ export async function fetchUsage(
     credits: balance,
     rawData: {
       prepaid: balanceResponse.ok
-        ? { balanceUsd: balance, changeCount: balanceData.changes?.length ?? 0 }
+        ? {
+            balanceUsd: balance,
+            changeCount: balanceData.changes?.length ?? 0,
+            complete: balance != null,
+          }
         : { available: false, status: balanceResponse.status },
       postpaid: invoiceResponse.ok
         ? {
             invoicePreviewUsd: totalCost,
-            effectiveSpendingLimitUsd: spendLimitUsd,
+            effectiveSpendingLimitUsd: invoiceSpendLimitUsd,
             billingCycle: invoiceData.billingCycle ?? null,
+            complete: invoiceComplete,
           }
         : { available: false, status: invoiceResponse.status },
       spendingLimits: limitsResponse.ok
         ? {
             effectiveUsd: spendLimitUsd,
             hardUsd: cents(limitsData.spendingLimits?.effectiveHardSl?.val),
+            complete: limitsComplete,
           }
         : { available: false, status: limitsResponse.status },
       capabilities: {
-        prepaidBalance: balanceResponse.ok,
-        postpaidInvoicePreview: invoiceResponse.ok,
-        spendingLimits: limitsResponse.ok,
+        prepaidBalance: balance != null,
+        postpaidInvoicePreview: invoiceComplete,
+        spendingLimits: limitsComplete,
         credential: "xAI Management API key",
       },
     },
-    externalBilling: {
-      source: "xai-billing",
-      authoritative: true,
-      records,
-    },
+    externalBillingSyncs: billingSyncs.length > 0 ? billingSyncs : undefined,
   };
 }

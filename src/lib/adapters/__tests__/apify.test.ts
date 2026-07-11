@@ -52,4 +52,30 @@ describe("apify adapter", () => {
     });
     expect(JSON.stringify(result.rawData)).not.toContain("must-not-persist");
   });
+
+  it("adds only usage above included credits to the base plan price", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(
+          json({ data: { current: { monthlyUsageUsd: 15 } } })
+        )
+        .mockResolvedValueOnce(
+          json({
+            data: {
+              plan: {
+                id: "Starter",
+                monthlyBasePriceUsd: 20,
+                monthlyUsageCreditsUsd: 10,
+              },
+            },
+          })
+        )
+    );
+
+    const result = await fetchUsage("token");
+
+    expect(result.totalCost).toBe(25);
+    expect(result.balance).toBe(0);
+  });
 });

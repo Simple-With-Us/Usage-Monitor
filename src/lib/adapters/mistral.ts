@@ -2,8 +2,13 @@ import {
   errorResult,
   fetchJson,
   parseNumber,
+  type AdapterExternalBillingSync,
   type UsageResult,
 } from "./helpers";
+
+function validDate(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
 
 export async function fetchUsage(
   apiKey: string,
@@ -58,30 +63,100 @@ export async function fetchUsage(
     tokens_limits_by_model?: unknown;
   };
   const completion = limits.limits?.completion;
-  const totalCost =
-    parseNumber(completion?.total_usage) ?? parseNumber(completion?.usage);
+  const reportedCost = limitsResponse.ok
+    ? parseNumber(completion?.total_usage) ?? parseNumber(completion?.usage)
+    : null;
   const spendLimitUsd =
     parseNumber(completion?.usage_limit) ??
     parseNumber(completion?.usage_limit_organization);
-  const currency = usage.currency ?? limits.limits?.currency ?? null;
-  const isUsd = currency == null || currency.toUpperCase() === "USD";
+  const usageCurrency = typeof usage.currency === "string"
+    ? usage.currency.trim().toUpperCase()
+    : null;
+  const limitsCurrency = typeof limits.limits?.currency === "string"
+    ? limits.limits.currency.trim().toUpperCase()
+    : "USD";
+  const periodStart = validDate(usage.start_date) ? usage.start_date : null;
+  const periodEnd = validDate(usage.end_date) ? usage.end_date : null;
+  const usageShapeComplete =
+    usageResponse.ok &&
+    periodStart != null &&
+    periodEnd != null &&
+    Date.parse(periodEnd) > Date.parse(periodStart) &&
+    Boolean(usageCurrency);
+  const billingComplete = usageShapeComplete && reportedCost != null;
+  const spendLimitComplete =
+    limitsResponse.ok && spendLimitUsd != null && limitsCurrency === "USD";
+  const requestLimit = rateResponse.ok
+    ? parseNumber(rate.requests_per_second)
+    : null;
+  const rateLimitComplete = requestLimit != null;
+  const totalCost =
+    billingComplete && usageCurrency === "USD" ? reportedCost : null;
   const balance =
-    isUsd && totalCost != null && spendLimitUsd != null
+    totalCost != null && spendLimitComplete
       ? Math.max(0, spendLimitUsd - totalCost)
       : null;
-  const periodStart = usage.start_date ??
-    new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-  const periodEnd = usage.end_date ?? now.toISOString();
-  const periodId = periodStart.slice(0, 7);
   const status = limits.limits?.last_payment_failure
     ? "payment_failed"
     : completion?.monthly_limit_reached
       ? "limit_reached"
       : "active";
+  const billingSyncs: AdapterExternalBillingSync[] = [];
+
+  if (billingComplete && periodStart && periodEnd && usageCurrency) {
+    billingSyncs.push({
+      source: "mistral-usage-billing",
+      authoritative: true,
+      records: [
+        {
+          externalId: periodStart.slice(0, 7),
+          kind: "billing_period",
+          planName: "Mistral organization usage",
+          status,
+          amountUsd: usageCurrency === "USD" ? reportedCost : null,
+          currency: usageCurrency,
+          currentPeriodStart: periodStart,
+          currentPeriodEnd: periodEnd,
+        },
+      ],
+    });
+  }
+  if (spendLimitComplete) {
+    billingSyncs.push({
+      source: "mistral-spend-limits",
+      authoritative: true,
+      records: [
+        {
+          externalId: "organization",
+          kind: "account",
+          planName: "Mistral organization spend limit",
+          status,
+          spendLimitUsd,
+          spendLimitWindow: completion?.no_monthly_limit ? null : "month",
+        },
+      ],
+    });
+  }
+  if (rateLimitComplete) {
+    billingSyncs.push({
+      source: "mistral-rate-limits",
+      authoritative: true,
+      records: [
+        {
+          externalId: "organization",
+          kind: "account",
+          planName: "Mistral organization rate limit",
+          status: "active",
+          requestLimit,
+          requestLimitWindow: "second",
+        },
+      ],
+    });
+  }
 
   return {
     balance,
-    totalCost: isUsd ? totalCost : null,
+    totalCost,
     totalRequests: null,
     credits: balance,
     rawData: {
@@ -89,34 +164,13 @@ export async function fetchUsage(
       spendLimit: limitsResponse.ok ? limits : null,
       rateLimit: rateResponse.ok ? rate : null,
       capabilities: {
-        actualCost: limitsResponse.ok,
-        usageBreakdown: usageResponse.ok,
-        spendLimit: limitsResponse.ok,
-        rateLimit: rateResponse.ok,
+        actualCost: billingComplete,
+        usageBreakdown: usageShapeComplete,
+        spendLimit: spendLimitComplete,
+        rateLimit: rateLimitComplete,
         credential: "Mistral Backoffice Admin API key",
       },
     },
-    externalBilling: limitsResponse.ok || usageResponse.ok
-      ? {
-          source: "mistral-admin-billing",
-          authoritative: true,
-          records: [
-            {
-              externalId: periodId,
-              kind: "billing_period",
-              planName: "Mistral organization usage",
-              status,
-              amountUsd: isUsd ? totalCost : null,
-              currency,
-              currentPeriodStart: periodStart,
-              currentPeriodEnd: periodEnd,
-              requestLimit: parseNumber(rate.requests_per_second),
-              requestLimitWindow: "second",
-              spendLimitUsd: isUsd ? spendLimitUsd : null,
-              spendLimitWindow: completion?.no_monthly_limit ? null : "month",
-            },
-          ],
-        }
-      : undefined,
+    externalBillingSyncs: billingSyncs.length > 0 ? billingSyncs : undefined,
   };
 }

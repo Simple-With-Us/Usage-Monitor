@@ -39,4 +39,42 @@ describe("anthropic adapter", () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain("page=page_2");
     expect(fetchMock.mock.calls[0][1].headers["x-api-key"]).toBe("admin-key");
   });
+
+  it("rejects a malformed 200 instead of reconciling an empty report", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response({ has_more: false })));
+
+    await expect(fetchUsage("admin-key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("fails closed when the next page cursor repeats", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(
+          response({ data: [], has_more: true, next_page: "repeat" })
+        )
+        .mockResolvedValueOnce(
+          response({ data: [], has_more: true, next_page: "repeat" })
+        )
+    );
+
+    await expect(fetchUsage("admin-key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("fails closed when has_more omits next_page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        response({ data: [], has_more: true, next_page: null })
+      )
+    );
+
+    await expect(fetchUsage("admin-key")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
 });

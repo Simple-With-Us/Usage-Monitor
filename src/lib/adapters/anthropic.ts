@@ -1,9 +1,12 @@
 import {
+  AdapterError,
   errorResult,
   fetchJson,
   parseNumber,
   type UsageResult,
 } from "./helpers";
+
+const MAX_COST_REPORT_PAGES = 10_000;
 
 interface AnthropicCostResult {
   amount?: string | number;
@@ -21,6 +24,12 @@ interface AnthropicCostPage {
   data?: AnthropicCostBucket[];
   has_more?: boolean;
   next_page?: string | null;
+}
+
+function invalidResponse(message: string): never {
+  throw new AdapterError(`Anthropic cost report: ${message}`, {
+    code: "INVALID_RESPONSE",
+  });
 }
 
 function monthWindow(now: Date): { startingAt: string; endingAt: string } {
@@ -51,8 +60,14 @@ export async function fetchUsage(
   const buckets: AnthropicCostBucket[] = [];
   let page: string | null = null;
   let pageCount = 0;
+  const seenPages = new Set<string>();
 
-  do {
+  while (true) {
+    if (pageCount >= MAX_COST_REPORT_PAGES) {
+      invalidResponse(
+        `pagination exceeded the ${MAX_COST_REPORT_PAGES}-page safety limit`
+      );
+    }
     const params = new URLSearchParams({
       starting_at: startingAt,
       ending_at: endingAt,
@@ -70,13 +85,29 @@ export async function fetchUsage(
       });
     }
 
-    const data = (response.data ?? {}) as AnthropicCostPage;
-    buckets.push(...(Array.isArray(data.data) ? data.data : []));
-    page = data.has_more && typeof data.next_page === "string"
-      ? data.next_page
-      : null;
+    if (!response.data || typeof response.data !== "object") {
+      invalidResponse("expected a response object");
+    }
+    const data = response.data as AnthropicCostPage;
+    if (!Array.isArray(data.data) || typeof data.has_more !== "boolean") {
+      invalidResponse("expected data[] and boolean has_more fields");
+    }
+    buckets.push(...data.data);
     pageCount++;
-  } while (page && pageCount < 10);
+
+    if (!data.has_more) break;
+    const nextPage = typeof data.next_page === "string"
+      ? data.next_page.trim()
+      : "";
+    if (!nextPage) {
+      invalidResponse("has_more was true but next_page was missing");
+    }
+    if (seenPages.has(nextPage)) {
+      invalidResponse(`pagination repeated cursor ${nextPage}`);
+    }
+    seenPages.add(nextPage);
+    page = nextPage;
+  }
 
   let totalCents = 0;
   let foundUsd = false;
@@ -108,7 +139,6 @@ export async function fetchUsage(
         subscriptionStatus: false,
         credential: "Anthropic organization Admin API key",
       },
-      truncated: Boolean(page),
     },
     externalBilling: {
       source: "anthropic-cost-report",

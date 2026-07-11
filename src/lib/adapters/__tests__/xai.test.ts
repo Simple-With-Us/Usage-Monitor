@@ -26,11 +26,36 @@ describe("xAI billing adapter", () => {
 
     expect(result.balance).toBe(45);
     expect(result.totalCost).toBe(12.34);
-    expect(result.externalBilling?.records).toEqual(
+    const invoiceSync = result.externalBillingSyncs?.find(
+      (sync) => sync.source === "xai-postpaid-invoice"
+    );
+    expect(invoiceSync?.records).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "invoice", amountUsd: 12.34, spendLimitUsd: 200 }),
       ])
     );
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer management-key");
+  });
+
+  it("omits only the failed endpoint source so prior invoice state is preserved", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ total: { val: "-4500" } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({ spendingLimits: { effectiveSl: { val: "20000" } } })
+        )
+    );
+
+    const result = await fetchUsage("management-key", { teamId: "team-1" });
+    const sources = result.externalBillingSyncs?.map((sync) => sync.source);
+
+    expect(result.totalCost).toBeNull();
+    expect(sources).toEqual([
+      "xai-prepaid-balance",
+      "xai-spending-limits",
+    ]);
+    expect(sources).not.toContain("xai-postpaid-invoice");
   });
 });

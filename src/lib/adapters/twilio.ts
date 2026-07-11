@@ -10,13 +10,19 @@ export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
-  const accountSid = config?.accountId as string | undefined;
+  const accountSid = (config?.accountId as string | undefined)?.trim();
 
   if (!accountSid) {
     configurationError("accountId (Account SID) is required in config");
   }
 
-  const auth = Buffer.from(`${accountSid}:${apiKey}`).toString("base64");
+  // Restricted API keys authenticate with their API Key SID as the Basic
+  // username while the Account SID remains the REST resource path.
+  const authUsername =
+    (config?.apiKeySid as string | undefined)?.trim() ||
+    (config?.authUsername as string | undefined)?.trim() ||
+    accountSid;
+  const auth = Buffer.from(`${authUsername}:${apiKey}`).toString("base64");
   const headers = { Authorization: `Basic ${auth}` };
   const [balanceResponse, usageResponse] = await Promise.all([
     fetchJson(
@@ -84,6 +90,7 @@ export async function fetchUsage(
         accountBalance: balanceResponse.ok,
         billingPeriod: usageResponse.ok,
         requiredRestrictedKeyPermission: "/twilio/billing/usage/read",
+        authMode: authUsername === accountSid ? "account-auth-token" : "api-key",
       },
     },
     externalBilling: totalPrice

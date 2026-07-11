@@ -1,5 +1,4 @@
 import {
-  emptyResult,
   errorResult,
   fetchJson,
   isoDateDaysAgo,
@@ -70,24 +69,29 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
 
   if (usageRes.ok && usageRes.data && typeof usageRes.data === "object") {
     const usage = usageRes.data as Record<string, unknown>;
-    let totalCostCents = 0;
+    let dailyCostCents = 0;
+    let foundDailyCost = false;
     let requestCount = 0;
     const data = Array.isArray(usage.data) ? usage.data : [usage];
 
     for (const day of data) {
       if (day && typeof day === "object") {
         const row = day as Record<string, unknown>;
-        if (typeof row.cost === "number") totalCostCents += row.cost;
+        if (typeof row.cost === "number") {
+          dailyCostCents += row.cost;
+          foundDailyCost = true;
+        }
         if (typeof row.n_requests === "number") requestCount += row.n_requests;
       }
     }
 
-    totalCost = totalCostCents / 100;
+    // `/v1/usage?date=today` is one day, not a month-to-date billing total.
+    // Keep its cost diagnostic-only so it can never overwrite MTD spend.
+    rawData.dailyCostUsd = foundDailyCost ? dailyCostCents / 100 : null;
     totalRequests = requestCount;
   }
 
   if (
-    totalCost == null &&
     usageRangeRes.ok &&
     usageRangeRes.data &&
     typeof usageRangeRes.data === "object"

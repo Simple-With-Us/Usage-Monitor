@@ -53,9 +53,11 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       ? Math.max(0, includedCredits - usedMonthly)
       : null;
   const currentBill =
-    monthlyBasePrice != null || usedMonthly != null
-      ? Math.max(monthlyBasePrice ?? 0, usedMonthly ?? 0)
-      : null;
+    monthlyBasePrice != null && usedMonthly != null && includedCredits != null
+      ? monthlyBasePrice + Math.max(0, usedMonthly - includedCredits)
+      : monthlyBasePrice != null || usedMonthly != null
+        ? Math.max(monthlyBasePrice ?? 0, usedMonthly ?? 0)
+        : null;
   const cycleStart = limitsData.data?.monthlyUsageCycle?.startAt ?? null;
   const cycleEnd = limitsData.data?.monthlyUsageCycle?.endAt ?? null;
 

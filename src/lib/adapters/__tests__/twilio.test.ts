@@ -38,4 +38,23 @@ describe("twilio adapter", () => {
       "/Usage/Records/ThisMonth.json?Category=totalprice"
     );
   });
+
+  it("uses a restricted API Key SID as username while keeping Account SID in the URL", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ balance: "42.50", currency: "USD" }))
+      .mockResolvedValueOnce(json({ usage_records: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchUsage("restricted-secret", {
+      accountId: "AC123",
+      apiKeySid: "SK123",
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/Accounts/AC123/");
+    const authorization = fetchMock.mock.calls[0][1].headers.Authorization;
+    expect(Buffer.from(authorization.slice("Basic ".length), "base64").toString()).toBe(
+      "SK123:restricted-secret"
+    );
+  });
 });

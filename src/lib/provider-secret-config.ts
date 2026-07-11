@@ -16,10 +16,12 @@ export interface ProviderSecretConfigMeta {
 // future adapters so they do not silently become browser-visible plaintext.
 const ALWAYS_SECRET_KEYS = new Set([
   "adminapikey",
+  "apikeysid",
   "apitoken",
   "apisecret",
   "accesstoken",
   "authtoken",
+  "authusername",
   "bearertoken",
   "clientsecret",
   "extraheaders",
