@@ -116,6 +116,7 @@ CREATE TABLE "UsageSnapshot" (
   "id" TEXT NOT NULL PRIMARY KEY,
   "providerId" TEXT NOT NULL,
   "fetchedAt" DATETIME NOT NULL,
+  "statusEventKey" TEXT,
   "balance" REAL,
   "totalCost" REAL,
   "fixedCostIncludedUsd" REAL,
@@ -277,6 +278,7 @@ CREATE UNIQUE INDEX "Project_nameKey_key" ON "Project"("nameKey");
 CREATE UNIQUE INDEX "ProviderProjectAllocation_providerId_projectId_key" ON "ProviderProjectAllocation"("providerId", "projectId");
 CREATE INDEX "UsageSnapshotDailyRollup_day_idx" ON "UsageSnapshotDailyRollup"("day");
 CREATE UNIQUE INDEX "UsageSnapshotDailyRollup_providerId_day_key" ON "UsageSnapshotDailyRollup"("providerId", "day");
+CREATE UNIQUE INDEX "UsageSnapshot_statusEventKey_key" ON "UsageSnapshot"("statusEventKey");
 CREATE UNIQUE INDEX "ExternalUsageEvent_idempotencyKey_key" ON "ExternalUsageEvent"("idempotencyKey");
 CREATE INDEX "ExternalUsageEvent_sourceApp_occurredAt_idx" ON "ExternalUsageEvent"("sourceApp", "occurredAt");
 CREATE INDEX "ExternalUsageEvent_provider_occurredAt_idx" ON "ExternalUsageEvent"("provider", "occurredAt");

@@ -99,6 +99,11 @@ model UsageSnapshot {
   providerId               String
   provider                 Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
   fetchedAt                DateTime
+  // Idempotent linkage for absolute status telemetry (`quota_sync` and
+  // `credit_balance`). Raw-event persistence and this snapshot are written in
+  // one transaction; a retry can therefore repair a previously-unmatched
+  // event without creating a duplicate snapshot.
+  statusEventKey           String?   @unique
   balance                  Float?
   totalCost                Float?
   // Portion of totalCost that the provider explicitly reports as fixed plan

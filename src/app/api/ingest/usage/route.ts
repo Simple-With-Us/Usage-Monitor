@@ -3,7 +3,6 @@ import type { Prisma } from "@prisma/client";
 import {
   ExternalUsageIdempotencyCollisionError,
   persistExternalUsageEvents,
-  syncStatusToUsageSnapshot,
 } from "@/lib/external-usage-events";
 import {
   MAX_USAGE_TELEMETRY_BODY_BYTES,
@@ -108,9 +107,6 @@ export async function POST(request: NextRequest) {
     }
     throw error;
   }
-
-  // Cross-app status metrics integration: Generate UsageSnapshot rows for absolute metrics.
-  await syncStatusToUsageSnapshot(persistResult.newEvents);
 
   return NextResponse.json(
     {
