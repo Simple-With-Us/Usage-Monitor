@@ -455,40 +455,46 @@ async function pruneExternalUsageEvents(
   const result = { scanned: 0, pruned: 0, rollupsTouched: 0, tombstonesWritten: 0 };
 
   while (true) {
-    const rows = await prisma.externalUsageEvent.findMany({
-      where: { occurredAt: { lt: cutoff } },
-      orderBy: { occurredAt: "asc" },
-      take: batchSize,
-      select: {
-        id: true,
-        idempotencyKey: true,
-        sourceApp: true,
-        environment: true,
-        provider: true,
-        service: true,
-        label: true,
-        keyRef: true,
-        billingMode: true,
-        metricType: true,
-        quantity: true,
-        unit: true,
-        costUsd: true,
-        requests: true,
-        credits: true,
-        limit: true,
-        limitWindow: true,
-        tier: true,
-        confidence: true,
-        projectId: true,
-        occurredAt: true,
-      },
-    });
-    if (rows.length === 0) break;
+    // Selection and grouping must share the write transaction with rollup and
+    // deletion. Ingest retries can backfill a previously-null projectId; if
+    // selection happened before this transaction, retention could aggregate
+    // the old attribution and then delete the newly-attributed raw row.
+    const batch = await prisma.$transaction(async (tx) => {
+      const rows = await tx.externalUsageEvent.findMany({
+        where: { occurredAt: { lt: cutoff } },
+        orderBy: { occurredAt: "asc" },
+        take: batchSize,
+        select: {
+          id: true,
+          idempotencyKey: true,
+          sourceApp: true,
+          environment: true,
+          provider: true,
+          service: true,
+          label: true,
+          keyRef: true,
+          billingMode: true,
+          metricType: true,
+          quantity: true,
+          unit: true,
+          costUsd: true,
+          requests: true,
+          credits: true,
+          limit: true,
+          limitWindow: true,
+          tier: true,
+          confidence: true,
+          projectId: true,
+          occurredAt: true,
+        },
+      });
+      if (rows.length === 0) {
+        return { scanned: 0, pruned: 0, rollupsTouched: 0, tombstonesWritten: 0 };
+      }
 
-    const groups = groupExternalRows(rows);
-    const ids = rows.map((row) => row.id);
-    const prunedAt = new Date();
-    await prisma.$transaction(async (tx) => {
+      const groups = groupExternalRows(rows);
+      const ids = rows.map((row) => row.id);
+      const prunedAt = new Date();
       for (const group of groups) {
         const existing = await tx.externalUsageEventDailyRollup.findUnique({
           where: { day_groupKey: { day: group.day, groupKey: group.groupKey } },
@@ -541,13 +547,21 @@ async function pruneExternalUsageEvents(
         });
       }
       await tx.externalUsageEvent.deleteMany({ where: { id: { in: ids } } });
-    });
+      return {
+        scanned: rows.length,
+        pruned: rows.length,
+        rollupsTouched: groups.length,
+        tombstonesWritten: rows.length,
+      };
+    }, { timeout: 30_000 });
 
-    result.scanned += rows.length;
-    result.pruned += rows.length;
-    result.rollupsTouched += groups.length;
-    result.tombstonesWritten += rows.length;
-    if (rows.length < batchSize) break;
+    if (batch.scanned === 0) break;
+
+    result.scanned += batch.scanned;
+    result.pruned += batch.pruned;
+    result.rollupsTouched += batch.rollupsTouched;
+    result.tombstonesWritten += batch.tombstonesWritten;
+    if (batch.scanned < batchSize) break;
   }
   return result;
 }
@@ -577,13 +591,18 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     getExternalEventRawCutoff(now),
     batchSize
   );
-  const tombstones = await prisma.externalUsageEventTombstone.deleteMany({
-    // A tombstone's protection window starts when the row was actually
-    // pruned, not when the original usage occurred (which may be years older).
-    where: { prunedAt: { lt: retentionCutoff(now, tombstoneRetentionDays) } },
-  });
 
-  const prunedRows = usageSnapshots.pruned + externalUsageEvents.pruned + tombstones.count;
+  // Tombstones are the only durable proof that an already-rolled-up event was
+  // consumed. Expiring one permits an arbitrarily late producer retry to be
+  // inserted as a raw row and counted a second time. Keep them permanently;
+  // the legacy retention setting remains in the result for API compatibility.
+  const tombstonesPruned = 0;
+
+  // OtlpMetricState is intentionally not age-pruned either. OTLP cumulative
+  // sums have no end-of-series signal; an exporter can resume an old series,
+  // and losing its checkpoint would make the next cumulative total look like
+  // a fresh delta. Cleanup is unsafe without an additional durable baseline.
+  const prunedRows = usageSnapshots.pruned + externalUsageEvents.pruned;
   let compacted = false;
   let compactionError: string | undefined;
   if (prunedRows > 0 && shouldRunVacuum()) {
@@ -604,7 +623,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     tombstoneRetentionDays,
     usageSnapshots,
     externalUsageEvents,
-    tombstonesPruned: tombstones.count,
+    tombstonesPruned,
     compacted,
     compactionError,
   };

@@ -79,8 +79,9 @@ not copied from the obsolete gray-cloud setup.
   rolled up daily and pruned)
 - `EXTERNAL_USAGE_EVENT_RAW_RETENTION_DAYS` (optional; defaults to `90`; current UTC-month events
   are always retained because `/api/budget-status` reads them directly)
-- `EXTERNAL_USAGE_EVENT_TOMBSTONE_RETENTION_DAYS` (optional; defaults to `180`, keeping old
-  idempotency keys from being reinserted after raw event pruning)
+- `EXTERNAL_USAGE_EVENT_TOMBSTONE_RETENTION_DAYS` (legacy compatibility setting, still reported
+  by maintenance results but no longer used to delete tombstones; rolled-up idempotency keys are
+  retained permanently so late producer retries cannot be counted twice)
 - `ADAPTER_HTTP_TIMEOUT_MS` / `ADAPTER_PROVIDER_TIMEOUT_MS` (optional bounded
   upstream-request and per-provider polling budgets)
 - `LITESTREAM_S3_*` (optional replica credentials; set all four required values

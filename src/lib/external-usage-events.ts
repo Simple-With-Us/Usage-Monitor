@@ -296,20 +296,7 @@ export async function summarizeExternalUsageEvents(
 }> {
   const groups = new Map<string, ExternalUsageEventSummaryGroup>();
   const rawSince = since > rawCutoff ? since : rawCutoff;
-  const rawEvents: Array<{
-    id: string;
-    sourceApp: string;
-    environment: string | null;
-    provider: string;
-    service: string | null;
-    projectId: string | null;
-    quantity: number | null;
-    costUsd: number | null;
-    requests: number | null;
-    limit: number | null;
-    limitWindow: string | null;
-    occurredAt: Date;
-  }> = [];
+  let rawEventCount = 0;
   const pageSize = 1_000;
   let cursor: string | undefined;
   while (true) {
@@ -336,7 +323,28 @@ export async function summarizeExternalUsageEvents(
         occurredAt: true,
       },
     });
-    rawEvents.push(...page);
+
+    // Fold each page into the summary immediately. The endpoint may span the
+    // entire raw-retention window, so retaining every row until the final
+    // reduction makes its peak memory grow linearly with event volume.
+    for (const event of page) {
+      mergeSummaryGroup(groups, {
+        sourceApp: event.sourceApp,
+        environment: event.environment,
+        provider: event.provider,
+        service: event.service,
+        projectId: event.projectId,
+        eventCount: 1,
+        totalCostUsd: event.costUsd ?? 0,
+        totalRequests: event.requests ?? 0,
+        totalQuantity: event.quantity ?? 0,
+        limit: event.limit,
+        limitWindow: event.limitWindow,
+        latestAt: event.occurredAt.toISOString(),
+      });
+    }
+    rawEventCount += page.length;
+
     if (page.length < pageSize) break;
     cursor = page[page.length - 1].id;
   }
@@ -368,23 +376,6 @@ export async function summarizeExternalUsageEvents(
         })
       : [];
 
-  for (const event of rawEvents) {
-    mergeSummaryGroup(groups, {
-      sourceApp: event.sourceApp,
-      environment: event.environment,
-      provider: event.provider,
-      service: event.service,
-      projectId: event.projectId,
-      eventCount: 1,
-      totalCostUsd: event.costUsd ?? 0,
-      totalRequests: event.requests ?? 0,
-      totalQuantity: event.quantity ?? 0,
-      limit: event.limit,
-      limitWindow: event.limitWindow,
-      latestAt: event.occurredAt.toISOString(),
-    });
-  }
-
   for (const rollup of rollups) {
     mergeSummaryGroup(groups, {
       sourceApp: rollup.sourceApp,
@@ -408,7 +399,7 @@ export async function summarizeExternalUsageEvents(
 
   return {
     eventCount:
-      rawEvents.length + rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
+      rawEventCount + rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
     groups: summaries,
   };
 }

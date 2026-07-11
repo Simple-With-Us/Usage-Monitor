@@ -92,6 +92,57 @@ describe("retention integration", () => {
     expect(summary.totalCostUsd).toBeCloseTo(50.5);
   });
 
+  it("returns only the newest requested raw snapshot points in chronological order", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const provider = await prisma.provider.create({
+      data: {
+        name: "bounded-snapshots",
+        displayName: "Bounded snapshots",
+        type: "custom",
+        refreshIntervalMin: 60,
+      },
+    });
+    await prisma.usageSnapshot.createMany({
+      data: Array.from({ length: 8 }, (_, index) => ({
+        providerId: provider.id,
+        fetchedAt: new Date(`2026-07-03T${String(index).padStart(2, "0")}:00:00.000Z`),
+        totalCost: index + 1,
+      })),
+    });
+
+    const response = await getSnapshots(
+      new NextRequest(
+        `https://usage.jays.services/api/snapshots?providerId=${provider.id}&days=30&maxPoints=3`
+      )
+    );
+    const snapshots = await response.json();
+
+    expect(snapshots).toHaveLength(3);
+    expect(snapshots.map((snapshot: { totalCost: number }) => snapshot.totalCost)).toEqual([
+      6, 7, 8,
+    ]);
+  });
+
+  it("keeps old rollup tombstones so late producer retries remain idempotent", async () => {
+    await prisma.externalUsageEventTombstone.create({
+      data: {
+        idempotencyKey: "old-but-still-protected",
+        occurredAt: new Date("2025-01-01T00:00:00.000Z"),
+        prunedAt: new Date("2025-01-02T00:00:00.000Z"),
+      },
+    });
+
+    const result = await runDataRetentionMaintenance(NOW);
+
+    expect(result.tombstonesPruned).toBe(0);
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: "old-but-still-protected" },
+      })
+    ).not.toBeNull();
+  });
+
   it("rejects distinct events that collide on one fallback idempotency key", async () => {
     const base = {
       idempotencyKey: "mandated-five-field-collision",

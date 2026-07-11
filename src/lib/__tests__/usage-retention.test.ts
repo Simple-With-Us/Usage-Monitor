@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const prismaMock = vi.hoisted(() => {
   const client: any = {
+    __transactionDepth: 0,
     provider: { findMany: vi.fn() },
     usageSnapshot: { findMany: vi.fn(), deleteMany: vi.fn() },
     usageSnapshotDailyRollup: { findMany: vi.fn(), findUnique: vi.fn(), upsert: vi.fn() },
@@ -10,7 +11,14 @@ const prismaMock = vi.hoisted(() => {
     externalUsageEventTombstone: { findMany: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
     $executeRawUnsafe: vi.fn(),
   };
-  client.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(client));
+  client.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
+    client.__transactionDepth += 1;
+    try {
+      return await fn(client);
+    } finally {
+      client.__transactionDepth -= 1;
+    }
+  });
   return client;
 });
 
@@ -38,6 +46,7 @@ describe("usage-retention wrapper", () => {
   beforeEach(() => {
     resetEnv();
     vi.clearAllMocks();
+    prismaMock.__transactionDepth = 0;
   });
 
   afterEach(() => {
@@ -106,7 +115,7 @@ describe("usage-retention wrapper", () => {
     prismaMock.usageSnapshotDailyRollup.findMany.mockResolvedValue([]);
     prismaMock.usageSnapshotDailyRollup.findUnique.mockResolvedValue(null);
 
-    prismaMock.externalUsageEvent.findMany.mockResolvedValue([
+    const externalRows = [
       {
         id: "evt-1",
         idempotencyKey: "evt-1",
@@ -127,6 +136,7 @@ describe("usage-retention wrapper", () => {
         limitWindow: "month",
         tier: "pro",
         confidence: "estimated",
+        projectId: null,
         occurredAt: new Date("2026-04-01T03:00:00.000Z"),
       },
       {
@@ -149,9 +159,16 @@ describe("usage-retention wrapper", () => {
         limitWindow: "month",
         tier: "pro",
         confidence: "estimated",
+        projectId: null,
         occurredAt: new Date("2026-04-01T09:00:00.000Z"),
       },
-    ]);
+    ];
+    prismaMock.externalUsageEvent.findMany.mockImplementation(async () => {
+      // The raw attribution selected here must be the same version rolled up
+      // and deleted by this transaction.
+      expect(prismaMock.__transactionDepth).toBeGreaterThan(0);
+      return externalRows;
+    });
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findUnique.mockResolvedValue(null);
     prismaMock.externalUsageEventTombstone.deleteMany.mockResolvedValue({ count: 0 });
@@ -192,9 +209,7 @@ describe("usage-retention wrapper", () => {
     expect(prismaMock.usageSnapshotDailyRollup.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.externalUsageEventDailyRollup.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.externalUsageEventTombstone.upsert).toHaveBeenCalledTimes(2);
-    expect(prismaMock.externalUsageEventTombstone.deleteMany).toHaveBeenCalledWith({
-      where: { prunedAt: { lt: new Date("2026-01-05T12:00:00.000Z") } },
-    });
+    expect(prismaMock.externalUsageEventTombstone.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.usageSnapshot.deleteMany).toHaveBeenCalledWith({
       where: { id: { in: ["snap-old-1", "snap-old-2"] } },
     });

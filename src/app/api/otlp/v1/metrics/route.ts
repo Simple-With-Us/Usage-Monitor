@@ -5,6 +5,7 @@ import { isUsageIngestAuthorized } from "@/lib/ingest-auth";
 import { createRateLimiter, getClientIp } from "@/lib/rate-limit";
 import { decodeMetricsJson } from "@/lib/otlp/json-decode";
 import { decodeMetricsProtobuf } from "@/lib/otlp/protobuf-decode";
+import { BoundedLogOnce } from "@/lib/otlp/bounded-log-once";
 import { mapClaudeCodeMetrics } from "@/lib/otlp/claude-code-mapper";
 import { mapSystemMetrics } from "@/lib/otlp/system-mapper";
 import { ensureAnthropicProviderSeeded } from "@/lib/otlp/ensure-anthropic-provider";
@@ -63,7 +64,7 @@ export const dynamic = "force-dynamic";
 // but keep a rate limiter for the same abuse-prevention reasons.
 const otlpMetricsRateLimiter = createRateLimiter(1_000, 10);
 
-const loggedUnknownMetrics = new Set<string>();
+const loggedUnknownMetrics = new BoundedLogOnce(1_000);
 
 function unsupportedProtocolResponse(contentType: string) {
   return NextResponse.json(
@@ -123,8 +124,7 @@ export async function POST(request: NextRequest) {
 
   for (const unknown of unknownMetrics) {
     const key = unknown.name;
-    if (!loggedUnknownMetrics.has(key)) {
-      loggedUnknownMetrics.add(key);
+    if (loggedUnknownMetrics.remember(key)) {
       console.warn(
         `[otlp/metrics] unrecognized metric "${unknown.name}" (${unknown.dataPointCount} data point(s) this request) — accepted, not mapped`
       );
