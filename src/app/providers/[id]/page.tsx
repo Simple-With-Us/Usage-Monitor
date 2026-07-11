@@ -15,6 +15,8 @@ interface Provider {
   type: string;
   config?: Record<string, unknown>;
   keyPreview?: string | null;
+  apiKeyConfigured?: boolean;
+  apiKeyReadable?: boolean;
   secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   refreshIntervalMin: number;
   isActive: boolean;
@@ -191,7 +193,9 @@ export default function ProviderDetailPage() {
             className="mt-2"
             instanceState={{
               isActive: provider.isActive,
-              primaryCredentialConfigured: Boolean(provider.keyPreview),
+              primaryCredentialConfigured:
+                provider.apiKeyConfigured ?? Boolean(provider.keyPreview),
+              primaryCredentialReadable: provider.apiKeyReadable,
               keyPreview: provider.keyPreview,
               publicConfigFields: publicConfigFieldNames(provider.config),
               protectedConfigFields: provider.secretConfigMeta?.fields ?? [],

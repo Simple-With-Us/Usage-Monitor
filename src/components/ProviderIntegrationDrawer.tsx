@@ -19,6 +19,7 @@ interface ProviderIntegrationDrawerProps {
 export interface ProviderIntegrationInstanceState {
   isActive: boolean;
   primaryCredentialConfigured: boolean;
+  primaryCredentialReadable?: boolean;
   keyPreview?: string | null;
   publicConfigFields: string[];
   protectedConfigFields: string[];
@@ -223,7 +224,10 @@ export default function ProviderIntegrationDrawer({
                 <div className="rounded-lg bg-gray-50 p-3">
                   <dt className="text-xs font-medium text-gray-500">Primary credential</dt>
                   <dd className="mt-1 font-medium text-gray-900">
-                    {instanceState.primaryCredentialConfigured
+                    {instanceState.primaryCredentialConfigured &&
+                    instanceState.primaryCredentialReadable === false
+                      ? "Configured · stored credential is not currently readable"
+                      : instanceState.primaryCredentialConfigured
                       ? keyLastFour
                         ? `Configured · •••• ${keyLastFour}`
                         : "Configured"

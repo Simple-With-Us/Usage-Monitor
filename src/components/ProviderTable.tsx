@@ -206,7 +206,9 @@ export default function ProviderTable({
                       variant="name"
                       instanceState={{
                         isActive: provider.isActive,
-                        primaryCredentialConfigured: Boolean(provider.keyPreview),
+                        primaryCredentialConfigured:
+                          provider.apiKeyConfigured ?? Boolean(provider.keyPreview),
+                        primaryCredentialReadable: provider.apiKeyReadable,
                         keyPreview: provider.keyPreview,
                         publicConfigFields: publicConfigFieldNames(provider.config),
                         protectedConfigFields: provider.secretConfigMeta?.fields ?? [],

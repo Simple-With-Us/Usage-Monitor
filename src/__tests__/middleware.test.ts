@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildContentSecurityPolicy, config } from "@/middleware";
+import { NextRequest } from "next/server";
+import { buildContentSecurityPolicy, config, middleware } from "@/middleware";
 
 // The session-cookie middleware only runs on paths its `config.matcher`
 // selects. Next.js compiles that matcher (a single negative-lookahead string)
@@ -93,5 +94,19 @@ describe("middleware CSP", () => {
 
   it("keeps unsafe-eval limited to local development", () => {
     expect(buildContentSecurityPolicy("test-nonce", false)).toContain("'unsafe-eval'");
+  });
+
+  it("forwards the exact response policy so Next can nonce framework scripts", () => {
+    const response = middleware(new NextRequest("https://usage.example.test/login"));
+    const responsePolicy = response.headers.get("content-security-policy");
+
+    expect(responsePolicy).toBeTruthy();
+    expect(response.headers.get("x-middleware-request-content-security-policy")).toBe(
+      responsePolicy
+    );
+    expect(response.headers.get("x-middleware-request-x-nonce")).toBeTruthy();
+    expect(response.headers.get("x-middleware-override-headers")?.split(",")).toEqual(
+      expect.arrayContaining(["content-security-policy", "x-nonce"])
+    );
   });
 });

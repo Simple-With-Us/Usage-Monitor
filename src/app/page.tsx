@@ -19,6 +19,8 @@ interface Provider {
   groupId: string | null;
   label: string | null;
   keyPreview?: string | null;
+  apiKeyConfigured?: boolean;
+  apiKeyReadable?: boolean;
   config?: Record<string, unknown>;
   secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   estimatedMonthlyCostUsd: number;

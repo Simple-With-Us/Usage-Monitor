@@ -13,6 +13,7 @@ import {
   providerConfigForClient,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
+import { providerApiKeyState } from "@/lib/provider-api-key-state";
 
 export async function GET(
   _request: NextRequest,
@@ -27,6 +28,7 @@ export async function GET(
       name: true,
       displayName: true,
       type: true,
+      apiKey: true,
       isActive: true,
       config: true,
       secretConfig: true,
@@ -87,8 +89,9 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const { snapshots, config, secretConfig, ...rest } = provider;
+  const { snapshots, apiKey, config, secretConfig, ...rest } = provider;
   const clientConfig = providerConfigForClient(config, secretConfig);
+  const apiKeyState = providerApiKeyState(apiKey);
   const latestSnapshot = snapshots[0] ?? null;
   const alertState = buildProviderAlertState({
     isActive: provider.isActive,
@@ -108,6 +111,7 @@ export async function GET(
   return NextResponse.json({
     ...rest,
     ...clientConfig,
+    ...apiKeyState,
     latestSnapshot,
     alerts: canonicalBudget?.alerts ?? alertState.alerts,
     estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,

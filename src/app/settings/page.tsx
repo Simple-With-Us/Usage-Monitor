@@ -43,6 +43,8 @@ export interface Provider {
   groupId: string | null;
   label: string | null;
   keyPreview?: string | null;
+  apiKeyConfigured?: boolean;
+  apiKeyReadable?: boolean;
   plan: ProviderPlan | null;
   allocations: { projectId: string; percentage: number }[];
   externalBilling?: ExternalBillingRecord[];

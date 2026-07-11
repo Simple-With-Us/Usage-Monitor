@@ -16,6 +16,8 @@ interface ProviderCardProps {
   refreshIntervalMin?: number;
   label?: string | null;
   keyPreview?: string | null;
+  apiKeyConfigured?: boolean;
+  apiKeyReadable?: boolean;
   estimatedMonthlyCostUsd?: number;
   projectedEomUsd?: number;
   spentUsd?: number;
@@ -71,6 +73,8 @@ export default function ProviderCard({
   refreshIntervalMin = 60,
   label,
   keyPreview,
+  apiKeyConfigured,
+  apiKeyReadable,
   estimatedMonthlyCostUsd = 0,
   projectedEomUsd = 0,
   spentUsd,
@@ -126,7 +130,8 @@ export default function ProviderCard({
               displayName={displayName}
               instanceState={{
                 isActive,
-                primaryCredentialConfigured: Boolean(keyPreview),
+                primaryCredentialConfigured: apiKeyConfigured ?? Boolean(keyPreview),
+                primaryCredentialReadable: apiKeyReadable,
                 keyPreview,
                 publicConfigFields: publicConfigFieldNames(config),
                 protectedConfigFields: secretConfigMeta?.fields ?? [],
