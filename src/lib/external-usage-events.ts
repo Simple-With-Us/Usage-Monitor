@@ -567,20 +567,56 @@ export async function sumMonthToDateExternalCostAttribution(
   return Array.from(rows.values());
 }
 
+interface StatusProviderCandidate {
+  id: string;
+  name: string;
+  config: unknown;
+}
+
+function statusKeyRef(config: unknown): string | null {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+  const record = config as Record<string, unknown>;
+  for (const key of ["statusKeyRef", "telemetryKeyRef"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+export function resolveStatusProviderId(
+  event: Pick<ExternalUsageEventInput, "provider" | "keyRef">,
+  candidates: StatusProviderCandidate[]
+): string | null {
+  const matchingName = candidates.filter(
+    (provider) =>
+      provider.name.trim().toLowerCase() === event.provider.trim().toLowerCase()
+  );
+  if (matchingName.length === 1) return matchingName[0].id;
+  if (matchingName.length === 0 || !event.keyRef?.trim()) return null;
+
+  const matchingRef = matchingName.filter(
+    (provider) => statusKeyRef(provider.config) === event.keyRef!.trim()
+  );
+  return matchingRef.length === 1 ? matchingRef[0].id : null;
+}
+
 export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[]): Promise<void> {
   const statusEvents = events.filter((e) => STATUS_METRIC_TYPES.has(e.metricType));
   if (statusEvents.length === 0) return;
 
   const providerNames = new Set(statusEvents.map((e) => e.provider.toLowerCase()));
   const allProviders = await prisma.provider.findMany({
-    select: { id: true, name: true },
+    select: { id: true, name: true, config: true },
   });
   const providers = allProviders.filter((p) => providerNames.has(p.name.toLowerCase()));
 
-  const providerIdByName = new Map(providers.map((p) => [p.name.toLowerCase(), p.id]));
-
   for (const event of statusEvents) {
-    const providerId = providerIdByName.get(event.provider.toLowerCase());
+    // Never attach an account-level absolute status to an arbitrary duplicate
+    // provider row. A unique name is sufficient; duplicate names require a
+    // producer keyRef that exactly matches a configured statusKeyRef (legacy
+    // telemetryKeyRef is also accepted). Ambiguous events remain preserved in
+    // ExternalUsageEvent but do not create a misleading snapshot.
+    const providerId = resolveStatusProviderId(event, providers);
     if (!providerId) continue;
 
     const data: Prisma.UsageSnapshotCreateInput = {
