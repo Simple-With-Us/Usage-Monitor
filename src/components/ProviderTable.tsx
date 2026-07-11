@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { type Provider } from "@/app/settings/page";
 import { isExternalBillingStale } from "@/components/ExternalBillingDetails";
+import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 
 interface ProviderTableProps {
   providers: Provider[];
@@ -210,9 +211,23 @@ export default function ProviderTable({
               >
                 <td data-label="Name" className="px-6 py-4">
                   <div>
-                    <p className="font-medium text-gray-900">
-                      {provider.displayName}
-                    </p>
+                    <ProviderIntegrationInfo
+                      providerName={provider.name}
+                      providerType={provider.type}
+                      displayName={provider.displayName}
+                      variant="name"
+                      instanceState={{
+                        isActive: provider.isActive,
+                        primaryCredentialConfigured: Boolean(provider.keyPreview),
+                        keyPreview: provider.keyPreview,
+                        publicConfigFields: publicConfigFieldNames(provider.config),
+                        protectedConfigFields: provider.secretConfigMeta?.fields ?? [],
+                        protectedConfigReadable: provider.secretConfigMeta?.readable,
+                        lastSnapshotAt: provider.latestSnapshot?.fetchedAt ?? null,
+                        externalBillingRecordCount: provider.externalBilling?.length ?? 0,
+                        externalBillingSources: [...new Set((provider.externalBilling ?? []).map((record) => record.source))].sort(),
+                      }}
+                    />
                     <p className="text-xs text-gray-400">{provider.name}</p>
                     {provider.groupId && (
                       <span className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-700 border border-amber-200">

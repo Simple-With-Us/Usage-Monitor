@@ -6,12 +6,16 @@ import Link from "next/link";
 import UsageChart from "@/components/UsageChart";
 import BalanceBadge from "@/components/BalanceBadge";
 import ExternalBillingDetails, { type ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 
 interface Provider {
   id: string;
   name: string;
   displayName: string;
   type: string;
+  config?: Record<string, unknown>;
+  keyPreview?: string | null;
+  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   refreshIntervalMin: number;
   isActive: boolean;
   label: string | null;
@@ -20,6 +24,7 @@ interface Provider {
   spentUsd?: number;
   projectedEomUsd?: number;
   externalBilling?: ExternalBillingRecord[];
+  latestSnapshot?: { fetchedAt: string } | null;
   plan: {
     fixedMonthlyCostUsd: number | null;
     monthlyBudgetUsd: number | null;
@@ -174,9 +179,29 @@ export default function ProviderDetailPage() {
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold text-gray-900">
-          {provider.displayName}
-        </h1>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {provider.displayName}
+          </h1>
+          <ProviderIntegrationInfo
+            providerName={provider.name}
+            providerType={provider.type}
+            displayName={provider.displayName}
+            variant="button"
+            className="mt-2"
+            instanceState={{
+              isActive: provider.isActive,
+              primaryCredentialConfigured: Boolean(provider.keyPreview),
+              keyPreview: provider.keyPreview,
+              publicConfigFields: publicConfigFieldNames(provider.config),
+              protectedConfigFields: provider.secretConfigMeta?.fields ?? [],
+              protectedConfigReadable: provider.secretConfigMeta?.readable,
+              lastSnapshotAt: provider.latestSnapshot?.fetchedAt ?? latest?.fetchedAt ?? null,
+              externalBillingRecordCount: provider.externalBilling?.length ?? 0,
+              externalBillingSources: [...new Set((provider.externalBilling ?? []).map((record) => record.source))].sort(),
+            }}
+          />
+        </div>
         <span className="px-2 py-1 text-xs font-medium text-gray-500 uppercase bg-gray-100 rounded">
           {provider.type}
         </span>
