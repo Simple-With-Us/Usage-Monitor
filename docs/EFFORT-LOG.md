@@ -141,6 +141,16 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
   `provider-subscriptions-2026-07-10-v1` seed with fixed billing anchors, exact-plan startup gate,
   database receipt written only after postconditions, ambiguity/manual-row preservation, and
   startup ordering after verified backup + migration. No production writes or deploys.
+- **Provider type-aware credential routing (CODEX, owner-directed 2026-07-11).** Branch
+  `codex-provider-type-routing` (slash namespace unavailable because a pre-existing local branch
+  is literally named `codex`), isolated worktree
+  `/Users/jay/apps/api-usage-monitor-provider-routing`, based on `origin/main` `8e44b4d`. Fix the
+  P0 adapter-dispatch flaw so custom providers always use their configured custom endpoint even
+  when their slug collides with a built-in, while generic/manual and unknown built-in rows fail
+  closed without routing credentials. Regression coverage proves `openai`/`stripe` custom-name
+  collisions never invoke those built-in adapters. No polling-loop files, production writes,
+  push, merge, or deploy. Local verification: adapter suite 20 files / 65 tests passed;
+  `npm run lint` and `npm run typecheck` passed.
 - **Alert-delivery channel reliability (CODEX, owner-directed 2026-07-11).** Branch
   `codex-alert-delivery-reliability`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-alert-delivery`, based on app-wide hardening commit `2dd8ad8`.
