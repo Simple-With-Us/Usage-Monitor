@@ -21,7 +21,8 @@
 6. Wait for the first deploy. At runtime, the startup wrapper optionally
    restores a missing database, creates a transaction-consistent SQLite Online
    Backup API snapshot of any existing database, verifies it with
-   `PRAGMA integrity_check`, and only then runs `scripts/migrate-safe.mjs`.
+   `PRAGMA integrity_check`, and only then runs `scripts/migrate-safe.mjs` and
+   any explicitly selected exact release-maintenance plan.
    Backup or verification failure stops startup before schema changes. The
    migration applies additive changes and refuses destructive drift; there is
    no `--accept-data-loss` startup path.
@@ -63,6 +64,9 @@ not copied from the obsolete gray-cloud setup.
 - `SQLITE_PRE_MIGRATION_BACKUP_RETENTION` (defaults to `3`, valid `1`-`10`;
   newest verified local snapshots retained under
   `/data/.pre-migration-backups` before startup schema synchronization)
+- `RELEASE_MAINTENANCE_PLAN_ID` (optional exact-plan startup gate; unset is a
+  no-op, unknown IDs fail closed; the registered provider/subscription plan is
+  `provider-subscriptions-2026-07-10-v1`)
 - `ENCRYPTION_KEY` (auto-generated 64-char hex)
 - `CRON_SECRET` (auto-generated; the `/api/cron/fetch-all` route still checks
   this, kept as an authenticated manual-trigger/debug endpoint even though
@@ -210,7 +214,12 @@ new `startCommand`), `scripts/litestream-restore.sh` (manual restore).
 
 ## Release-time data maintenance
 
-Do not add the Claude cumulative-cost repair or subscription seed to automatic
-startup. Both require production-specific review that an idempotency marker
-cannot replace. See `docs/release-maintenance.md` for the evidence and the
-requirements for any future marker-driven task.
+The provider/subscription seed is implemented as an immutable, dry-run-first,
+exact-plan startup task with fixed billing anchors, one transaction,
+postconditions, an in-transaction `PRAGMA integrity_check`, and a final durable
+receipt. It is disabled by default. Review its dry-run before setting
+`RELEASE_MAINTENANCE_PLAN_ID=provider-subscriptions-2026-07-10-v1`.
+
+The historical Claude cumulative-cost repair remains manual and is not part of
+startup. See `docs/release-maintenance.md` for the plan details and operator
+runbook.

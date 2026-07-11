@@ -1,288 +1,93 @@
 #!/usr/bin/env node
+
 /**
- * One-time, idempotent seed for "subscription -> knob linkage phase 1" (see
- * docs/rollouts/2026-07-10-subscription-knob-linkage.md).
+ * Dry-run-first CLI for the immutable provider/subscription release plan.
  *
- * Creates/updates:
- *   1. `Subscription` rows for the market-data plans the owner is on (or
- *      considering) — massive "Stocks Starter" (active), fmp "Starter"
- *      (active), tiingo "Power" (considering), fmp "Premium" (considering) —
- *      each carrying a `knobEnv` map (env-var knob name -> string value) that
- *      overrides the provider's free-tier baseline while active/considered.
- *   2. `ProviderPlan.knobEnv` FREE-TIER baseline maps for tiingo, twelvedata,
- *      alphavantage, and finnhub — the values a consuming app (Socratic.Trade)
- *      should use when NOT on a paid plan for that provider.
- *
- * Run this EXACTLY ONCE against prod, from Render's Shell tab for the
- * deployed `api-usage-monitor` web service:
- *
+ * Preflight only (default; zero writes):
  *   node scripts/seed-provider-subscriptions.mjs
  *
- * Safe to re-run (every write is idempotent):
- *   - Provider lookup is case-insensitive-by-name find-or-create (never
- *     renames an existing row).
- *   - Subscription lookup is by (providerId, name) — if a match already
- *     exists this script SKIPS it (never overwrites a row an operator may
- *     have since edited by hand).
- *   - ProviderPlan.knobEnv is written ONLY IF the column is currently null —
- *     an already-set value (from this script's prior run, or a manual edit)
- *     is left untouched.
- *
- * IMPORTANT - Alpha Vantage provider name: "alphavantage" (NO hyphen). The
- * adapter registry (src/lib/adapters/index.ts) dispatches usage-fetch on
- * `provider.name.toLowerCase()` and only registers the key "alphavantage" —
- * a Provider row named e.g. "alpha-vantage" would silently fall through to
- * the generic "custom" adapter (no real usage polling) instead of the actual
- * Alpha Vantage adapter. This script creates/matches the provider as
- * "alphavantage" and WARNS (does not rename) if a hyphenated near-miss name
- * is found in the database instead.
+ * Apply the one exact plan. Business writes and the durable receipt commit in
+ * one transaction, with the receipt inserted only after postconditions pass:
+ *   node scripts/seed-provider-subscriptions.mjs \
+ *     --apply --plan-id provider-subscriptions-2026-07-10-v1
  */
 
+import { pathToFileURL } from "node:url";
 import { PrismaClient } from "@prisma/client";
+import {
+  PROVIDER_SUBSCRIPTION_PLAN_ID,
+  ReleasePlanConflictError,
+  runProviderSubscriptionReleasePlan,
+} from "./provider-subscription-release-plan.mjs";
 
-const prisma = new PrismaClient();
-
-function log(message) {
-  console.log(`[seed-provider-subscriptions] ${message}`);
-}
-
-// Duplicated from src/lib/subscriptions.ts's addUtcMonths/initialCycle (that
-// module is TypeScript compiled as part of the Next.js app; this script is
-// plain standalone ESM run directly via `node`, so it re-implements the same
-// small piece of pure date math rather than pulling in a build step).
-function addUtcMonths(date, months) {
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth();
-  const day = date.getUTCDate();
-  const target = new Date(
-    Date.UTC(
-      year,
-      month + months,
-      1,
-      date.getUTCHours(),
-      date.getUTCMinutes(),
-      date.getUTCSeconds(),
-      date.getUTCMilliseconds()
-    )
-  );
-  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(Math.min(day, lastDay));
-  return target;
-}
-
-function initialMonthlyCycle(startDate) {
-  return { currentPeriodStart: startDate, nextRenewalAt: addUtcMonths(startDate, 1) };
-}
-
-// name -> Provider defaults used ONLY when a matching provider doesn't exist
-// yet. displayName/category match the conventions already used in
-// src/components/AddProviderModal.tsx's PROVIDER_CATALOG for these same
-// providers.
-const PROVIDER_DEFAULTS = {
-  massive: { displayName: "Massive", category: "Market Data" },
-  fmp: { displayName: "FMP", category: "Market Data" },
-  tiingo: { displayName: "Tiingo", category: "Market Data" },
-  twelvedata: { displayName: "Twelve Data", category: "Market Data" },
-  alphavantage: { displayName: "Alpha Vantage", category: "Market Data" },
-  finnhub: { displayName: "Finnhub", category: "Market Data" },
-};
-
-// Subscriptions to seed. costUsd/interval are the CURRENT (monthly) sticker
-// price; `notes` records the annual-billing alternative where relevant so a
-// human comparing tiers has it without leaving this table.
-const SUBSCRIPTIONS = [
-  {
-    providerName: "massive",
-    name: "Stocks Starter",
-    status: "active",
-    costUsd: 29,
-    notes: "annual available $288/yr",
-    knobEnv: { MASSIVE_REST_MAX_CALLS_PER_MINUTE: "100" },
-  },
-  {
-    providerName: "fmp",
-    name: "Starter",
-    status: "active",
-    costUsd: 22,
-    notes: "billed annually $264/yr",
-    knobEnv: {},
-  },
-  {
-    providerName: "tiingo",
-    name: "Power",
-    status: "considering",
-    costUsd: 30,
-    notes:
-      "annual $300/yr (2 months free) — owner-verified 2026-07-10; marketing matrix hides it",
-    knobEnv: {
-      PROVIDER_QUOTA_TIINGO_PER_HOUR: "10000",
-      PROVIDER_QUOTA_TIINGO_PER_DAY: "100000",
-      TIINGO_DROP_NEWS: "false",
-    },
-  },
-  {
-    providerName: "fmp",
-    name: "Premium",
-    status: "considering",
-    costUsd: 59,
-    notes: "billed annually $708/yr; quarterly fundamentals + 750 calls/min",
-    knobEnv: {},
-  },
-];
-
-// Provider name -> FREE-TIER knobEnv map (ProviderPlan.knobEnv). Set
-// only-if-currently-null — see the idempotency note in the file header.
-const FREE_TIER_KNOB_MAPS = {
-  tiingo: {
-    PROVIDER_QUOTA_TIINGO_PER_HOUR: "50",
-    PROVIDER_QUOTA_TIINGO_PER_DAY: "1000",
-    TIINGO_DROP_NEWS: "true",
-  },
-  twelvedata: {
-    PROVIDER_QUOTA_TWELVEDATA_PER_MIN: "8",
-    PROVIDER_QUOTA_TWELVEDATA_PER_DAY: "800",
-  },
-  alphavantage: {
-    PROVIDER_RATE_LIMIT_ALPHA_VANTAGE_MIN_INTERVAL_MS: "1100",
-    PROVIDER_RATE_LIMIT_ALPHA_VANTAGE_CONCURRENCY: "1",
-  },
-  finnhub: {
-    PROVIDER_RATE_LIMIT_FINNHUB_PER_MIN: "50",
-  },
-};
-
-async function findProviderCaseInsensitive(name) {
-  const providers = await prisma.provider.findMany();
-  return providers.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
-}
-
-async function warnOnHyphenatedNearMiss(canonicalName) {
-  if (!canonicalName.includes("-") && canonicalName === "alphavantage") {
-    const providers = await prisma.provider.findMany();
-    const nearMiss = providers.find(
-      (p) => p.name.toLowerCase() !== canonicalName && p.name.toLowerCase().replace(/[-_]/g, "") === canonicalName
-    );
-    if (nearMiss) {
-      log(
-        `WARNING: found provider "${nearMiss.name}" (id=${nearMiss.id}) which looks like a ` +
-          `hyphen/underscore variant of "${canonicalName}". The adapter registry only recognizes ` +
-          `the exact name "alphavantage" (src/lib/adapters/index.ts) — "${nearMiss.name}" silently ` +
-          `falls through to the generic "custom" adapter (no real usage polling). This script does ` +
-          `NOT rename it; that is a manual data-repair decision.`
+function parseArgs(argv) {
+  const options = { apply: false, json: false, planId: null };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--apply") options.apply = true;
+    else if (arg === "--json") options.json = true;
+    else if (arg === "--plan-id") {
+      options.planId = argv[index + 1] ?? null;
+      index += 1;
+    } else if (arg === "--help") {
+      console.log(
+        `Usage: node scripts/seed-provider-subscriptions.mjs [--json] [--apply --plan-id ${PROVIDER_SUBSCRIPTION_PLAN_ID}]`
       );
+      process.exit(0);
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
     }
   }
-}
-
-async function findOrCreateProvider(name) {
-  const defaults = PROVIDER_DEFAULTS[name];
-  if (!defaults) throw new Error(`No PROVIDER_DEFAULTS entry for "${name}"`);
-
-  await warnOnHyphenatedNearMiss(name);
-
-  const existing = await findProviderCaseInsensitive(name);
-  if (existing) {
-    log(`Provider "${name}" already exists as "${existing.name}" (id=${existing.id}).`);
-    return existing;
-  }
-
-  log(`Creating provider "${name}" (${defaults.displayName})...`);
-  return prisma.provider.create({
-    data: {
-      name,
-      displayName: defaults.displayName,
-      type: "builtin",
-      category: defaults.category,
-      refreshIntervalMin: 60,
-    },
-  });
-}
-
-async function seedFreeTierKnobEnv(providerId, providerName, knobEnv) {
-  const existingPlan = await prisma.providerPlan.findUnique({ where: { providerId } });
-
-  if (!existingPlan) {
-    log(`Creating ProviderPlan for "${providerName}" with free-tier knobEnv...`);
-    await prisma.providerPlan.create({ data: { providerId, knobEnv } });
-    return;
-  }
-
-  if (existingPlan.knobEnv != null) {
-    log(`ProviderPlan.knobEnv for "${providerName}" is already set — leaving it untouched (idempotent).`);
-    return;
-  }
-
-  log(`Setting free-tier knobEnv on existing ProviderPlan for "${providerName}"...`);
-  await prisma.providerPlan.update({ where: { providerId }, data: { knobEnv } });
-}
-
-async function seedSubscription(provider, def) {
-  const existing = await prisma.subscription.findFirst({
-    where: { providerId: provider.id, name: def.name },
-  });
-  if (existing) {
-    log(
-      `Subscription "${def.name}" for provider "${provider.name}" already exists ` +
-        `(id=${existing.id}, status=${existing.status}) — skipping (idempotent, not overwriting).`
+  if (options.apply && options.planId !== PROVIDER_SUBSCRIPTION_PLAN_ID) {
+    throw new Error(
+      `--apply requires --plan-id ${PROVIDER_SUBSCRIPTION_PLAN_ID}`
     );
-    return existing;
   }
-
-  const now = new Date();
-  const { currentPeriodStart, nextRenewalAt } = initialMonthlyCycle(now);
-
-  log(
-    `Creating subscription "${def.name}" for provider "${provider.name}" ` +
-      `($${def.costUsd}/mo, status=${def.status})...`
-  );
-  return prisma.subscription.create({
-    data: {
-      providerId: provider.id,
-      name: def.name,
-      costUsd: def.costUsd,
-      currency: "USD",
-      interval: "monthly",
-      intervalCount: 1,
-      startDate: now,
-      currentPeriodStart,
-      nextRenewalAt,
-      autoRenew: true,
-      status: def.status,
-      notes: def.notes,
-      knobEnv: def.knobEnv,
-    },
-  });
+  if (
+    options.planId != null &&
+    options.planId !== PROVIDER_SUBSCRIPTION_PLAN_ID
+  ) {
+    throw new Error(`Unknown release-maintenance plan: ${options.planId}`);
+  }
+  return options;
 }
 
-async function main() {
-  log("Starting...");
-
-  const providerCache = new Map();
-  async function provider(name) {
-    if (!providerCache.has(name)) {
-      providerCache.set(name, await findOrCreateProvider(name));
+export async function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  const prisma = new PrismaClient();
+  try {
+    const result = await runProviderSubscriptionReleasePlan({
+      prisma,
+      apply: options.apply,
+    });
+    const output = {
+      mode: options.apply ? "apply" : "dry-run",
+      applied: result.applied,
+      alreadyCompleted: result.alreadyCompleted,
+      ...result.report,
+      ...(result.receipt ? { receipt: result.receipt } : {}),
+    };
+    console.log(JSON.stringify(output, null, options.json ? 2 : 2));
+    return output;
+  } catch (error) {
+    if (error instanceof ReleasePlanConflictError && error.conflicts.length) {
+      for (const conflict of error.conflicts) {
+        console.error(`[seed-provider-subscriptions] CONFLICT: ${conflict}`);
+      }
     }
-    return providerCache.get(name);
+    throw error;
+  } finally {
+    await prisma.$disconnect();
   }
-
-  for (const def of SUBSCRIPTIONS) {
-    const p = await provider(def.providerName);
-    await seedSubscription(p, def);
-  }
-
-  for (const [providerName, knobEnv] of Object.entries(FREE_TIER_KNOB_MAPS)) {
-    const p = await provider(providerName);
-    await seedFreeTierKnobEnv(p.id, providerName, knobEnv);
-  }
-
-  log("Done.");
 }
 
-main()
-  .catch((error) => {
-    console.error("[seed-provider-subscriptions] FAILED:", error);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(
+      `[seed-provider-subscriptions] ERROR: ${
+        error instanceof Error ? error.message : "unknown failure"
+      }`
+    );
     process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
   });
+}
