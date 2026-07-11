@@ -35,6 +35,7 @@ function providerRow(name: string) {
   return {
     id: `id-${name}`,
     name,
+    type: "builtin",
     refreshIntervalMin: 60,
     // no prior snapshots => always "due"
     snapshots: [],
@@ -99,6 +100,30 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       "success",
       "failure",
     ]);
+  });
+
+  it("skips generic manual providers without invoking an adapter or writing a snapshot", async () => {
+    findMany.mockResolvedValue([{ ...providerRow("manual-account"), type: "generic" }]);
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 0,
+      failures: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({
+        name: "manual-account",
+        status: "skipped",
+        skipReason: "manual_provider",
+      }),
+    ]);
+    expect(fetchProviderUsage).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("rolls back a late result after a newer attempt supersedes it", async () => {

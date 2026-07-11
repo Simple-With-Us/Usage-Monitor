@@ -127,6 +127,17 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Residual whole-app audit and deterministic hardening (CODEX, owner-directed 2026-07-11).** Branch
+  `residual-audit-hardening`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-residual-audit`, based on `c8ccd7f`. Fresh independent review
+  of security/privacy, data correctness, accessibility, operational safety, and direct-billing
+  semantics. Implemented high-confidence fixes for generic/manual polling no-ops, credential-safe
+  balance grouping, project/allocation validation, strict subscription booleans and safe knob names,
+  delimiter-safe telemetry grouping, duplicate-provider project attribution, refresh-derived external
+  billing staleness, and mobile table header semantics. Full Node 24 `npm run verify` green: ESLint,
+  TypeScript, 51 files / 273 tests, migration/backup/release/startup checks, and production build.
+  Detailed evidence and deferred items:
+  `docs/audits/2026-07-11-residual-app-audit.md`. No production writes, push, merge, or deploy.
 - **Production maintenance script hardening (CODEX, owner-directed 2026-07-11).** Branch
   `maintenance-script-hardening`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-maintenance-hardening`, based on `e736bf1`. Scope: make
@@ -220,6 +231,45 @@ by OPEN PR #42" row that was also here merged as PR #42.) Stale keyed issues for
 being closed in this same reconciliation pass._
 
 ## Planned / Reserved
+
+- **Audit and repair legacy provider `groupId` rows; make grouped money/credit totals canonical
+  (unassigned, M).** Provider creation historically grouped every same-name provider even when API
+  keys/accounts differed, so dashboard balance can hide distinct accounts. This lane stops new false
+  groups by requiring the same credential, but existing rows need a backup-backed data audit. Also,
+  `computeBudgetStatus` and total credits do not currently dedupe genuine same-account groups, so
+  duplicate credential rows can still multiply spend/credits even when balance is deduped.
+- **Add account identity to pushed status metrics before mapping duplicate provider names
+  (unassigned, M).** `syncStatusToUsageSnapshot` maps `quota_sync`/`credit_balance` by provider name
+  through an unordered duplicate-name map; with multiple OpenAI/Resend/etc. accounts it can attach a
+  status sample to an arbitrary row. Extend the producer contract with stable account/key identity or
+  define a canonical owner, then backfill safely.
+- **Complete provider credential lifecycle and config-input hardening (unassigned, M).** Provider edit
+  cannot explicitly clear the primary `apiKey` or one encrypted secondary field; `config: null` clears
+  only secondary config. Arbitrary config keys/depth/size are also unbounded and object construction
+  should reject prototype-pollution keys. Add explicit preserve/replace/clear operations, bounded JSON
+  validation, tests, and an operator-visible rotation path.
+- **Bound generic usage-ingest request bodies before JSON decoding (unassigned, S).** OTLP ingest uses
+  a streaming 1 MiB limit, but `/api/ingest/usage` calls `request.json()` directly. Its 100-event and
+  metadata limits apply only after full allocation. Add a contract-sized streaming cap, return 413,
+  and test declared-length and chunked bodies.
+- **Separate session signing from the dashboard password and remove production CSP `unsafe-inline`
+  (unassigned, L).** Session HMACs currently use `DASHBOARD_PASSWORD` directly, making a stolen cookie
+  an offline password verifier and offering no per-session revocation. Provision `SESSION_SECRET`,
+  version/rotate sessions, then adopt nonce/hash-based Next scripts/styles before removing CSP inline
+  allowances; coordinate deployment so existing sessions fail closed without locking out the owner.
+- **Minimize and classify persisted adapter `rawData` (unassigned, M).** Poll snapshots retain
+  provider-shaped payloads (and preserve each provider's latest snapshot indefinitely) even though
+  client routes select only normalized fields. Define per-adapter allowlists/redaction, especially for
+  custom endpoints, and document retention/privacy provenance before exposing any raw detail.
+- **Verify Hetzner plan currency against the current official API before displaying it as USD
+  (unassigned, S).** The adapter names the parsed monthly net price `monthlyRunRateUsd` and writes
+  external-billing currency `USD`, but does not read a currency field or perform FX conversion. Confirm
+  the API contract; if non-USD, preserve source currency and keep it out of USD budgets until explicit
+  conversion exists.
+- **Remove or explain `Fetch Now` for generic/manual providers in Settings (integration-transparency
+  lane, S).** The backend now returns a safe `manual_provider` no-op, but the table still presents an
+  action that appears to fetch data. Hide/disable it or surface the no-API explanation in the new
+  service-details affordance.
 
 - **End-of-Month Spend Forecasting (unassigned, S)** — IDEA: Add a simple linear extrapolation algorithm based on the `UsageSnapshotDailyRollup` data to project EOM spend and display it on the dashboard as `Projected EOM Spend: $X`.
 - **Dark Mode Support (unassigned, S)** — IDEA: Add standard CSS dark mode via media queries to support dark mode on the frontend dashboard without breaking the current UI.

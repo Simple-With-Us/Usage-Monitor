@@ -79,6 +79,25 @@ describe("parseSubscriptionCreateInput — knobEnv", () => {
       /knobEnv must be a JSON object/
     );
   });
+
+  it("rejects keys that are not safe environment-variable names", () => {
+    expect(() =>
+      parseSubscriptionCreateInput({ ...baseBody, knobEnv: { "__proto__-unsafe": "1" } })
+    ).toThrowError(/uppercase environment-variable name/);
+  });
+});
+
+describe("subscription boolean validation", () => {
+  it("accepts booleans and rejects truthy strings", () => {
+    expect(parseSubscriptionCreateInput({ ...baseBody, autoRenew: false }).autoRenew).toBe(false);
+    expect(parseSubscriptionUpdateInput({ autoRenew: true }).autoRenew).toBe(true);
+    expect(() =>
+      parseSubscriptionCreateInput({ ...baseBody, autoRenew: "false" })
+    ).toThrowError(/autoRenew must be a boolean/);
+    expect(() => parseSubscriptionUpdateInput({ autoRenew: 0 })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+  });
 });
 
 describe("parseSubscriptionUpdateInput — status and knobEnv", () => {
