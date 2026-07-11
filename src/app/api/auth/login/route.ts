@@ -3,6 +3,7 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_MAX_AGE,
   createSessionToken,
+  isSessionAuthConfigured,
   verifyPassword,
 } from "@/lib/auth";
 import { createRateLimiter, getClientIp } from "@/lib/rate-limit";
@@ -14,7 +15,7 @@ export const dynamic = "force-dynamic";
 const loginRateLimiter = createRateLimiter(60_000, 5);
 
 export async function POST(request: NextRequest) {
-  if (!process.env.DASHBOARD_PASSWORD?.trim()) {
+  if (!process.env.DASHBOARD_PASSWORD?.trim() || !isSessionAuthConfigured()) {
     return NextResponse.json(
       { error: "Dashboard auth is not configured" },
       { status: 503 }

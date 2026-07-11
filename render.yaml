@@ -81,6 +81,10 @@ services:
       # rights, add a distinct USAGE_READ_TOKEN in the Render dashboard.
       - key: DASHBOARD_PASSWORD
         generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SESSION_VERSION
+        value: "1"
       # Optional: enables the read-only Sentry Health dashboard card
       # (GET /api/sentry-health). `sync: false` means Render won't generate
       # or sync a value - set these manually in the dashboard's Environment

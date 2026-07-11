@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { config } from "@/middleware";
+import { buildContentSecurityPolicy, config } from "@/middleware";
 
 // The session-cookie middleware only runs on paths its `config.matcher`
 // selects. Next.js compiles that matcher (a single negative-lookahead string)
@@ -79,5 +79,19 @@ describe("middleware matcher — /api/subscriptions collection-only exclusion (s
   it("still session-gates prefix-collision paths (anchoring holds)", () => {
     expect(isSessionGated("/api/subscriptions-foo")).toBe(true);
     expect(isSessionGated("/api/subscriptionsfoo")).toBe(true);
+  });
+});
+
+describe("middleware CSP", () => {
+  it("uses a per-request nonce instead of production script unsafe-inline", () => {
+    const policy = buildContentSecurityPolicy("test-nonce", true);
+    expect(policy).toContain("script-src 'self' 'nonce-test-nonce' 'strict-dynamic'");
+    expect(policy).not.toContain("script-src 'self' 'unsafe-inline'");
+    expect(policy).not.toContain("'unsafe-eval'");
+    expect(policy).toContain("style-src 'self' 'nonce-test-nonce'");
+  });
+
+  it("keeps unsafe-eval limited to local development", () => {
+    expect(buildContentSecurityPolicy("test-nonce", false)).toContain("'unsafe-eval'");
   });
 });

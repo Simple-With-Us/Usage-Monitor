@@ -1,5 +1,43 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
+
+export function buildContentSecurityPolicy(
+  nonce: string,
+  production = process.env.NODE_ENV === "production"
+): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${
+      production ? "" : " 'unsafe-eval'"
+    }`,
+    `style-src 'self' 'nonce-${nonce}'`,
+    // Recharts and a small number of dynamic progress indicators still use
+    // style attributes. Scope this exception to attributes; inline <style>
+    // elements require the per-request nonce above.
+    "style-src-attr 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    ...(production ? ["upgrade-insecure-requests"] : []),
+  ].join("; ");
+}
+
+function nextWithNonce(request: NextRequest): NextResponse {
+  const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set(
+    "Content-Security-Policy",
+    buildContentSecurityPolicy(nonce)
+  );
+  return response;
+}
 
 export const config = {
   runtime: "nodejs",
@@ -28,14 +66,20 @@ export const config = {
     // [id]` PUT/DELETE routes are NOT matched by this exclusion (they don't
     // end the string right after the collection segment) and so stay fully
     // session-gated by this middleware, as they always were.
-    "/((?!_next/static|_next/image|favicon\\.ico|login(?:/|$)|api/auth/login(?:/|$)|api/cron(?:/|$)|api/ingest(?:/|$)|api/otlp(?:/|$)|api/budget-status(?:/|$)|api/subscriptions/?$|api/health(?:/|$)|api/ready(?:/|$)).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|api/auth/login(?:/|$)|api/cron(?:/|$)|api/ingest(?:/|$)|api/otlp(?:/|$)|api/budget-status(?:/|$)|api/subscriptions/?$|api/health(?:/|$)|api/ready(?:/|$)).*)",
   ],
 };
 
 export function middleware(request: NextRequest) {
+  if (
+    request.nextUrl.pathname === "/login" ||
+    request.nextUrl.pathname.startsWith("/login/")
+  ) {
+    return nextWithNonce(request);
+  }
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   if (verifySessionToken(token)) {
-    return NextResponse.next();
+    return nextWithNonce(request);
   }
   if (request.nextUrl.pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

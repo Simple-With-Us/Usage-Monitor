@@ -33,6 +33,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = `file:${dbPath}`;
   process.env.USAGE_READ_TOKEN = READ_TOKEN;
   process.env.DASHBOARD_PASSWORD = SESSION_PASSWORD;
+  process.env.SESSION_SECRET = "subscription-route-session-secret-0123456789";
   delete process.env.USAGE_INGEST_TOKEN;
 
   setupPrismaSqliteTestDb(dbPath);

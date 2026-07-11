@@ -77,6 +77,9 @@ not copied from the obsolete gray-cloud setup.
 - `USAGE_READ_TOKEN` (optional distinct read-only token for `/api/budget-status`;
   falls back to `USAGE_INGEST_TOKEN`)
 - `DASHBOARD_PASSWORD` (auto-generated; after the first deploy, copy this value from Render's Environment tab to log in at `/login`)
+- `SESSION_SECRET` (auto-generated independently from the dashboard password; signs randomized, versioned session cookies and must be at least 32 characters)
+- `SESSION_VERSION` (defaults to `1`; increment to invalidate all existing dashboard cookies after a security event)
+- `SESSION_SECRET_PREVIOUS` (optional manual rotation bridge; temporarily accepts cookies signed by the previous secret)
 - `SENTRY_READ_TOKEN` (optional; enables the read-only Sentry Health dashboard card, an org-auth
   token or internal integration token with `project:read`/`event:read` scope — never sent to the
   client, absent by default)
