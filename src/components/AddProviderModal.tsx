@@ -8,6 +8,12 @@ import {
   PROVIDER_CATEGORIES,
   type ProviderDefinition,
 } from "@/lib/provider-definitions";
+import {
+  buildProviderCredentialUpdate,
+  credentialPathKey,
+  type CredentialAction,
+  type SecretCredentialOperation,
+} from "@/lib/provider-credential-update";
 
 type BillingMode = "actual" | "estimated" | "manual";
 
@@ -29,13 +35,23 @@ interface Provider {
   name: string;
   displayName: string;
   type: string;
+  isActive?: boolean;
   config?: Record<string, unknown>;
   apiKey?: string;
+  apiKeyAction?: CredentialAction;
+  apiKeyConfigured?: boolean;
+  apiKeyReadable?: boolean;
+  secretConfigOperations?: SecretCredentialOperation[];
   label?: string | null;
   keyPreview?: string | null;
   plan?: ProviderPlan | null;
   allocations?: { projectId: string; percentage: number }[];
-  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
+  secretConfigMeta?: {
+    configured: boolean;
+    fields: string[];
+    paths?: string[][];
+    readable: boolean;
+  };
 }
 
 interface AddProviderModalProps {
@@ -97,6 +113,16 @@ export default function AddProviderModal({
   const [selectedBuiltin, setSelectedBuiltin] = useState(editProvider?.name || "");
   const [builtinDisplayName, setBuiltinDisplayName] = useState(editProvider?.displayName || "");
   const [apiKey, setApiKey] = useState(editProvider?.apiKey || "");
+  const [apiKeyAction, setApiKeyAction] = useState<CredentialAction>(
+    editProvider ? "preserve" : "replace"
+  );
+  const [secretConfigActions, setSecretConfigActions] = useState<
+    Record<string, CredentialAction>
+  >({});
+  const [secretConfigValues, setSecretConfigValues] = useState<
+    Record<string, string>
+  >({});
+  const [confirmCredentialClear, setConfirmCredentialClear] = useState(false);
   const [label, setLabel] = useState(editProvider?.label || "");
   const [statusKeyRef, setStatusKeyRef] = useState(
     String(editProvider?.config?.statusKeyRef ?? "")
@@ -186,6 +212,17 @@ export default function AddProviderModal({
     setSelectedBuiltin(editProvider?.name || "");
     setBuiltinDisplayName(editProvider?.displayName || "");
     setApiKey("");
+    setApiKeyAction(editProvider ? "preserve" : "replace");
+    setSecretConfigActions(
+      Object.fromEntries(
+        (editProvider?.secretConfigMeta?.paths ?? []).map((path) => [
+          credentialPathKey(path),
+          "preserve" as CredentialAction,
+        ])
+      )
+    );
+    setSecretConfigValues({});
+    setConfirmCredentialClear(false);
     setLabel(editProvider?.label || "");
     setStatusKeyRef(stringConfig.statusKeyRef || "");
     setOriginalConfig(config);
@@ -214,6 +251,12 @@ export default function AddProviderModal({
   }, [editProvider, open]);
 
   if (!open) return null;
+
+  const requiresCredentialClearConfirmation = Boolean(
+    editProvider?.isActive &&
+      (apiKeyAction === "clear" ||
+        Object.values(secretConfigActions).some((action) => action === "clear"))
+  );
 
   const parseNumberField = (value: string, labelText: string, integer = false) => {
     const trimmed = value.trim();
@@ -269,6 +312,19 @@ export default function AddProviderModal({
         throw new Error("Project allocations cannot exceed 100%");
       }
       const allocationPayload = editProvider != null || allocations.length > 0 ? allocations : undefined;
+      if (requiresCredentialClearConfirmation && !confirmCredentialClear) {
+        throw new Error(
+          "Confirm that clearing an active provider credential may stop polling"
+        );
+      }
+      const credentialUpdate = buildProviderCredentialUpdate({
+        editing: Boolean(editProvider),
+        apiKeyAction,
+        apiKey,
+        secretPaths: editProvider?.secretConfigMeta?.paths ?? [],
+        secretActions: secretConfigActions,
+        secretValues: secretConfigValues,
+      });
 
       if (tab === "builtin") {
         if (!selectedDef) {
@@ -294,12 +350,16 @@ export default function AddProviderModal({
         }
 
         if (!builtinDisplayName.trim()) throw new Error("Display name is required");
+        const builtinCredentialUpdate =
+          selectedDef.usesApiKey === false && !editProvider
+            ? {}
+            : credentialUpdate;
         await onSave({
           id: editProvider?.id,
           name: selectedDef.name,
           displayName: builtinDisplayName.trim(),
           type: "builtin",
-          apiKey: selectedDef.usesApiKey === false ? undefined : apiKey || undefined,
+          ...builtinCredentialUpdate,
           config: Object.keys(config).length > 0 ? config : undefined,
           label: label.trim() || null,
           plan,
@@ -332,7 +392,7 @@ export default function AddProviderModal({
           name: editProvider?.name ?? customName.trim().toLowerCase().replace(/\s+/g, "-"),
           displayName: customDisplayName.trim(),
           type: "custom",
-          apiKey: apiKey || undefined,
+          ...credentialUpdate,
           config,
           label: label.trim() || null,
           plan,
@@ -350,6 +410,7 @@ export default function AddProviderModal({
           name: editProvider?.name ?? customName.trim().toLowerCase().replace(/\s+/g, "-"),
           displayName: customDisplayName.trim(),
           type: "generic",
+          ...(editProvider ? credentialUpdate : {}),
           config: statusKeyRef.trim()
             ? { statusKeyRef: statusKeyRef.trim() }
             : undefined,
@@ -364,6 +425,167 @@ export default function AddProviderModal({
     } finally {
       setSaving(false);
     }
+  };
+
+  const renderPrimaryCredential = (inputId: string, allowCreate: boolean) => {
+    const configured =
+      editProvider?.apiKeyConfigured ?? Boolean(editProvider?.keyPreview);
+    if (!editProvider && !allowCreate) return null;
+    if (editProvider && !allowCreate && !configured) return null;
+
+    if (!editProvider) {
+      return (
+        <div>
+          <label htmlFor={inputId} className="block text-sm font-medium text-gray-700 mb-1">
+            API Key
+          </label>
+          <input
+            id={inputId}
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder="Your API key"
+            autoComplete="new-password"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+      );
+    }
+
+    return (
+      <fieldset className="rounded-lg border border-gray-200 p-3 space-y-3">
+        <legend className="px-1 text-sm font-medium text-gray-700">
+          Primary API credential
+        </legend>
+        <p className="text-xs text-gray-500">
+          {configured
+            ? `Configured${editProvider.keyPreview ? ` (${editProvider.keyPreview})` : ""}. Existing values are never loaded into this form.`
+            : "Not configured."}
+        </p>
+        {editProvider.apiKeyReadable === false && (
+          <p role="alert" className="text-xs text-amber-700">
+            The stored key cannot be decrypted. Replace or clear it before polling.
+          </p>
+        )}
+        <label htmlFor={`${inputId}-action`} className="block text-xs font-medium text-gray-600">
+          Credential action
+        </label>
+        <select
+          id={`${inputId}-action`}
+          aria-label="Primary API credential action"
+          value={apiKeyAction}
+          onChange={(event) => {
+            const action = event.target.value as CredentialAction;
+            setApiKeyAction(action);
+            if (action !== "replace") setApiKey("");
+          }}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+        >
+          <option value="preserve">Keep current</option>
+          <option value="replace">Replace</option>
+          <option value="clear">Clear</option>
+        </select>
+        {apiKeyAction === "replace" && (
+          <div>
+            <label htmlFor={inputId} className="block text-xs font-medium text-gray-600 mb-1">
+              Replacement API key
+            </label>
+            <input
+              id={inputId}
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder="Enter replacement key"
+              autoComplete="new-password"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+        )}
+      </fieldset>
+    );
+  };
+
+  const renderProtectedCredentialControls = () => {
+    if (!editProvider?.secretConfigMeta?.configured) return null;
+    const paths = editProvider.secretConfigMeta.paths ?? [];
+    if (paths.length === 0) {
+      return (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Protected configuration exists but its field paths are unavailable. Verify the encryption key before editing it.
+        </div>
+      );
+    }
+
+    return (
+      <fieldset className="rounded-lg border border-gray-200 p-3 space-y-3">
+        <legend className="px-1 text-sm font-medium text-gray-700">
+          Protected configuration
+        </legend>
+        <p className="text-xs text-gray-500">
+          Stored values are write-only. Choose an explicit action for each field.
+        </p>
+        {editProvider.secretConfigMeta.readable === false && (
+          <p role="alert" className="text-xs text-amber-700">
+            The encrypted payload is unreadable; replace or clear affected fields before polling.
+          </p>
+        )}
+        {paths.map((path, index) => {
+          const key = credentialPathKey(path);
+          const action = secretConfigActions[key] ?? "preserve";
+          const labelText = path.join(".");
+          return (
+            <div key={key} className="rounded-md bg-gray-50 p-3 space-y-2">
+              <code className="block break-all text-xs text-gray-700">{labelText}</code>
+              <label htmlFor={`provider-secret-action-${index}`} className="sr-only">
+                Action for {labelText}
+              </label>
+              <select
+                id={`provider-secret-action-${index}`}
+                aria-label={`Action for ${labelText}`}
+                value={action}
+                onChange={(event) => {
+                  const nextAction = event.target.value as CredentialAction;
+                  setSecretConfigActions((current) => ({
+                    ...current,
+                    [key]: nextAction,
+                  }));
+                  if (nextAction !== "replace") {
+                    setSecretConfigValues((current) => ({ ...current, [key]: "" }));
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="preserve">Keep current</option>
+                <option value="replace">Replace</option>
+                <option value="clear">Clear</option>
+              </select>
+              {action === "replace" && (
+                <>
+                  <label htmlFor={`provider-secret-value-${index}`} className="sr-only">
+                    Replacement value for {labelText}
+                  </label>
+                  <input
+                    id={`provider-secret-value-${index}`}
+                    aria-label={`Replacement value for ${labelText}`}
+                    type="password"
+                    value={secretConfigValues[key] ?? ""}
+                    onChange={(event) =>
+                      setSecretConfigValues((current) => ({
+                        ...current,
+                        [key]: event.target.value,
+                      }))
+                    }
+                    placeholder="Enter replacement value"
+                    autoComplete="new-password"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </>
+              )}
+            </div>
+          );
+        })}
+      </fieldset>
+    );
   };
 
   const renderBillingFields = () => (
@@ -546,14 +768,25 @@ export default function AddProviderModal({
       fields.push(...selectedDef.needsConfig.fields);
     }
 
+    const configuredSecretPaths = editProvider?.secretConfigMeta?.paths ?? [];
+    const visibleFields = fields.filter(
+      (field) =>
+        !(
+          field.type === "password" &&
+          configuredSecretPaths.some(
+            (path) => path.length === 1 && path[0] === field.key
+          )
+        )
+    );
+
     const hasHelp = !!selectedDef.helpNote;
 
-    return fields.length > 0 || hasHelp ? (
+    return visibleFields.length > 0 || hasHelp ? (
       <div className="space-y-3">
-        {fields.length > 0 && (
+        {visibleFields.length > 0 && (
           <>
             <p className="text-xs font-medium text-gray-500">Extra Configuration</p>
-            {fields.map((f) => (
+            {visibleFields.map((f) => (
               <div key={f.key}>
                 <label htmlFor={`provider-extra-${f.key}`} className="block text-sm font-medium text-gray-700 mb-1">
                   {f.label}
@@ -562,6 +795,7 @@ export default function AddProviderModal({
                   id={`provider-extra-${f.key}`}
                   aria-label={f.label}
                   type={f.type || "text"}
+                  autoComplete={f.type === "password" ? "new-password" : undefined}
                   required={f.required}
                   value={extraFields[f.key] || ""}
                   onChange={(e) =>
@@ -750,7 +984,7 @@ export default function AddProviderModal({
           {editProvider?.secretConfigMeta?.configured && (
             <div className="-mt-2 mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
               Protected configuration is stored for {editProvider.secretConfigMeta.fields.join(", ") || "this provider"}.
-              Leave hidden values blank to keep them unchanged.
+              Use the write-only controls below to keep, replace, or clear each field.
             </div>
           )}
 
@@ -846,28 +1080,9 @@ export default function AddProviderModal({
                 </div>
               )}
 
-              {selectedDef?.usesApiKey !== false && (
-              <div>
-                <label htmlFor="provider-builtin-api-key" className="block text-sm font-medium text-gray-700 mb-1">
-                  API Key
-                </label>
-                <input
-                  id="provider-builtin-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {editProvider && !apiKey && editProvider.keyPreview && (
-                  <p className="text-xs text-gray-500 mt-1">
-                    Current key:{" "}
-                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px]">
-                      {editProvider.keyPreview}
-                    </code>
-                  </p>
-                )}
-              </div>
+              {renderPrimaryCredential(
+                "provider-builtin-api-key",
+                selectedDef?.usesApiKey !== false
               )}
 
               <div>
@@ -887,6 +1102,7 @@ export default function AddProviderModal({
 
               {renderStatusKeyRef()}
               {renderExtraFields()}
+              {renderProtectedCredentialControls()}
 
               {renderAllocations()}
               {renderBillingFields()}
@@ -925,27 +1141,7 @@ export default function AddProviderModal({
                 </div>
               </div>
 
-              <div>
-                <label htmlFor="provider-custom-api-key" className="block text-sm font-medium text-gray-700 mb-1">
-                  API Key
-                </label>
-                <input
-                  id="provider-custom-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {editProvider && !apiKey && editProvider.keyPreview && (
-                  <p className="text-xs text-gray-500 mt-1">
-                    Current key:{" "}
-                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px]">
-                      {editProvider.keyPreview}
-                    </code>
-                  </p>
-                )}
-              </div>
+              {renderPrimaryCredential("provider-custom-api-key", true)}
 
               <div>
                 <label htmlFor="provider-custom-label" className="block text-xs font-medium text-gray-500 mb-1">
@@ -963,6 +1159,7 @@ export default function AddProviderModal({
               </div>
 
               {renderStatusKeyRef()}
+              {renderProtectedCredentialControls()}
               <div>
                 <label htmlFor="provider-custom-endpoint" className="block text-sm font-medium text-gray-700 mb-1">
                   Endpoint URL
@@ -1121,9 +1318,25 @@ export default function AddProviderModal({
               </div>
 
               {renderStatusKeyRef()}
+              {renderPrimaryCredential("provider-generic-api-key", false)}
+              {renderProtectedCredentialControls()}
               {renderAllocations()}
               {renderBillingFields()}
             </div>
+          )}
+
+          {requiresCredentialClearConfirmation && (
+            <label className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <input
+                type="checkbox"
+                checked={confirmCredentialClear}
+                onChange={(event) => setConfirmCredentialClear(event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-amber-300 text-amber-700 focus:ring-amber-500"
+              />
+              <span>
+                I understand that clearing this active provider credential may stop polling until a replacement is configured.
+              </span>
+            </label>
           )}
 
           {error && (

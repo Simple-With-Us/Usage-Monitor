@@ -10,6 +10,10 @@ import SubscriptionsPanel, { type SubscriptionRow } from "@/components/Subscript
 import ProviderTable from "@/components/ProviderTable";
 import ProjectTable from "@/components/ProjectTable";
 import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import type {
+  CredentialAction,
+  SecretCredentialOperation,
+} from "@/lib/provider-credential-update";
 
 export type BillingMode = "actual" | "estimated" | "manual";
 type SettingsTab = "providers" | "projects" | "subscriptions";
@@ -48,7 +52,12 @@ export interface Provider {
   plan: ProviderPlan | null;
   allocations: { projectId: string; percentage: number }[];
   externalBilling?: ExternalBillingRecord[];
-  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
+  secretConfigMeta?: {
+    configured: boolean;
+    fields: string[];
+    paths?: string[][];
+    readable: boolean;
+  };
   alerts: ProviderAlert[];
   estimatedMonthlyCostUsd: number;
   spentUsd?: number;
@@ -153,6 +162,8 @@ function SettingsPageContent() {
     displayName: string;
     type: string;
     apiKey?: string;
+    apiKeyAction?: CredentialAction;
+    secretConfigOperations?: SecretCredentialOperation[];
     config?: Record<string, unknown>;
     label?: string | null;
     plan?: ProviderPlan | null;
@@ -165,6 +176,8 @@ function SettingsPageContent() {
         body: JSON.stringify({
           displayName: provider.displayName,
           apiKey: provider.apiKey,
+          apiKeyAction: provider.apiKeyAction,
+          secretConfigOperations: provider.secretConfigOperations,
           config: provider.config,
           label: provider.label,
           plan: provider.plan,

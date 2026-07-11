@@ -49,12 +49,12 @@ New config is limited to six levels, 200 entries, 128-character keys, and 4096-c
 Arrays, non-finite numbers, control-character keys, and `__proto__`/`constructor`/`prototype` keys are
 rejected.
 
-## Coordinated UI hook
+## Dashboard controls
 
-The provider-transparency lane already owns `AddProviderModal`, so this backend lane deliberately did
-not edit it. After that lane lands, the modal should:
+The Settings provider editor implements this contract end to end:
 
-1. send `apiKeyAction=preserve|replace|clear` from an explicit control;
-2. render clear controls from `secretConfigMeta.paths` and send only selected clear operations;
-3. never request, prefill, or display an existing secret value;
-4. require confirmation before clearing credentials used by an active provider.
+1. the primary credential has explicit keep, replace, and clear actions;
+2. every `secretConfigMeta.paths` entry has a write-only keep, replace, or clear control;
+3. existing values are never requested, prefilled, or displayed;
+4. clearing any credential on an active provider requires an explicit impact confirmation;
+5. unreadable encrypted values are surfaced as a replace-or-clear error state.
