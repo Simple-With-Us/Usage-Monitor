@@ -212,9 +212,12 @@ export default function ProviderIntegrationDrawer({
             <Section title="Current configured state">
               <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
                 <div className="rounded-lg bg-gray-50 p-3">
-                  <dt className="text-xs font-medium text-gray-500">Polling</dt>
+                  <dt className="text-xs font-medium text-gray-500">Account row</dt>
                   <dd className="mt-1 font-medium text-gray-900">
                     {instanceState.isActive ? "Active" : "Inactive"}
+                    {(profile.mode === "push-only" || profile.mode === "manual")
+                      ? " · no polling endpoint"
+                      : " · polling eligible"}
                   </dd>
                 </div>
                 <div className="rounded-lg bg-gray-50 p-3">

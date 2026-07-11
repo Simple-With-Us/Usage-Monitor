@@ -126,6 +126,21 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("skips push/manual built-ins without invoking their unsupported adapter", async () => {
+    findMany.mockResolvedValue([{ ...providerRow("fmp"), type: "builtin" }]);
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({ successes: 0, failures: 0, skipped: 1 });
+    expect(result.outcomes[0]).toMatchObject({
+      name: "fmp",
+      status: "skipped",
+      skipReason: "manual_provider",
+    });
+    expect(fetchProviderUsage).not.toHaveBeenCalled();
+  });
+
   it("rolls back a late result after a newer attempt supersedes it", async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
     let resolveSecond: ((value: unknown) => void) | undefined;

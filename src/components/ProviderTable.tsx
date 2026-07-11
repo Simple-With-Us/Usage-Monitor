@@ -2,6 +2,7 @@ import { useState } from "react";
 import { type Provider } from "@/app/settings/page";
 import { isExternalBillingStale } from "@/components/ExternalBillingDetails";
 import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
+import { isManualProvider } from "@/lib/provider-polling";
 
 interface ProviderTableProps {
   providers: Provider[];
@@ -49,6 +50,35 @@ export default function ProviderTable({
     }
     return <span className="ml-1 text-gray-500">{sortDirection === "asc" ? "↑" : "↓"}</span>;
   };
+
+  const sortableHeader = (
+    field: SortField,
+    label: string,
+    className = "",
+    align: "left" | "right" = "left"
+  ) => (
+    <th
+      scope="col"
+      aria-sort={
+        sortField === field
+          ? sortDirection === "asc"
+            ? "ascending"
+            : "descending"
+          : "none"
+      }
+      className={`px-6 py-3 font-medium text-gray-500 ${className}`}
+    >
+      <button
+        type="button"
+        onClick={() => handleSort(field)}
+        className={`group flex w-full items-center rounded-sm hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+          align === "right" ? "justify-end text-right" : "justify-start text-left"
+        }`}
+      >
+        {label} {renderSortIcon(field)}
+      </button>
+    </th>
+  );
 
   const formatDateObject = (dateStr: string | null) => {
     if (!dateStr) return null;
@@ -140,60 +170,18 @@ export default function ProviderTable({
         <caption className="sr-only">Configured API providers</caption>
         <thead>
           <tr className="border-b border-gray-100 bg-gray-50">
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("name")}
-            >
-              Name {renderSortIcon("name")}
-            </th>
-            <th className="text-left px-6 py-3 font-medium text-gray-500 hidden md:table-cell">
+            {sortableHeader("name", "Name")}
+            <th scope="col" className="text-left px-6 py-3 font-medium text-gray-500 hidden md:table-cell">
               Label
             </th>
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 hidden sm:table-cell cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("type")}
-            >
-              Type {renderSortIcon("type")}
-            </th>
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 hidden sm:table-cell cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("status")}
-            >
-              Status {renderSortIcon("status")}
-            </th>
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("spend")}
-            >
-              Spend / Budget {renderSortIcon("spend")}
-            </th>
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 hidden lg:table-cell cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("renewal")}
-            >
-              Renewal {renderSortIcon("renewal")}
-            </th>
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("alerts")}
-            >
-              Alerts {renderSortIcon("alerts")}
-            </th>
-            {hasAnyCredits && (
-              <th 
-                className="text-right px-6 py-3 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 group select-none"
-                onClick={() => handleSort("credits")}
-              >
-                Credits {renderSortIcon("credits")}
-              </th>
-            )}
-            <th 
-              className="text-left px-6 py-3 font-medium text-gray-500 hidden xl:table-cell cursor-pointer hover:bg-gray-100 group select-none"
-              onClick={() => handleSort("lastFetched")}
-            >
-              Last Fetched {renderSortIcon("lastFetched")}
-            </th>
-            <th className="text-right px-6 py-3 font-medium text-gray-500">
+            {sortableHeader("type", "Type", "hidden sm:table-cell")}
+            {sortableHeader("status", "Status", "hidden sm:table-cell")}
+            {sortableHeader("spend", "Spend / Budget")}
+            {sortableHeader("renewal", "Renewal", "hidden lg:table-cell")}
+            {sortableHeader("alerts", "Alerts")}
+            {hasAnyCredits && sortableHeader("credits", "Credits", "", "right")}
+            {sortableHeader("lastFetched", "Last Fetched", "hidden xl:table-cell")}
+            <th scope="col" className="text-right px-6 py-3 font-medium text-gray-500">
               Actions
             </th>
           </tr>
@@ -345,15 +333,24 @@ export default function ProviderTable({
                 </td>
                 <td data-label="Actions" className="px-6 py-4">
                   <div className="table-actions flex flex-wrap items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      aria-label={`Fetch ${provider.displayName} now`}
-                      onClick={() => onFetchNow(provider.id)}
-                      disabled={actionLoading === provider.id}
-                      className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
-                    >
-                      {actionLoading === provider.id ? "..." : "Fetch Now"}
-                    </button>
+                    {isManualProvider(provider) ? (
+                      <span
+                        className="rounded-md bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-500"
+                        title="This provider uses pushed telemetry or manual plan data and has no polling endpoint."
+                      >
+                        Push / manual
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-label={`Fetch ${provider.displayName} now`}
+                        onClick={() => onFetchNow(provider.id)}
+                        disabled={actionLoading === provider.id}
+                        className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
+                      >
+                        {actionLoading === provider.id ? "..." : "Fetch Now"}
+                      </button>
+                    )}
                     <button
                       type="button"
                       aria-label={`Edit ${provider.displayName}`}

@@ -98,6 +98,9 @@ export default function AddProviderModal({
   const [builtinDisplayName, setBuiltinDisplayName] = useState(editProvider?.displayName || "");
   const [apiKey, setApiKey] = useState(editProvider?.apiKey || "");
   const [label, setLabel] = useState(editProvider?.label || "");
+  const [statusKeyRef, setStatusKeyRef] = useState(
+    String(editProvider?.config?.statusKeyRef ?? "")
+  );
   const [originalConfig, setOriginalConfig] = useState<Record<string, unknown>>(editProvider?.config || {});
   const [extraFields, setExtraFields] = useState<Record<string, string>>(
     stringFieldsFromConfig(editProvider?.config)
@@ -184,6 +187,7 @@ export default function AddProviderModal({
     setBuiltinDisplayName(editProvider?.displayName || "");
     setApiKey("");
     setLabel(editProvider?.label || "");
+    setStatusKeyRef(stringConfig.statusKeyRef || "");
     setOriginalConfig(config);
     setExtraFields(stringConfig);
     setCustomName(nextTab !== "builtin" ? editProvider?.name || "" : "");
@@ -278,6 +282,8 @@ export default function AddProviderModal({
           if (value.trim()) config[key] = value.trim();
           else delete config[key];
         }
+        if (statusKeyRef.trim()) config.statusKeyRef = statusKeyRef.trim();
+        else delete config.statusKeyRef;
         if (selectedDef.needsAccountId && !String(config.accountId ?? "").trim()) {
           throw new Error(`${selectedDef.name === "twilio" ? "Account SID" : "Account ID"} is required`);
         }
@@ -317,6 +323,9 @@ export default function AddProviderModal({
         if (trackCredits) {
           config.creditsPath = customCreditsPath;
         }
+        if (statusKeyRef.trim()) {
+          config.statusKeyRef = statusKeyRef.trim();
+        }
 
         await onSave({
           id: editProvider?.id,
@@ -341,6 +350,9 @@ export default function AddProviderModal({
           name: editProvider?.name ?? customName.trim().toLowerCase().replace(/\s+/g, "-"),
           displayName: customDisplayName.trim(),
           type: "generic",
+          config: statusKeyRef.trim()
+            ? { statusKeyRef: statusKeyRef.trim() }
+            : undefined,
           label: label.trim() || null,
           plan,
           allocations: allocationPayload,
@@ -661,6 +673,28 @@ export default function AddProviderModal({
     );
   };
 
+  const renderStatusKeyRef = () => (
+    <div>
+      <label
+        htmlFor={`provider-${tab}-status-key-ref`}
+        className="block text-xs font-medium text-gray-500 mb-1"
+      >
+        Status telemetry account ref (optional)
+      </label>
+      <input
+        id={`provider-${tab}-status-key-ref`}
+        type="text"
+        value={statusKeyRef}
+        onChange={(event) => setStatusKeyRef(event.target.value)}
+        placeholder="Must match the producer event keyRef"
+        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+      />
+      <p className="text-xs text-gray-400 mt-0.5">
+        Routes quota or credit-balance status safely when multiple rows use the same provider name.
+      </p>
+    </div>
+  );
+
   return (
     <ModalDialog
       title={editProvider ? "Edit Provider" : "Add Provider"}
@@ -851,6 +885,7 @@ export default function AddProviderModal({
                 <p className="text-xs text-gray-400 mt-0.5">Tag this key to distinguish it from others with the same provider name</p>
               </div>
 
+              {renderStatusKeyRef()}
               {renderExtraFields()}
 
               {renderAllocations()}
@@ -927,6 +962,7 @@ export default function AddProviderModal({
                 <p className="text-xs text-gray-400 mt-0.5">Tag this key to distinguish it from others</p>
               </div>
 
+              {renderStatusKeyRef()}
               <div>
                 <label htmlFor="provider-custom-endpoint" className="block text-sm font-medium text-gray-700 mb-1">
                   Endpoint URL
@@ -1084,6 +1120,7 @@ export default function AddProviderModal({
                 />
               </div>
 
+              {renderStatusKeyRef()}
               {renderAllocations()}
               {renderBillingFields()}
             </div>

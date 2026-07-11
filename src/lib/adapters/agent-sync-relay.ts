@@ -23,6 +23,12 @@ export async function fetchUsage(
     totalCost: 0,
     totalRequests: null,
     credits: null,
-    rawData: { status: "UP", data: res.data },
+    rawData: {
+      status: "UP",
+      reachable: true,
+      // Health payloads can grow to include operational internals. The
+      // adapter only needs reachability, so never retain the arbitrary body.
+      responseBodyRetained: false,
+    },
   };
 }

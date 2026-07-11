@@ -41,4 +41,28 @@ describe("POST /api/providers/:id/fetch", () => {
     });
     expect(recordProviderUsage).not.toHaveBeenCalled();
   });
+
+  it("returns a successful no-op for push/manual built-ins", async () => {
+    findUnique.mockResolvedValue({
+      id: "fmp-1",
+      name: "fmp",
+      type: "builtin",
+    });
+    const { POST } = await import("../route");
+
+    const response = await POST(
+      new NextRequest("https://usage.jays.services/api/providers/fmp-1/fetch", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "fmp-1" }) }
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      skipped: true,
+      reason: "manual_provider",
+    });
+    expect(recordProviderUsage).not.toHaveBeenCalled();
+  });
 });

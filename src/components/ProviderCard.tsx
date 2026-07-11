@@ -60,10 +60,6 @@ const typeColors: Record<string, string> = {
   render: "bg-indigo-500",
 };
 
-const creditBasedProviders = new Set([
-  "llamaindex", "voyage", "langfuse", "apify",
-]);
-
 export default function ProviderCard({
   id,
   displayName,
@@ -86,7 +82,6 @@ export default function ProviderCard({
   const dotColor =
     typeColors[name.toLowerCase()] ?? "bg-purple-500";
 
-  const isCreditBased = creditBasedProviders.has(name.toLowerCase());
   const hasCredits = latestSnapshot?.credits != null;
   const openAlerts = alerts.filter((alert) => alert.severity !== "info");
   const hasCritical = openAlerts.some((alert) => alert.severity === "critical");
@@ -177,7 +172,7 @@ export default function ProviderCard({
             )}
           </p>
         </div>
-        {(isCreditBased || hasCredits) && (
+        {hasCredits && (
           <div>
             <p className="text-xs text-gray-500 mb-1">Credits</p>
             <p className="text-sm font-medium text-purple-600">
@@ -191,7 +186,7 @@ export default function ProviderCard({
             {formatNumber(latestSnapshot?.totalRequests ?? null)}
           </p>
         </div>
-        <div className={(isCreditBased || hasCredits) ? "col-span-2" : ""}>
+        <div className={hasCredits ? "col-span-2" : ""}>
           <p className="text-xs text-gray-500 mb-1">Tracked MTD / projected EOM</p>
           <p className="text-sm font-medium text-gray-900">
             {formatUsd(spentUsd ?? estimatedMonthlyCostUsd)} <span className="text-gray-400 font-normal">/ {formatUsd(projectedEomUsd)}</span>

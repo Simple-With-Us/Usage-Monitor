@@ -163,7 +163,7 @@ export async function fetchUsage(
       reportingWindow: { startingAt, endingAt },
       capabilities: {
         actualCost: true,
-        usageReport: true,
+        usageReport: false,
         subscriptionStatus: false,
         credential: "Anthropic organization Admin API key",
       },
