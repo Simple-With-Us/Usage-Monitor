@@ -181,6 +181,17 @@ CREATE TABLE "ExternalUsageEventTombstone" (
   "prunedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE "OtlpMetricState" (
+  "seriesKey" TEXT NOT NULL PRIMARY KEY,
+  "metricName" TEXT NOT NULL,
+  "startTimeUnixNano" TEXT,
+  "lastTimeUnixNano" TEXT NOT NULL,
+  "lastValue" REAL NOT NULL,
+  "lastPointKey" TEXT NOT NULL,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL
+);
+
 CREATE TABLE "ProviderAlertNotification" (
   "id" TEXT NOT NULL PRIMARY KEY,
   "providerId" TEXT NOT NULL,
@@ -220,6 +231,7 @@ CREATE INDEX "Subscription_projectId_idx" ON "Subscription"("projectId");
 CREATE INDEX "Subscription_status_nextRenewalAt_idx" ON "Subscription"("status", "nextRenewalAt");
 CREATE INDEX "ExternalUsageEventTombstone_occurredAt_idx" ON "ExternalUsageEventTombstone"("occurredAt");
 CREATE INDEX "ExternalUsageEventTombstone_prunedAt_idx" ON "ExternalUsageEventTombstone"("prunedAt");
+CREATE INDEX "OtlpMetricState_updatedAt_idx" ON "OtlpMetricState"("updatedAt");
 CREATE UNIQUE INDEX "ProviderAlertNotification_stateKey_key" ON "ProviderAlertNotification"("stateKey");
 CREATE INDEX "ProviderAlertNotification_providerId_resolvedAt_idx" ON "ProviderAlertNotification"("providerId", "resolvedAt");
 CREATE INDEX "ProviderAlertNotification_lastSentAt_idx" ON "ProviderAlertNotification"("lastSentAt");

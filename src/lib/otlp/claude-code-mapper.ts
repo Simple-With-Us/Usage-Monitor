@@ -7,6 +7,13 @@ import {
   type OtlpKeyValue,
   type OtlpNumberDataPoint,
 } from "./types";
+import {
+  cleanOtlpMetadata,
+  describeOtlpPoint,
+  normalizeTemporality,
+  type OtlpAggregationTemporality,
+  type OtlpPointDescriptor,
+} from "./mapping-utils";
 
 // ---------------------------------------------------------------------------
 // Claude Code -> ExternalUsageEvent metric mapping table
@@ -15,11 +22,11 @@ import {
 // Metrics and Logs Export"), current as of 2026-07-04. Claude Code's OTel
 // meter name is `com.anthropic.claude_code`; every metric below is a Sum
 // (monotonic counter). Attributes listed are the ones this mapper actually
-// reads — Claude Code emits several more (session.id, user.email,
+// reads. Claude Code emits several more (session.id, user.email,
 // organization.id, terminal.type, query_source, speed, effort, agent.name,
-// skill.name, plugin.name, mcp_server.name, mcp_tool.name, ...) which are
-// preserved verbatim into ExternalUsageEvent.metadata for observability but
-// don't drive provider/model/tokens/cost mapping.
+// skill.name, plugin.name, mcp_server.name, mcp_tool.name, ...). Those values
+// participate in one-way series/idempotency hashes but are not persisted;
+// metadata storage uses the explicit allowlist in mapping-utils.ts.
 //
 //   OTLP metric name                      | unit   | -> ExternalUsageEvent fields
 //   ---------------------------------------+--------+---------------------------------
@@ -100,6 +107,7 @@ export interface MappedUsageEvent {
   occurredAt: Date;
   metadata: Record<string, string | number | boolean>;
   idempotencyKey: string;
+  otlp: OtlpPointDescriptor;
 }
 
 export interface UnknownMetricSummary {
@@ -110,28 +118,6 @@ export interface UnknownMetricSummary {
 export interface MapMetricsResult {
   events: MappedUsageEvent[];
   unknownMetrics: UnknownMetricSummary[];
-}
-
-function cleanMetadata(
-  resourceAttrs: Record<string, string | number | boolean | undefined>,
-  pointAttrs: Record<string, string | number | boolean | undefined>,
-  extra: Record<string, string | number | boolean | undefined> = {}
-): Record<string, string | number | boolean> {
-  const merged: Record<string, string | number | boolean> = {};
-  // Only carry a curated allowlist forward — Claude Code attributes can
-  // include free-form values (model names, session ids, emails); we keep
-  // everything the mapper doesn't otherwise consume so operators can inspect
-  // it, but skip nested/array-shaped attributes (already dropped by
-  // flattenAttributes -> undefined).
-  for (const [key, value] of [
-    ...Object.entries(resourceAttrs),
-    ...Object.entries(pointAttrs),
-    ...Object.entries(extra),
-  ]) {
-    if (value === undefined) continue;
-    merged[key] = value;
-  }
-  return merged;
 }
 
 // Idempotency: hash the metric name + every attribute (resource + point,
@@ -177,7 +163,9 @@ function mapDataPoint(
   metricName: string,
   unit: string | undefined,
   resourceAttrs: Record<string, string | number | boolean | undefined>,
-  point: OtlpNumberDataPoint
+  point: OtlpNumberDataPoint,
+  temporality: OtlpAggregationTemporality = "unspecified",
+  isMonotonic = true
 ): MappedUsageEvent | undefined {
   const value = dataPointValue(point);
   if (value == null || !Number.isFinite(value)) return undefined;
@@ -203,6 +191,15 @@ function mapDataPoint(
     projectName,
     billingMode: "actual" as const,
     occurredAt,
+    otlp: describeOtlpPoint({
+      metricName,
+      resourceAttrs,
+      point,
+      value,
+      temporality,
+      isMonotonic,
+      occurredAt,
+    }),
   };
 
   switch (metricName) {
@@ -215,7 +212,7 @@ function mapDataPoint(
         unit: "token",
         keyRef: model,
         label: `token:${tokenType}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { tokenType }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { tokenType }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -226,7 +223,7 @@ function mapDataPoint(
         costUsd: value,
         keyRef: model,
         label: "cost",
-        metadata: cleanMetadata(resourceAttrs, pointAttrs),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -237,7 +234,7 @@ function mapDataPoint(
         unit: "request",
         requests: value,
         label: "session",
-        metadata: cleanMetadata(resourceAttrs, pointAttrs),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -249,7 +246,7 @@ function mapDataPoint(
         unit: "row",
         quantity: value,
         label: `lines_of_code:${locType}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { locType }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { locType }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -260,7 +257,7 @@ function mapDataPoint(
         unit: "job",
         quantity: value,
         label: "commit",
-        metadata: cleanMetadata(resourceAttrs, pointAttrs),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -271,7 +268,7 @@ function mapDataPoint(
         unit: "job",
         quantity: value,
         label: "pull_request",
-        metadata: cleanMetadata(resourceAttrs, pointAttrs),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -286,7 +283,7 @@ function mapDataPoint(
         // as quantity so it's not lost.
         quantity: value,
         label: `active_time:${activeType}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { activeType, unit: unit ?? "s" }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { activeType, unit: unit ?? "s" }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -298,7 +295,7 @@ function mapDataPoint(
         metricType: "usage",
         quantity: value,
         label: `code_edit_tool.decision:${toolName}:${decision}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { toolName, decision }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { toolName, decision }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -322,13 +319,21 @@ export function mapClaudeCodeMetrics(request: OtlpExportMetricsServiceRequest): 
     const resourceAttrs = flattenAttributes(resourceMetrics.resource?.attributes);
     for (const scopeMetrics of resourceMetrics.scopeMetrics ?? []) {
       for (const metric of scopeMetrics.metrics ?? []) {
+        const isGauge = !metric.sum && !!metric.gauge;
         const dataPoints = metric.sum?.dataPoints ?? metric.gauge?.dataPoints ?? [];
         if (!KNOWN_METRICS.has(metric.name)) {
           unknownCounts.set(metric.name, (unknownCounts.get(metric.name) ?? 0) + dataPoints.length);
           continue;
         }
         for (const point of dataPoints) {
-          const mapped = mapDataPoint(metric.name, metric.unit, resourceAttrs, point);
+          const mapped = mapDataPoint(
+            metric.name,
+            metric.unit,
+            resourceAttrs,
+            point,
+            normalizeTemporality(metric.sum?.aggregationTemporality, isGauge),
+            metric.sum?.isMonotonic
+          );
           if (mapped) events.push(mapped);
         }
       }

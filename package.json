@@ -13,6 +13,7 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
+    "repair:claude-cost": "node scripts/repair-claude-cumulative-cost.mjs",
     "test": "vitest run"
   },
   "dependencies": {

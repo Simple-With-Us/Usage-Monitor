@@ -185,6 +185,24 @@ model ExternalUsageEventTombstone {
   @@index([prunedAt])
 }
 
+// Durable checkpoint for converting OTLP cumulative Sum points into deltas.
+// `seriesKey` hashes the metric name plus all resource/data-point attributes;
+// raw high-cardinality attributes never need to be stored here. Checkpoint and
+// ExternalUsageEvent writes happen in one transaction so an exporter retry or
+// process restart cannot advance the counter without persisting its delta.
+model OtlpMetricState {
+  seriesKey         String   @id
+  metricName        String
+  startTimeUnixNano String?
+  lastTimeUnixNano  String
+  lastValue         Float
+  lastPointKey      String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([updatedAt])
+}
+
 model ProviderAlertNotification {
   id                  String    @id @default(uuid())
   providerId          String

@@ -219,4 +219,53 @@ describe("alert delivery", () => {
     expect(body.payload.component).toBe("test_pd");
     expect(body.payload.severity).toBe("warning"); // The default balance low is warning
   });
+
+  it("delivers budget alerts from canonical pushed spend", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "anthropic",
+        displayName: "Anthropic",
+        type: "builtin",
+        refreshIntervalMin: 60,
+        plan: {
+          create: { billingMode: "actual", monthlyBudgetUsd: 10 },
+        },
+        snapshots: {
+          create: {
+            fetchedAt: new Date("2026-07-20T11:00:00.000Z"),
+            totalCost: 0,
+          },
+        },
+      },
+    });
+    await prisma.externalUsageEvent.create({
+      data: {
+        idempotencyKey: "pushed-budget-warning",
+        sourceApp: "claude-code",
+        provider: "anthropic",
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 9,
+        occurredAt: new Date("2026-07-20T10:00:00.000Z"),
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const result = await deliverProviderAlerts({
+      now: new Date("2026-07-20T12:00:00.000Z"),
+      config: {
+        channels: [{ kind: "webhook", url: "https://alerts.example/webhook" }],
+        minSeverity: "warning",
+        reminderHours: 24,
+      },
+      fetchImpl: fetchMock,
+    });
+
+    expect(result.sent).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(payload.provider.id).toBe(provider.id);
+    expect(payload.alert.code).toBe("budget_warning");
+    expect(payload.alert.message).toContain("$9.00");
+  });
 });

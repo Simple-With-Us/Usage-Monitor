@@ -57,6 +57,57 @@ afterEach(() => {
 });
 
 describe("retention integration", () => {
+  it("summarizes every filtered raw event beyond the former 5,000-row cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const rows = Array.from({ length: 5_050 }, (_, index) => ({
+      idempotencyKey: `summary-page-${index}`,
+      sourceApp: "pagination-test",
+      provider: "openai",
+      billingMode: "actual",
+      metricType: "cost",
+      costUsd: 0.01,
+      occurredAt: new Date("2026-07-03T12:00:00.000Z"),
+    }));
+    for (let offset = 0; offset < rows.length; offset += 400) {
+      await prisma.externalUsageEvent.createMany({ data: rows.slice(offset, offset + 400) });
+    }
+    await prisma.externalUsageEvent.create({
+      data: {
+        idempotencyKey: "filtered-status-row",
+        sourceApp: "pagination-test",
+        provider: "openai",
+        billingMode: "actual",
+        metricType: "quota_sync",
+        costUsd: 999,
+        occurredAt: new Date("2026-07-03T12:00:00.000Z"),
+      },
+    });
+
+    const response = await getUsageEvents(
+      new NextRequest("https://usage.jays.services/api/usage-events?days=30")
+    );
+    const summary = await response.json();
+    expect(summary.eventCount).toBe(5_050);
+    expect(summary.totalCostUsd).toBeCloseTo(50.5);
+  });
+
+  it("rejects distinct events that collide on one fallback idempotency key", async () => {
+    const base = {
+      idempotencyKey: "mandated-five-field-collision",
+      sourceApp: "socratic-trade",
+      provider: "openai",
+      billingMode: "actual",
+      metricType: "cost",
+      occurredAt: new Date("2026-07-03T12:00:00.000Z"),
+    };
+    await persistExternalUsageEvents([{ ...base, label: "lane-a", costUsd: 1 }]);
+    await expect(
+      persistExternalUsageEvents([{ ...base, label: "lane-b", costUsd: 2 }])
+    ).rejects.toThrow(/Idempotency key collision/);
+    expect(await prisma.externalUsageEvent.count()).toBe(1);
+  });
+
   it("serves rolled-up historical data without double counting recent raw rows", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);

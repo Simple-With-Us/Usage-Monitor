@@ -7,6 +7,12 @@ import {
   type OtlpNumberDataPoint,
 } from "./types";
 import type { MappedUsageEvent, UnknownMetricSummary, MapMetricsResult } from "./claude-code-mapper";
+import {
+  cleanOtlpMetadata,
+  describeOtlpPoint,
+  normalizeTemporality,
+  type OtlpAggregationTemporality,
+} from "./mapping-utils";
 
 const KNOWN_METRICS = new Set([
   "system.cpu.utilization",
@@ -19,23 +25,6 @@ const KNOWN_METRICS = new Set([
 export const SOURCE_APP = "system-metrics";
 export const PROVIDER = "hetzner"; // By default, we'll map system metrics to hetzner
 export const SERVICE = "system";
-
-function cleanMetadata(
-  resourceAttrs: Record<string, string | number | boolean | undefined>,
-  pointAttrs: Record<string, string | number | boolean | undefined>,
-  extra: Record<string, string | number | boolean | undefined> = {}
-): Record<string, string | number | boolean> {
-  const merged: Record<string, string | number | boolean> = {};
-  for (const [key, value] of [
-    ...Object.entries(resourceAttrs),
-    ...Object.entries(pointAttrs),
-    ...Object.entries(extra),
-  ]) {
-    if (value === undefined) continue;
-    merged[key] = value;
-  }
-  return merged;
-}
 
 function sortedEntries(
   record: Record<string, string | number | boolean | undefined>
@@ -71,7 +60,9 @@ function mapDataPoint(
   metricName: string,
   unit: string | undefined,
   resourceAttrs: Record<string, string | number | boolean | undefined>,
-  point: OtlpNumberDataPoint
+  point: OtlpNumberDataPoint,
+  temporality: OtlpAggregationTemporality = "unspecified",
+  isMonotonic = true
 ): MappedUsageEvent | undefined {
   const value = dataPointValue(point);
   if (value == null || !Number.isFinite(value)) return undefined;
@@ -90,6 +81,15 @@ function mapDataPoint(
     environment,
     billingMode: "actual" as const,
     occurredAt,
+    otlp: describeOtlpPoint({
+      metricName,
+      resourceAttrs,
+      point,
+      value,
+      temporality,
+      isMonotonic,
+      occurredAt,
+    }),
   };
 
   switch (metricName) {
@@ -101,7 +101,7 @@ function mapDataPoint(
         quantity: value,
         keyRef: hostname,
         label: `cpu:${state}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { state }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { state }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -114,7 +114,7 @@ function mapDataPoint(
         unit: "byte",
         keyRef: hostname,
         label: `memory:${state}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { state }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { state }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -127,7 +127,7 @@ function mapDataPoint(
         unit: "byte",
         keyRef: hostname,
         label: `disk_io:${direction}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { direction }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { direction }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -140,7 +140,7 @@ function mapDataPoint(
         unit: "byte",
         keyRef: hostname,
         label: `network_io:${direction}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { direction }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { direction }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -153,7 +153,7 @@ function mapDataPoint(
         unit: "byte",
         keyRef: hostname,
         label: `filesystem:${state}`,
-        metadata: cleanMetadata(resourceAttrs, pointAttrs, { state }),
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, { state }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }
@@ -170,13 +170,21 @@ export function mapSystemMetrics(request: OtlpExportMetricsServiceRequest): MapM
     const resourceAttrs = flattenAttributes(resourceMetrics.resource?.attributes);
     for (const scopeMetrics of resourceMetrics.scopeMetrics ?? []) {
       for (const metric of scopeMetrics.metrics ?? []) {
+        const isGauge = !metric.sum && !!metric.gauge;
         const dataPoints = metric.sum?.dataPoints ?? metric.gauge?.dataPoints ?? [];
         if (!KNOWN_METRICS.has(metric.name)) {
           unknownCounts.set(metric.name, (unknownCounts.get(metric.name) ?? 0) + dataPoints.length);
           continue;
         }
         for (const point of dataPoints) {
-          const mapped = mapDataPoint(metric.name, metric.unit, resourceAttrs, point);
+          const mapped = mapDataPoint(
+            metric.name,
+            metric.unit,
+            resourceAttrs,
+            point,
+            normalizeTemporality(metric.sum?.aggregationTemporality, isGauge),
+            metric.sum?.isMonotonic
+          );
           if (mapped) events.push(mapped);
         }
       }

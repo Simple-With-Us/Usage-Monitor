@@ -578,7 +578,9 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     batchSize
   );
   const tombstones = await prisma.externalUsageEventTombstone.deleteMany({
-    where: { occurredAt: { lt: retentionCutoff(now, tombstoneRetentionDays) } },
+    // A tombstone's protection window starts when the row was actually
+    // pruned, not when the original usage occurred (which may be years older).
+    where: { prunedAt: { lt: retentionCutoff(now, tombstoneRetentionDays) } },
   });
 
   const prunedRows = usageSnapshots.pruned + externalUsageEvents.pruned + tombstones.count;

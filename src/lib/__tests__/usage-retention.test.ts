@@ -192,6 +192,9 @@ describe("usage-retention wrapper", () => {
     expect(prismaMock.usageSnapshotDailyRollup.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.externalUsageEventDailyRollup.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.externalUsageEventTombstone.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.externalUsageEventTombstone.deleteMany).toHaveBeenCalledWith({
+      where: { prunedAt: { lt: new Date("2026-01-05T12:00:00.000Z") } },
+    });
     expect(prismaMock.usageSnapshot.deleteMany).toHaveBeenCalledWith({
       where: { id: { in: ["snap-old-1", "snap-old-2"] } },
     });

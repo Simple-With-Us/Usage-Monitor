@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { buildProviderAlertState, type AlertSeverity, type ProviderAlert } from "@/lib/provider-alerts";
+import { computeBudgetStatus } from "@/lib/budget-status";
 
 export type AlertDeliveryChannel =
   | { kind: "slack"; url: string }
@@ -219,6 +220,15 @@ export async function deliverProviderAlerts(options: {
       },
     },
   });
+  // Production delivery uses the same canonical poll+pushed+subscription
+  // computation as /api/budget-status. Tests/callers that inject a partial DB
+  // retain the legacy snapshot-only path because that DB may not expose the
+  // external-event tables required by computeBudgetStatus.
+  const canonicalByProviderId = options.db
+    ? new Map<string, Awaited<ReturnType<typeof computeBudgetStatus>>["providers"][number]>()
+    : new Map(
+        (await computeBudgetStatus(now)).providers.map((status) => [status.id, status])
+      );
 
   result.evaluatedProviders = providers.length;
 
@@ -232,6 +242,13 @@ export async function deliverProviderAlerts(options: {
       },
       now
     );
+    const canonical = canonicalByProviderId.get(provider.id);
+    if (canonical) {
+      const nonBudgetAlerts = alertState.alerts.filter(
+        (alert) => alert.code !== "budget_exceeded" && alert.code !== "budget_warning"
+      );
+      alertState.alerts = [...nonBudgetAlerts, ...canonical.alerts];
+    }
     const deliverableAlerts = alertState.alerts.filter((alert) =>
       shouldDeliverSeverity(alert.severity, config.minSeverity)
     );

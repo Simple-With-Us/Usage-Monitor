@@ -224,6 +224,50 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
     const status = await computeBudgetStatus(NOW);
     const prov = status.providers.find((p) => p.id === provider.id)!;
     expect(prov.spentUsd).toBeCloseTo(110);
+    expect(prov.fixedAccruedUsd).toBeCloseTo(30);
+    // The $30 subscription is a discrete fixed charge; only the $80 metered
+    // portion is extrapolated over the remainder of July.
+    expect(prov.projectedEomUsd).toBeCloseTo(190);
+  });
+
+  it("assigns name-keyed pushed and subscription spend to one duplicate provider row", async () => {
+    const canonical = await prisma.provider.create({
+      data: {
+        name: "anthropic",
+        displayName: "Anthropic budget owner",
+        type: "push",
+        plan: { create: { billingMode: "actual", monthlyBudgetUsd: 100 } },
+      },
+    });
+    await prisma.provider.create({
+      data: { name: "Anthropic", displayName: "Legacy duplicate", type: "push" },
+    });
+    await prisma.externalUsageEvent.createMany({
+      data: [
+        {
+          idempotencyKey: "duplicate-name-usage",
+          sourceApp: "claude-code",
+          provider: "ANTHROPIC",
+          billingMode: "actual",
+          metricType: "cost",
+          costUsd: 5,
+          occurredAt: NOW,
+        },
+        {
+          idempotencyKey: "duplicate-name-subscription",
+          sourceApp: "subscription",
+          provider: "anthropic",
+          billingMode: "actual",
+          metricType: "subscription",
+          costUsd: 30,
+          occurredAt: NOW,
+        },
+      ],
+    });
+
+    const status = await computeBudgetStatus(NOW);
+    expect(status.providers.reduce((sum, provider) => sum + provider.pushedMonthToDateUsd, 0)).toBe(35);
+    expect(status.providers.find((provider) => provider.id === canonical.id)?.spentUsd).toBe(35);
   });
 
   it("does not re-charge already-charged periods when the schedule is edited", async () => {

@@ -36,7 +36,9 @@ export interface OtlpNumberDataPoint {
 
 export interface OtlpSum {
   dataPoints?: OtlpNumberDataPoint[];
-  aggregationTemporality?: number;
+  // Protobuf decoding yields the numeric enum; canonical OTLP JSON may use
+  // either the enum name or number.
+  aggregationTemporality?: number | string;
   isMonotonic?: boolean;
 }
 

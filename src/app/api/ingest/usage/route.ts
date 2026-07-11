@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { persistExternalUsageEvents, syncStatusToUsageSnapshot } from "@/lib/external-usage-events";
+import {
+  ExternalUsageIdempotencyCollisionError,
+  persistExternalUsageEvents,
+  syncStatusToUsageSnapshot,
+} from "@/lib/external-usage-events";
 import { parseUsageTelemetryBatch } from "@/lib/usage-telemetry";
 import { createRateLimiter, getClientIp } from "@/lib/rate-limit";
 import { isUsageIngestAuthorized } from "@/lib/ingest-auth";
@@ -47,42 +51,50 @@ export async function POST(request: NextRequest) {
     events.map((event) => event.project).filter((name): name is string => !!name)
   );
 
-  const persistResult = await persistExternalUsageEvents(
-    events.map((event) => {
-      const projectId = event.project
-        ? projectIdByName.get(event.project.trim().toLowerCase()) ?? null
-        : null;
-      const metadata =
-        event.project && !(event.metadata && "project" in event.metadata)
-          ? { ...(event.metadata ?? {}), project: event.project }
-          : event.metadata;
-      return {
-        idempotencyKey: event.idempotencyKey,
-        sourceApp: event.sourceApp,
-        environment: event.environment,
-        provider: event.provider,
-        service: event.service,
-        projectId,
-        label: event.label,
-        keyRef: event.keyRef,
-        billingMode: event.billingMode,
-        metricType: event.metricType,
-        quantity: event.quantity,
-        unit: event.unit,
-        costUsd: event.costUsd,
-        requests: event.requests,
-        credits: event.credits,
-        limit: event.limit,
-        limitWindow: event.limitWindow,
-        tier: event.tier,
-        confidence: event.confidence,
-        windowStart: event.windowStart,
-        windowEnd: event.windowEnd,
-        occurredAt: event.occurredAt,
-        metadata: metadata as Prisma.InputJsonObject | undefined,
-      };
-    })
-  );
+  let persistResult: Awaited<ReturnType<typeof persistExternalUsageEvents>>;
+  try {
+    persistResult = await persistExternalUsageEvents(
+      events.map((event) => {
+        const projectId = event.project
+          ? projectIdByName.get(event.project.trim().toLowerCase()) ?? null
+          : null;
+        const metadata =
+          event.project && !(event.metadata && "project" in event.metadata)
+            ? { ...(event.metadata ?? {}), project: event.project }
+            : event.metadata;
+        return {
+          idempotencyKey: event.idempotencyKey,
+          sourceApp: event.sourceApp,
+          environment: event.environment,
+          provider: event.provider,
+          service: event.service,
+          projectId,
+          label: event.label,
+          keyRef: event.keyRef,
+          billingMode: event.billingMode,
+          metricType: event.metricType,
+          quantity: event.quantity,
+          unit: event.unit,
+          costUsd: event.costUsd,
+          requests: event.requests,
+          credits: event.credits,
+          limit: event.limit,
+          limitWindow: event.limitWindow,
+          tier: event.tier,
+          confidence: event.confidence,
+          windowStart: event.windowStart,
+          windowEnd: event.windowEnd,
+          occurredAt: event.occurredAt,
+          metadata: metadata as Prisma.InputJsonObject | undefined,
+        };
+      })
+    );
+  } catch (error) {
+    if (error instanceof ExternalUsageIdempotencyCollisionError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    throw error;
+  }
 
   // Cross-app status metrics integration: Generate UsageSnapshot rows for absolute metrics.
   await syncStatusToUsageSnapshot(persistResult.newEvents);

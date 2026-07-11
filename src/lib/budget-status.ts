@@ -30,6 +30,8 @@ export interface ProviderBudgetStatus {
   fixedMonthlyCostUsd: number;
   snapshotCostUsd: number | null;
   pushedMonthToDateUsd: number;
+  subscriptionMonthToDateUsd: number;
+  fixedAccruedUsd: number;
   spentUsd: number;
   projectedEomUsd: number;
   remainingUsd: number | null;
@@ -104,12 +106,36 @@ export async function computeBudgetStatus(now: Date = new Date()): Promise<Budge
   // usage-like vs subscription — see sumMonthToDateExternalCostByProvider).
   const pushedMap = pushedByProvider;
 
+  // External events identify providers by case-insensitive name, while the
+  // settings table can contain legacy duplicate Provider rows. Assign each
+  // name-keyed pushed/subscription total to exactly one deterministic owner so
+  // duplicates cannot multiply spend. Prefer the row with a configured budget,
+  // then any plan, then lexical id for a stable tie-break.
+  const canonicalProviderIdByName = new Map<string, string>();
+  for (const provider of providers) {
+    const key = provider.name.toLowerCase();
+    const currentId = canonicalProviderIdByName.get(key);
+    if (!currentId) {
+      canonicalProviderIdByName.set(key, provider.id);
+      continue;
+    }
+    const current = providers.find((candidate) => candidate.id === currentId)!;
+    const rank = (candidate: typeof provider) =>
+      (candidate.plan?.monthlyBudgetUsd != null ? 4 : 0) + (candidate.plan ? 2 : 0);
+    if (rank(provider) > rank(current) || (rank(provider) === rank(current) && provider.id < current.id)) {
+      canonicalProviderIdByName.set(key, provider.id);
+    }
+  }
+
   const providerStatuses: ProviderBudgetStatus[] = providers.map((p) => {
     const plan = p.plan;
     const latestSnapshot = p.snapshots[0] ?? null;
     const fixedMonthlyCostUsd = plan?.fixedMonthlyCostUsd ?? 0;
     const snapshotCostUsd = latestSnapshot?.totalCost ?? null;
-    const pushed = pushedMap.get(p.name.toLowerCase()) ?? { usagePushed: 0, subscriptionPushed: 0 };
+    const ownsNameKeyedSpend = canonicalProviderIdByName.get(p.name.toLowerCase()) === p.id;
+    const pushed = ownsNameKeyedSpend
+      ? pushedMap.get(p.name.toLowerCase()) ?? { usagePushed: 0, subscriptionPushed: 0 }
+      : { usagePushed: 0, subscriptionPushed: 0 };
     const pushedMonthToDateUsd = pushed.usagePushed + pushed.subscriptionPushed;
     // Usage-like pushed cost is deduped against the poll snapshot via max()
     // (they measure the same spend); materialized subscription fees are DISJOINT
@@ -117,6 +143,7 @@ export async function computeBudgetStatus(now: Date = new Date()): Promise<Budge
     // on a poll-tracked provider vanishes whenever snapshot ≥ the fee.
     const usageCost = Math.max(snapshotCostUsd ?? 0, pushed.usagePushed) + pushed.subscriptionPushed;
     const spentUsd = fixedMonthlyCostUsd + usageCost;
+    const fixedAccruedUsd = fixedMonthlyCostUsd + pushed.subscriptionPushed;
     const monthlyBudgetUsd = plan?.monthlyBudgetUsd ?? null;
 
     // Reuse the shared alert logic for budget alerts by feeding the combined usage cost as the
@@ -133,6 +160,8 @@ export async function computeBudgetStatus(now: Date = new Date()): Promise<Budge
           credits: latestSnapshot?.credits ?? null,
           fetchedAt: latestSnapshot?.fetchedAt ?? now,
         },
+        trackedSpendUsd: spentUsd,
+        fixedAccruedUsd,
       },
       now
     );
@@ -166,8 +195,10 @@ export async function computeBudgetStatus(now: Date = new Date()): Promise<Budge
       fixedMonthlyCostUsd,
       snapshotCostUsd,
       pushedMonthToDateUsd,
+      subscriptionMonthToDateUsd: pushed.subscriptionPushed,
+      fixedAccruedUsd,
       spentUsd,
-      projectedEomUsd: calculateEomForecast(spentUsd, fixedMonthlyCostUsd, now),
+      projectedEomUsd: calculateEomForecast(spentUsd, fixedAccruedUsd, now),
       remainingUsd,
       percentUsed,
       status,
@@ -255,13 +286,25 @@ export async function computeProjectBudgetStatus(now: Date = new Date()): Promis
   //     the residual that percentage allocations distribute (this is the fix
   //     for the old code, which subtracted a differently-keyed pushed total).
   const directByProjectId = new Map<string, number>();
+  const directFixedByProjectId = new Map<string, number>();
   const attributedByProvider = new Map<string, number>();
+  const attributedFixedByProvider = new Map<string, number>();
   for (const row of attribution) {
     const projectId = row.projectId ?? projectIdByName.get(row.sourceApp.toLowerCase()) ?? null;
     if (!projectId) continue;
     directByProjectId.set(projectId, (directByProjectId.get(projectId) ?? 0) + row.costUsd);
     const providerKey = row.provider.toLowerCase();
     attributedByProvider.set(providerKey, (attributedByProvider.get(providerKey) ?? 0) + row.costUsd);
+    if (row.metricType === "subscription") {
+      directFixedByProjectId.set(
+        projectId,
+        (directFixedByProjectId.get(projectId) ?? 0) + row.costUsd
+      );
+      attributedFixedByProvider.set(
+        providerKey,
+        (attributedFixedByProvider.get(providerKey) ?? 0) + row.costUsd
+      );
+    }
   }
 
   const providerById = new Map(providerStatus.providers.map((p) => [p.id, p]));
@@ -269,18 +312,23 @@ export async function computeProjectBudgetStatus(now: Date = new Date()): Promis
   const projectStatuses: ProjectBudgetStatus[] = projects.map((proj) => {
     // 1. Direct per-event attribution (projectId, plus legacy name match).
     const directUsd = directByProjectId.get(proj.id) ?? 0;
+    const directFixedUsd = directFixedByProjectId.get(proj.id) ?? 0;
 
     // 2. Percentage allocation of each provider's residual — the spend NOT
     // already directly attributed to any project (fixed fees, poll-snapshot
     // usage, and any untagged pushed telemetry).
     let allocatedUsd = 0;
+    let allocatedFixedUsd = 0;
     for (const alloc of proj.allocations) {
       const provider = providerById.get(alloc.providerId);
       if (!provider) continue;
       const attributed = attributedByProvider.get(provider.name.toLowerCase()) ?? 0;
       const residual = Math.max(0, provider.spentUsd - attributed);
+      const attributedFixed = attributedFixedByProvider.get(provider.name.toLowerCase()) ?? 0;
+      const fixedResidual = Math.max(0, provider.fixedAccruedUsd - attributedFixed);
       const ratio = Math.max(0, Math.min(100, alloc.percentage)) / 100;
       allocatedUsd += residual * ratio;
+      allocatedFixedUsd += Math.min(residual, fixedResidual) * ratio;
     }
 
     const spentUsd = directUsd + allocatedUsd;
@@ -309,7 +357,11 @@ export async function computeProjectBudgetStatus(now: Date = new Date()): Promis
       description: proj.description,
       monthlyBudgetUsd: proj.monthlyBudgetUsd,
       spentUsd,
-      projectedEomUsd: calculateEomForecast(spentUsd, 0, now), // Fixed cost for projects is 0
+      projectedEomUsd: calculateEomForecast(
+        spentUsd,
+        Math.min(spentUsd, directFixedUsd + allocatedFixedUsd),
+        now
+      ),
       directUsd,
       allocatedUsd,
       remainingUsd,

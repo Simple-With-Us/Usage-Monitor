@@ -1,6 +1,6 @@
 export function calculateEomForecast(
   spentUsd: number,
-  fixedMonthlyCostUsd: number,
+  fixedAccruedUsd: number,
   now: Date
 ): number {
   const daysInMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
@@ -14,8 +14,8 @@ export function calculateEomForecast(
   }
 
   // The usage portion is what grows linearly. Fixed costs don't grow.
-  const usageUsd = Math.max(0, spentUsd - fixedMonthlyCostUsd);
+  const usageUsd = Math.max(0, spentUsd - fixedAccruedUsd);
   const forecastedUsage = (usageUsd / currentDay) * daysInMonth;
 
-  return fixedMonthlyCostUsd + forecastedUsage;
+  return fixedAccruedUsd + forecastedUsage;
 }

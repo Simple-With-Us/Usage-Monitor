@@ -125,6 +125,32 @@ describe("deriveIdempotencyKey", () => {
     expect(key1).toBe(key3);
   });
 
+  it("preserves the mandated five-field basis when non-basis lane data differs", () => {
+    const [first, second] = parseUsageTelemetryBatch({
+      events: [
+        {
+          sourceApp: "socratic-trade",
+          provider: "openai",
+          metricType: "cost",
+          keyRef: "shared-key-ref",
+          occurredAt: "2026-06-15T00:00:00.000Z",
+          label: "lane-a",
+          costUsd: 1,
+        },
+        {
+          sourceApp: "socratic-trade",
+          provider: "openai",
+          metricType: "cost",
+          keyRef: "shared-key-ref",
+          occurredAt: "2026-06-15T00:00:00.000Z",
+          label: "lane-b",
+          costUsd: 2,
+        },
+      ],
+    });
+    expect(first.idempotencyKey).toBe(second.idempotencyKey);
+  });
+
   // ---- Uniqueness: different inputs → different keys --------------------
 
   it("produces different keys for different sourceApp values", () => {

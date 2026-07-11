@@ -38,15 +38,17 @@ export interface PersistExternalUsageEventsResult {
   newEvents: ExternalUsageEventInput[];
 }
 
-// Prisma raises P2003 on a foreign-key constraint violation (e.g. a projectId
-// pointing at a Project deleted between resolution and insert).
-function isForeignKeyError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "P2003"
-  );
+export class ExternalUsageIdempotencyCollisionError extends Error {
+  readonly idempotencyKey: string;
+
+  constructor(idempotencyKey: string) {
+    super(
+      `Idempotency key collision for "${idempotencyKey}". Distinct events that share the ` +
+        "five-field fallback key must provide explicit idempotencyKey values."
+    );
+    this.name = "ExternalUsageIdempotencyCollisionError";
+    this.idempotencyKey = idempotencyKey;
+  }
 }
 
 export interface ExternalUsageEventSummaryGroup {
@@ -73,6 +75,7 @@ export interface ExternalCostAttributionRow {
   provider: string;
   sourceApp: string;
   projectId: string | null;
+  metricType: string;
   costUsd: number;
 }
 
@@ -110,72 +113,135 @@ export async function persistExternalUsageEvents(
   if (events.length === 0) {
     return { attempted: 0, persisted: 0, skippedPrunedDuplicates: 0, newEvents: [] };
   }
-
-  const idempotencyKeys = events.map((event) => event.idempotencyKey);
-  const tombstones = await prisma.externalUsageEventTombstone.findMany({
-    where: { idempotencyKey: { in: idempotencyKeys } },
-    select: { idempotencyKey: true },
+  // Tombstone lookup and INSERT now share the same write transaction as
+  // retention's tombstone+DELETE transaction. SQLite serializes those writers,
+  // closing the old window where a retry could observe no tombstone, then
+  // resurrect a row immediately after retention pruned it.
+  return prisma.$transaction((tx) => persistExternalUsageEventsInTransaction(tx, events), {
+    timeout: 30_000,
   });
-  
-  const existingEvents = await prisma.externalUsageEvent.findMany({
-    where: { idempotencyKey: { in: idempotencyKeys } },
-    select: { idempotencyKey: true },
-  });
+}
 
-  const prunedKeys = new Set(tombstones.map((row) => row.idempotencyKey));
-  const existingKeys = new Set(existingEvents.map((row) => row.idempotencyKey));
-  
-  let activeEvents = events.filter((event) => !prunedKeys.has(event.idempotencyKey));
-  const newEvents = activeEvents.filter((event) => !existingKeys.has(event.idempotencyKey));
+type ExistingExternalUsageEvent = Awaited<
+  ReturnType<Prisma.TransactionClient["externalUsageEvent"]["findMany"]>
+>[number];
 
-  const upsertAll = (batch: ExternalUsageEventInput[]) =>
-    prisma.$transaction(
-      batch.map((event) =>
-        prisma.externalUsageEvent.upsert({
-          where: { idempotencyKey: event.idempotencyKey },
-          create: toCreateData(event),
-          update: {},
-        })
-      )
-    );
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+    .join(",")}}`;
+}
 
-  if (activeEvents.length > 0) {
-    try {
-      await upsertAll(activeEvents);
-    } catch (error) {
-      // A referenced Project can be deleted in the window between name
-      // resolution and this insert; its projectId then FK-violates and, because
-      // all events share one transaction, the whole batch would be lost. Rather
-      // than drop durable usage rows for a rare race, drop only the stale
-      // attribution: re-check which referenced projects still exist, null the
-      // dangling projectIds, and retry once. (SetNull governs deletes of an
-      // existing row, not insert-time FK validation, so it can't prevent this.)
-      if (isForeignKeyError(error)) {
-        const referencedIds = Array.from(
-          new Set(activeEvents.map((e) => e.projectId).filter((id): id is string => !!id))
-        );
-        const alive = new Set(
-          (
-            await prisma.project.findMany({
-              where: { id: { in: referencedIds } },
-              select: { id: true },
-            })
-          ).map((p) => p.id)
-        );
-        activeEvents = activeEvents.map((e) =>
-          e.projectId && !alive.has(e.projectId) ? { ...e, projectId: null } : e
-        );
-        await upsertAll(activeEvents);
-      } else {
-        throw error;
-      }
+function comparableEvent(event: ExternalUsageEventInput | ExistingExternalUsageEvent) {
+  const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
+  const iso = (date: Date | undefined | null) => date?.toISOString() ?? null;
+  return {
+    sourceApp: value.sourceApp,
+    environment: value.environment ?? null,
+    provider: value.provider,
+    service: value.service ?? null,
+    projectId: value.projectId ?? null,
+    label: value.label ?? null,
+    keyRef: value.keyRef ?? null,
+    billingMode: value.billingMode,
+    metricType: value.metricType,
+    quantity: value.quantity ?? null,
+    unit: value.unit ?? null,
+    costUsd: value.costUsd ?? null,
+    requests: value.requests ?? null,
+    credits: value.credits ?? null,
+    limit: value.limit ?? null,
+    limitWindow: value.limitWindow ?? null,
+    tier: value.tier ?? null,
+    confidence: value.confidence ?? "estimated",
+    windowStart: iso(value.windowStart),
+    windowEnd: iso(value.windowEnd),
+    occurredAt: value.occurredAt.toISOString(),
+    metadata: stableJson(value.metadata ?? null),
+  };
+}
+
+function sameEvent(
+  left: ExternalUsageEventInput | ExistingExternalUsageEvent,
+  right: ExternalUsageEventInput | ExistingExternalUsageEvent
+): boolean {
+  return stableJson(comparableEvent(left)) === stableJson(comparableEvent(right));
+}
+
+export async function persistExternalUsageEventsInTransaction(
+  tx: Prisma.TransactionClient,
+  events: ExternalUsageEventInput[]
+): Promise<PersistExternalUsageEventsResult> {
+  if (events.length === 0) {
+    return { attempted: 0, persisted: 0, skippedPrunedDuplicates: 0, newEvents: [] };
+  }
+
+  // Collapse byte-equivalent repeats inside one batch, but never silently
+  // collapse distinct lanes that collided on the mandated five-field key.
+  const uniqueByKey = new Map<string, ExternalUsageEventInput>();
+  for (const event of events) {
+    const prior = uniqueByKey.get(event.idempotencyKey);
+    if (prior && !sameEvent(prior, event)) {
+      throw new ExternalUsageIdempotencyCollisionError(event.idempotencyKey);
     }
+    if (!prior) uniqueByKey.set(event.idempotencyKey, event);
+  }
+  let uniqueEvents = Array.from(uniqueByKey.values());
+
+  // Resolve stale project ids inside this transaction. A concurrent Project
+  // deletion is serialized behind/ahead of this transaction, so it cannot
+  // create an insert-time foreign-key race.
+  const referencedProjectIds = Array.from(
+    new Set(uniqueEvents.map((event) => event.projectId).filter((id): id is string => !!id))
+  );
+  if (referencedProjectIds.length > 0) {
+    const alive = new Set(
+      (
+        await tx.project.findMany({
+          where: { id: { in: referencedProjectIds } },
+          select: { id: true },
+        })
+      ).map((project) => project.id)
+    );
+    uniqueEvents = uniqueEvents.map((event) =>
+      event.projectId && !alive.has(event.projectId) ? { ...event, projectId: null } : event
+    );
+  }
+
+  const keys = uniqueEvents.map((event) => event.idempotencyKey);
+  const [tombstones, existingEvents] = await Promise.all([
+    tx.externalUsageEventTombstone.findMany({
+      where: { idempotencyKey: { in: keys } },
+      select: { idempotencyKey: true },
+    }),
+    tx.externalUsageEvent.findMany({
+      where: { idempotencyKey: { in: keys } },
+    }),
+  ]);
+  const prunedKeys = new Set(tombstones.map((row) => row.idempotencyKey));
+  const existingByKey = new Map(existingEvents.map((row) => [row.idempotencyKey, row]));
+  const activeEvents = uniqueEvents.filter((event) => !prunedKeys.has(event.idempotencyKey));
+  const newEvents: ExternalUsageEventInput[] = [];
+
+  for (const event of activeEvents) {
+    const existing = existingByKey.get(event.idempotencyKey);
+    if (existing) {
+      if (!sameEvent(existing, event)) {
+        throw new ExternalUsageIdempotencyCollisionError(event.idempotencyKey);
+      }
+      continue;
+    }
+    await tx.externalUsageEvent.create({ data: toCreateData(event) });
+    newEvents.push(event);
   }
 
   return {
     attempted: events.length,
     persisted: activeEvents.length,
-    skippedPrunedDuplicates: events.length - activeEvents.length,
+    skippedPrunedDuplicates: uniqueEvents.length - activeEvents.length,
     newEvents,
   };
 }
@@ -211,10 +277,13 @@ function mergeSummaryGroup(
   existing.totalCostUsd += group.totalCostUsd;
   existing.totalRequests += group.totalRequests;
   existing.totalQuantity += group.totalQuantity;
-  existing.limit = existing.limit ?? group.limit;
-  existing.limitWindow = existing.limitWindow ?? group.limitWindow;
   if (group.latestAt > existing.latestAt) {
     existing.latestAt = group.latestAt;
+    existing.limit = group.limit ?? existing.limit;
+    existing.limitWindow = group.limitWindow ?? existing.limitWindow;
+  } else {
+    existing.limit = existing.limit ?? group.limit;
+    existing.limitWindow = existing.limitWindow ?? group.limitWindow;
   }
 }
 
@@ -227,16 +296,33 @@ export async function summarizeExternalUsageEvents(
 }> {
   const groups = new Map<string, ExternalUsageEventSummaryGroup>();
   const rawSince = since > rawCutoff ? since : rawCutoff;
-
-  const [rawEvents, rollups] = await Promise.all([
-    prisma.externalUsageEvent.findMany({
+  const rawEvents: Array<{
+    id: string;
+    sourceApp: string;
+    environment: string | null;
+    provider: string;
+    service: string | null;
+    projectId: string | null;
+    quantity: number | null;
+    costUsd: number | null;
+    requests: number | null;
+    limit: number | null;
+    limitWindow: string | null;
+    occurredAt: Date;
+  }> = [];
+  const pageSize = 1_000;
+  let cursor: string | undefined;
+  while (true) {
+    const page = await prisma.externalUsageEvent.findMany({
       where: { 
         occurredAt: { gte: rawSince },
         metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
       },
-      orderBy: { occurredAt: "desc" },
-      take: 5000,
+      orderBy: { id: "asc" },
+      take: pageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: {
+        id: true,
         sourceApp: true,
         environment: true,
         provider: true,
@@ -249,9 +335,15 @@ export async function summarizeExternalUsageEvents(
         limitWindow: true,
         occurredAt: true,
       },
-    }),
+    });
+    rawEvents.push(...page);
+    if (page.length < pageSize) break;
+    cursor = page[page.length - 1].id;
+  }
+
+  const rollups =
     since < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
+      ? await prisma.externalUsageEventDailyRollup.findMany({
           where: {
             day: {
               gte: new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())),
@@ -274,8 +366,7 @@ export async function summarizeExternalUsageEvents(
             latestOccurredAt: true,
           },
         })
-      : Promise.resolve([]),
-  ]);
+      : [];
 
   for (const event of rawEvents) {
     mergeSummaryGroup(groups, {
@@ -404,7 +495,7 @@ export async function sumMonthToDateExternalCostAttribution(
 
   const [rawGroups, rollups] = await Promise.all([
     prisma.externalUsageEvent.groupBy({
-      by: ["provider", "sourceApp", "projectId"],
+      by: ["provider", "sourceApp", "projectId", "metricType"],
       where: { 
         occurredAt: { gte: rawSince }, 
         costUsd: { not: null },
@@ -422,6 +513,7 @@ export async function sumMonthToDateExternalCostAttribution(
             provider: true,
             sourceApp: true,
             projectId: true,
+            metricType: true,
             totalCostUsd: true,
           },
         })
@@ -429,21 +521,33 @@ export async function sumMonthToDateExternalCostAttribution(
   ]);
 
   const rows = new Map<string, ExternalCostAttributionRow>();
-  const add = (provider: string, sourceApp: string, projectId: string | null, cost: number) => {
-    const key = `${provider.toLowerCase()}|${sourceApp.toLowerCase()}|${projectId ?? ""}`;
+  const add = (
+    provider: string,
+    sourceApp: string,
+    projectId: string | null,
+    metricType: string,
+    cost: number
+  ) => {
+    const key = `${provider.toLowerCase()}|${sourceApp.toLowerCase()}|${projectId ?? ""}|${metricType}`;
     const existing = rows.get(key);
     if (existing) {
       existing.costUsd += cost;
     } else {
-      rows.set(key, { provider, sourceApp, projectId, costUsd: cost });
+      rows.set(key, { provider, sourceApp, projectId, metricType, costUsd: cost });
     }
   };
 
   for (const row of rawGroups) {
-    add(row.provider, row.sourceApp, row.projectId, row._sum.costUsd ?? 0);
+    add(row.provider, row.sourceApp, row.projectId, row.metricType, row._sum.costUsd ?? 0);
   }
   for (const rollup of rollups) {
-    add(rollup.provider, rollup.sourceApp, rollup.projectId, rollup.totalCostUsd);
+    add(
+      rollup.provider,
+      rollup.sourceApp,
+      rollup.projectId,
+      rollup.metricType,
+      rollup.totalCostUsd
+    );
   }
   return Array.from(rows.values());
 }
@@ -481,4 +585,3 @@ export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[
     await prisma.usageSnapshot.create({ data });
   }
 }
-

@@ -46,6 +46,13 @@ export interface ProviderAlertInput {
   refreshIntervalMin: number;
   plan: ProviderPlanForAlerts | null;
   latestSnapshot: UsageSnapshotForAlerts | null;
+  // Canonical month-to-date spend across poll, pushed usage, subscriptions,
+  // and configured fixed cost. When omitted, preserve the legacy snapshot
+  // calculation for pure/unit-test callers.
+  trackedSpendUsd?: number;
+  // Portion of trackedSpendUsd that is already a discrete/fixed charge and
+  // must not be linearly extrapolated to month end.
+  fixedAccruedUsd?: number;
 }
 
 export interface ProviderAlertState {
@@ -85,8 +92,12 @@ export function buildProviderAlertState(
   const { plan, latestSnapshot } = input;
   const fixedMonthlyCost = plan?.fixedMonthlyCostUsd ?? 0;
   const usageCost = latestSnapshot?.totalCost ?? 0;
-  const estimatedMonthlyCostUsd = fixedMonthlyCost + usageCost;
-  const projectedEomUsd = calculateEomForecast(estimatedMonthlyCostUsd, fixedMonthlyCost, now);
+  const estimatedMonthlyCostUsd = input.trackedSpendUsd ?? fixedMonthlyCost + usageCost;
+  const projectedEomUsd = calculateEomForecast(
+    estimatedMonthlyCostUsd,
+    input.fixedAccruedUsd ?? fixedMonthlyCost,
+    now
+  );
   const billingMode = normalizeBillingMode(plan?.billingMode);
 
   if (!input.isActive) {
