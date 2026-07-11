@@ -21,16 +21,26 @@ Verification: Node 24 full `npm run verify` green — ESLint, TypeScript, 51 tes
 migration-safety scenarios, SQLite backup checks, release-maintenance checks, startup configuration,
 and the Next.js production build. `git diff --check` is also clean.
 
+## Follow-up security hardening (`residual-security-hardening`)
+
+| Severity | Finding | Resolution / evidence |
+|---|---|---|
+| High | `/api/ingest/usage` allocated and decoded an unbounded body before its 100-event/metadata validation. | A shared streaming reader now enforces a contract-derived 4 MiB ceiling. Declared-length and chunked oversize bodies return 413 before JSON decoding; OTLP reuses the same primitive with its existing 1 MiB limit. |
+| High | Provider credentials had implicit preserve/replace behavior but no explicit primary-key clear or individual encrypted-field clear; config accepted unbounded/pollution-shaped JSON. | Update input now supports `apiKeyAction` and per-path `secretConfigOperations` with preserve/replace/clear. Config is bounded to six levels, 200 entries, 128-character keys, and 4096-character strings; arrays, non-finite numbers, control/dangerous prototype keys, duplicate operations, and public-field secret operations are rejected. Legacy object merging uses own-property definitions so stored pollution keys remain inert. |
+| Medium | Clients could see secret field labels but lacked an unambiguous machine path or primary-key configured/readable state for safe clear controls. | Provider DTOs now expose no secret values, but do expose `apiKeyConfigured`, `apiKeyReadable`, masked `keyPreview`, and `secretConfigMeta.paths` string arrays. The active transparency lane owns `AddProviderModal`, so the backend contract is documented in `docs/provider-credential-lifecycle.md` and the small UI hook remains coordinated there. |
+
+Follow-up verification: Node 24 ESLint and TypeScript pass; 55 test files / 294 tests pass; the
+Next.js production build and `git diff --check` pass.
+
 ## Open findings mirrored to the effort log
 
 1. Backup-backed audit/repair of legacy false `groupId` rows; canonical grouped spend/credit math.
 2. Stable account identity for name-colliding `quota_sync` and `credit_balance` events.
-3. Explicit primary/secondary credential clear/rotate semantics plus bounded, prototype-safe provider config.
-4. Streaming body limit and 413 behavior for generic usage ingest.
-5. Independent `SESSION_SECRET`, session version/rotation, and nonce/hash CSP migration.
-6. Adapter `rawData` allowlisting/redaction and explicit privacy/retention classification.
-7. Official-source verification of Hetzner currency before labeling plan prices USD.
-8. Hide/disable or explain the now-safe generic/manual Fetch Now no-op in the integration UI.
+3. Add the documented credential-clear controls after the separately-owned transparency modal change lands.
+4. Independent `SESSION_SECRET`, session version/rotation, and nonce/hash CSP migration.
+5. Adapter `rawData` allowlisting/redaction and explicit privacy/retention classification.
+6. Official-source verification of Hetzner currency before labeling plan prices USD.
+7. Hide/disable or explain the now-safe generic/manual Fetch Now no-op in the integration UI.
 
 ## Deliberate non-actions
 

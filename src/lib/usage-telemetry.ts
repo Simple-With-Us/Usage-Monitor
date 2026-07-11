@@ -3,6 +3,11 @@ import crypto from "crypto";
 const MAX_EVENTS = 100;
 const MAX_METADATA_KEYS = 50;
 const MAX_METADATA_STRING_LENGTH = 500;
+// 100 events * 50 metadata entries * (80-byte key + 500-byte value), plus
+// event fields and JSON framing, fits below 4 MiB. The route enforces this
+// before decoding so the parser's field limits cannot be bypassed with a huge
+// body that is mostly discarded after allocation.
+export const MAX_USAGE_TELEMETRY_BODY_BYTES = 4 * 1024 * 1024;
 
 const metricTypes = new Set(["usage", "cost", "quota", "tier", "health", "balance", "limit", "quota_sync", "credit_balance", "subscription"]);
 const units = new Set([

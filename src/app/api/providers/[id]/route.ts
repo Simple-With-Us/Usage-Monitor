@@ -7,6 +7,7 @@ import { buildProviderAlertState } from "@/lib/provider-alerts";
 import { computeBudgetStatus } from "@/lib/budget-status";
 import { toPrismaProviderPlanData } from "@/lib/provider-plan";
 import {
+  applyProviderSecretConfigOperations,
   decryptProviderSecretConfig,
   hasProviderSecrets,
   mergeProviderConfig,
@@ -178,39 +179,42 @@ export async function PUT(
     if (input.config === null) {
       updateData.config = Prisma.JsonNull;
       updateData.secretConfig = null;
-    } else {
-      const incoming = splitProviderConfig(input.config);
-      updateData.config = Object.keys(incoming.publicConfig).length > 0
-        ? (incoming.publicConfig as Prisma.InputJsonObject)
-        : Prisma.JsonNull;
-
-      // Hidden secret values are omitted by the edit UI, so updates merge any
-      // newly supplied values into the existing encrypted/legacy secret set.
-      // Explicit `config: null` above is the deliberate clear-all operation.
-      const legacySecrets = splitProviderConfig(existing.config).secretConfig;
-      let existingSecrets = legacySecrets;
-      if (existing.secretConfig) {
-        try {
-          existingSecrets = mergeProviderConfig(
-            legacySecrets,
-            decryptProviderSecretConfig(existing.secretConfig)
-          );
-        } catch {
-          return NextResponse.json(
-            { error: "Stored provider secret configuration cannot be decrypted" },
-            { status: 500 }
-          );
-        }
-      }
-
-      const mergedSecrets = mergeProviderConfig(
-        existingSecrets,
-        incoming.secretConfig
-      );
-      updateData.secretConfig = hasProviderSecrets(mergedSecrets)
-        ? encryptJson(mergedSecrets)
-        : null;
     }
+  }
+  const hasSecretOperations = (input.secretConfigOperations?.length ?? 0) > 0;
+  if (input.config !== null && (input.config !== undefined || hasSecretOperations)) {
+    const legacy = splitProviderConfig(existing.config);
+    const incoming = splitProviderConfig(input.config);
+    const publicConfig = input.config !== undefined
+      ? incoming.publicConfig
+      : legacy.publicConfig;
+    updateData.config = Object.keys(publicConfig).length > 0
+      ? (publicConfig as Prisma.InputJsonObject)
+      : Prisma.JsonNull;
+
+    let existingSecrets = legacy.secretConfig;
+    if (existing.secretConfig) {
+      try {
+        existingSecrets = mergeProviderConfig(
+          legacy.secretConfig,
+          decryptProviderSecretConfig(existing.secretConfig)
+        );
+      } catch {
+        return NextResponse.json(
+          { error: "Stored provider secret configuration cannot be decrypted" },
+          { status: 500 }
+        );
+      }
+    }
+
+    const nextSecrets = applyProviderSecretConfigOperations(
+      existingSecrets,
+      incoming.secretConfig,
+      input.secretConfigOperations
+    );
+    updateData.secretConfig = hasProviderSecrets(nextSecrets)
+      ? encryptJson(nextSecrets)
+      : null;
   }
   if (input.isActive !== undefined) updateData.isActive = input.isActive;
   if (input.refreshIntervalMin !== undefined) {
@@ -218,8 +222,10 @@ export async function PUT(
   }
   if (input.groupId !== undefined) updateData.groupId = input.groupId;
   if (input.label !== undefined) updateData.label = input.label;
-  if (input.apiKey !== undefined) {
-    updateData.apiKey = encrypt(input.apiKey);
+  if (input.apiKeyOperation.action === "replace") {
+    updateData.apiKey = encrypt(input.apiKeyOperation.value);
+  } else if (input.apiKeyOperation.action === "clear") {
+    updateData.apiKey = null;
   }
   if (input.plan !== undefined) {
     const planData = toPrismaProviderPlanData(input.plan);

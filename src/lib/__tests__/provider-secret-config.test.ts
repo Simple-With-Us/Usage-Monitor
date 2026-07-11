@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decryptJson, encryptJson } from "@/lib/crypto";
 import {
+  applyProviderSecretConfigOperations,
   mergeProviderConfig,
   providerConfigForClient,
   splitProviderConfig,
@@ -65,6 +66,7 @@ describe("provider secret config", () => {
       secretConfigMeta: {
         configured: true,
         fields: ["apiSecret", "secretKey"],
+        paths: [["apiSecret"], ["secretKey"]],
         readable: true,
       },
     });
@@ -82,5 +84,36 @@ describe("provider secret config", () => {
       nested: { region: "us", token: "secret" },
       host: "https://example.com",
     });
+  });
+
+  it("applies explicit preserve, replace, and clear operations per protected field", () => {
+    expect(
+      applyProviderSecretConfigOperations(
+        {
+          apiSecret: "old-secret",
+          managementKey: "old-management",
+          nested: { password: "old-password" },
+          extraHeaders: { Authorization: "Bearer old", "X-Trace": "keep" },
+        },
+        { apiSecret: "incoming-secret", managementKey: "incoming-management" },
+        [
+          { path: ["apiSecret"], action: "preserve" },
+          { path: ["managementKey"], action: "clear" },
+          { path: ["nested", "password"], action: "replace", value: "new-password" },
+          { path: ["extraHeaders", "Authorization"], action: "clear" },
+        ]
+      )
+    ).toEqual({
+      apiSecret: "old-secret",
+      nested: { password: "new-password" },
+      extraHeaders: { "X-Trace": "keep" },
+    });
+  });
+
+  it("handles legacy prototype keys as inert own properties", () => {
+    const legacy = JSON.parse('{"__proto__":{"polluted":true},"region":"us"}');
+    const split = splitProviderConfig(legacy);
+    expect(Object.prototype.hasOwnProperty.call(split.publicConfig, "__proto__")).toBe(true);
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
   });
 });

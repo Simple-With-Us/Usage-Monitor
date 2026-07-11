@@ -12,15 +12,31 @@ import {
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 
-function buildKeyPreview(encryptedKey: string | null): string | null {
-  if (!encryptedKey) return null;
+function buildKeyPreview(decrypted: string): string | null {
+  if (decrypted.length < 4) return null;
+  return `••••${decrypted.slice(-4)}`;
+}
+
+function apiKeyMetadata(encryptedKey: string | null): {
+  apiKeyConfigured: boolean;
+  apiKeyReadable: boolean;
+  keyPreview: string | null;
+} {
+  if (!encryptedKey) {
+    return { apiKeyConfigured: false, apiKeyReadable: true, keyPreview: null };
+  }
   try {
+    // Decrypt once here so a short-but-valid key can still be reported as
+    // configured without exposing it. buildKeyPreview intentionally returns
+    // null for keys too short to mask safely.
     const decrypted = decrypt(encryptedKey);
-    if (decrypted.length < 4) return null;
-    const last = decrypted.slice(-4);
-    return `••••${last}`;
+    return {
+      apiKeyConfigured: true,
+      apiKeyReadable: true,
+      keyPreview: buildKeyPreview(decrypted),
+    };
   } catch {
-    return null;
+    return { apiKeyConfigured: true, apiKeyReadable: false, keyPreview: null };
   }
 }
 
@@ -130,7 +146,7 @@ export async function GET() {
     return {
       ...rest,
       ...clientConfig,
-      keyPreview: buildKeyPreview(apiKey),
+      ...apiKeyMetadata(apiKey),
       latestSnapshot,
       alerts: canonicalBudget?.alerts ?? alertState.alerts,
       estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,
