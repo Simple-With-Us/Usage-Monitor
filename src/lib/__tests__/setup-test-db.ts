@@ -236,6 +236,24 @@ CREATE TABLE "ProviderAlertNotification" (
   CONSTRAINT "ProviderAlertNotification_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+CREATE TABLE "ProviderAlertChannelDelivery" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "notificationId" TEXT NOT NULL,
+  "channelKey" TEXT NOT NULL,
+  "channelKind" TEXT NOT NULL,
+  "lastAttemptAt" DATETIME,
+  "lastSucceededAt" DATETIME,
+  "attemptCount" INTEGER NOT NULL DEFAULT 0,
+  "successCount" INTEGER NOT NULL DEFAULT 0,
+  "lastResolveAttemptAt" DATETIME,
+  "lastResolvedAt" DATETIME,
+  "resolveAttemptCount" INTEGER NOT NULL DEFAULT 0,
+  "lastError" TEXT,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL,
+  CONSTRAINT "ProviderAlertChannelDelivery_notificationId_fkey" FOREIGN KEY ("notificationId") REFERENCES "ProviderAlertNotification" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 CREATE UNIQUE INDEX "ProviderPlan_providerId_key" ON "ProviderPlan"("providerId");
 CREATE UNIQUE INDEX "ProviderExternalBilling_providerId_source_externalId_key" ON "ProviderExternalBilling"("providerId", "source", "externalId");
 CREATE INDEX "ProviderExternalBilling_providerId_status_idx" ON "ProviderExternalBilling"("providerId", "status");
@@ -262,6 +280,8 @@ CREATE INDEX "OtlpMetricState_updatedAt_idx" ON "OtlpMetricState"("updatedAt");
 CREATE UNIQUE INDEX "ProviderAlertNotification_stateKey_key" ON "ProviderAlertNotification"("stateKey");
 CREATE INDEX "ProviderAlertNotification_providerId_resolvedAt_idx" ON "ProviderAlertNotification"("providerId", "resolvedAt");
 CREATE INDEX "ProviderAlertNotification_lastSentAt_idx" ON "ProviderAlertNotification"("lastSentAt");
+CREATE UNIQUE INDEX "ProviderAlertChannelDelivery_notificationId_channelKey_key" ON "ProviderAlertChannelDelivery"("notificationId", "channelKey");
+CREATE INDEX "ProviderAlertChannelDelivery_notificationId_channelKind_idx" ON "ProviderAlertChannelDelivery"("notificationId", "channelKind");
 `;
 
 export function setupPrismaSqliteTestDb(dbPath: string): void {

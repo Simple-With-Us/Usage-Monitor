@@ -68,9 +68,9 @@ model ProviderPlan {
 // mirrors external plan/status/period data and can therefore never create a
 // second charge for spend already reported by an adapter.
 model ProviderExternalBilling {
-  id                 String   @id @default(uuid())
+  id                 String    @id @default(uuid())
   providerId         String
-  provider           Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  provider           Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
   source             String
   externalId         String
   kind               String
@@ -87,8 +87,8 @@ model ProviderExternalBilling {
   spendLimitUsd      Float?
   spendLimitWindow   String?
   syncedAt           DateTime
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@unique([providerId, source, externalId])
   @@index([providerId, status])
@@ -242,10 +242,10 @@ model OtlpMetricState {
 }
 
 model ProviderAlertNotification {
-  id                  String    @id @default(uuid())
+  id                  String                         @id @default(uuid())
   providerId          String
-  provider            Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  stateKey            String    @unique
+  provider            Provider                       @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  stateKey            String                         @unique
   alertCode           String
   severity            String
   providerName        String
@@ -254,13 +254,40 @@ model ProviderAlertNotification {
   firstDetectedAt     DateTime
   lastDetectedAt      DateTime
   lastSentAt          DateTime?
-  sendCount           Int       @default(0)
+  sendCount           Int                            @default(0)
   resolvedAt          DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  createdAt           DateTime                       @default(now())
+  updatedAt           DateTime                       @updatedAt
+  channelDeliveries   ProviderAlertChannelDelivery[]
 
   @@index([providerId, resolvedAt])
   @@index([lastSentAt])
+}
+
+// Per-destination delivery state. A notification can succeed on Slack while
+// email/PagerDuty is temporarily down; keeping these outcomes separately stops
+// the successful channel from being replayed on every maintenance tick. The
+// channelKey is a one-way fingerprint of kind + destination, never a URL,
+// routing key, or API key.
+model ProviderAlertChannelDelivery {
+  id                   String                    @id @default(uuid())
+  notificationId       String
+  notification         ProviderAlertNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  channelKey           String
+  channelKind          String
+  lastAttemptAt        DateTime?
+  lastSucceededAt      DateTime?
+  attemptCount         Int                       @default(0)
+  successCount         Int                       @default(0)
+  lastResolveAttemptAt DateTime?
+  lastResolvedAt       DateTime?
+  resolveAttemptCount  Int                       @default(0)
+  lastError            String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+
+  @@unique([notificationId, channelKey])
+  @@index([notificationId, channelKind])
 }
 
 model Project {

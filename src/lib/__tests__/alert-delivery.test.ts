@@ -28,6 +28,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.restoreAllMocks();
+  await prisma.providerAlertChannelDelivery.deleteMany();
   await prisma.providerAlertNotification.deleteMany();
   await prisma.externalUsageEventTombstone.deleteMany();
   await prisma.externalUsageEventDailyRollup.deleteMany();
@@ -114,6 +115,129 @@ describe("alert delivery", () => {
     expect(resolved.resolvedAt).not.toBeNull();
   });
 
+  it("retries only the failed channel while preserving successful channel state", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "partial-delivery",
+        displayName: "Partial Delivery",
+        type: "builtin",
+        refreshIntervalMin: 60,
+        plan: { create: { billingMode: "actual", lowBalanceUsd: 10 } },
+        snapshots: {
+          create: {
+            fetchedAt: new Date("2026-07-20T08:00:00.000Z"),
+            balance: 5,
+          },
+        },
+      },
+    });
+    const slackUrl = "https://hooks.slack.test/services/channel";
+    const webhookUrl = "https://alerts.example/webhook";
+    let webhookCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === slackUrl) return new Response("ok", { status: 200 });
+      webhookCalls += 1;
+      return new Response(webhookCalls === 1 ? "down" : "ok", {
+        status: webhookCalls === 1 ? 503 : 200,
+      });
+    });
+    const config = {
+      channels: [
+        { kind: "slack" as const, url: slackUrl },
+        { kind: "webhook" as const, url: webhookUrl },
+      ],
+      minSeverity: "warning" as const,
+      reminderHours: 24,
+      maxAttempts: 1,
+      retryBaseMs: 0,
+    };
+
+    const first = await deliverProviderAlerts({
+      now: new Date("2026-07-20T12:00:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(first.sent).toBe(0);
+    expect(first.errors).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const notification = await prisma.providerAlertNotification.findUniqueOrThrow({
+      where: { stateKey: `${provider.id}:balance_low` },
+    });
+    const channelStates = await prisma.providerAlertChannelDelivery.findMany({
+      where: { notificationId: notification.id },
+      orderBy: { channelKind: "asc" },
+    });
+    expect(channelStates).toHaveLength(2);
+    expect(channelStates.find((state) => state.channelKind === "slack")?.lastSucceededAt).not.toBeNull();
+    expect(channelStates.find((state) => state.channelKind === "webhook")?.lastSucceededAt).toBeNull();
+
+    const second = await deliverProviderAlerts({
+      now: new Date("2026-07-20T13:00:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(second.sent).toBe(1);
+    expect(second.errors).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(webhookUrl);
+
+    const third = await deliverProviderAlerts({
+      now: new Date("2026-07-20T14:00:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(third.skipped).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("times out a hung channel attempt and succeeds on a bounded retry", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "timeout-retry",
+        displayName: "Timeout Retry",
+        type: "builtin",
+        plan: { create: { billingMode: "actual", lowBalanceUsd: 10 } },
+        snapshots: {
+          create: {
+            fetchedAt: new Date("2026-07-20T08:00:00.000Z"),
+            balance: 5,
+          },
+        },
+      },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+    const result = await deliverProviderAlerts({
+      now: new Date("2026-07-20T12:00:00.000Z"),
+      config: {
+        channels: [{ kind: "webhook", url: "https://alerts.example/timeout" }],
+        minSeverity: "warning",
+        reminderHours: 24,
+        timeoutMs: 5,
+        maxAttempts: 2,
+        retryBaseMs: 0,
+      },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(result.sent).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const notification = await prisma.providerAlertNotification.findUniqueOrThrow({
+      where: { stateKey: `${provider.id}:balance_low` },
+    });
+    const channelState = await prisma.providerAlertChannelDelivery.findFirstOrThrow({
+      where: { notificationId: notification.id },
+    });
+    expect(channelState.attemptCount).toBe(2);
+    expect(channelState.successCount).toBe(1);
+    expect(channelState.lastError).toBeNull();
+  });
+
   it("supports email delivery via Resend", async () => {
     const provider = await prisma.provider.create({
       data: {
@@ -163,14 +287,14 @@ describe("alert delivery", () => {
     expect(callArgs[1].headers).toMatchObject({
       Authorization: "Bearer test-api-key",
     });
-    const body = JSON.parse(callArgs[1].body);
+    const body = JSON.parse(String(callArgs[1]?.body ?? "{}"));
     expect(body.to).toBe("oncall@example.com");
     expect(body.from).toBe("alerts@example.com");
     expect(body.subject).toContain("Test Email");
     expect(body.html).toContain("Test Email");
   });
 
-  it("supports pagerduty delivery", async () => {
+  it("uses one PagerDuty dedup key for trigger, retried resolve, and reopen", async () => {
     const provider = await prisma.provider.create({
       data: {
         name: "test_pd",
@@ -193,19 +317,25 @@ describe("alert delivery", () => {
       },
     });
 
-    const fetchMock = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const responseStatuses = [202, 503, 202, 202];
+    const fetchMock = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response("ok", { status: responseStatuses.shift() ?? 202 })
+    );
     const config = {
       channels: [
         { kind: "pagerduty" as const, routingKey: "test-routing-key" },
       ],
       minSeverity: "warning" as const,
       reminderHours: 24,
+      maxAttempts: 1,
+      retryBaseMs: 0,
     };
 
     const first = await deliverProviderAlerts({
       now: new Date("2026-07-20T12:00:00.000Z"),
       config,
-      fetchImpl: fetchMock,
+      fetchImpl: fetchMock as unknown as typeof fetch,
     });
     
     expect(first.sent).toBe(1);
@@ -213,11 +343,67 @@ describe("alert delivery", () => {
 
     const callArgs = fetchMock.mock.calls[0];
     expect(callArgs[0]).toBe("https://events.pagerduty.com/v2/enqueue");
-    const body = JSON.parse(callArgs[1].body);
+    const body = JSON.parse(String(callArgs[1]?.body ?? "{}"));
     expect(body.routing_key).toBe("test-routing-key");
+    expect(body.event_action).toBe("trigger");
+    expect(body.dedup_key).toBe(`api-usage-monitor:${provider.id}:balance_low`);
     expect(body.payload.source).toBe("API Usage Monitor");
     expect(body.payload.component).toBe("test_pd");
     expect(body.payload.severity).toBe("warning"); // The default balance low is warning
+
+    await prisma.usageSnapshot.create({
+      data: {
+        providerId: provider.id,
+        fetchedAt: new Date("2026-07-20T13:00:00.000Z"),
+        balance: 25,
+      },
+    });
+    const failedResolve = await deliverProviderAlerts({
+      now: new Date("2026-07-20T13:30:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(failedResolve.resolved).toBe(0);
+    expect(failedResolve.errors).toHaveLength(1);
+    const stillOpen = await prisma.providerAlertNotification.findUniqueOrThrow({
+      where: { stateKey: `${provider.id}:balance_low` },
+    });
+    expect(stillOpen.resolvedAt).toBeNull();
+
+    const resolved = await deliverProviderAlerts({
+      now: new Date("2026-07-20T14:00:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(resolved.resolved).toBe(1);
+    const resolveBodies = fetchMock.mock.calls
+      .slice(1, 3)
+      .map((call) => JSON.parse(String(call[1]?.body ?? "{}")));
+    expect(resolveBodies.every((payload) => payload.event_action === "resolve")).toBe(true);
+    expect(resolveBodies.every((payload) => payload.dedup_key === body.dedup_key)).toBe(true);
+
+    const channelState = await prisma.providerAlertChannelDelivery.findFirstOrThrow({
+      where: { notificationId: stillOpen.id, channelKind: "pagerduty" },
+    });
+    expect(channelState.resolveAttemptCount).toBe(2);
+    expect(channelState.lastResolvedAt).not.toBeNull();
+
+    await prisma.usageSnapshot.create({
+      data: {
+        providerId: provider.id,
+        fetchedAt: new Date("2026-07-20T15:00:00.000Z"),
+        balance: 5,
+      },
+    });
+    const reopened = await deliverProviderAlerts({
+      now: new Date("2026-07-20T15:30:00.000Z"),
+      config,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(reopened.sent).toBe(1);
+    const reopenedBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body ?? "{}"));
+    expect(reopenedBody.event_action).toBe("trigger");
+    expect(reopenedBody.dedup_key).toBe(body.dedup_key);
   });
 
   it("delivers budget alerts from canonical pushed spend", async () => {

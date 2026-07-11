@@ -125,6 +125,15 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Alert-delivery channel reliability (CODEX, owner-directed 2026-07-11).** Branch
+  `codex-alert-delivery-reliability`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-alert-delivery`, based on app-wide hardening commit `2dd8ad8`.
+  Persist per-channel attempt/success state so one failed channel cannot resend successful channels;
+  add bounded per-channel HTTP timeout/retry; use stable PagerDuty dedup keys and resolution events.
+  Implemented locally: Prisma schema + additive migration harness pass, focused alert-delivery
+  tests 6/6, TypeScript, and scoped ESLint pass under Node 24. Scope is alert
+  delivery/schema/focused tests/docs only; no full gate, production writes, push, PR, merge, or
+  deploy in this lane.
 - **App-wide hardening + direct billing integrations (CODEX, owner-directed 2026-07-11).** Branch
   `codex-app-wide-hardening`. Implementing the 2026-07-11 audit backlog across telemetry/spend,
   subscriptions, security, adapter failure semantics, accessible/responsive UI, readiness/deploy/
