@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,13 +6,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { describeOtlpPoint } from "../otlp/mapping-utils";
 import { isSecretConfigKey } from "../provider-secret-config";
 import { setupPrismaSqliteTestDb } from "./setup-test-db";
-// @ts-expect-error Standalone maintenance modules are plain ESM for direct Node execution.
 import {
   applyClaudeCumulativeCostRepair,
   historicalClaudeCostSeriesKey,
   planClaudeCumulativeCostRepair,
 } from "../../../scripts/lib/claude-cost-repair.mjs";
-// @ts-expect-error Standalone maintenance modules are plain ESM for direct Node execution.
 import {
   applyProviderSecretMigration,
   decryptProviderSecretConfig,
@@ -55,7 +53,7 @@ async function createProvider(
       id,
       name: id,
       displayName: id,
-      config,
+      config: config as Prisma.InputJsonObject,
       secretConfig,
     },
   });
@@ -83,7 +81,9 @@ async function createUsageEvent(input: {
       costUsd: input.costUsd,
       quantity: input.quantity,
       occurredAt: new Date(input.occurredAt),
-      metadata: input.metadata ?? { model: "claude-sonnet" },
+      metadata: (input.metadata ?? {
+        model: "claude-sonnet",
+      }) as Prisma.InputJsonObject,
     },
   });
 }
