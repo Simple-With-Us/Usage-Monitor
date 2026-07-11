@@ -4,6 +4,7 @@ import {
   mergeProviderConfig,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
+import { unsupportedError } from "./helpers";
 import type { Provider } from "@prisma/client";
 import type { UsageResult } from "./openai";
 
@@ -141,9 +142,30 @@ export async function fetchProviderUsage(
 ): Promise<UsageResult> {
   await loadAdapters();
 
-  const adapter = adapters[provider.name.toLowerCase()] ?? adapters["custom"];
-  if (!adapter) {
-    throw new Error(`No adapter found for provider: ${provider.name}`);
+  // Provider type is the credential-routing boundary. A custom provider may
+  // deliberately use the same display slug as a built-in, but its credential
+  // must still go only to its configured custom endpoint. Conversely, generic
+  // manual rows and unknown built-ins must fail closed instead of falling back
+  // to an adapter selected only by name.
+  const providerType = provider.type.trim().toLowerCase();
+  const providerName = provider.name.trim().toLowerCase();
+  let adapter: AdapterFn;
+
+  if (providerType === "custom") {
+    adapter = adapters["custom"];
+  } else if (providerType === "generic") {
+    unsupportedError(
+      `${provider.name}: generic providers are manual-only and have no poll adapter`
+    );
+  } else if (providerType === "builtin") {
+    const builtinAdapter =
+      providerName === "custom" ? undefined : adapters[providerName];
+    if (!builtinAdapter) {
+      unsupportedError(`No built-in adapter found for provider: ${provider.name}`);
+    }
+    adapter = builtinAdapter;
+  } else {
+    unsupportedError(`Unsupported provider type: ${provider.type}`);
   }
 
   const apiKey = provider.apiKey ? decrypt(provider.apiKey) : "";
