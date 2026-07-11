@@ -14,6 +14,8 @@ describe("project attribution (integration)", () => {
   let persistExternalUsageEvents: typeof import("../external-usage-events").persistExternalUsageEvents;
   let computeProjectBudgetStatus: typeof import("../budget-status").computeProjectBudgetStatus;
   let resolveProjectIdsByName: typeof import("../project-resolver").resolveProjectIdsByName;
+  let summarizeExternalUsageEvents: typeof import("../external-usage-events").summarizeExternalUsageEvents;
+  let sumMonthToDateExternalCostAttribution: typeof import("../external-usage-events").sumMonthToDateExternalCostAttribution;
 
   const NOW = new Date("2026-07-15T12:00:00.000Z");
   const occurredAt = new Date("2026-07-10T00:00:00.000Z");
@@ -26,6 +28,7 @@ describe("project attribution (integration)", () => {
 
     ({ prisma } = await import("@/lib/prisma"));
     ({ persistExternalUsageEvents } = await import("../external-usage-events"));
+    ({ summarizeExternalUsageEvents, sumMonthToDateExternalCostAttribution } = await import("../external-usage-events"));
     ({ computeProjectBudgetStatus } = await import("../budget-status"));
     ({ resolveProjectIdsByName } = await import("../project-resolver"));
   }, 60_000);
@@ -108,6 +111,107 @@ describe("project attribution (integration)", () => {
     await expect(
       persistExternalUsageEvents([{ ...event, projectId: second.id }])
     ).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
+  });
+
+  it("keeps delimiter-containing summary and attribution dimensions distinct", async () => {
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "summary-delimiter-a",
+        sourceApp: "a|b",
+        provider: "c",
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 1,
+        occurredAt,
+      },
+      {
+        idempotencyKey: "summary-delimiter-b",
+        sourceApp: "a",
+        environment: "b|",
+        provider: "c",
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 1,
+        occurredAt,
+      },
+      {
+        idempotencyKey: "attribution-delimiter-a",
+        sourceApp: "c",
+        provider: "a|b",
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 2,
+        occurredAt,
+      },
+      {
+        idempotencyKey: "attribution-delimiter-b",
+        sourceApp: "b|c",
+        provider: "a",
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 3,
+        occurredAt,
+      },
+    ]);
+
+    const summary = await summarizeExternalUsageEvents(
+      new Date("2026-07-01T00:00:00.000Z"),
+      new Date("2026-06-01T00:00:00.000Z")
+    );
+    const attribution = await sumMonthToDateExternalCostAttribution(
+      new Date("2026-07-01T00:00:00.000Z"),
+      new Date("2026-06-01T00:00:00.000Z")
+    );
+
+    expect(summary.groups).toHaveLength(4);
+    expect(attribution).toHaveLength(4);
+  });
+
+  it("does not subtract canonical direct spend from a duplicate provider's snapshot residual", async () => {
+    const project = await prisma.project.create({
+      data: { name: "Duplicate allocation", nameKey: "duplicate allocation" },
+    });
+    await prisma.provider.create({
+      data: {
+        name: "openai",
+        displayName: "Canonical push owner",
+        type: "builtin",
+        plan: { create: { monthlyBudgetUsd: 100 } },
+      },
+    });
+    const duplicate = await prisma.provider.create({
+      data: {
+        name: "OpenAI",
+        displayName: "Independent key",
+        type: "builtin",
+        allocations: { create: { projectId: project.id, percentage: 100 } },
+        snapshots: {
+          create: {
+            fetchedAt: NOW,
+            totalCost: 10,
+            costWindowStart: new Date("2026-07-01T00:00:00.000Z"),
+            costWindowEnd: NOW,
+            costScope: "calendar_month_to_date",
+          },
+        },
+      },
+    });
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "duplicate-direct-cost",
+        sourceApp: "socratic-trade",
+        provider: "openai",
+        projectId: project.id,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 5,
+        occurredAt,
+      },
+    ]);
+
+    const status = await computeProjectBudgetStatus(NOW);
+    expect(status.providers.find((provider) => provider.id === duplicate.id)?.spentUsd).toBe(10);
+    expect(status.projects[0]).toMatchObject({ directUsd: 5, allocatedUsd: 10, spentUsd: 15 });
   });
 
   it("attributes projectId-tagged cost directly and never double-counts under allocation", async () => {

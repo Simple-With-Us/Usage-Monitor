@@ -84,6 +84,13 @@ function requireNonNegativeNumber(value: unknown, field: string): number {
   return parsed;
 }
 
+function parseBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
+}
+
 function parseInterval(value: unknown): SubscriptionInterval {
   if (value === undefined || value === null || value === "") return "monthly";
   if (typeof value !== "string" || !isSubscriptionInterval(value)) {
@@ -169,10 +176,20 @@ function parseKnobEnv(value: unknown, field: string): Record<string, string> | n
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${field} must be a JSON object mapping knob names to string values`);
   }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) {
+    throw new Error(`${field} must contain 100 entries or fewer`);
+  }
   const result: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, entry] of entries) {
+    if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(key)) {
+      throw new Error(`${field}.${key} must be an uppercase environment-variable name`);
+    }
     if (typeof entry !== "string") {
       throw new Error(`${field}.${key} must be a string value`);
+    }
+    if (entry.length > 1_000) {
+      throw new Error(`${field}.${key} must be 1000 characters or fewer`);
     }
     result[key] = entry;
   }
@@ -220,7 +237,9 @@ export function parseSubscriptionCreateInput(
     startDate,
     currentPeriodStart,
     nextRenewalAt,
-    autoRenew: record.autoRenew === undefined ? true : Boolean(record.autoRenew),
+    autoRenew: record.autoRenew === undefined
+      ? true
+      : parseBoolean(record.autoRenew, "autoRenew"),
     status: parseStatus(record.status),
     notes: cleanNullableString(record.notes, "notes"),
     knobEnv: parseKnobEnv(record.knobEnv, "knobEnv"),
@@ -259,7 +278,9 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   if (record.currency !== undefined) {
     update.currency = parseCurrency(record.currency);
   }
-  if (record.autoRenew !== undefined) update.autoRenew = Boolean(record.autoRenew);
+  if (record.autoRenew !== undefined) {
+    update.autoRenew = parseBoolean(record.autoRenew, "autoRenew");
+  }
   if (record.status !== undefined) update.status = parseStatus(record.status);
   if (record.notes !== undefined) update.notes = cleanNullableString(record.notes, "notes");
   if (record.interval !== undefined) update.interval = parseInterval(record.interval);

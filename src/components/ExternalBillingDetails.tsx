@@ -1,3 +1,10 @@
+import {
+  EXTERNAL_BILLING_STALE_AFTER_MS,
+  isExternalBillingStale,
+} from "@/lib/external-billing-freshness";
+
+export { isExternalBillingStale } from "@/lib/external-billing-freshness";
+
 export interface ExternalBillingRecord {
   source: string;
   externalId: string | null;
@@ -15,17 +22,6 @@ export interface ExternalBillingRecord {
   spendLimitUsd: number | null;
   spendLimitWindow: string | null;
   syncedAt: string;
-}
-
-const EXTERNAL_BILLING_STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
-
-export function isExternalBillingStale(
-  record: Pick<ExternalBillingRecord, "syncedAt">,
-  staleAfterMs = EXTERNAL_BILLING_STALE_AFTER_MS,
-  now = Date.now()
-): boolean {
-  const syncedAt = Date.parse(record.syncedAt);
-  return !Number.isFinite(syncedAt) || now - syncedAt > EXTERNAL_BILLING_STALE_AFTER_MS;
 }
 
 function formatCurrency(amount: number, currency: string | null): string {

@@ -160,6 +160,19 @@ export async function PUT(
   }
 
   const updateData: Prisma.ProviderUpdateInput = {};
+  if (input.allocations?.length) {
+    const projectIds = input.allocations.map((allocation) => allocation.projectId);
+    const projects = await prisma.project.findMany({
+      where: { id: { in: projectIds } },
+      select: { id: true },
+    });
+    if (projects.length !== projectIds.length) {
+      return NextResponse.json(
+        { error: "allocations contains an unknown projectId" },
+        { status: 400 }
+      );
+    }
+  }
   if (input.displayName !== undefined) updateData.displayName = input.displayName;
   if (input.config !== undefined) {
     if (input.config === null) {

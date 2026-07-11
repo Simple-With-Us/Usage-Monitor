@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { computeProjectBudgetStatus } from "@/lib/budget-status";
+import { readJsonBody } from "@/lib/provider-input";
+import { parseProjectCreateInput } from "@/lib/project-input";
 
 export async function GET(request: NextRequest) {
   try {
@@ -20,42 +22,41 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: Request) {
+  let input;
   try {
-    const body = await request.json();
-    const { name, description, monthlyBudgetUsd } = body;
+    input = parseProjectCreateInput(await readJsonBody(request));
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Invalid request" },
+      { status: 400 }
+    );
+  }
 
-    if (!name) {
-      return NextResponse.json(
-        { error: "Project name is required" },
-        { status: 400 }
-      );
-    }
-
+  try {
     // Case-insensitive uniqueness: Project.name is only BINARY-unique in SQLite,
     // but project attribution resolves producer-supplied names case-insensitively
     // (project-resolver.ts). Allowing "Foo" and "foo" to coexist would make that
     // resolution ambiguous. The app-level check gives a friendly message; the
     // unique `nameKey` column is the real guarantee (it closes the race two
     // app-level checks can't — both would pass, but the second insert fails).
-    const nameKey = String(name).trim().toLowerCase();
     const existing = await prisma.project.findMany({ select: { name: true } });
-    if (existing.some((p) => p.name.trim().toLowerCase() === nameKey)) {
+    if (existing.some((p) => p.name.trim().toLowerCase() === input.nameKey)) {
       return NextResponse.json(
         { error: "Project name already exists (names are case-insensitive)" },
-        { status: 400 }
+        { status: 409 }
       );
     }
 
     const project = await prisma.project.create({
       data: {
-        name,
-        nameKey,
-        description,
-        monthlyBudgetUsd,
+        name: input.name,
+        nameKey: input.nameKey,
+        description: input.description,
+        monthlyBudgetUsd: input.monthlyBudgetUsd,
       },
     });
 
-    return NextResponse.json(project);
+    return NextResponse.json(project, { status: 201 });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return NextResponse.json(

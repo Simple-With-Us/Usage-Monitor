@@ -574,9 +574,19 @@ export async function computeProjectBudgetStatus(now: Date = new Date()): Promis
     for (const alloc of proj.allocations) {
       const provider = providerById.get(alloc.providerId);
       if (!provider) continue;
-      const attributed = attributedByProvider.get(provider.name.toLowerCase()) ?? 0;
+      // Name-keyed pushed spend is assigned to exactly one canonical provider
+      // row in computeBudgetStatus. Subtract its direct attribution only from
+      // that same owner; duplicate provider rows can carry independent poll
+      // snapshots, and subtracting the shared name total from every duplicate
+      // silently drops part of their allocatable spend.
+      const ownsNameKeyedSpend = provider.pushedMonthToDateUsd > 0;
+      const attributed = ownsNameKeyedSpend
+        ? attributedByProvider.get(provider.name.toLowerCase()) ?? 0
+        : 0;
       const residual = Math.max(0, provider.spentUsd - attributed);
-      const attributedFixed = attributedFixedByProvider.get(provider.name.toLowerCase()) ?? 0;
+      const attributedFixed = provider.subscriptionMonthToDateUsd > 0
+        ? attributedFixedByProvider.get(provider.name.toLowerCase()) ?? 0
+        : 0;
       const fixedResidual = Math.max(0, provider.fixedAccruedUsd - attributedFixed);
       const ratio = Math.max(0, Math.min(100, alloc.percentage)) / 100;
       allocatedUsd += residual * ratio;

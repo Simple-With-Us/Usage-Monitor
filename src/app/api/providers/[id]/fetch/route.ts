@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { recordProviderUsage } from "@/lib/usage-recorder";
 import { AdapterError } from "@/lib/adapters/helpers";
+import { isManualProvider } from "@/lib/provider-polling";
 
 export async function POST(
   _request: NextRequest,
@@ -12,6 +13,15 @@ export async function POST(
   const provider = await prisma.provider.findUnique({ where: { id } });
   if (!provider) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  if (isManualProvider(provider)) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "manual_provider",
+      message: "Manual providers do not have an automated usage endpoint.",
+    });
   }
 
   try {

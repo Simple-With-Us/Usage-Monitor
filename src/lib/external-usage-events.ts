@@ -270,13 +270,15 @@ function summaryGroupKey(group: {
   service: string | null;
   projectId: string | null;
 }): string {
-  return [
+  // JSON tuple encoding is delimiter-safe. A plain `join("|")` merged distinct
+  // legal values such as ["a|b", "", "c"] and ["a", "b|", "c"].
+  return JSON.stringify([
     group.sourceApp,
     group.environment ?? "",
     group.provider,
     group.service ?? "",
     group.projectId ?? "",
-  ].join("|");
+  ]);
 }
 
 function mergeSummaryGroup(
@@ -536,7 +538,12 @@ export async function sumMonthToDateExternalCostAttribution(
     metricType: string,
     cost: number
   ) => {
-    const key = `${provider.toLowerCase()}|${sourceApp.toLowerCase()}|${projectId ?? ""}|${metricType}`;
+    const key = JSON.stringify([
+      provider.toLowerCase(),
+      sourceApp.toLowerCase(),
+      projectId ?? "",
+      metricType,
+    ]);
     const existing = rows.get(key);
     if (existing) {
       existing.costUsd += cost;

@@ -11,6 +11,7 @@ import {
   providerConfigForClient,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
+import { planCredentialGroup } from "@/lib/provider-grouping";
 
 function buildKeyPreview(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
@@ -176,19 +177,35 @@ export async function POST(request: NextRequest) {
 
   let groupId = input.groupId;
 
-  if (!groupId) {
-    const existingWithSameName = await prisma.provider.findFirst({
-      where: { name: input.name },
-      orderBy: { createdAt: "asc" },
+  if (input.allocations?.length) {
+    const projectIds = input.allocations.map((allocation) => allocation.projectId);
+    const projects = await prisma.project.findMany({
+      where: { id: { in: projectIds } },
+      select: { id: true },
     });
+    if (projects.length !== projectIds.length) {
+      return NextResponse.json(
+        { error: "allocations contains an unknown projectId" },
+        { status: 400 }
+      );
+    }
+  }
 
-    if (existingWithSameName) {
-      if (existingWithSameName.groupId) {
-        groupId = existingWithSameName.groupId;
-      } else {
-        groupId = input.name;
+  if (!groupId) {
+    const existingProviders = await prisma.provider.findMany({
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, groupId: true, apiKey: true },
+    });
+    const groupPlan = planCredentialGroup(
+      input.name,
+      input.apiKey,
+      existingProviders
+    );
+    if (groupPlan) {
+      groupId = groupPlan.groupId;
+      if (groupPlan.providerIdsToBackfill.length > 0) {
         await prisma.provider.updateMany({
-          where: { name: input.name, groupId: null },
+          where: { id: { in: groupPlan.providerIdsToBackfill }, groupId: null },
           data: { groupId },
         });
       }

@@ -9,6 +9,7 @@ import {
   markSchedulerTickStarted,
 } from "@/lib/runtime-health";
 import { reconcileProviderExternalBilling } from "@/lib/provider-external-billing";
+import { isManualProvider } from "@/lib/provider-polling";
 import type { Provider, UsageSnapshot } from "@prisma/client";
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
@@ -109,6 +110,7 @@ export interface ProviderFetchOutcome {
   status: "success" | "failure" | "skipped";
   durationMs: number;
   errorCode?: AdapterErrorCode | "UNKNOWN";
+  skipReason?: "manual_provider" | "not_due";
 }
 
 export interface FetchAllProvidersResult {
@@ -152,6 +154,17 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
 
     for (const { snapshots, ...provider } of providers) {
       const startedAt = Date.now();
+      if (isManualProvider(provider)) {
+        skipped++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "skipped",
+          durationMs: Date.now() - startedAt,
+          skipReason: "manual_provider",
+        });
+        continue;
+      }
       const latestFetchedAt = snapshots[0]?.fetchedAt.getTime();
       const intervalMs = provider.refreshIntervalMin * 60 * 1000;
       if (latestFetchedAt && now - latestFetchedAt < intervalMs) {
@@ -161,6 +174,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
           name: provider.name,
           status: "skipped",
           durationMs: Date.now() - startedAt,
+          skipReason: "not_due",
         });
         continue;
       }
