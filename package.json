@@ -13,6 +13,7 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
+    "audit:subscription-currency": "node scripts/audit-subscription-currency.mjs",
     "test": "vitest run"
   },
   "dependencies": {
@@ -21,7 +22,8 @@
     "protobufjs": "^8.6.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "recharts": "^2.15.0",
+    "react-is": "^19.0.0",
+    "recharts": "^3.9.2",
     "uuid": "^11.0.0"
   },
   "devDependencies": {

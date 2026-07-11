@@ -35,6 +35,7 @@ export interface SubscriptionCreateInput {
 // startDate) are surfaced separately so the route can recompute the cycle only
 // when one actually changes.
 export interface SubscriptionUpdateInput {
+  providerId?: string;
   projectId?: string | null;
   name?: string;
   description?: string | null;
@@ -120,6 +121,14 @@ function parseStatus(value: unknown): SubscriptionStatus {
   return value;
 }
 
+function parseCurrency(value: unknown): "USD" {
+  const currency = (cleanNullableString(value, "currency", 8) ?? "USD").toUpperCase();
+  if (currency !== "USD") {
+    throw new Error("currency must be USD until authoritative FX conversion is configured");
+  }
+  return "USD";
+}
+
 // A flat map of env-var knob name -> string value (e.g.
 // {"PROVIDER_QUOTA_TIINGO_PER_HOUR": "10000"}). Every value must be a string
 // so it round-trips directly into an env var — no numbers/booleans/nesting.
@@ -169,7 +178,7 @@ export function parseSubscriptionCreateInput(
     name,
     description: cleanNullableString(record.description, "description"),
     costUsd,
-    currency: (cleanNullableString(record.currency, "currency", 8) ?? "USD").toUpperCase(),
+    currency: parseCurrency(record.currency),
     interval,
     intervalCount,
     anchorDay,
@@ -187,6 +196,9 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   const record = asRecord(body);
   const update: SubscriptionUpdateInput = {};
 
+  if (record.providerId !== undefined) {
+    update.providerId = cleanString(record.providerId, "providerId");
+  }
   if (record.projectId !== undefined) {
     update.projectId =
       record.projectId === null || record.projectId === ""
@@ -199,7 +211,7 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   }
   if (record.costUsd !== undefined) update.costUsd = requireNonNegativeNumber(record.costUsd, "costUsd");
   if (record.currency !== undefined) {
-    update.currency = (cleanNullableString(record.currency, "currency", 8) ?? "USD").toUpperCase();
+    update.currency = parseCurrency(record.currency);
   }
   if (record.autoRenew !== undefined) update.autoRenew = Boolean(record.autoRenew);
   if (record.status !== undefined) update.status = parseStatus(record.status);

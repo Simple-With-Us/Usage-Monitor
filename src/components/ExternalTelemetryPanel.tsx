@@ -1,4 +1,6 @@
-import React from "react";
+"use client";
+
+import { useState } from "react";
 
 export interface ExternalUsageGroup {
   sourceApp: string;
@@ -29,8 +31,10 @@ interface ExternalTelemetryPanelProps {
 }
 
 export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemetryPanelProps) {
+  const [showAll, setShowAll] = useState(false);
   const externalCost = usageSummary.totalCostUsd;
   const externalRequests = usageSummary.totalRequests;
+  const visibleGroups = showAll ? usageSummary.groups : usageSummary.groups.slice(0, 8);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -61,7 +65,7 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
         </div>
       ) : (
         <div className="divide-y divide-gray-100">
-          {usageSummary.groups.slice(0, 8).map((group) => {
+          {visibleGroups.map((group) => {
             const usagePercent =
               group.limit && group.totalQuantity
                 ? Math.min((group.totalQuantity / group.limit) * 100, 999)
@@ -105,7 +109,14 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                 </div>
                 {usagePercent != null && (
                   <div className="mt-3">
-                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      role="progressbar"
+                      aria-label={`${group.provider} quota usage`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.min(usagePercent, 100)}
+                      className="h-2 bg-gray-100 rounded-full overflow-hidden"
+                    >
                       <div
                         className={`h-full ${
                           usagePercent >= 90
@@ -127,6 +138,17 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
               </div>
             );
           })}
+          {usageSummary.groups.length > 8 && (
+            <div className="px-6 py-3">
+              <button
+                type="button"
+                onClick={() => setShowAll((expanded) => !expanded)}
+                className="text-xs font-medium text-blue-600 hover:text-blue-800"
+              >
+                {showAll ? "Show fewer groups" : `Show all ${usageSummary.groups.length} groups`}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

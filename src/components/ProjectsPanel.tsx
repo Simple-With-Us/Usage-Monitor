@@ -7,6 +7,8 @@ export interface ProjectBudgetStatus {
   description: string | null;
   monthlyBudgetUsd: number | null;
   spentUsd: number;
+  directUsd?: number;
+  allocatedUsd?: number;
   remainingUsd: number | null;
   percentUsed: number | null;
   status: "ok" | "warning" | "exceeded" | "unconfigured";
@@ -25,7 +27,7 @@ export default function ProjectsPanel({ projects }: ProjectsPanelProps) {
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-gray-800">Projects</h2>
-        <Link href="/settings" className="text-xs font-medium text-blue-600">
+        <Link href="/settings?tab=projects" className="text-xs font-medium text-blue-600">
           Manage projects
         </Link>
       </div>
@@ -48,6 +50,13 @@ export default function ProjectsPanel({ projects }: ProjectsPanelProps) {
                       currency: "USD",
                     }).format(project.spentUsd)}
                   </p>
+                  {(project.directUsd != null || project.allocatedUsd != null) && (
+                    <p className="text-[10px] text-gray-500">
+                      {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(project.directUsd ?? 0)} direct
+                      {" · "}
+                      {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(project.allocatedUsd ?? 0)} allocated
+                    </p>
+                  )}
                   {project.monthlyBudgetUsd != null && (
                     <p className="text-xs text-gray-500">
                       of {new Intl.NumberFormat("en-US", {
@@ -60,7 +69,14 @@ export default function ProjectsPanel({ projects }: ProjectsPanelProps) {
               </div>
               {usagePercent != null && (
                 <div className="mt-3">
-                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div
+                    role="progressbar"
+                    aria-label={`${project.name} monthly budget used`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.min(usagePercent, 100)}
+                    className="h-2 bg-gray-100 rounded-full overflow-hidden"
+                  >
                     <div
                       className={`h-full ${
                         usagePercent >= 90

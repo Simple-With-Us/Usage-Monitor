@@ -2,12 +2,75 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --chart-grid: #e5e7eb;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-text: #111827;
+}
+
 body {
   @apply bg-gray-50 text-gray-900 antialiased;
   min-height: 100vh;
 }
 
+@media (max-width: 639px) {
+  .responsive-table,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .responsive-table thead {
+    display: none;
+  }
+
+  .responsive-table tbody {
+    padding: 0.5rem 0.875rem;
+  }
+
+  .responsive-table tbody tr {
+    margin-bottom: 0.75rem;
+    border: 1px solid rgb(229 231 235);
+    border-radius: 0.75rem;
+    padding: 0.5rem 0.875rem;
+  }
+
+  .responsive-table tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .responsive-table tbody td {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 0.42fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 0.75rem;
+    border: 0;
+    padding: 0.5rem 0;
+    text-align: left;
+  }
+
+  .responsive-table tbody td::before {
+    content: attr(data-label);
+    color: rgb(107 114 128);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+  }
+
+  .responsive-table .table-actions {
+    justify-content: flex-start;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
+  :root {
+    --chart-grid: #374151;
+    --chart-tooltip-bg: #111827;
+    --chart-tooltip-text: #f3f4f6;
+  }
   body {
     @apply bg-gray-900 text-gray-100;
   }
@@ -20,6 +83,25 @@ body {
   .border-gray-100 {
     @apply border-gray-700;
   }
+  .border-gray-300 {
+    @apply border-gray-600;
+  }
+  .border-gray-50 {
+    @apply border-gray-700;
+  }
+  .border-blue-100,
+  .border-blue-200 {
+    @apply border-blue-900;
+  }
+  .border-red-200 {
+    @apply border-red-900;
+  }
+  .border-amber-200 {
+    @apply border-amber-900;
+  }
+  .border-emerald-200 {
+    @apply border-emerald-900;
+  }
   .text-gray-900 {
     @apply text-white;
   }
@@ -29,10 +111,98 @@ body {
   .text-gray-500 {
     @apply text-gray-400;
   }
+  .text-gray-700 {
+    @apply text-gray-200;
+  }
+  .text-gray-600 {
+    @apply text-gray-300;
+  }
+  .text-blue-700,
+  .text-blue-800 {
+    @apply text-blue-300;
+  }
+  .text-blue-600 {
+    @apply text-blue-400;
+  }
+  .text-red-700 {
+    @apply text-red-300;
+  }
+  .text-red-600 {
+    @apply text-red-400;
+  }
+  .text-amber-700 {
+    @apply text-amber-300;
+  }
+  .text-amber-600,
+  .text-amber-800 {
+    @apply text-amber-300;
+  }
+  .text-emerald-700 {
+    @apply text-emerald-300;
+  }
+  .text-emerald-600 {
+    @apply text-emerald-400;
+  }
+  .text-purple-600 {
+    @apply text-purple-400;
+  }
+  .text-indigo-700 {
+    @apply text-indigo-300;
+  }
   .bg-gray-100 {
+    @apply bg-gray-700;
+  }
+  .bg-gray-200 {
     @apply bg-gray-700;
   }
   .bg-gray-50 {
     @apply bg-gray-800;
+  }
+  .bg-blue-50,
+  .bg-blue-100 {
+    @apply bg-blue-950;
+  }
+  .bg-red-50,
+  .bg-red-100 {
+    @apply bg-red-950;
+  }
+  .bg-amber-50 {
+    @apply bg-amber-950;
+  }
+  .bg-emerald-50 {
+    @apply bg-emerald-950;
+  }
+  .bg-indigo-50 {
+    @apply bg-indigo-950;
+  }
+  input,
+  select,
+  textarea {
+    @apply border-gray-600 bg-gray-900 text-gray-100;
+    color-scheme: dark;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    @apply text-gray-500;
+  }
+  .hover\:bg-gray-50:hover,
+  .hover\:bg-gray-100:hover,
+  .hover\:bg-gray-200:hover {
+    @apply bg-gray-700;
+  }
+  .hover\:text-gray-900:hover,
+  .hover\:text-gray-700:hover,
+  .hover\:text-gray-600:hover {
+    @apply text-white;
+  }
+  .divide-gray-50 > :not([hidden]) ~ :not([hidden]),
+  .divide-gray-100 > :not([hidden]) ~ :not([hidden]) {
+    @apply border-gray-700;
+  }
+  .responsive-table tbody tr {
+    @apply border-gray-700;
+  }
+  .responsive-table tbody td::before {
+    @apply text-gray-400;
   }
 }

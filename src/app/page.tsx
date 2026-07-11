@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import ProviderCard from "@/components/ProviderCard";
 import SentryHealthCard from "@/components/SentryHealthCard";
 import DashboardSummaryCards from "@/components/DashboardSummaryCards";
 import ExternalTelemetryPanel, { type ExternalUsageSummary } from "@/components/ExternalTelemetryPanel";
 import ProjectsPanel, { type ProjectBudgetStatus } from "@/components/ProjectsPanel";
+import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
 
 interface Provider {
   id: string;
@@ -19,6 +20,8 @@ interface Provider {
   keyPreview?: string | null;
   estimatedMonthlyCostUsd: number;
   projectedEomUsd: number;
+  spentUsd?: number;
+  externalBilling?: ExternalBillingRecord[];
   billingMode: "actual" | "estimated" | "manual";
   alerts: {
     severity: "critical" | "warning" | "info";
@@ -33,32 +36,68 @@ interface Provider {
   } | null;
 }
 
+async function fetchJson<T>(url: string, label: string): Promise<T> {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch ${label}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export default function DashboardPage() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [usageSummary, setUsageSummary] = useState<ExternalUsageSummary | null>(null);
   const [projects, setProjects] = useState<ProjectBudgetStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const loadedOnce = useRef(false);
+  const hasProviderData = useRef(false);
 
   const fetchProviders = useCallback(async () => {
+    if (loadedOnce.current && hasProviderData.current) setRefreshing(true);
+    else setLoading(true);
+    setError("");
+    setWarnings([]);
+
     try {
-      setLoading(true);
-      setError("");
-      const [providersRes, usageRes, projectsRes] = await Promise.all([
-        fetch("/api/providers"),
-        fetch("/api/usage-events?days=30"),
-        fetch("/api/projects"),
+      const [providersResult, usageResult, projectsResult] = await Promise.allSettled([
+        fetchJson<Provider[]>("/api/providers", "providers"),
+        fetchJson<ExternalUsageSummary>("/api/usage-events?days=30", "app telemetry"),
+        fetchJson<ProjectBudgetStatus[]>("/api/projects", "projects"),
       ]);
-      if (!providersRes.ok) throw new Error("Failed to fetch providers");
-      if (!usageRes.ok) throw new Error("Failed to fetch app telemetry");
-      if (!projectsRes.ok) throw new Error("Failed to fetch projects");
-      setProviders(await providersRes.json());
-      setUsageSummary(await usageRes.json());
-      setProjects(await projectsRes.json());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+
+      const nextWarnings: string[] = [];
+      if (providersResult.status === "fulfilled") {
+        setProviders(providersResult.value);
+        hasProviderData.current = true;
+      } else if (!hasProviderData.current) {
+        setError(providersResult.reason instanceof Error ? providersResult.reason.message : "Failed to load providers");
+      } else {
+        nextWarnings.push("Provider data could not be refreshed; showing the last successful result.");
+      }
+
+      if (usageResult.status === "fulfilled") {
+        setUsageSummary(usageResult.value);
+      } else {
+        nextWarnings.push("External app telemetry is temporarily unavailable.");
+      }
+
+      if (projectsResult.status === "fulfilled") {
+        setProjects(projectsResult.value);
+      } else {
+        nextWarnings.push("Project budgets are temporarily unavailable.");
+      }
+
+      setWarnings(nextWarnings);
+      if (providersResult.status === "fulfilled") setLastUpdatedAt(new Date().toISOString());
     } finally {
+      loadedOnce.current = true;
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
@@ -84,7 +123,7 @@ export default function DashboardPage() {
     return sum + (groupBalance ?? 0);
   }, 0);
   const totalCost = providers.reduce(
-    (sum, p) => sum + (p.latestSnapshot?.totalCost || 0),
+    (sum, p) => sum + (p.spentUsd ?? p.latestSnapshot?.totalCost ?? 0),
     0
   );
   const totalProjectedMonthlyCost = providers.reduce(
@@ -102,7 +141,14 @@ export default function DashboardPage() {
     provider.alerts
       .filter((alert) => alert.severity !== "info")
       .map((alert) => ({ provider, alert }))
-  );
+  ).sort((left, right) => {
+    const severityRank = { critical: 0, warning: 1, info: 2 } as const;
+    return (
+      severityRank[left.alert.severity] - severityRank[right.alert.severity] ||
+      left.provider.displayName.localeCompare(right.provider.displayName) ||
+      left.alert.message.localeCompare(right.alert.message)
+    );
+  });
   const criticalCount = attentionItems.filter(
     (item) => item.alert.severity === "critical"
   ).length;
@@ -129,8 +175,9 @@ export default function DashboardPage() {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <p className="text-red-600">{error}</p>
+        <p role="alert" className="text-red-600">{error}</p>
         <button
+          type="button"
           onClick={fetchProviders}
           className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
         >
@@ -142,9 +189,30 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <div className="flex items-center gap-3">
+          {lastUpdatedAt && (
+            <span className="hidden text-xs text-gray-500 sm:inline">
+              Updated {new Date(lastUpdatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={fetchProviders}
+            disabled={refreshing}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
       </div>
+
+      {warnings.length > 0 && (
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {warnings.join(" ")}
+        </div>
+      )}
 
       <DashboardSummaryCards
         totalBalance={totalBalance}
@@ -207,6 +275,7 @@ export default function DashboardPage() {
       {providers.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 gap-4">
           <svg
+            aria-hidden="true"
             className="w-16 h-16 text-gray-300"
             fill="none"
             stroke="currentColor"
@@ -240,6 +309,8 @@ export default function DashboardPage() {
               keyPreview={provider.keyPreview}
               estimatedMonthlyCostUsd={provider.estimatedMonthlyCostUsd}
               projectedEomUsd={provider.projectedEomUsd}
+              spentUsd={provider.spentUsd}
+              externalBilling={provider.externalBilling}
               billingMode={provider.billingMode}
               alerts={provider.alerts}
               latestSnapshot={provider.latestSnapshot}

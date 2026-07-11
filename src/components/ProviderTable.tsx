@@ -54,11 +54,22 @@ export default function ProviderTable({
     critical: provider.alerts.filter((a) => a.severity === "critical").length,
   });
 
+  const orderedProviders = [...providers].sort((left, right) => {
+    const severity = (provider: Provider) =>
+      provider.alerts.some((alert) => alert.severity === "critical")
+        ? 0
+        : provider.alerts.some((alert) => alert.severity === "warning")
+          ? 1
+          : 2;
+    return severity(left) - severity(right) || left.displayName.localeCompare(right.displayName);
+  });
+
   if (providers.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-4 text-center bg-white rounded-xl border border-gray-200">
         <p className="text-gray-500">No providers configured yet.</p>
         <button
+          type="button"
           onClick={onAddProvider}
           className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
         >
@@ -70,7 +81,8 @@ export default function ProviderTable({
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="responsive-table w-full text-sm">
+        <caption className="sr-only">Configured API providers</caption>
         <thead>
           <tr className="border-b border-gray-100 bg-gray-50">
             <th className="text-left px-6 py-3 font-medium text-gray-500">
@@ -108,15 +120,16 @@ export default function ProviderTable({
           </tr>
         </thead>
         <tbody>
-          {providers.map((provider) => {
+          {orderedProviders.map((provider) => {
             const alertCounts = countProviderAlerts(provider);
+            const connectedBilling = provider.externalBilling?.[0];
 
             return (
               <tr
                 key={provider.id}
                 className="border-b border-gray-50 hover:bg-gray-50"
               >
-                <td className="px-6 py-4">
+                <td data-label="Name" className="px-6 py-4">
                   <div>
                     <p className="font-medium text-gray-900">
                       {provider.displayName}
@@ -132,18 +145,20 @@ export default function ProviderTable({
                     )}
                   </div>
                 </td>
-                <td className="px-6 py-4 hidden md:table-cell">
+                <td data-label="Label" className="px-6 py-4 hidden md:table-cell">
                   <span className="text-xs text-gray-400">
                     {provider.label || "--"}
                   </span>
                 </td>
-                <td className="px-6 py-4 hidden sm:table-cell">
+                <td data-label="Type" className="px-6 py-4 hidden sm:table-cell">
                   <span className="inline-flex px-2 py-0.5 text-xs font-medium uppercase rounded bg-gray-100 text-gray-500">
                     {provider.type}
                   </span>
                 </td>
-                <td className="px-6 py-4 hidden sm:table-cell">
+                <td data-label="Status" className="px-6 py-4 hidden sm:table-cell">
                   <button
+                    type="button"
+                    aria-label={`${provider.isActive ? "Deactivate" : "Activate"} ${provider.displayName}`}
                     onClick={() => onToggleActive(provider)}
                     disabled={actionLoading === provider.id}
                     className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors ${
@@ -160,23 +175,32 @@ export default function ProviderTable({
                     {provider.isActive ? "Active" : "Inactive"}
                   </button>
                 </td>
-                <td className="px-6 py-4">
+                <td data-label="Spend / Budget" className="px-6 py-4">
                   <div className="text-xs">
                     <p className="font-medium text-gray-900">
-                      {formatUsd(provider.estimatedMonthlyCostUsd)}
+                      {formatUsd(provider.spentUsd ?? provider.estimatedMonthlyCostUsd)} MTD
                     </p>
+                    {provider.projectedEomUsd != null && (
+                      <p className="text-gray-400">Projected {formatUsd(provider.projectedEomUsd)}</p>
+                    )}
                     <p className="text-gray-400">
                       Budget {formatUsd(provider.plan?.monthlyBudgetUsd)}
                     </p>
                     <span className="inline-flex mt-1 px-1.5 py-0.5 rounded bg-gray-100 text-[10px] font-medium uppercase text-gray-500">
                       {provider.billingMode}
                     </span>
+                    {connectedBilling && (
+                      <p className="mt-1 text-[10px] font-medium text-blue-700">
+                        Connected: {connectedBilling.planName || connectedBilling.kind}
+                        {connectedBilling.status ? ` · ${connectedBilling.status}` : ""}
+                      </p>
+                    )}
                   </div>
                 </td>
-                <td className="px-6 py-4 text-xs text-gray-500 hidden lg:table-cell">
+                <td data-label="Renewal" className="px-6 py-4 text-xs text-gray-500 hidden lg:table-cell">
                   {formatDateOnly(provider.plan?.renewalDate)}
                 </td>
-                <td className="px-6 py-4">
+                <td data-label="Alerts" className="px-6 py-4">
                   {alertCounts.open > 0 ? (
                     <span
                       className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${
@@ -199,7 +223,7 @@ export default function ProviderTable({
                   )}
                 </td>
                 {hasAnyCredits && (
-                  <td className="px-6 py-4 text-right text-purple-600 text-xs">
+                  <td data-label="Credits" className="px-6 py-4 text-right text-purple-600 text-xs">
                     {provider.latestSnapshot?.credits != null
                       ? new Intl.NumberFormat("en-US").format(
                           provider.latestSnapshot.credits
@@ -207,12 +231,14 @@ export default function ProviderTable({
                       : "--"}
                   </td>
                 )}
-                <td className="px-6 py-4 text-gray-500 text-xs hidden xl:table-cell">
+                <td data-label="Last fetched" className="px-6 py-4 text-gray-500 text-xs hidden xl:table-cell">
                   {formatDate(provider.latestSnapshot?.fetchedAt ?? null)}
                 </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center justify-end gap-2">
+                <td data-label="Actions" className="px-6 py-4">
+                  <div className="table-actions flex flex-wrap items-center justify-end gap-2">
                     <button
+                      type="button"
+                      aria-label={`Fetch ${provider.displayName} now`}
                       onClick={() => onFetchNow(provider.id)}
                       disabled={actionLoading === provider.id}
                       className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
@@ -220,6 +246,8 @@ export default function ProviderTable({
                       {actionLoading === provider.id ? "..." : "Fetch Now"}
                     </button>
                     <button
+                      type="button"
+                      aria-label={`Edit ${provider.displayName}`}
                       onClick={() => onEdit(provider)}
                       className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors"
                     >
@@ -228,6 +256,8 @@ export default function ProviderTable({
                     {deleteConfirm === provider.id ? (
                       <div className="flex items-center gap-1">
                         <button
+                          type="button"
+                          aria-label={`Confirm deletion of ${provider.displayName}`}
                           onClick={() => onDelete(provider.id)}
                           disabled={actionLoading === provider.id}
                           className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50"
@@ -235,6 +265,8 @@ export default function ProviderTable({
                           Confirm
                         </button>
                         <button
+                          type="button"
+                          aria-label={`Cancel deletion of ${provider.displayName}`}
                           onClick={() => onDeleteConfirmCancel()}
                           className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-600"
                         >
@@ -243,6 +275,8 @@ export default function ProviderTable({
                       </div>
                     ) : (
                       <button
+                        type="button"
+                        aria-label={`Delete ${provider.displayName}`}
                         onClick={() => onDeleteConfirmStart(provider.id)}
                         className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
                       >

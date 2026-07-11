@@ -38,8 +38,20 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       return NextResponse.json({ error: "projectId does not match a known project" }, { status: 400 });
     }
   }
+  if (update.providerId !== undefined) {
+    const provider = await prisma.provider.findUnique({ where: { id: update.providerId } });
+    if (!provider) {
+      return NextResponse.json(
+        { error: "providerId does not match a known provider" },
+        { status: 400 }
+      );
+    }
+  }
 
   const data: Prisma.SubscriptionUpdateInput = {};
+  if (update.providerId !== undefined) {
+    data.provider = { connect: { id: update.providerId } };
+  }
   if (update.name !== undefined) data.name = update.name;
   if (update.description !== undefined) data.description = update.description;
   if (update.costUsd !== undefined) data.costUsd = update.costUsd;

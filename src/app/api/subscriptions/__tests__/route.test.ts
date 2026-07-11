@@ -19,6 +19,7 @@ import { setupPrismaSqliteTestDb } from "@/lib/__tests__/setup-test-db";
 let dbPath: string;
 let GET: typeof import("../route").GET;
 let POST: typeof import("../route").POST;
+let PUT: typeof import("../[id]/route").PUT;
 let prisma: typeof import("@/lib/prisma").prisma;
 let createSessionToken: typeof import("@/lib/auth").createSessionToken;
 let SESSION_COOKIE_NAME: typeof import("@/lib/auth").SESSION_COOKIE_NAME;
@@ -37,6 +38,7 @@ beforeAll(async () => {
   setupPrismaSqliteTestDb(dbPath);
 
   ({ GET, POST } = await import("../route"));
+  ({ PUT } = await import("../[id]/route"));
   ({ prisma } = await import("@/lib/prisma"));
   ({ createSessionToken, SESSION_COOKIE_NAME } = await import("@/lib/auth"));
 }, 60_000);
@@ -329,5 +331,68 @@ describe("POST /api/subscriptions — stays session-cookie-only", () => {
 
     const stored = await prisma.subscription.findUnique({ where: { id: body.id } });
     expect(stored?.knobEnv).toEqual({ SOME_KNOB: "value" });
+  });
+});
+
+describe("PUT /api/subscriptions/:id — provider editing", () => {
+  it("moves a subscription to another existing provider", async () => {
+    const original = await prisma.provider.create({
+      data: { name: "fmp", displayName: "FMP", type: "builtin", refreshIntervalMin: 60 },
+    });
+    const replacement = await prisma.provider.create({
+      data: { name: "tiingo", displayName: "Tiingo", type: "builtin", refreshIntervalMin: 60 },
+    });
+    const subscription = await prisma.subscription.create({
+      data: {
+        providerId: original.id,
+        name: "Market data plan",
+        costUsd: 20,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+      },
+    });
+
+    const response = await PUT(
+      new Request(`https://usage.jays.services/api/subscriptions/${subscription.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: replacement.id }),
+      }),
+      { params: Promise.resolve({ id: subscription.id }) }
+    );
+
+    expect(response.status).toBe(200);
+    const stored = await prisma.subscription.findUnique({ where: { id: subscription.id } });
+    expect(stored?.providerId).toBe(replacement.id);
+  });
+
+  it("rejects an unknown provider without changing the subscription", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "fmp", displayName: "FMP", type: "builtin", refreshIntervalMin: 60 },
+    });
+    const subscription = await prisma.subscription.create({
+      data: {
+        providerId: provider.id,
+        name: "Market data plan",
+        costUsd: 20,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+      },
+    });
+
+    const response = await PUT(
+      new Request(`https://usage.jays.services/api/subscriptions/${subscription.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "missing-provider" }),
+      }),
+      { params: Promise.resolve({ id: subscription.id }) }
+    );
+
+    expect(response.status).toBe(400);
+    const stored = await prisma.subscription.findUnique({ where: { id: subscription.id } });
+    expect(stored?.providerId).toBe(provider.id);
   });
 });

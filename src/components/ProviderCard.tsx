@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import BalanceBadge from "./BalanceBadge";
+import type { ExternalBillingRecord } from "./ExternalBillingDetails";
 
 interface ProviderCardProps {
   id: string;
@@ -12,6 +13,8 @@ interface ProviderCardProps {
   keyPreview?: string | null;
   estimatedMonthlyCostUsd?: number;
   projectedEomUsd?: number;
+  spentUsd?: number;
+  externalBilling?: ExternalBillingRecord[];
   billingMode?: "actual" | "estimated" | "manual";
   alerts?: {
     severity: "critical" | "warning" | "info";
@@ -47,6 +50,9 @@ const typeColors: Record<string, string> = {
   stripe: "bg-indigo-600",
   robinhood: "bg-green-500",
   alpaca: "bg-gray-600",
+  github: "bg-slate-700",
+  vercel: "bg-gray-900",
+  render: "bg-indigo-500",
 };
 
 const creditBasedProviders = new Set([
@@ -62,6 +68,8 @@ export default function ProviderCard({
   keyPreview,
   estimatedMonthlyCostUsd = 0,
   projectedEomUsd = 0,
+  spentUsd,
+  externalBilling = [],
   billingMode = "manual",
   alerts = [],
   latestSnapshot,
@@ -73,6 +81,7 @@ export default function ProviderCard({
   const hasCredits = latestSnapshot?.credits != null;
   const openAlerts = alerts.filter((alert) => alert.severity !== "info");
   const hasCritical = openAlerts.some((alert) => alert.severity === "critical");
+  const connectedBilling = externalBilling[0];
 
   const formatNumber = (n: number | null) => {
     if (n == null) return "--";
@@ -129,7 +138,7 @@ export default function ProviderCard({
           <BalanceBadge amount={latestSnapshot?.balance ?? null} />
         </div>
         <div>
-          <p className="text-xs text-gray-500 mb-1">Cost</p>
+          <p className="text-xs text-gray-500 mb-1">Latest provider report</p>
           <p className="text-sm font-medium text-gray-900">
             {latestSnapshot?.totalCost != null ? (
               <BalanceBadge
@@ -156,13 +165,21 @@ export default function ProviderCard({
           </p>
         </div>
         <div className={(isCreditBased || hasCredits) ? "col-span-2" : ""}>
-          <p className="text-xs text-gray-500 mb-1">MTD / EOM</p>
+          <p className="text-xs text-gray-500 mb-1">Tracked MTD / projected EOM</p>
           <p className="text-sm font-medium text-gray-900">
-            {formatUsd(estimatedMonthlyCostUsd)} <span className="text-gray-400 font-normal">/ {formatUsd(projectedEomUsd)}</span>
+            {formatUsd(spentUsd ?? estimatedMonthlyCostUsd)} <span className="text-gray-400 font-normal">/ {formatUsd(projectedEomUsd)}</span>
           </p>
           <p className="text-xs uppercase text-gray-400">{billingMode}</p>
         </div>
       </div>
+
+      {connectedBilling && (
+        <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+          <span className="font-semibold">Provider-reported:</span>{" "}
+          {connectedBilling.planName || connectedBilling.kind}
+          {connectedBilling.status ? ` · ${connectedBilling.status}` : ""}
+        </div>
+      )}
 
       {openAlerts[0] && (
         <p

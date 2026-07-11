@@ -1,12 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { Suspense, useState, useEffect, useCallback, useRef } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import AddProviderModal from "@/components/AddProviderModal";
 import AddProjectModal, { Project } from "@/components/AddProjectModal";
 import AddSubscriptionModal, { type SubscriptionFormValue } from "@/components/AddSubscriptionModal";
 import SubscriptionsPanel, { type SubscriptionRow } from "@/components/SubscriptionsPanel";
 import ProviderTable from "@/components/ProviderTable";
 import ProjectTable from "@/components/ProjectTable";
+import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
 
 export type BillingMode = "actual" | "estimated" | "manual";
 type SettingsTab = "providers" | "projects" | "subscriptions";
@@ -41,8 +44,13 @@ export interface Provider {
   label: string | null;
   keyPreview?: string | null;
   plan: ProviderPlan | null;
+  allocations: { projectId: string; percentage: number }[];
+  externalBilling?: ExternalBillingRecord[];
+  secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   alerts: ProviderAlert[];
   estimatedMonthlyCostUsd: number;
+  spentUsd?: number;
+  projectedEomUsd?: number;
   billingMode: BillingMode;
   createdAt: string;
   latestSnapshot: {
@@ -54,14 +62,19 @@ export interface Provider {
   } | null;
 }
 
-export default function SettingsPage() {
+function parseSettingsTab(value: string | null): SettingsTab {
+  return value === "projects" || value === "subscriptions" ? value : "providers";
+}
+
+function SettingsPageContent() {
+  const searchParams = useSearchParams();
+  const activeTab = parseSettingsTab(searchParams.get("tab"));
   const [providers, setProviders] = useState<Provider[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [subscriptionsLoading, setSubscriptionsLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<SettingsTab>("providers");
   const [error, setError] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -73,15 +86,19 @@ export default function SettingsPage() {
   const [deleteProjectConfirm, setDeleteProjectConfirm] = useState<string | null>(null);
   const [deleteSubscriptionConfirm, setDeleteSubscriptionConfirm] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const providersLoaded = useRef(false);
+  const projectsLoaded = useRef(false);
+  const subscriptionsLoaded = useRef(false);
 
   const fetchProviders = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!providersLoaded.current) setLoading(true);
       setError("");
       const res = await fetch("/api/providers");
       if (!res.ok) throw new Error("Failed to fetch providers");
       const data = await res.json();
       setProviders(data);
+      providersLoaded.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
@@ -91,12 +108,13 @@ export default function SettingsPage() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      setProjectsLoading(true);
+      if (!projectsLoaded.current) setProjectsLoading(true);
       setError("");
       const res = await fetch("/api/projects");
       if (!res.ok) throw new Error("Failed to fetch projects");
       const data = await res.json();
       setProjects(data);
+      projectsLoaded.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load projects");
     } finally {
@@ -106,12 +124,13 @@ export default function SettingsPage() {
 
   const fetchSubscriptions = useCallback(async () => {
     try {
-      setSubscriptionsLoading(true);
+      if (!subscriptionsLoaded.current) setSubscriptionsLoading(true);
       setError("");
       const res = await fetch("/api/subscriptions");
       if (!res.ok) throw new Error("Failed to fetch subscriptions");
       const data = await res.json();
       setSubscriptions(data);
+      subscriptionsLoaded.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load subscriptions");
     } finally {
@@ -135,6 +154,7 @@ export default function SettingsPage() {
     config?: Record<string, unknown>;
     label?: string | null;
     plan?: ProviderPlan | null;
+    allocations?: { projectId: string; percentage: number }[];
   }) => {
     if (provider.id) {
       const res = await fetch(`/api/providers/${provider.id}`, {
@@ -146,6 +166,7 @@ export default function SettingsPage() {
           config: provider.config,
           label: provider.label,
           plan: provider.plan,
+          allocations: provider.allocations ?? [],
         }),
       });
       if (!res.ok) {
@@ -307,10 +328,11 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
         {activeTab === "providers" ? (
           <button
+            type="button"
             onClick={() => {
               setEditProvider(null);
               setModalOpen(true);
@@ -321,6 +343,7 @@ export default function SettingsPage() {
           </button>
         ) : activeTab === "projects" ? (
           <button
+            type="button"
             onClick={() => {
               setEditProject(null);
               setProjectModalOpen(true);
@@ -331,6 +354,7 @@ export default function SettingsPage() {
           </button>
         ) : (
           <button
+            type="button"
             onClick={() => {
               setEditSubscription(null);
               setSubscriptionModalOpen(true);
@@ -342,9 +366,11 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <div className="flex border-b border-gray-200">
-        <button
-          onClick={() => setActiveTab("providers")}
+      <nav aria-label="Settings sections" className="flex overflow-x-auto border-b border-gray-200">
+        <Link
+          href="/settings?tab=providers"
+          id="settings-tab-providers"
+          aria-current={activeTab === "providers" ? "page" : undefined}
           className={`pb-3 px-4 text-sm font-medium border-b-2 transition-colors ${
             activeTab === "providers"
               ? "border-blue-500 text-blue-600"
@@ -352,9 +378,11 @@ export default function SettingsPage() {
           }`}
         >
           Providers
-        </button>
-        <button
-          onClick={() => setActiveTab("projects")}
+        </Link>
+        <Link
+          href="/settings?tab=projects"
+          id="settings-tab-projects"
+          aria-current={activeTab === "projects" ? "page" : undefined}
           className={`pb-3 px-4 text-sm font-medium border-b-2 transition-colors ${
             activeTab === "projects"
               ? "border-blue-500 text-blue-600"
@@ -362,9 +390,11 @@ export default function SettingsPage() {
           }`}
         >
           Projects
-        </button>
-        <button
-          onClick={() => setActiveTab("subscriptions")}
+        </Link>
+        <Link
+          href="/settings?tab=subscriptions"
+          id="settings-tab-subscriptions"
+          aria-current={activeTab === "subscriptions" ? "page" : undefined}
           className={`pb-3 px-4 text-sm font-medium border-b-2 transition-colors ${
             activeTab === "subscriptions"
               ? "border-blue-500 text-blue-600"
@@ -372,15 +402,16 @@ export default function SettingsPage() {
           }`}
         >
           Subscriptions
-        </button>
-      </div>
+        </Link>
+      </nav>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
+        <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
           {error}
         </p>
       )}
 
+      <section id={`settings-panel-${activeTab}`} aria-label={`${activeTab} settings`}>
       {activeTab === "providers" ? (
         <ProviderTable
           providers={providers}
@@ -449,6 +480,7 @@ export default function SettingsPage() {
           actionLoading={actionLoading}
         />
       )}
+      </section>
 
       <AddProviderModal
         open={modalOpen}
@@ -489,5 +521,26 @@ export default function SettingsPage() {
           .map((p) => ({ id: p.id, name: p.name }))}
       />
     </div>
+  );
+}
+
+function SettingsPageFallback() {
+  return (
+    <div className="space-y-6 animate-pulse" aria-label="Loading settings">
+      <div className="flex items-center justify-between">
+        <div className="h-8 w-32 bg-gray-200 rounded" />
+        <div className="h-10 w-32 bg-gray-200 rounded-lg" />
+      </div>
+      <div className="h-12 rounded bg-gray-100" />
+      <div className="h-64 rounded-xl border border-gray-200 bg-white" />
+    </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<SettingsPageFallback />}>
+      <SettingsPageContent />
+    </Suspense>
   );
 }

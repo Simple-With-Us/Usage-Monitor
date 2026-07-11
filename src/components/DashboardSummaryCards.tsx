@@ -40,7 +40,7 @@ export default function DashboardSummaryCards({
         </p>
       </div>
       <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <p className="text-sm text-gray-500 mb-1">Usage Cost This Month</p>
+        <p className="text-sm text-gray-500 mb-1">Tracked Spend This Month</p>
         <p className="text-3xl font-bold text-amber-600">
           {new Intl.NumberFormat("en-US", {
             style: "currency",
