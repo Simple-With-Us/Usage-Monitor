@@ -128,7 +128,7 @@ export async function GET() {
       ...clientConfig,
       keyPreview: buildKeyPreview(apiKey),
       latestSnapshot,
-      alerts: alertState.alerts,
+      alerts: canonicalBudget?.alerts ?? alertState.alerts,
       estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,
       spentUsd: canonicalBudget?.spentUsd ?? latestSnapshot?.totalCost ?? 0,
       snapshotCostUsd: canonicalBudget?.snapshotCostUsd ?? latestSnapshot?.totalCost ?? null,

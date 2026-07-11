@@ -104,7 +104,7 @@ export async function GET(
     ...rest,
     ...clientConfig,
     latestSnapshot,
-    alerts: alertState.alerts,
+    alerts: canonicalBudget?.alerts ?? alertState.alerts,
     estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,
     spentUsd: canonicalBudget?.spentUsd ?? latestSnapshot?.totalCost ?? 0,
     snapshotCostUsd:
