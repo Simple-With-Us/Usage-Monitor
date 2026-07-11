@@ -125,6 +125,13 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Production maintenance script hardening (CODEX, owner-directed 2026-07-11).** Branch
+  `maintenance-script-hardening`, isolated worktree
+  `/Users/jay/apps/api-usage-monitor-maintenance-hardening`, based on `e736bf1`. Scope: make
+  provider-secret migration transactional with encrypted-value precedence and classifier parity;
+  constrain historical Claude repair to cost-only, preserve newer OTLP checkpoints, and add
+  production-safety/idempotency regression coverage. Implementation complete locally: focused
+  suite 6/6, ESLint, TypeScript, script syntax, and diff checks green. No production writes or deploys.
 - **Alert-delivery channel reliability (CODEX, owner-directed 2026-07-11).** Branch
   `codex-alert-delivery-reliability`, isolated worktree
   `/Users/jay/apps/api-usage-monitor-alert-delivery`, based on app-wide hardening commit `2dd8ad8`.

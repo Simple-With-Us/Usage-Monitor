@@ -19,7 +19,10 @@ created or changed by startup.
 
 `npm run repair:claude-cost` is intentionally dry-run-first and reports the
 candidate row count, reconstructed cost, reduction, reset count, and compacted
-Claude rollups. Automatic apply is unsafe because:
+Claude rollups. It deliberately repairs only `metricType="cost"` rows; token,
+session, code-edit, and other cumulative counters remain untouched because the
+approved production correction is historical cost only. Automatic apply is
+unsafe because:
 
 - historical OTLP start timestamps were not retained, so a reset to a higher
   counter value cannot be proven after the fact;
@@ -28,10 +31,13 @@ Claude rollups. Automatic apply is unsafe because:
 - the expected dollar reduction must be reviewed against production evidence;
 - `--apply` deliberately requires `--backup-acknowledged`.
 
-The repair's write phase is transactional and repaired rows are excluded from
-future candidate selection, so it is rerun-safe after an operator approves the
-dry-run. It is still not approval-free. A release marker would add bookkeeping,
-not the missing semantic approval.
+The importable planner runs before writes, while the applier rechecks for
+compacted Claude rollups as its first operation inside the caller-owned
+transaction. It never replaces an equal/newer OTLP checkpoint. Repaired rows
+are excluded from future candidate selection, so the operation is rerun-safe
+after an operator approves the dry-run. The caller must run before the app's
+maintenance scheduler starts. It is still not approval-free. A release marker
+would add bookkeeping, not the missing semantic approval.
 
 ## Provider subscription seed
 
