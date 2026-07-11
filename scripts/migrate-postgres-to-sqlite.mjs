@@ -140,6 +140,7 @@ async function main() {
             id: row.id,
             providerId: row.providerId,
             fetchedAt: row.fetchedAt,
+            statusEventKey: row.statusEventKey ?? null,
             balance: row.balance,
             totalCost: row.totalCost,
             fixedCostIncludedUsd: row.fixedCostIncludedUsd,

@@ -3,7 +3,6 @@ import type { Prisma } from "@prisma/client";
 import {
   ExternalUsageIdempotencyCollisionError,
   persistExternalUsageEvents,
-  syncStatusToUsageSnapshot,
 } from "@/lib/external-usage-events";
 import { parseUsageTelemetryBatch } from "@/lib/usage-telemetry";
 import { createRateLimiter, getClientIp } from "@/lib/rate-limit";
@@ -95,9 +94,6 @@ export async function POST(request: NextRequest) {
     }
     throw error;
   }
-
-  // Cross-app status metrics integration: Generate UsageSnapshot rows for absolute metrics.
-  await syncStatusToUsageSnapshot(persistResult.newEvents);
 
   return NextResponse.json(
     {

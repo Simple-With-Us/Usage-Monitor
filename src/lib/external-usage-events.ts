@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 export const STATUS_METRIC_TYPES = new Set(["quota_sync", "credit_balance"]);
@@ -254,6 +254,13 @@ export async function persistExternalUsageEventsInTransaction(
     await tx.externalUsageEvent.create({ data: toCreateData(event) });
     newEvents.push(event);
   }
+
+  // Absolute status events are projections of the durable raw event, not a
+  // best-effort side effect. Materialize them in this same transaction so a
+  // snapshot failure rolls the event insert back. Reprocessing active events
+  // (including idempotent retries) also repairs events that were initially
+  // unmatched because same-name accounts lacked a stable status key ref.
+  await syncStatusToUsageSnapshotInTransaction(tx, activeEvents);
 
   return {
     attempted: events.length,
@@ -573,6 +580,13 @@ interface StatusProviderCandidate {
   config: unknown;
 }
 
+export interface StatusSnapshotSyncResult {
+  attempted: number;
+  materialized: number;
+  unmatched: number;
+  empty: number;
+}
+
 function statusKeyRef(config: unknown): string | null {
   if (!config || typeof config !== "object" || Array.isArray(config)) return null;
   const record = config as Record<string, unknown>;
@@ -600,15 +614,42 @@ export function resolveStatusProviderId(
   return matchingRef.length === 1 ? matchingRef[0].id : null;
 }
 
-export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[]): Promise<void> {
+function statusSnapshotValues(event: ExternalUsageEventInput): {
+  totalRequests: number | null;
+  totalCost: number | null;
+  credits: number | null;
+} | null {
+  if (event.metricType === "quota_sync") {
+    const totalRequests = event.requests ?? event.quantity ?? null;
+    const totalCost = event.costUsd ?? null;
+    if (totalRequests == null && totalCost == null) return null;
+    return { totalRequests, totalCost, credits: null };
+  }
+  if (event.metricType === "credit_balance") {
+    const credits = event.credits ?? event.quantity ?? null;
+    if (credits == null) return null;
+    return { totalRequests: null, totalCost: null, credits };
+  }
+  return null;
+}
+
+export async function syncStatusToUsageSnapshotInTransaction(
+  tx: Prisma.TransactionClient,
+  events: ExternalUsageEventInput[]
+): Promise<StatusSnapshotSyncResult> {
   const statusEvents = events.filter((e) => STATUS_METRIC_TYPES.has(e.metricType));
-  if (statusEvents.length === 0) return;
+  if (statusEvents.length === 0) {
+    return { attempted: 0, materialized: 0, unmatched: 0, empty: 0 };
+  }
 
   const providerNames = new Set(statusEvents.map((e) => e.provider.toLowerCase()));
-  const allProviders = await prisma.provider.findMany({
+  const allProviders = await tx.provider.findMany({
     select: { id: true, name: true, config: true },
   });
   const providers = allProviders.filter((p) => providerNames.has(p.name.toLowerCase()));
+  let materialized = 0;
+  let unmatched = 0;
+  let empty = 0;
 
   for (const event of statusEvents) {
     // Never attach an account-level absolute status to an arbitrary duplicate
@@ -617,22 +658,71 @@ export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[
     // telemetryKeyRef is also accepted). Ambiguous events remain preserved in
     // ExternalUsageEvent but do not create a misleading snapshot.
     const providerId = resolveStatusProviderId(event, providers);
-    if (!providerId) continue;
-
-    const data: Prisma.UsageSnapshotCreateInput = {
-      provider: { connect: { id: providerId } },
-      fetchedAt: event.occurredAt,
-    };
-
-    if (event.metricType === "quota_sync") {
-      if (event.requests != null || event.quantity != null) {
-        data.totalRequests = event.requests ?? event.quantity ?? undefined;
-      }
-      if (event.costUsd != null) data.totalCost = event.costUsd;
-    } else if (event.metricType === "credit_balance") {
-      data.credits = event.credits ?? event.quantity ?? undefined;
+    if (!providerId) {
+      unmatched += 1;
+      continue;
     }
 
-    await prisma.usageSnapshot.create({ data });
+    const values = statusSnapshotValues(event);
+    if (!values) {
+      empty += 1;
+      continue;
+    }
+
+    const existing = await tx.usageSnapshot.findUnique({
+      where: { statusEventKey: event.idempotencyKey },
+      select: { id: true },
+    });
+    const data: Prisma.UsageSnapshotUncheckedUpdateInput = {
+      providerId,
+      fetchedAt: event.occurredAt,
+      ...values,
+    };
+
+    if (existing) {
+      await tx.usageSnapshot.update({ where: { id: existing.id }, data });
+      materialized += 1;
+      continue;
+    }
+
+    // Adopt snapshots written by releases predating statusEventKey so a retry
+    // upgrades them in place instead of duplicating the same absolute sample.
+    const legacy = await tx.usageSnapshot.findFirst({
+      where: {
+        providerId,
+        fetchedAt: event.occurredAt,
+        statusEventKey: null,
+        rawData: { equals: Prisma.DbNull },
+        ...values,
+      },
+      select: { id: true },
+    });
+    if (legacy) {
+      await tx.usageSnapshot.update({
+        where: { id: legacy.id },
+        data: { ...data, statusEventKey: event.idempotencyKey },
+      });
+    } else {
+      await tx.usageSnapshot.create({
+        data: {
+          providerId,
+          fetchedAt: event.occurredAt,
+          statusEventKey: event.idempotencyKey,
+          ...values,
+        },
+      });
+    }
+    materialized += 1;
   }
+
+  return { attempted: statusEvents.length, materialized, unmatched, empty };
+}
+
+export async function syncStatusToUsageSnapshot(
+  events: ExternalUsageEventInput[]
+): Promise<StatusSnapshotSyncResult> {
+  return prisma.$transaction(
+    (tx) => syncStatusToUsageSnapshotInTransaction(tx, events),
+    { timeout: 30_000 }
+  );
 }
