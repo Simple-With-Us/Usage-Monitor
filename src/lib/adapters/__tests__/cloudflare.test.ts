@@ -63,6 +63,12 @@ describe("cloudflare adapter", () => {
     expect(result.totalCost).toBe(7);
     expect(result.fixedCostIncludedUsd).toBe(5);
     expect(result.totalRequests).toBe(10);
+    expect(result.requestUnit).toBe("requests");
+    expect(result.requestWindow).toBe("rolling_30_days");
+    expect(
+      new Date(result.requestWindowEnd!).getTime() -
+        new Date(result.requestWindowStart!).getTime()
+    ).toBe(30 * 24 * 60 * 60 * 1000);
     expect(result.rawData).toMatchObject({
       accountAnalytics: { requests: 10 },
       workersAnalytics: {

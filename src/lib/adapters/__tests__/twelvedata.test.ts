@@ -20,6 +20,10 @@ describe("twelve data adapter", () => {
     const result = await fetchUsage("key");
 
     expect(result.totalRequests).toBe(11);
+    expect(result.requestUnit).toBe("api_credits");
+    expect(result.requestWindow).toBe("provider_defined");
+    expect(result.requestWindowStart).toBeNull();
+    expect(result.requestWindowEnd).toBeNull();
     expect(result.credits).toBe(599);
     expect(result.externalBilling?.records[0]).toMatchObject({
       planName: "Pro",

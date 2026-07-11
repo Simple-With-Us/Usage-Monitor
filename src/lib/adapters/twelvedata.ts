@@ -39,6 +39,10 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     balance: null,
     totalCost: null,
     totalRequests: used,
+    requestUnit: used == null ? null : "api_credits",
+    requestWindow: used == null ? null : "provider_defined",
+    requestWindowStart: null,
+    requestWindowEnd: null,
     credits: remaining,
     rawData: {
       planName,

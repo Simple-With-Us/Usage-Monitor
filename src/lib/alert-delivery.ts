@@ -540,7 +540,17 @@ export async function deliverProviderAlerts(options: {
       snapshots: {
         orderBy: { fetchedAt: "desc" },
         take: 1,
-        select: { balance: true, totalCost: true, totalRequests: true, credits: true, fetchedAt: true },
+        select: {
+          balance: true,
+          totalCost: true,
+          totalRequests: true,
+          requestUnit: true,
+          requestWindow: true,
+          requestWindowStart: true,
+          requestWindowEnd: true,
+          credits: true,
+          fetchedAt: true,
+        },
       },
     },
   });

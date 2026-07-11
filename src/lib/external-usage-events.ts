@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { normalizeRequestWindow } from "@/lib/request-provenance";
 
 export const STATUS_METRIC_TYPES = new Set(["quota_sync", "credit_balance"]);
 
@@ -584,6 +585,11 @@ export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[
     if (event.metricType === "quota_sync") {
       if (event.requests != null || event.quantity != null) {
         data.totalRequests = event.requests ?? event.quantity ?? undefined;
+        data.requestUnit = event.unit?.trim() ||
+          (event.requests != null ? "requests" : "count");
+        data.requestWindow = normalizeRequestWindow(event.limitWindow);
+        data.requestWindowStart = event.windowStart ?? null;
+        data.requestWindowEnd = event.windowEnd ?? null;
       }
       if (event.costUsd != null) data.totalCost = event.costUsd;
     } else if (event.metricType === "credit_balance") {

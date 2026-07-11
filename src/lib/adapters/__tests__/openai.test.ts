@@ -79,6 +79,14 @@ describe("openai adapter", () => {
 
     expect(result.totalCost).toBe(123.45);
     expect(result.totalRequests).toBe(9);
+    expect(result.requestUnit).toBe("requests");
+    expect(result.requestWindow).toBe("calendar_day_to_date");
+    expect(new Date(result.requestWindowStart!).toISOString()).toBe(
+      "2026-07-11T00:00:00.000Z"
+    );
+    expect(new Date(result.requestWindowEnd!).toISOString()).toBe(
+      "2026-07-11T15:30:00.000Z"
+    );
     expect(result.costScope).toBe("calendar_month_to_date");
     expect(new Date(result.costWindowStart!).toISOString()).toBe("2026-07-01T00:00:00.000Z");
     expect(result.rawData).toMatchObject({

@@ -15,6 +15,10 @@ interface UsageSnapshotRow {
   balance: number | null;
   totalCost: number | null;
   totalRequests: number | null;
+  requestUnit: string | null;
+  requestWindow: string | null;
+  requestWindowStart: Date | null;
+  requestWindowEnd: Date | null;
   credits: number | null;
 }
 
@@ -27,6 +31,10 @@ interface SnapshotRollupValues {
   latestBalance: number | null;
   latestTotalCost: number | null;
   latestTotalRequests: number | null;
+  latestRequestUnit: string | null;
+  latestRequestWindow: string | null;
+  latestRequestWindowStart: Date | null;
+  latestRequestWindowEnd: Date | null;
   latestCredits: number | null;
   minBalance: number | null;
   maxBalance: number | null;
@@ -189,6 +197,10 @@ function applySnapshotRow(group: SnapshotRollupValues, row: UsageSnapshotRow): v
     group.latestBalance = row.balance;
     group.latestTotalCost = row.totalCost;
     group.latestTotalRequests = row.totalRequests;
+    group.latestRequestUnit = row.requestUnit;
+    group.latestRequestWindow = row.requestWindow;
+    group.latestRequestWindowStart = row.requestWindowStart;
+    group.latestRequestWindowEnd = row.requestWindowEnd;
     group.latestCredits = row.credits;
   }
   group.minBalance = minNullable(group.minBalance, row.balance);
@@ -213,6 +225,10 @@ function groupSnapshotRows(rows: UsageSnapshotRow[]): SnapshotRollupValues[] {
         latestBalance: null,
         latestTotalCost: null,
         latestTotalRequests: null,
+        latestRequestUnit: null,
+        latestRequestWindow: null,
+        latestRequestWindowStart: null,
+        latestRequestWindowEnd: null,
         latestCredits: null,
         minBalance: null,
         maxBalance: null,
@@ -244,6 +260,18 @@ function mergeSnapshotRollup(
     latestTotalRequests: incomingIsLatest
       ? incoming.latestTotalRequests
       : existing.latestTotalRequests,
+    latestRequestUnit: incomingIsLatest
+      ? incoming.latestRequestUnit
+      : existing.latestRequestUnit,
+    latestRequestWindow: incomingIsLatest
+      ? incoming.latestRequestWindow
+      : existing.latestRequestWindow,
+    latestRequestWindowStart: incomingIsLatest
+      ? incoming.latestRequestWindowStart
+      : existing.latestRequestWindowStart,
+    latestRequestWindowEnd: incomingIsLatest
+      ? incoming.latestRequestWindowEnd
+      : existing.latestRequestWindowEnd,
     latestCredits: incomingIsLatest ? incoming.latestCredits : existing.latestCredits,
     minBalance: minNullable(existing.minBalance, incoming.minBalance),
     maxBalance: maxNullable(existing.maxBalance, incoming.maxBalance),
@@ -391,6 +419,10 @@ async function pruneUsageSnapshots(
         balance: true,
         totalCost: true,
         totalRequests: true,
+        requestUnit: true,
+        requestWindow: true,
+        requestWindowStart: true,
+        requestWindowEnd: true,
         credits: true,
       },
     });
@@ -411,6 +443,10 @@ async function pruneUsageSnapshots(
             latestBalance: true,
             latestTotalCost: true,
             latestTotalRequests: true,
+            latestRequestUnit: true,
+            latestRequestWindow: true,
+            latestRequestWindowStart: true,
+            latestRequestWindowEnd: true,
             latestCredits: true,
             minBalance: true,
             maxBalance: true,
@@ -429,6 +465,10 @@ async function pruneUsageSnapshots(
             latestBalance: merged.latestBalance,
             latestTotalCost: merged.latestTotalCost,
             latestTotalRequests: merged.latestTotalRequests,
+            latestRequestUnit: merged.latestRequestUnit,
+            latestRequestWindow: merged.latestRequestWindow,
+            latestRequestWindowStart: merged.latestRequestWindowStart,
+            latestRequestWindowEnd: merged.latestRequestWindowEnd,
             latestCredits: merged.latestCredits,
             minBalance: merged.minBalance,
             maxBalance: merged.maxBalance,

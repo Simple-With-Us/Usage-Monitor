@@ -24,6 +24,10 @@ describe("intrinio adapter", () => {
     const result = await fetchUsage("key");
 
     expect(result.totalRequests).toBe(15);
+    expect(result.requestUnit).toBe("requests");
+    expect(result.requestWindow).toBe("provider_defined");
+    expect(result.requestWindowStart).toBeNull();
+    expect(result.requestWindowEnd).toBeNull();
     expect(result.credits).toBe(135);
     expect(result.externalBilling?.records).toHaveLength(2);
     expect(JSON.stringify(result.rawData)).not.toContain("private@example.com");
