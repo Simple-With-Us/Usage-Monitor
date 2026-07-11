@@ -5,6 +5,10 @@ import {
   parseNumber,
   type UsageResult,
 } from "./helpers";
+import {
+  deriveRequestWindowBounds,
+  parseRequestBoundary,
+} from "@/lib/request-provenance";
 
 const EVENT_COUNT_CATEGORIES = new Set([
   "error",
@@ -72,10 +76,18 @@ export async function fetchUsage(
     }
   }
 
+  const fallbackBounds = deriveRequestWindowBounds("rolling_30_days");
+  const requestWindowStart = parseRequestBoundary(data.start) ?? fallbackBounds.start;
+  const requestWindowEnd = parseRequestBoundary(data.end) ?? fallbackBounds.end;
+
   return {
     balance: null,
     totalCost: null,
     totalRequests: foundEventCount ? totalEvents : null,
+    requestUnit: foundEventCount ? "events" : null,
+    requestWindow: foundEventCount ? "rolling_30_days" : null,
+    requestWindowStart: foundEventCount ? requestWindowStart : null,
+    requestWindowEnd: foundEventCount ? requestWindowEnd : null,
     credits: null,
     rawData: {
       period: { start: data.start ?? null, end: data.end ?? null },

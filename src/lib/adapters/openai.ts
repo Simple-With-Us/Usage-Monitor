@@ -128,6 +128,9 @@ export async function fetchUsage(
   config: Record<string, unknown> = {}
 ): Promise<UsageResult> {
   const now = new Date();
+  const dayStartDate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  );
   const today = now.toISOString().slice(0, 10);
   const monthStartDate = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
@@ -255,6 +258,11 @@ export async function fetchUsage(
     costWindowEnd: totalCost == null ? null : now,
     costScope: totalCost == null ? "unknown" : "calendar_month_to_date",
     totalRequests,
+    requestUnit: totalRequests == null ? null : "requests",
+    requestWindow:
+      totalRequests == null ? null : "calendar_day_to_date",
+    requestWindowStart: totalRequests == null ? null : dayStartDate,
+    requestWindowEnd: totalRequests == null ? null : now,
     credits: null,
     rawData,
   };

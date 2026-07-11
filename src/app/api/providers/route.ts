@@ -83,6 +83,10 @@ export async function GET() {
           costScope: true,
           costIncludesUnknownFixed: true,
           totalRequests: true,
+          requestUnit: true,
+          requestWindow: true,
+          requestWindowStart: true,
+          requestWindowEnd: true,
           credits: true,
           fetchedAt: true,
         },
@@ -113,6 +117,16 @@ export async function GET() {
     });
     const canonicalBudget = budgetByProviderId.get(p.id);
     const apiKeyState = providerApiKeyState(apiKey);
+    const alerts = canonicalBudget
+      ? [
+          ...alertState.alerts.filter(
+            (alert) =>
+              alert.code !== "budget_exceeded" &&
+              alert.code !== "budget_warning"
+          ),
+          ...canonicalBudget.alerts,
+        ]
+      : alertState.alerts;
     const duplicateProviderIds = duplicateIdsByName.get(
       p.name.trim().toLowerCase()
     ) ?? [];
@@ -122,7 +136,7 @@ export async function GET() {
       ...clientConfig,
       ...apiKeyState,
       latestSnapshot,
-      alerts: canonicalBudget?.alerts ?? alertState.alerts,
+      alerts,
       estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,
       spentUsd: canonicalBudget?.spentUsd ?? latestSnapshot?.totalCost ?? 0,
       snapshotCostUsd: canonicalBudget?.snapshotCostUsd ?? latestSnapshot?.totalCost ?? null,

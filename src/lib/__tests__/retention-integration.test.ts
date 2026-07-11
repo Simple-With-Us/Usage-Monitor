@@ -9,8 +9,10 @@ let dbPath: string;
 let prisma: typeof import("@/lib/prisma").prisma;
 let runDataRetentionMaintenance: typeof import("../data-retention").runDataRetentionMaintenance;
 let persistExternalUsageEvents: typeof import("../external-usage-events").persistExternalUsageEvents;
+let syncStatusToUsageSnapshot: typeof import("../external-usage-events").syncStatusToUsageSnapshot;
 let computeBudgetStatus: typeof import("../budget-status").computeBudgetStatus;
 let getSnapshots: typeof import("@/app/api/snapshots/route").GET;
+let getProviders: typeof import("@/app/api/providers/route").GET;
 let getUsageEvents: typeof import("@/app/api/usage-events/route").GET;
 
 const NOW = new Date("2026-07-04T12:00:00.000Z");
@@ -28,9 +30,10 @@ beforeAll(async () => {
 
   ({ prisma } = await import("@/lib/prisma"));
   ({ runDataRetentionMaintenance } = await import("../data-retention"));
-  ({ persistExternalUsageEvents } = await import("../external-usage-events"));
+  ({ persistExternalUsageEvents, syncStatusToUsageSnapshot } = await import("../external-usage-events"));
   ({ computeBudgetStatus } = await import("../budget-status"));
   ({ GET: getSnapshots } = await import("@/app/api/snapshots/route"));
+  ({ GET: getProviders } = await import("@/app/api/providers/route"));
   ({ GET: getUsageEvents } = await import("@/app/api/usage-events/route"));
 }, 60_000);
 
@@ -124,6 +127,91 @@ describe("retention integration", () => {
     ]);
   });
 
+  it("returns incompatible request-window provenance as a non-critical provider alert", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const provider = await prisma.provider.create({
+      data: {
+        name: "daily-counter",
+        displayName: "Daily counter",
+        type: "custom",
+        refreshIntervalMin: 60,
+        plan: {
+          create: {
+            billingMode: "actual",
+            monthlyRequestLimit: 100,
+          },
+        },
+      },
+    });
+    await prisma.usageSnapshot.create({
+      data: {
+        providerId: provider.id,
+        fetchedAt: NOW,
+        totalRequests: 500,
+        requestUnit: "requests",
+        requestWindow: "calendar_day_to_date",
+        requestWindowStart: new Date("2026-07-04T00:00:00.000Z"),
+        requestWindowEnd: NOW,
+      },
+    });
+
+    const response = await getProviders();
+    const providers = await response.json();
+    expect(providers[0].latestSnapshot).toMatchObject({
+      totalRequests: 500,
+      requestUnit: "requests",
+      requestWindow: "calendar_day_to_date",
+      requestWindowStart: "2026-07-04T00:00:00.000Z",
+      requestWindowEnd: NOW.toISOString(),
+    });
+    expect(providers[0].alerts).toContainEqual(
+      expect.objectContaining({
+        code: "request_limit_incompatible",
+        severity: "info",
+      })
+    );
+    expect(providers[0].alerts).not.toContainEqual(
+      expect.objectContaining({ code: "request_limit" })
+    );
+  });
+
+  it("persists request provenance for pushed absolute quota snapshots", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "pushed-quota",
+        displayName: "Pushed quota",
+        type: "builtin",
+      },
+    });
+    await syncStatusToUsageSnapshot([
+      {
+        idempotencyKey: "pushed-quota-snapshot",
+        sourceApp: "producer",
+        provider: provider.name,
+        billingMode: "actual",
+        metricType: "quota_sync",
+        requests: 70,
+        unit: "request",
+        limitWindow: "month",
+        windowStart: new Date("2026-07-01T00:00:00.000Z"),
+        windowEnd: NOW,
+        occurredAt: NOW,
+      },
+    ]);
+
+    const snapshot = await prisma.usageSnapshot.findFirstOrThrow({
+      where: { providerId: provider.id },
+    });
+    expect(snapshot).toMatchObject({
+      totalRequests: 70,
+      requestUnit: "request",
+      requestWindow: "calendar_month_to_date",
+      requestWindowStart: new Date("2026-07-01T00:00:00.000Z"),
+      requestWindowEnd: NOW,
+    });
+  });
+
   it("keeps old rollup tombstones so late producer retries remain idempotent", async () => {
     await prisma.externalUsageEventTombstone.create({
       data: {
@@ -186,6 +274,10 @@ describe("retention integration", () => {
           balance: 55,
           totalCost: 7,
           totalRequests: 70,
+          requestUnit: "requests",
+          requestWindow: "calendar_month_to_date",
+          requestWindowStart: new Date("2026-06-01T00:00:00.000Z"),
+          requestWindowEnd: new Date("2026-06-20T08:00:00.000Z"),
           credits: 12,
         },
         {
@@ -194,6 +286,10 @@ describe("retention integration", () => {
           balance: 30,
           totalCost: 11,
           totalRequests: 110,
+          requestUnit: "requests",
+          requestWindow: "calendar_month_to_date",
+          requestWindowStart: new Date("2026-07-01T00:00:00.000Z"),
+          requestWindowEnd: new Date("2026-07-02T08:00:00.000Z"),
           credits: 6,
         },
       ],
@@ -243,7 +339,18 @@ describe("retention integration", () => {
     const snapshots = await snapshotsResponse.json();
     expect(snapshots).toHaveLength(2);
     expect(snapshots[0].id).toMatch(/^rollup:/);
+    expect(snapshots[0]).toMatchObject({
+      totalRequests: 70,
+      requestUnit: "requests",
+      requestWindow: "calendar_month_to_date",
+      requestWindowStart: "2026-06-01T00:00:00.000Z",
+      requestWindowEnd: "2026-06-20T08:00:00.000Z",
+    });
     expect(snapshots[1].totalCost).toBe(11);
+    expect(snapshots[1]).toMatchObject({
+      requestUnit: "requests",
+      requestWindow: "calendar_month_to_date",
+    });
 
     const usageEventsResponse = await getUsageEvents(
       new NextRequest("https://usage.jays.services/api/usage-events?days=30")

@@ -155,6 +155,10 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       balance: 1,
       totalCost: 10,
       totalRequests: 1,
+      requestUnit: "requests",
+      requestWindow: "calendar_month_to_date",
+      requestWindowStart: "2026-07-01T00:00:00.000Z",
+      requestWindowEnd: "2026-07-11T17:00:00.000Z",
       credits: null,
       rawData: {},
     };
@@ -170,7 +174,13 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ totalCost: 10 }),
+        data: expect.objectContaining({
+          totalCost: 10,
+          requestUnit: "requests",
+          requestWindow: "calendar_month_to_date",
+          requestWindowStart: new Date("2026-07-01T00:00:00.000Z"),
+          requestWindowEnd: new Date("2026-07-11T17:00:00.000Z"),
+        }),
       })
     );
   });

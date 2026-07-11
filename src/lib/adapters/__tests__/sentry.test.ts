@@ -29,6 +29,14 @@ describe("Sentry adapter", () => {
     const result = await fetchUsage("token", { orgSlug: "example" });
 
     expect(result.totalRequests).toBe(20);
+    expect(result.requestUnit).toBe("events");
+    expect(result.requestWindow).toBe("rolling_30_days");
+    expect(new Date(result.requestWindowStart!).toISOString()).toBe(
+      "2026-06-11T00:00:00.000Z"
+    );
+    expect(new Date(result.requestWindowEnd!).toISOString()).toBe(
+      "2026-07-11T00:00:00.000Z"
+    );
     expect(result.rawData).toMatchObject({
       categories: {
         error: { quantity: 12, unit: "events", included: true },

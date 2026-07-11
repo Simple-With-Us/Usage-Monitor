@@ -87,12 +87,20 @@ async function fetchAccountBalance(
   const expiryAt = Number.isFinite(parsedExpiry)
     ? new Date(parsedExpiry).toISOString()
     : null;
+  const requestWindowEnd = expiryAt ? new Date(expiryAt) : null;
+  const requestWindowStart = requestWindowEnd
+    ? new Date(requestWindowEnd.getTime() - 60 * 1000)
+    : null;
 
   return {
     balance,
     // Brokerage P/L is not API spend and must never enter provider budgets.
     totalCost: null,
     totalRequests: used,
+    requestUnit: used == null ? null : "requests",
+    requestWindow: used == null ? null : "minute",
+    requestWindowStart: used == null ? null : requestWindowStart,
+    requestWindowEnd: used == null ? null : requestWindowEnd,
     credits: available,
     rawData: {
       resolvedFromProfile,

@@ -5,11 +5,13 @@ import {
   parseNumber,
   type UsageResult,
 } from "./helpers";
+import { deriveRequestWindowBounds } from "@/lib/request-provenance";
 
 export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
+  const requestBounds = deriveRequestWindowBounds("rolling_31_days");
   const publicKey = (config?.publicKey as string | undefined) || apiKey;
   const secretKey = config?.secretKey as string | undefined;
   const host =
@@ -62,6 +64,10 @@ export async function fetchUsage(
     // or double-count it alongside the underlying model provider.
     totalCost: null,
     totalRequests: foundRequests ? totalRequests : null,
+    requestUnit: foundRequests ? "observations" : null,
+    requestWindow: foundRequests ? "rolling_31_days" : null,
+    requestWindowStart: foundRequests ? requestBounds.start : null,
+    requestWindowEnd: foundRequests ? requestBounds.end : null,
     credits: null,
     rawData: {
       trackedLlmCostUsd: foundCost ? totalCost : null,

@@ -73,6 +73,14 @@ export async function recordProviderUsage(
           costScope: usage.costScope,
           costIncludesUnknownFixed: usage.costIncludesUnknownFixed ?? false,
           totalRequests: usage.totalRequests,
+          requestUnit: usage.requestUnit,
+          requestWindow: usage.requestWindow,
+          requestWindowStart: usage.requestWindowStart
+            ? new Date(usage.requestWindowStart)
+            : null,
+          requestWindowEnd: usage.requestWindowEnd
+            ? new Date(usage.requestWindowEnd)
+            : null,
           credits: usage.credits,
           rawData: usage.rawData ?? undefined,
         },

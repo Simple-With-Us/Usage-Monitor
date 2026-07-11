@@ -1,4 +1,5 @@
 import { calculateEomForecast } from "@/lib/forecasting";
+import { evaluateMonthlyRequestCompatibility } from "@/lib/request-provenance";
 import { isSubscriptionInterval, rollForwardRenewal } from "@/lib/subscriptions";
 
 export type AlertSeverity = "critical" | "warning" | "info";
@@ -12,6 +13,7 @@ export interface ProviderAlert {
     | "credits_low"
     | "request_limit"
     | "request_limit_warning"
+    | "request_limit_incompatible"
     | "renewal_overdue"
     | "renewal_due"
     | "missing_balance_visibility"
@@ -38,6 +40,10 @@ export interface UsageSnapshotForAlerts {
   balance: number | null;
   totalCost: number | null;
   totalRequests: number | null;
+  requestUnit?: string | null;
+  requestWindow?: string | null;
+  requestWindowStart?: Date | string | null;
+  requestWindowEnd?: Date | string | null;
   credits: number | null;
   fetchedAt: Date | string;
 }
@@ -76,6 +82,11 @@ function formatUsd(value: number): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatRequestCount(value: number, unit: string | null | undefined): string {
+  const label = unit?.trim().replace(/_/g, " ");
+  return label ? `${formatNumber(value)} ${label}` : formatNumber(value);
 }
 
 function normalizeBillingMode(value: string | undefined): ProviderAlertState["billingMode"] {
@@ -151,12 +162,32 @@ export function buildProviderAlertState(
     }
   }
 
-  if (latestSnapshot?.totalRequests != null && plan?.monthlyRequestLimit) {
-    if (latestSnapshot.totalRequests >= plan.monthlyRequestLimit) {
+  if (
+    latestSnapshot?.totalRequests != null &&
+    plan?.monthlyRequestLimit != null &&
+    plan.monthlyRequestLimit > 0
+  ) {
+    const compatibility = evaluateMonthlyRequestCompatibility(
+      latestSnapshot,
+      now
+    );
+    if (!compatibility.compatible) {
+      alerts.push({
+        code: "request_limit_incompatible",
+        severity: "info",
+        message: `${formatRequestCount(
+          latestSnapshot.totalRequests,
+          latestSnapshot.requestUnit
+        )} reported, but ${compatibility.explanation}; monthly limit threshold alerts are suppressed.`,
+      });
+    } else if (latestSnapshot.totalRequests >= plan.monthlyRequestLimit) {
       alerts.push({
         code: "request_limit",
         severity: "critical",
-        message: `${formatNumber(latestSnapshot.totalRequests)} requests against ${formatNumber(
+        message: `${formatRequestCount(
+          latestSnapshot.totalRequests,
+          latestSnapshot.requestUnit
+        )} against ${formatNumber(
           plan.monthlyRequestLimit
         )} monthly limit.`,
       });
@@ -164,7 +195,10 @@ export function buildProviderAlertState(
       alerts.push({
         code: "request_limit_warning",
         severity: "warning",
-        message: `${formatNumber(latestSnapshot.totalRequests)} requests against ${formatNumber(
+        message: `${formatRequestCount(
+          latestSnapshot.totalRequests,
+          latestSnapshot.requestUnit
+        )} against ${formatNumber(
           plan.monthlyRequestLimit
         )} monthly limit.`,
       });

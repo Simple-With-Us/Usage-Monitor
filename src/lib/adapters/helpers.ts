@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import https from "node:https";
 import net from "node:net";
+import type { RequestWindow } from "@/lib/request-provenance";
 
 export interface UsageResult {
   balance: number | null;
@@ -12,6 +13,12 @@ export interface UsageResult {
   costScope?: "calendar_month_to_date" | "billing_cycle_to_date" | "daily" | "unknown";
   costIncludesUnknownFixed?: boolean;
   totalRequests: number | null;
+  /** Semantic unit for totalRequests, e.g. requests, messages, events, observations, API credits. */
+  requestUnit?: string | null;
+  /** Provider-reported or query-defined window represented by totalRequests. */
+  requestWindow?: RequestWindow | null;
+  requestWindowStart?: Date | string | null;
+  requestWindowEnd?: Date | string | null;
   credits: number | null;
   rawData: unknown;
   /**

@@ -114,29 +114,42 @@ model UsageSnapshot {
   // classify exactly (for example an all-category invoice total).
   costIncludesUnknownFixed Boolean   @default(false)
   totalRequests            Int?
+  // Provenance for totalRequests. Bare request counts are not comparable:
+  // adapters may expose per-minute, daily, rolling, monthly, or provider-
+  // defined counters in different units. Monthly-limit alerts use these
+  // fields to fail closed unless the count is current calendar-month or
+  // monthly billing-cycle-to-date.
+  requestUnit              String?
+  requestWindow            String?
+  requestWindowStart       DateTime?
+  requestWindowEnd         DateTime?
   credits                  Float?
   rawData                  Json?
   createdAt                DateTime  @default(now())
 }
 
 model UsageSnapshotDailyRollup {
-  id                  String   @id @default(uuid())
-  providerId          String
-  provider            Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  day                 DateTime
-  sampleCount         Int      @default(0)
-  firstFetchedAt      DateTime
-  lastFetchedAt       DateTime
-  latestBalance       Float?
-  latestTotalCost     Float?
-  latestTotalRequests Int?
-  latestCredits       Float?
-  minBalance          Float?
-  maxBalance          Float?
-  maxTotalCost        Float?
-  maxTotalRequests    Int?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                       String    @id @default(uuid())
+  providerId               String
+  provider                 Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  day                      DateTime
+  sampleCount              Int       @default(0)
+  firstFetchedAt           DateTime
+  lastFetchedAt            DateTime
+  latestBalance            Float?
+  latestTotalCost          Float?
+  latestTotalRequests      Int?
+  latestRequestUnit        String?
+  latestRequestWindow      String?
+  latestRequestWindowStart DateTime?
+  latestRequestWindowEnd   DateTime?
+  latestCredits            Float?
+  minBalance               Float?
+  maxBalance               Float?
+  maxTotalCost             Float?
+  maxTotalRequests         Int?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
   @@unique([providerId, day])
   @@index([day])
