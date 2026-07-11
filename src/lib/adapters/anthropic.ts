@@ -1,79 +1,129 @@
-import { fetchJson } from "./helpers";
-import type { UsageResult } from "./openai";
+import {
+  errorResult,
+  fetchJson,
+  parseNumber,
+  type UsageResult,
+} from "./helpers";
+
+interface AnthropicCostResult {
+  amount?: string | number;
+  currency?: string;
+  [key: string]: unknown;
+}
+
+interface AnthropicCostBucket {
+  starting_at?: string;
+  ending_at?: string;
+  results?: AnthropicCostResult[];
+}
+
+interface AnthropicCostPage {
+  data?: AnthropicCostBucket[];
+  has_more?: boolean;
+  next_page?: string | null;
+}
+
+function monthWindow(now: Date): { startingAt: string; endingAt: string } {
+  return {
+    startingAt: new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+    ).toISOString(),
+    endingAt: now.toISOString(),
+  };
+}
 
 export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
-  const rawData: Record<string, unknown> = {};
-  let totalCost: number | null = null;
-  let totalRequests: number | null = null;
+  // The Usage & Cost API requires an Admin API key (sk-ant-admin01-*), not a
+  // standard Messages API key. Keep an optional secondary key in encrypted
+  // provider config so existing inference credentials need not be replaced.
+  const adminApiKey =
+    (config?.adminApiKey as string | undefined)?.trim() || apiKey;
+  const { startingAt, endingAt } = monthWindow(new Date());
+  const headers = {
+    "x-api-key": adminApiKey,
+    "anthropic-version": "2023-06-01",
+    "User-Agent": "api-usage-monitor/1.0",
+  };
 
-  // Anthropic's billing/usage API is behind the Console and not fully public.
-  // Try the organizations usage endpoint and the rate-limit headers as fallback.
+  const buckets: AnthropicCostBucket[] = [];
+  let page: string | null = null;
+  let pageCount = 0;
 
-  // 1. Try the organizations usage endpoint if orgId is provided
-  const orgId = config?.orgId as string | undefined;
-  if (orgId) {
-    try {
-      const usageRes = await fetchJson(
-        `https://api.anthropic.com/v1/organizations/${orgId}/usage`,
-        {
-          headers: {
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      if (usageRes.ok) {
-        const data = usageRes.data as Record<string, unknown>;
-        rawData.usage = data;
-        if (typeof data.total_cost === "number") totalCost = data.total_cost;
-        if (typeof data.total_requests === "number") totalRequests = data.total_requests;
-      } else {
-        rawData.usageStatus = `HTTP ${usageRes.status}`;
+  do {
+    const params = new URLSearchParams({
+      starting_at: startingAt,
+      ending_at: endingAt,
+      limit: "31",
+    });
+    if (page) params.set("page", page);
+
+    const response = await fetchJson(
+      `https://api.anthropic.com/v1/organizations/cost_report?${params}`,
+      { headers }
+    );
+    if (!response.ok) {
+      return errorResult(response.status, {
+        note: "Anthropic Usage & Cost API requires an organization Admin API key",
+      });
+    }
+
+    const data = (response.data ?? {}) as AnthropicCostPage;
+    buckets.push(...(Array.isArray(data.data) ? data.data : []));
+    page = data.has_more && typeof data.next_page === "string"
+      ? data.next_page
+      : null;
+    pageCount++;
+  } while (page && pageCount < 10);
+
+  let totalCents = 0;
+  let foundUsd = false;
+  for (const bucket of buckets) {
+    for (const result of bucket.results ?? []) {
+      if ((result.currency ?? "USD").toUpperCase() !== "USD") continue;
+      const amount = parseNumber(result.amount);
+      if (amount != null) {
+        totalCents += amount;
+        foundUsd = true;
       }
-    } catch (err) {
-      rawData.usageError = err instanceof Error ? err.message : "Failed";
     }
   }
 
-  // 2. Probe rate-limit headers from a lightweight Messages API call
-  try {
-    const probeRes = await fetchJson(
-      "https://api.anthropic.com/v1/messages",
-      {
-        method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
+  return {
+    balance: null,
+    totalCost: foundUsd ? totalCents / 100 : null,
+    totalRequests: null,
+    credits: null,
+    rawData: {
+      costReport: {
+        bucketCount: buckets.length,
+        totalUsd: foundUsd ? totalCents / 100 : null,
+      },
+      reportingWindow: { startingAt, endingAt },
+      capabilities: {
+        actualCost: true,
+        usageReport: true,
+        subscriptionStatus: false,
+        credential: "Anthropic organization Admin API key",
+      },
+      truncated: Boolean(page),
+    },
+    externalBilling: {
+      source: "anthropic-cost-report",
+      authoritative: true,
+      records: [
+        {
+          externalId: startingAt.slice(0, 7),
+          kind: "billing_period",
+          status: "open",
+          amountUsd: foundUsd ? totalCents / 100 : null,
+          currency: "USD",
+          currentPeriodStart: startingAt,
+          currentPeriodEnd: endingAt,
         },
-        body: JSON.stringify({
-          model: "claude-haiku-3-5",
-          max_tokens: 1,
-          messages: [{ role: "user", content: "hi" }],
-        }),
-      }
-    );
-    // We deliberately throw away the response; we just want the headers
-    const remaining = probeRes.headers.get("anthropic-ratelimit-requests-remaining");
-    const limit = probeRes.headers.get("anthropic-ratelimit-requests-limit");
-    const reset = probeRes.headers.get("anthropic-ratelimit-requests-reset");
-    rawData.rateLimit = {
-      remaining: remaining ? parseInt(remaining) : null,
-      limit: limit ? parseInt(limit) : null,
-      reset: reset || null,
-      probeStatus: probeRes.status,
-    };
-  } catch (err) {
-    rawData.rateLimitError = err instanceof Error ? err.message : "Failed";
-  }
-
-  if (Object.keys(rawData).length === 0) {
-    rawData.note = "No orgId configured. Add orgId in provider config to enable usage tracking. Anthropic does not expose a public billing REST API.";
-  }
-
-  return { balance: null, totalCost, totalRequests, credits: null, rawData };
+      ],
+    },
+  };
 }

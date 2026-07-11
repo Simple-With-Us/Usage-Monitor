@@ -1,22 +1,9 @@
-import { errorResult, fetchJson, type UsageResult } from "./helpers";
+import { blindProviderResult, type UsageResult } from "./helpers";
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const res = await fetchJson(
-    `https://api.polygon.io/v2/aggs/ticker/AAPL/prev?apiKey=${encodeURIComponent(apiKey)}`
+  void apiKey;
+  return blindProviderResult(
+    "massive",
+    "Massive exposes account and invoice information in its dashboard, not a documented billing API. No aggregate-data request was consumed merely to validate the key."
   );
-
-  if (!res.ok) {
-    return errorResult(res.status, { response: res.data });
-  }
-
-  return {
-    balance: null,
-    totalCost: null,
-    totalRequests: 1,
-    credits: null,
-    rawData: {
-      response: res.data,
-      note: "Massive (Polygon) does not expose account balance via API. Key validated with a prev aggregate request.",
-    },
-  };
 }

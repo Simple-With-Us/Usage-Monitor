@@ -15,6 +15,11 @@ model Provider {
   category           String?
   apiKey             String?
   config             Json?
+  // Credential-bearing provider configuration (secondary secrets such as
+  // Alpaca's API secret, Langfuse's secret key, xAI management keys, and
+  // custom auth headers). Stored as a versioned AES-256-GCM JSON envelope and
+  // never selected into client-facing DTOs.
+  secretConfig       String?
   isActive           Boolean                     @default(true)
   credits            Float                       @default(0)
   refreshIntervalMin Int                         @default(60)
@@ -27,6 +32,7 @@ model Provider {
   alertNotifications ProviderAlertNotification[]
   allocations        ProviderProjectAllocation[]
   subscriptions      Subscription[]
+  externalBilling    ProviderExternalBilling[]
 }
 
 model ProviderPlan {
@@ -54,6 +60,38 @@ model ProviderPlan {
   knobEnv             Json?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
+}
+
+// Authoritative, read-only billing/account state synchronized from a
+// provider's official API. These rows are deliberately separate from
+// Subscription: Subscription materializes charges, while this model only
+// mirrors external plan/status/period data and can therefore never create a
+// second charge for spend already reported by an adapter.
+model ProviderExternalBilling {
+  id                 String   @id @default(uuid())
+  providerId         String
+  provider           Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  source             String
+  externalId         String
+  kind               String
+  planName           String?
+  status             String?
+  amountUsd          Float?
+  currency           String?
+  billingInterval    String?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  nextRenewalAt      DateTime?
+  requestLimit       Float?
+  requestLimitWindow String?
+  spendLimitUsd      Float?
+  spendLimitWindow   String?
+  syncedAt           DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([providerId, source, externalId])
+  @@index([providerId, status])
 }
 
 model UsageSnapshot {

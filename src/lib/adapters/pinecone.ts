@@ -1,8 +1,27 @@
-import { fetchJson, type UsageResult } from "./helpers";
+import { AdapterError, errorResult, fetchJson, type UsageResult } from "./helpers";
 
 interface PineconeIndex {
   name: string;
   host?: string;
+}
+
+export function isAllowedPineconeIndexHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/\.$/, "");
+  if (
+    !normalized ||
+    normalized.includes(":") ||
+    normalized.includes("/") ||
+    normalized.includes("@")
+  ) {
+    return false;
+  }
+  const labels = normalized.split(".");
+  return (
+    labels.length >= 5 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) &&
+    normalized.endsWith(".pinecone.io") &&
+    labels.includes("svc")
+  );
 }
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
@@ -15,13 +34,7 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   });
 
   if (!indexesRes.ok) {
-    return {
-      balance: null,
-      totalCost: null,
-      totalRequests: null,
-      credits: null,
-      rawData: { error: `HTTP ${indexesRes.status}`, status: indexesRes.status },
-    };
+    return errorResult(indexesRes.status);
   }
 
   const { indexes = [] } = (indexesRes.data ?? {}) as {
@@ -36,14 +49,24 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     try {
       const host = idx.host;
       if (!host) continue;
-      const statsRes = await fetchJson(`https://${host}/describe_index_stats`, {
-        headers: {
-          "Api-Key": apiKey,
-          "Content-Type": "application/json",
+      if (!isAllowedPineconeIndexHost(host)) {
+        throw new AdapterError(
+          "Pinecone returned an index host outside the allowed *.svc.*.pinecone.io domain",
+          { code: "UNSAFE_OUTBOUND_URL" }
+        );
+      }
+      const statsRes = await fetchJson(
+        `https://${host}/describe_index_stats`,
+        {
+          headers: {
+            "Api-Key": apiKey,
+            "Content-Type": "application/json",
+          },
+          method: "POST",
+          body: JSON.stringify({}),
         },
-        method: "POST",
-        body: JSON.stringify({}),
-      });
+        { security: "untrusted" }
+      );
 
       if (statsRes.ok) {
         const indexStats = statsRes.data as { totalVectorCount?: number };
@@ -67,8 +90,17 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   return {
     balance: null,
     totalCost: null,
-    totalRequests: totalVectorCount,
+    totalRequests: null,
     credits: null,
-    rawData,
+    rawData: {
+      ...rawData,
+      totalVectorCount,
+      capabilities: {
+        indexInventory: true,
+        vectorCount: true,
+        billingCost: false,
+        subscriptionStatus: false,
+      },
+    },
   };
 }

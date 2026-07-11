@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchJson, redactUrlForError } from "../helpers";
+import {
+  fetchJson,
+  isForbiddenOutboundAddress,
+  redactUrlForError,
+  resolveSafeOutboundAddress,
+} from "../helpers";
 
 // These tests exercise the transport hardening added to fetchJson: a
 // per-request timeout, bounded retry-on-transient-status behavior with
@@ -264,5 +269,61 @@ describe("fetchJson", () => {
     );
 
     expect(err.message).toContain("timed out after 1234ms");
+  });
+
+  it("rejects plaintext HTTP before sending credentials", async () => {
+    await expect(fetchJson("http://api.example.com/usage")).rejects.toMatchObject({
+      code: "UNSAFE_OUTBOUND_URL",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("bounds provider response bodies", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ value: "x".repeat(200) }), {
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await expect(
+      fetchJson("https://api.example.com/usage", undefined, {
+        maxResponseBytes: 32,
+      })
+    ).rejects.toMatchObject({ code: "RESPONSE_TOO_LARGE" });
+  });
+
+  it("classifies malformed successful JSON as an invalid provider response", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("{broken", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await expect(
+      fetchJson("https://api.example.com/usage")
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+});
+
+describe("untrusted outbound address validation", () => {
+  it("blocks local, private, link-local, and metadata-adjacent ranges", () => {
+    expect(isForbiddenOutboundAddress("127.0.0.1")).toBe(true);
+    expect(isForbiddenOutboundAddress("10.0.0.1")).toBe(true);
+    expect(isForbiddenOutboundAddress("169.254.169.254")).toBe(true);
+    expect(isForbiddenOutboundAddress("::1")).toBe(true);
+    expect(isForbiddenOutboundAddress("8.8.8.8")).toBe(false);
+  });
+
+  it("fails closed when any DNS answer is private", async () => {
+    await expect(
+      resolveSafeOutboundAddress(
+        new URL("https://api.example.com/usage"),
+        async () => [
+          { address: "8.8.8.8", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ]
+      )
+    ).rejects.toMatchObject({ code: "UNSAFE_OUTBOUND_URL" });
   });
 });

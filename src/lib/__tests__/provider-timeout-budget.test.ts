@@ -18,6 +18,8 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     provider: { findMany: () => findMany(), create: vi.fn() },
     usageSnapshot: { create: (args: unknown) => create(args) },
+    $transaction: (run: (tx: unknown) => unknown) =>
+      run({ usageSnapshot: { create: (args: unknown) => create(args) } }),
   },
 }));
 
@@ -88,5 +90,14 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].name).toBe("hung");
     expect(result.errors[0].error).toBe("Provider hung timed out after 5000ms");
+    expect(result.errors[0]).toMatchObject({
+      code: "TIMEOUT",
+      status: null,
+      retryable: true,
+    });
+    expect(result.outcomes.map((outcome) => outcome.status)).toEqual([
+      "success",
+      "failure",
+    ]);
   });
 });

@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { encrypt, decrypt } from "@/lib/crypto";
+import { encrypt, decrypt, encryptJson } from "@/lib/crypto";
 import { parseProviderCreateInput, readJsonBody } from "@/lib/provider-input";
 import { buildProviderAlertState } from "@/lib/provider-alerts";
+import { computeBudgetStatus } from "@/lib/budget-status";
 import { toPrismaProviderPlanData } from "@/lib/provider-plan";
+import {
+  hasProviderSecrets,
+  providerConfigForClient,
+  splitProviderConfig,
+} from "@/lib/provider-secret-config";
 
 function buildKeyPreview(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
@@ -20,7 +26,7 @@ function buildKeyPreview(encryptedKey: string | null): string | null {
 }
 
 export async function GET() {
-  const providers = await prisma.provider.findMany({
+  const [providers, budget] = await Promise.all([prisma.provider.findMany({
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -32,6 +38,7 @@ export async function GET() {
       groupId: true,
       label: true,
       config: true,
+      secretConfig: true,
       apiKey: true,
       createdAt: true,
       allocations: {
@@ -55,6 +62,27 @@ export async function GET() {
           notes: true,
         },
       },
+      externalBilling: {
+        orderBy: [{ source: "asc" }, { externalId: "asc" }],
+        select: {
+          source: true,
+          externalId: true,
+          kind: true,
+          planName: true,
+          status: true,
+          amountUsd: true,
+          currency: true,
+          billingInterval: true,
+          currentPeriodStart: true,
+          currentPeriodEnd: true,
+          nextRenewalAt: true,
+          requestLimit: true,
+          requestLimitWindow: true,
+          spendLimitUsd: true,
+          spendLimitWindow: true,
+          syncedAt: true,
+        },
+      },
       snapshots: {
         orderBy: { fetchedAt: "desc" },
         take: 1,
@@ -67,11 +95,22 @@ export async function GET() {
         },
       },
     },
-  });
+  }), computeBudgetStatus()]);
+  const budgetByProviderId = new Map(
+    budget.providers.map((entry) => [entry.id, entry])
+  );
+  const duplicateIdsByName = new Map<string, string[]>();
+  for (const provider of providers) {
+    const key = provider.name.trim().toLowerCase();
+    const ids = duplicateIdsByName.get(key) ?? [];
+    ids.push(provider.id);
+    duplicateIdsByName.set(key, ids);
+  }
 
   // Flatten latest snapshot into the provider object
   const result = providers.map((p) => {
-    const { snapshots, apiKey, ...rest } = p;
+    const { snapshots, apiKey, config, secretConfig, ...rest } = p;
+    const clientConfig = providerConfigForClient(config, secretConfig);
     const latestSnapshot = snapshots[0] ?? null;
     const alertState = buildProviderAlertState({
       isActive: p.isActive,
@@ -79,15 +118,28 @@ export async function GET() {
       plan: p.plan,
       latestSnapshot,
     });
+    const canonicalBudget = budgetByProviderId.get(p.id);
+    const duplicateProviderIds = duplicateIdsByName.get(
+      p.name.trim().toLowerCase()
+    ) ?? [];
 
     return {
       ...rest,
+      ...clientConfig,
       keyPreview: buildKeyPreview(apiKey),
       latestSnapshot,
       alerts: alertState.alerts,
       estimatedMonthlyCostUsd: alertState.estimatedMonthlyCostUsd,
-      projectedEomUsd: alertState.projectedEomUsd,
+      spentUsd: canonicalBudget?.spentUsd ?? latestSnapshot?.totalCost ?? 0,
+      snapshotCostUsd: canonicalBudget?.snapshotCostUsd ?? latestSnapshot?.totalCost ?? null,
+      pushedMonthToDateUsd: canonicalBudget?.pushedMonthToDateUsd ?? 0,
+      fixedMonthlyCostUsd: canonicalBudget?.fixedMonthlyCostUsd ?? 0,
+      projectedEomUsd: canonicalBudget?.projectedEomUsd ?? alertState.projectedEomUsd,
       billingMode: alertState.billingMode,
+      duplicateNameWarning:
+        duplicateProviderIds.length > 1
+          ? { providerIds: [...duplicateProviderIds].sort() }
+          : null,
     };
   });
 
@@ -127,6 +179,7 @@ export async function POST(request: NextRequest) {
   }
 
   const encryptedKey = input.apiKey ? encrypt(input.apiKey) : null;
+  const splitConfig = splitProviderConfig(input.config);
 
   const provider = await prisma.provider.create({
     data: {
@@ -134,7 +187,12 @@ export async function POST(request: NextRequest) {
       displayName: input.displayName,
       type: input.type,
       apiKey: encryptedKey,
-      config: input.config as Prisma.InputJsonObject | undefined,
+      config: Object.keys(splitConfig.publicConfig).length > 0
+        ? (splitConfig.publicConfig as Prisma.InputJsonObject)
+        : undefined,
+      secretConfig: hasProviderSecrets(splitConfig.secretConfig)
+        ? encryptJson(splitConfig.secretConfig)
+        : null,
       refreshIntervalMin: input.refreshIntervalMin,
       groupId,
       label: input.label,

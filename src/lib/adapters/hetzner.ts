@@ -1,105 +1,100 @@
-import { fetchJson, type UsageResult } from "./helpers";
+import {
+  AdapterError,
+  errorResult,
+  fetchJson,
+  parseNumber,
+  type AdapterExternalBillingRecord,
+  type UsageResult,
+} from "./helpers";
 
 interface ServerPrice {
-  location: string;
-  price_hourly: { net: string; gross: string };
-  price_monthly: { net: string; gross: string };
+  location?: string;
+  price_monthly?: { net?: string; gross?: string };
 }
 
 interface HetznerServer {
-  id: number;
-  name: string;
-  status: string;
-  outgoing_traffic: number | null;
-  server_type: {
-    name: string;
-    prices: ServerPrice[];
-  };
-  datacenter: {
-    location: {
-      name: string;
-    };
-  };
+  id?: number;
+  name?: string;
+  status?: string;
+  outgoing_traffic?: number | null;
+  server_type?: { name?: string; prices?: ServerPrice[] };
+  datacenter?: { location?: { name?: string } };
 }
 
-interface HetznerServersResponse {
-  servers: HetznerServer[];
-}
+export async function fetchUsage(apiKey: string): Promise<UsageResult> {
+  const response = await fetchJson("https://api.hetzner.cloud/v1/servers", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) return errorResult(response.status);
 
-export async function fetchUsage(
-  apiKey: string,
-  config?: Record<string, unknown>
-): Promise<UsageResult> {
-  const headers = {
-    Authorization: `Bearer ${apiKey}`,
-  };
-
-  const rawData: Record<string, unknown> = {};
-  let totalCost: number | null = null;
-  let totalRequests = 0;
-  let totalBandwidth_bytes = 0;
-
-  try {
-    const res = await fetchJson("https://api.hetzner.cloud/v1/servers", {
-      headers,
+  const data = (response.data ?? {}) as { servers?: HetznerServer[] };
+  if (!Array.isArray(data.servers)) {
+    throw new AdapterError("Hetzner returned an invalid servers response", {
+      code: "INVALID_RESPONSE",
     });
-
-    if (!res.ok) {
-      return {
-        balance: null,
-        totalCost: null,
-        totalRequests: null,
-        credits: null,
-        rawData: { error: `HTTP ${res.status}` },
-      };
-    }
-
-    const data = res.data as HetznerServersResponse;
-    rawData.servers = data.servers.map((s) => ({
-      id: s.id,
-      name: s.name,
-      status: s.status,
-      type: s.server_type.name,
-      location: s.datacenter.location.name,
-      outgoing_traffic: s.outgoing_traffic,
-    }));
-
-    let estimatedMonthlyCost = 0;
-    
-    for (const server of data.servers) {
-      totalRequests += 1;
-      
-      if (server.outgoing_traffic != null) {
-        totalBandwidth_bytes += server.outgoing_traffic;
-      }
-
-      // Find the price for the server's specific location
-      const locationName = server.datacenter.location.name;
-      const priceForLocation = server.server_type.prices.find(
-        (p) => p.location === locationName
-      );
-
-      // Fallback to the first price if location-specific price isn't found
-      const priceStr = priceForLocation?.price_monthly?.net 
-        ?? server.server_type.prices[0]?.price_monthly?.net 
-        ?? "0";
-      
-      estimatedMonthlyCost += parseFloat(priceStr);
-    }
-
-    totalCost = estimatedMonthlyCost;
-    rawData.totalBandwidth_bytes = totalBandwidth_bytes;
-    rawData.note = "totalCost is the estimated monthly run-rate based on active servers.";
-    
-  } catch (err) {
-    rawData.error = err instanceof Error ? err.message : "Failed to fetch from Hetzner API";
   }
+
+  let monthlyRunRateUsd = 0;
+  let foundPrice = false;
+  let totalBandwidthBytes = 0;
+  const records: AdapterExternalBillingRecord[] = [];
+  const servers = data.servers.map((server) => {
+    const location = server.datacenter?.location?.name;
+    const prices = server.server_type?.prices ?? [];
+    const price = prices.find((entry) => entry.location === location) ?? prices[0];
+    const monthlyPriceUsd = parseNumber(price?.price_monthly?.net);
+    if (monthlyPriceUsd != null) {
+      monthlyRunRateUsd += monthlyPriceUsd;
+      foundPrice = true;
+    }
+    if (typeof server.outgoing_traffic === "number") {
+      totalBandwidthBytes += server.outgoing_traffic;
+    }
+    if (server.id != null) {
+      records.push({
+        externalId: String(server.id),
+        kind: "service_plan",
+        planName: server.server_type?.name ?? null,
+        status: server.status ?? "unknown",
+        amountUsd: monthlyPriceUsd,
+        currency: "USD",
+        billingInterval: "monthly",
+      });
+    }
+    return {
+      id: server.id ?? null,
+      name: server.name ?? null,
+      status: server.status ?? null,
+      type: server.server_type?.name ?? null,
+      location: location ?? null,
+      outgoingTrafficBytes: server.outgoing_traffic ?? null,
+      monthlyPlanPriceUsd: monthlyPriceUsd,
+    };
+  });
 
   return {
     balance: null,
-    totalCost,
-    totalRequests, // We'll use totalRequests to track the number of active servers
+    // Hetzner's API exposes current resource prices, not an invoice or accrued
+    // month-to-date bill. Do not misclassify the monthly run-rate as spend.
+    totalCost: null,
+    totalRequests: null,
     credits: null,
-    rawData,
+    rawData: {
+      servers,
+      serverCount: servers.length,
+      totalBandwidthBytes,
+      monthlyRunRateUsd: foundPrice ? monthlyRunRateUsd : null,
+      capabilities: {
+        servicePlan: true,
+        serviceStatus: true,
+        monthlyRunRate: foundPrice,
+        actualInvoiceCost: false,
+      },
+    },
+    externalBilling: {
+      source: "hetzner-cloud-server-plans",
+      authoritative: true,
+      records,
+    },
   };
 }

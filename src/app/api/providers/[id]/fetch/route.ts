@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { recordProviderUsage } from "@/lib/usage-recorder";
+import { AdapterError } from "@/lib/adapters/helpers";
 
 export async function POST(
   _request: NextRequest,
@@ -31,6 +32,23 @@ export async function POST(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const typed = error instanceof AdapterError ? error : null;
+    const status =
+      typed?.code === "CONFIGURATION_ERROR" ||
+      typed?.code === "UNSAFE_OUTBOUND_URL"
+        ? 400
+        : typed?.code === "UNSUPPORTED"
+          ? 422
+          : typed?.retryable
+            ? 503
+            : 502;
+    return NextResponse.json(
+      {
+        error: message,
+        code: typed?.code ?? "UNKNOWN",
+        retryable: typed?.retryable ?? false,
+      },
+      { status }
+    );
   }
 }

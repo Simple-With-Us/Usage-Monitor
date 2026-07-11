@@ -1,7 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import { fetchProviderUsage } from "@/lib/adapters";
+import { AdapterError, type AdapterErrorCode } from "@/lib/adapters/helpers";
 import { runUsageMaintenance } from "@/lib/usage-maintenance";
 import { ensureAgentSyncProviderSeeded } from "@/lib/ensure-agent-sync-provider";
+import { reconcileProviderExternalBilling } from "@/lib/provider-external-billing";
 import type { Provider, UsageSnapshot } from "@prisma/client";
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
@@ -19,16 +21,26 @@ export async function recordProviderUsage(
 ): Promise<UsageSnapshot> {
   const usage = await fetchProviderUsage(provider);
 
-  return prisma.usageSnapshot.create({
-    data: {
-      providerId: provider.id,
-      fetchedAt: new Date(),
-      balance: usage.balance,
-      totalCost: usage.totalCost,
-      totalRequests: usage.totalRequests,
-      credits: usage.credits,
-      rawData: usage.rawData ?? undefined,
-    },
+  return prisma.$transaction(async (tx) => {
+    const billingSyncs = [
+      ...(usage.externalBilling ? [usage.externalBilling] : []),
+      ...(usage.externalBillingSyncs ?? []),
+    ];
+    for (const sync of billingSyncs) {
+      await reconcileProviderExternalBilling(provider.id, sync, tx);
+    }
+
+    return tx.usageSnapshot.create({
+      data: {
+        providerId: provider.id,
+        fetchedAt: new Date(),
+        balance: usage.balance,
+        totalCost: usage.totalCost,
+        totalRequests: usage.totalRequests,
+        credits: usage.credits,
+        rawData: usage.rawData ?? undefined,
+      },
+    });
   });
 }
 
@@ -38,21 +50,35 @@ export async function recordProviderUsage(
 // This app runs as a single Node process against a local SQLite file, so a
 // simple in-process mutex is sufficient - there is no multi-instance/
 // multi-process deployment for this service to coordinate across.
-let fetchAllInFlight: Promise<{
-  total: number;
-  successes: number;
-  failures: number;
-  skipped: number;
-  errors: Array<{ providerId: string; name: string; error: string }>;
-}> | null = null;
+export interface ProviderFetchError {
+  providerId: string;
+  name: string;
+  error: string;
+  code: AdapterErrorCode | "UNKNOWN";
+  status: number | null;
+  retryable: boolean;
+}
 
-export async function fetchAllDueProviders(): Promise<{
+export interface ProviderFetchOutcome {
+  providerId: string;
+  name: string;
+  status: "success" | "failure" | "skipped";
+  durationMs: number;
+  errorCode?: AdapterErrorCode | "UNKNOWN";
+}
+
+export interface FetchAllProvidersResult {
   total: number;
   successes: number;
   failures: number;
   skipped: number;
-  errors: Array<{ providerId: string; name: string; error: string }>;
-}> {
+  errors: ProviderFetchError[];
+  outcomes: ProviderFetchOutcome[];
+}
+
+let fetchAllInFlight: Promise<FetchAllProvidersResult> | null = null;
+
+export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   // If a run is already in progress, wait for it and return its result
   // instead of starting a second, overlapping pass over the same providers.
   if (fetchAllInFlight) {
@@ -75,15 +101,23 @@ export async function fetchAllDueProviders(): Promise<{
     let successes = 0;
     let failures = 0;
     let skipped = 0;
-    const errors: Array<{ providerId: string; name: string; error: string }> = [];
+    const errors: ProviderFetchError[] = [];
+    const outcomes: ProviderFetchOutcome[] = [];
     const now = Date.now();
     const providerTimeoutMs = resolveProviderTimeoutMs();
 
     for (const { snapshots, ...provider } of providers) {
+      const startedAt = Date.now();
       const latestFetchedAt = snapshots[0]?.fetchedAt.getTime();
       const intervalMs = provider.refreshIntervalMin * 60 * 1000;
       if (latestFetchedAt && now - latestFetchedAt < intervalMs) {
         skipped++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "skipped",
+          durationMs: Date.now() - startedAt,
+        });
         continue;
       }
 
@@ -106,8 +140,9 @@ export async function fetchAllDueProviders(): Promise<{
               timeoutHandle = setTimeout(
                 () =>
                   reject(
-                    new Error(
-                      `Provider ${provider.name} timed out after ${providerTimeoutMs}ms`
+                    new AdapterError(
+                      `Provider ${provider.name} timed out after ${providerTimeoutMs}ms`,
+                      { code: "TIMEOUT", retryable: true }
                     )
                   ),
                 providerTimeoutMs
@@ -124,12 +159,29 @@ export async function fetchAllDueProviders(): Promise<{
           if (timeoutHandle) clearTimeout(timeoutHandle);
         }
         successes++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "success",
+          durationMs: Date.now() - startedAt,
+        });
       } catch (error) {
         failures++;
+        const typed = error instanceof AdapterError ? error : null;
         errors.push({
           providerId: provider.id,
           name: provider.name,
           error: error instanceof Error ? error.message : "Failed to fetch",
+          code: typed?.code ?? "UNKNOWN",
+          status: typed?.status ?? null,
+          retryable: typed?.retryable ?? false,
+        });
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "failure",
+          durationMs: Date.now() - startedAt,
+          errorCode: typed?.code ?? "UNKNOWN",
         });
       }
     }
@@ -140,6 +192,7 @@ export async function fetchAllDueProviders(): Promise<{
       failures,
       skipped,
       errors,
+      outcomes,
     };
   })();
 

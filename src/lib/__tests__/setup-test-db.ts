@@ -10,6 +10,7 @@ CREATE TABLE "Provider" (
   "type" TEXT NOT NULL DEFAULT 'builtin',
   "apiKey" TEXT,
   "config" JSONB,
+  "secretConfig" TEXT,
   "isActive" BOOLEAN NOT NULL DEFAULT true,
   "credits" REAL NOT NULL DEFAULT 0,
   "refreshIntervalMin" INTEGER NOT NULL DEFAULT 60,
@@ -57,6 +58,30 @@ CREATE TABLE "ProviderPlan" (
   "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt" DATETIME NOT NULL,
   CONSTRAINT "ProviderPlan_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE "ProviderExternalBilling" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "providerId" TEXT NOT NULL,
+  "source" TEXT NOT NULL,
+  "externalId" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "planName" TEXT,
+  "status" TEXT,
+  "amountUsd" REAL,
+  "currency" TEXT,
+  "billingInterval" TEXT,
+  "currentPeriodStart" DATETIME,
+  "currentPeriodEnd" DATETIME,
+  "nextRenewalAt" DATETIME,
+  "requestLimit" REAL,
+  "requestLimitWindow" TEXT,
+  "spendLimitUsd" REAL,
+  "spendLimitWindow" TEXT,
+  "syncedAt" DATETIME NOT NULL,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL,
+  CONSTRAINT "ProviderExternalBilling_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE "Subscription" (
@@ -201,6 +226,8 @@ CREATE TABLE "ProviderAlertNotification" (
 );
 
 CREATE UNIQUE INDEX "ProviderPlan_providerId_key" ON "ProviderPlan"("providerId");
+CREATE UNIQUE INDEX "ProviderExternalBilling_providerId_source_externalId_key" ON "ProviderExternalBilling"("providerId", "source", "externalId");
+CREATE INDEX "ProviderExternalBilling_providerId_status_idx" ON "ProviderExternalBilling"("providerId", "status");
 CREATE UNIQUE INDEX "Project_name_key" ON "Project"("name");
 CREATE UNIQUE INDEX "Project_nameKey_key" ON "Project"("nameKey");
 CREATE UNIQUE INDEX "ProviderProjectAllocation_providerId_projectId_key" ON "ProviderProjectAllocation"("providerId", "projectId");

@@ -1,25 +1,72 @@
-import { errorResult, fetchJson, type UsageResult } from "./helpers";
+import {
+  errorResult,
+  fetchJson,
+  headerNumber,
+  parseNumber,
+  type UsageResult,
+} from "./helpers";
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const res = await fetchJson(
-    `https://api.twelvedata.com/quote?symbol=AAPL&apikey=${encodeURIComponent(apiKey)}`
-  );
+  const response = await fetchJson("https://api.twelvedata.com/api_usage", {
+    headers: { Authorization: `apikey ${apiKey}` },
+  });
+  if (!response.ok) return errorResult(response.status);
 
-  if (!res.ok) {
-    return errorResult(res.status, { response: res.data });
+  const data = (response.data ?? {}) as Record<string, unknown>;
+  if (data.status === "error") {
+    return errorResult(parseNumber(data.code) ?? 400, {
+      note: typeof data.message === "string" ? data.message : undefined,
+    });
   }
 
-  const data = res.data as Record<string, unknown>;
-  const isValid = data.symbol != null && !data.code;
+  // Twelve Data documents these response headers as the real-time source of
+  // truth. The /api_usage body additionally carries current plan details.
+  const used = headerNumber(response.headers, [
+    "api-credits-used",
+    "api-credits-request",
+  ]);
+  const remaining = headerNumber(response.headers, ["api-credits-left"]);
+  const creditLimit =
+    used != null && remaining != null ? used + remaining : null;
+  const planValue = data.plan;
+  const planName = typeof planValue === "string"
+    ? planValue
+    : planValue && typeof planValue === "object"
+      ? ((planValue as Record<string, unknown>).name as string | undefined) ?? null
+      : null;
 
   return {
     balance: null,
     totalCost: null,
-    totalRequests: isValid ? 1 : null,
-    credits: null,
+    totalRequests: used,
+    credits: remaining,
     rawData: {
-      response: data,
-      note: "Twelve Data does not expose account balance via API. Key validated with a quote request.",
+      usage: data,
+      apiCreditsUsed: used,
+      apiCreditsRemaining: remaining,
+      apiCreditsLimit: creditLimit,
+      capabilities: {
+        currentPlan: true,
+        realtimeCredits: true,
+        billingCost: false,
+        renewalDate: false,
+      },
     },
+    externalBilling: planName || creditLimit != null
+      ? {
+          source: "twelve-data-api-usage",
+          authoritative: true,
+          records: [
+            {
+              externalId: "api-plan",
+              kind: "plan",
+              planName,
+              status: "active",
+              requestLimit: creditLimit,
+              requestLimitWindow: "provider-defined-credit-window",
+            },
+          ],
+        }
+      : undefined,
   };
 }

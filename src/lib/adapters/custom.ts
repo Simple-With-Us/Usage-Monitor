@@ -1,4 +1,9 @@
-import { fetchJson, type UsageResult } from "./helpers";
+import {
+  configurationError,
+  errorResult,
+  fetchJson,
+  type UsageResult,
+} from "./helpers";
 
 function resolveJsonPath(obj: unknown, path: string): unknown {
   // Simple JSONPath-like resolution: $.balance -> obj.balance
@@ -28,13 +33,7 @@ export async function fetchUsage(
   const extraHeaders = (config?.extraHeaders as Record<string, string>) || {};
 
   if (!endpoint) {
-    return {
-      balance: null,
-      totalCost: null,
-      totalRequests: null,
-      credits: null,
-      rawData: { error: "endpoint is required in config" },
-    };
+    configurationError("endpoint is required in config");
   }
 
   const headers: Record<string, string> = {
@@ -56,16 +55,10 @@ export async function fetchUsage(
     }
   }
 
-  const res = await fetchJson(endpoint, { headers });
+  const res = await fetchJson(endpoint, { headers }, { security: "untrusted" });
 
   if (!res.ok) {
-    return {
-      balance: null,
-      totalCost: null,
-      totalRequests: null,
-      credits: null,
-      rawData: { error: `HTTP ${res.status}`, status: res.status },
-    };
+    return errorResult(res.status);
   }
 
   const data = res.data;

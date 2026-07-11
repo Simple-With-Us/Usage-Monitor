@@ -1,5 +1,5 @@
 import {
-  emptyResult,
+  configurationError,
   errorResult,
   fetchJson,
   parseNumber,
@@ -14,18 +14,17 @@ export async function fetchUsage(
   const secretKey = config?.secretKey as string | undefined;
   const host =
     (config?.host as string | undefined) || "https://cloud.langfuse.com";
+  const defaultHost = "https://cloud.langfuse.com";
 
   if (!secretKey) {
-    return emptyResult({
-      error: "secretKey is required in config (Langfuse secret key)",
-      note: "Store the public key in the API key field and the secret key in config.",
-    });
+    configurationError("secretKey is required in config (Langfuse secret key)");
   }
 
   const auth = Buffer.from(`${publicKey}:${secretKey}`).toString("base64");
   const res = await fetchJson(
     `${host.replace(/\/$/, "")}/api/public/metrics/daily?page=1&limit=31`,
-    { headers: { Authorization: `Basic ${auth}` } }
+    { headers: { Authorization: `Basic ${auth}` } },
+    { security: host === defaultHost ? "trusted" : "untrusted" }
   );
 
   if (!res.ok) {
@@ -58,9 +57,20 @@ export async function fetchUsage(
 
   return {
     balance: null,
-    totalCost: foundCost ? totalCost : null,
+    // Langfuse reports the cost of observed model calls, not the price of the
+    // Langfuse subscription itself. Do not attribute that spend to Langfuse
+    // or double-count it alongside the underlying model provider.
+    totalCost: null,
     totalRequests: foundRequests ? totalRequests : null,
     credits: null,
-    rawData: data,
+    rawData: {
+      trackedLlmCostUsd: foundCost ? totalCost : null,
+      observationCount: foundRequests ? totalRequests : null,
+      capabilities: {
+        trackedLlmCost: foundCost,
+        langfuseInvoiceCost: false,
+        subscriptionStatus: false,
+      },
+    },
   };
 }

@@ -1,5 +1,5 @@
 import {
-  emptyResult,
+  AdapterError,
   errorResult,
   fetchJson,
   parseNumber,
@@ -16,7 +16,9 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   }
 
   if (!res.data || typeof res.data !== "object") {
-    return emptyResult(res.data);
+    throw new AdapterError("DeepSeek returned an invalid balance response", {
+      code: "INVALID_RESPONSE",
+    });
   }
 
   const data = res.data as {
@@ -51,5 +53,17 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     totalRequests: null,
     credits,
     rawData: data,
+    externalBilling: {
+      source: "deepseek-account-balance",
+      authoritative: true,
+      records: [
+        {
+          externalId: "api-account",
+          kind: "account",
+          planName: "DeepSeek API account",
+          status: data.is_available === false ? "unavailable" : "active",
+        },
+      ],
+    },
   };
 }

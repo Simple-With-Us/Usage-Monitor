@@ -55,7 +55,7 @@ describe("agent-sync-relay adapter", () => {
 
     expect(res.balance).toBeNull();
     expect(res.totalCost).toBe(0);
-    expect(res.totalRequests).toBe(1);
+    expect(res.totalRequests).toBeNull();
     expect(res.rawData).toEqual({
       status: "UP",
       data: { ok: true, service: "agent-sync-push" },
@@ -77,7 +77,7 @@ describe("agent-sync-relay adapter", () => {
       fetchUsage("dummy-key", {
         endpoint: "https://agent-sync.jays.services/health",
       })
-    ).rejects.toThrow("Uptime check failed: HTTP 500");
+    ).rejects.toMatchObject({ code: "HTTP_ERROR", status: 500 });
   });
 });
 

@@ -1,5 +1,4 @@
 import {
-  emptyResult,
   errorResult,
   fetchJson,
   type UsageResult,
@@ -23,11 +22,16 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   return {
     balance: null,
     totalCost: null,
-    totalRequests: keyCount > 0 ? keyCount : null,
+    totalRequests: null,
     credits: null,
     rawData: {
-      ...data,
-      note: "Resend does not expose remaining email quota via API. Key validated via api-keys endpoint.",
+      apiKeyCount: keyCount,
+      note: "Resend does not expose remaining email quota, plan, or billing cost via API. Authentication was checked through the non-sending API-key control plane.",
+      capabilities: {
+        nonBillableKeyValidation: true,
+        billingCost: false,
+        subscriptionStatus: false,
+      },
     },
   };
 }

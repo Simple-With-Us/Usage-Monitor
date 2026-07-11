@@ -1,5 +1,4 @@
 import {
-  emptyResult,
   errorResult,
   fetchJson,
   type UsageResult,
@@ -12,6 +11,7 @@ export async function fetchUsage(
   const projectId = config?.projectId as string | undefined;
   const host =
     (config?.host as string | undefined) || "https://api.cloud.llamaindex.ai";
+  const defaultHost = "https://api.cloud.llamaindex.ai";
 
   const url = projectId
     ? `${host.replace(/\/$/, "")}/api/v1/projects/${projectId}`
@@ -19,7 +19,7 @@ export async function fetchUsage(
 
   const res = await fetchJson(url, {
     headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  }, { security: host === defaultHost ? "trusted" : "untrusted" });
 
   if (!res.ok) {
     return errorResult(res.status, { response: res.data });
@@ -41,11 +41,16 @@ export async function fetchUsage(
   return {
     balance: null,
     totalCost: null,
-    totalRequests: projects.length > 0 ? projects.length : null,
+    totalRequests: null,
     credits: null,
     rawData: {
-      projects,
-      note: "LlamaIndex Cloud does not expose remaining credits via API. Key validated via projects endpoint.",
+      projectCount: projects.length,
+      note: "LlamaIndex Cloud does not expose remaining credits or billing via API. Authentication was checked through the non-inference projects control plane.",
+      capabilities: {
+        nonBillableKeyValidation: true,
+        billingCost: false,
+        subscriptionStatus: false,
+      },
     },
   };
 }

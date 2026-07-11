@@ -13,6 +13,8 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
+    "migrate:provider-secrets": "node scripts/migrate-provider-config-secrets.mjs",
+    "audit:provider-duplicates": "node scripts/audit-provider-duplicates.mjs",
     "test": "vitest run"
   },
   "dependencies": {

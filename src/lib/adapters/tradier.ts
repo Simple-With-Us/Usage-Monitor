@@ -1,7 +1,8 @@
 import {
-  emptyResult,
+  configurationError,
   errorResult,
   fetchJson,
+  headerNumber,
   parseNumber,
   type UsageResult,
 } from "./helpers";
@@ -33,13 +34,10 @@ export async function fetchUsage(
     const resolvedAccountId = firstAccount?.account_number;
 
     if (!resolvedAccountId) {
-      return emptyResult({
-        profile: profileRes.data,
-        error: "accountId is required in config when profile has no account",
-      });
+      configurationError("accountId is required when the Tradier profile has no account");
     }
 
-    return fetchAccountBalance(apiKey, resolvedAccountId, profileRes.data);
+    return fetchAccountBalance(apiKey, resolvedAccountId, true);
   }
 
   return fetchAccountBalance(apiKey, accountId);
@@ -48,7 +46,7 @@ export async function fetchUsage(
 async function fetchAccountBalance(
   apiKey: string,
   accountId: string,
-  profile?: unknown
+  resolvedFromProfile = false
 ): Promise<UsageResult> {
   const res = await fetchJson(
     `https://api.tradier.com/v1/accounts/${accountId}/balances`,
@@ -61,7 +59,7 @@ async function fetchAccountBalance(
   );
 
   if (!res.ok) {
-    return errorResult(res.status, { profile, balances: res.data });
+    return errorResult(res.status, { note: "Tradier balances were unavailable" });
   }
 
   const data = res.data as {
@@ -77,14 +75,57 @@ async function fetchAccountBalance(
   const balances = data.balances;
   const balance =
     parseNumber(balances?.total_equity) ?? parseNumber(balances?.total_cash);
+  const allowed = headerNumber(res.headers, ["x-ratelimit-allowed"]);
+  const used = headerNumber(res.headers, ["x-ratelimit-used"]);
+  const available = headerNumber(res.headers, ["x-ratelimit-available"]);
+  const expiry = res.headers.get("x-ratelimit-expiry");
+  const parsedExpiry = expiry == null
+    ? Number.NaN
+    : /^\d+$/.test(expiry)
+      ? Number(expiry) * 1000
+      : Date.parse(expiry);
+  const expiryAt = Number.isFinite(parsedExpiry)
+    ? new Date(parsedExpiry).toISOString()
+    : null;
 
   return {
     balance,
-    totalCost: parseNumber(balances?.open_pl),
-    totalRequests: null,
-    credits:
-      parseNumber(balances?.margin?.stock_buying_power) ??
-      parseNumber(balances?.cash?.cash_available),
-    rawData: { profile, balances: data },
+    // Brokerage P/L is not API spend and must never enter provider budgets.
+    totalCost: null,
+    totalRequests: used,
+    credits: available,
+    rawData: {
+      resolvedFromProfile,
+      account: {
+        totalEquity: balance,
+        openProfitLoss: parseNumber(balances?.open_pl),
+        buyingPower:
+          parseNumber(balances?.margin?.stock_buying_power) ??
+          parseNumber(balances?.cash?.cash_available),
+      },
+      rateLimit: { allowed, used, available, expiryAt },
+      capabilities: {
+        accountPortfolio: true,
+        apiRateLimit: allowed != null || available != null,
+        billingCost: false,
+      },
+    },
+    externalBilling: allowed != null
+      ? {
+          source: "tradier-api-limits",
+          authoritative: true,
+          records: [
+            {
+              externalId: "account-api-limit",
+              kind: "account",
+              planName: "Tradier API rate limit",
+              status: "active",
+              requestLimit: allowed,
+              requestLimitWindow: "minute",
+              currentPeriodEnd: expiryAt,
+            },
+          ],
+        }
+      : undefined,
   };
 }

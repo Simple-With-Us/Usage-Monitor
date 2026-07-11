@@ -6,11 +6,9 @@ describe("hetzner adapter", () => {
     vi.restoreAllMocks();
   });
 
-  it("fetches servers and calculates cost and bandwidth", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue({
-      ok: true,
-      headers: new Headers({ "content-type": "application/json" }),
-      json: async () => ({
+  it("syncs server plans without misclassifying run-rate as accrued spend", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
         servers: [
           {
             id: 1,
@@ -47,36 +45,35 @@ describe("hetzner adapter", () => {
             },
           },
         ],
-      }),
-    } as unknown as Response);
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    );
 
     const result = await fetchUsage("fake-key");
 
     expect(fetchSpy).toHaveBeenCalledWith("https://api.hetzner.cloud/v1/servers", {
       headers: { Authorization: "Bearer fake-key" },
+      redirect: "error",
       signal: expect.any(AbortSignal),
     });
 
-    expect(result.totalCost).toBe(8.5); // 3.50 + 5.00
-    expect(result.totalRequests).toBe(2); // 2 active servers
+    expect(result.totalCost).toBeNull();
+    expect(result.totalRequests).toBeNull();
     
     const rawData = result.rawData as Record<string, unknown>;
-    expect(rawData.totalBandwidth_bytes).toBe(1500); // 1000 + 500
+    expect(rawData.totalBandwidthBytes).toBe(1500);
+    expect(rawData.monthlyRunRateUsd).toBe(8.5);
     expect(rawData.servers).toHaveLength(2);
+    expect(result.externalBilling?.records).toHaveLength(2);
   });
 
   it("handles fetch errors", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue({
-      ok: false,
-      headers: new Headers(),
-      status: 401,
-      statusText: "Unauthorized",
-      text: async () => "Unauthorized",
-    } as unknown as Response);
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response("Unauthorized", { status: 401 })
+    );
 
-    const result = await fetchUsage("bad-key");
-    expect(result.totalCost).toBeNull();
-    const rawData = result.rawData as Record<string, unknown>;
-    expect(rawData.error).toBe("HTTP 401");
+    await expect(fetchUsage("bad-key")).rejects.toMatchObject({
+      code: "HTTP_ERROR",
+      status: 401,
+    });
   });
 });

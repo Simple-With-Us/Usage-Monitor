@@ -1,5 +1,5 @@
 import {
-  emptyResult,
+  configurationError,
   errorResult,
   fetchJson,
   parseNumber,
@@ -13,9 +13,7 @@ export async function fetchUsage(
   const orgSlug = config?.orgSlug as string | undefined;
 
   if (!orgSlug) {
-    return emptyResult({
-      error: "orgSlug is required in config",
-    });
+    configurationError("orgSlug is required in config");
   }
 
   const res = await fetchJson(

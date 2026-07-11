@@ -1,4 +1,9 @@
 import { decrypt } from "@/lib/crypto";
+import {
+  decryptProviderSecretConfig,
+  mergeProviderConfig,
+  splitProviderConfig,
+} from "@/lib/provider-secret-config";
 import type { Provider } from "@prisma/client";
 import type { UsageResult } from "./openai";
 
@@ -46,6 +51,9 @@ async function loadAdapters() {
     import("./alpaca"),
     import("./agent-sync-relay"),
     import("./hetzner"),
+    import("./github"),
+    import("./vercel"),
+    import("./render"),
   ]);
 
   const [
@@ -60,6 +68,9 @@ async function loadAdapters() {
     robinhood, alpaca,
     agentSyncRelay,
     hetzner,
+    github,
+    vercel,
+    render,
   ] = modules;
 
   // LLM/AI
@@ -103,6 +114,9 @@ async function loadAdapters() {
   // Infrastructure
   adapters["cloudflare"] = cloudflare.fetchUsage;
   adapters["hetzner"] = hetzner.fetchUsage;
+  adapters["github"] = github.fetchUsage;
+  adapters["vercel"] = vercel.fetchUsage;
+  adapters["render"] = render.fetchUsage;
 
   // Data
   adapters["apify"] = apify.fetchUsage;
@@ -133,7 +147,14 @@ export async function fetchProviderUsage(
   }
 
   const apiKey = provider.apiKey ? decrypt(provider.apiKey) : "";
-  const config = (provider.config as Record<string, unknown> | null) ?? {};
+  const storedConfig =
+    (provider.config as Record<string, unknown> | null) ?? {};
+  const legacySplit = splitProviderConfig(storedConfig);
+  const encryptedSecrets = decryptProviderSecretConfig(provider.secretConfig);
+  const config = mergeProviderConfig(
+    legacySplit.publicConfig,
+    mergeProviderConfig(legacySplit.secretConfig, encryptedSecrets)
+  );
 
   return adapter(apiKey, config);
 }

@@ -1,22 +1,9 @@
-import { errorResult, fetchJson, type UsageResult } from "./helpers";
+import { blindProviderResult, type UsageResult } from "./helpers";
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const res = await fetchJson("https://api.fintechstudios.com/v1/market/status", {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-
-  if (!res.ok) {
-    return errorResult(res.status, { response: res.data });
-  }
-
-  return {
-    balance: null,
-    totalCost: null,
-    totalRequests: 1,
-    credits: null,
-    rawData: {
-      response: res.data,
-      note: "Fintech Studios does not expose account balance via API. Key validated with market status.",
-    },
-  };
+  void apiKey;
+  return blindProviderResult(
+    "fintech-studios",
+    "No documented Fintech Studios account usage or billing API was found. No market-status request was consumed merely to validate the key."
+  );
 }

@@ -1,48 +1,59 @@
-import { fetchJson } from "./helpers";
-import type { UsageResult } from "./openai";
+import {
+  errorResult,
+  fetchJson,
+  headerNumber,
+  type UsageResult,
+} from "./helpers";
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const rawData: Record<string, unknown> = {};
-  let totalRequests: number | null = null;
-
-  // Google AI Studio does not expose a public billing/usage REST API.
-  // Usage is visible only at https://aistudio.google.com/app/apikey.
-  // As a workaround, we probe the rate-limit headers from a lightweight call.
-
-  try {
-    const probeRes = await fetchJson(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
-      { headers: { "Content-Type": "application/json" } }
-    );
-
-    if (probeRes.ok) {
-      const data = probeRes.data as { models?: unknown[] };
-      rawData.availableModels = Array.isArray(data.models)
-        ? data.models.length
-        : null;
-
-      // Google returns rate-limit headers (RPQ = requests per quota, usually per minute)
-      const remaining = probeRes.headers.get("x-ratelimit-remaining");
-      const limit = probeRes.headers.get("x-ratelimit-limit");
-      const reset = probeRes.headers.get("x-ratelimit-reset");
-      if (remaining || limit) {
-        rawData.rateLimit = {
-          remaining: remaining ? parseInt(remaining) : null,
-          limit: limit ? parseInt(limit) : null,
-          reset: reset || null,
-        };
-      }
-
-      // Count models as a proxy for available services
-      totalRequests = Array.isArray(data.models) ? data.models.length : null;
-    } else {
-      rawData.probeStatus = `HTTP ${probeRes.status}`;
-    }
-  } catch (err) {
-    rawData.probeError = err instanceof Error ? err.message : "Failed";
+  // Listing model metadata is a non-inference control-plane read. Google AI
+  // Studio does not expose billing or usage through the Gemini API key; actual
+  // spend must come from Cloud Billing export/API in a separate connector.
+  const response = await fetchJson(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+    { headers: { "Content-Type": "application/json" } }
+  );
+  if (!response.ok) {
+    return errorResult(response.status, {
+      note: "Gemini key validation failed; Google AI Studio has no billing API",
+    });
   }
 
-  rawData.note = "Google AI Studio does not expose a public billing/usage REST API. Usage is visible at https://aistudio.google.com/app/apikey. To track actual spend, configure Google Cloud Billing API instead.";
+  const data = (response.data ?? {}) as { models?: unknown[] };
+  const remaining = headerNumber(response.headers, ["x-ratelimit-remaining"]);
+  const limit = headerNumber(response.headers, ["x-ratelimit-limit"]);
+  const reset = response.headers.get("x-ratelimit-reset");
 
-  return { balance: null, totalCost: null, totalRequests, credits: null, rawData };
+  return {
+    balance: null,
+    totalCost: null,
+    totalRequests: null,
+    credits: remaining,
+    rawData: {
+      availableModelCount: Array.isArray(data.models) ? data.models.length : null,
+      rateLimit: { remaining, limit, reset },
+      note: "Google AI Studio exposes no billing/usage API. Configure Google Cloud Billing export/API for direct spend.",
+      capabilities: {
+        nonBillableKeyValidation: true,
+        billingCost: false,
+        subscriptionStatus: false,
+      },
+    },
+    externalBilling: limit != null
+      ? {
+          source: "google-gemini-rate-limits",
+          authoritative: true,
+          records: [
+            {
+              externalId: "gemini-api-key",
+              kind: "account",
+              planName: "Gemini API quota",
+              status: "active",
+              requestLimit: limit,
+              requestLimitWindow: "provider-defined",
+            },
+          ],
+        }
+      : undefined,
+  };
 }

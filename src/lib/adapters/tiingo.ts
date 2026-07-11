@@ -1,22 +1,9 @@
-import { errorResult, fetchJson, type UsageResult } from "./helpers";
+import { blindProviderResult, type UsageResult } from "./helpers";
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
-  const res = await fetchJson("https://api.tiingo.com/api/test", {
-    headers: { Authorization: `Token ${apiKey}` },
-  });
-
-  if (!res.ok) {
-    return errorResult(res.status, { response: res.data });
-  }
-
-  return {
-    balance: null,
-    totalCost: null,
-    totalRequests: 1,
-    credits: null,
-    rawData: {
-      response: res.data,
-      note: "Tiingo does not expose account balance via API. Key validated with /api/test.",
-    },
-  };
+  void apiKey;
+  return blindProviderResult(
+    "tiingo",
+    "Tiingo has no documented account usage or billing endpoint. The monitor no longer spends an API call on /api/test every poll."
+  );
 }

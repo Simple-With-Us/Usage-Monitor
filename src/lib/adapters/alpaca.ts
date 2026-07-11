@@ -1,5 +1,5 @@
 import {
-  emptyResult,
+  configurationError,
   errorResult,
   fetchJson,
   parseNumber,
@@ -18,9 +18,7 @@ export async function fetchUsage(
       : "https://paper-api.alpaca.markets";
 
   if (!apiSecret) {
-    return emptyResult({
-      error: "apiSecret is required in config for Alpaca",
-    });
+    configurationError("apiSecret is required in config for Alpaca");
   }
 
   const res = await fetchJson(`${baseUrl}/v2/account`, {
@@ -49,7 +47,17 @@ export async function fetchUsage(
       parseNumber(data.cash),
     totalCost: null,
     totalRequests: null,
-    credits: parseNumber(data.buying_power),
-    rawData: data,
+    credits: null,
+    rawData: {
+      status: data.status ?? null,
+      equity: parseNumber(data.equity),
+      cash: parseNumber(data.cash),
+      buyingPower: parseNumber(data.buying_power),
+      portfolioValue: parseNumber(data.portfolio_value),
+      capabilities: {
+        brokerageAccount: true,
+        apiBillingCost: false,
+      },
+    },
   };
 }

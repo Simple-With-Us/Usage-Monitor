@@ -1,5 +1,4 @@
 import {
-  emptyResult,
   errorResult,
   fetchJson,
   parseNumber,
@@ -8,23 +7,62 @@ import {
 
 export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   const res = await fetchJson(
-    `https://api.pushover.net/1/licenses.json?token=${encodeURIComponent(apiKey)}`
+    `https://api.pushover.net/1/apps/limits.json?token=${encodeURIComponent(apiKey)}`
   );
 
   if (!res.ok) {
     return errorResult(res.status, { response: res.data });
   }
 
-  const data = res.data as { status?: number; credits?: number };
+  const data = res.data as {
+    status?: number;
+    limit?: number;
+    remaining?: number;
+    reset?: number;
+  };
   if (data.status !== 1) {
-    return emptyResult(data);
+    return errorResult(400, { note: "Pushover returned an unsuccessful status" });
   }
+
+  const limit = parseNumber(data.limit);
+  const remaining = parseNumber(data.remaining);
+  const resetAt =
+    typeof data.reset === "number"
+      ? new Date(data.reset * 1000).toISOString()
+      : null;
 
   return {
     balance: null,
     totalCost: null,
-    totalRequests: null,
-    credits: parseNumber(data.credits),
-    rawData: data,
+    totalRequests:
+      limit != null && remaining != null ? Math.max(0, limit - remaining) : null,
+    credits: remaining,
+    rawData: {
+      monthlyMessageLimit: limit,
+      monthlyMessagesRemaining: remaining,
+      resetAt,
+      capabilities: {
+        messageQuota: true,
+        billingCost: false,
+        subscriptionStatus: false,
+      },
+    },
+    externalBilling: limit != null
+      ? {
+          source: "pushover-application-limits",
+          authoritative: true,
+          records: [
+            {
+              externalId: "application-quota",
+              kind: "account",
+              planName: "Pushover application quota",
+              status: "active",
+              requestLimit: limit,
+              requestLimitWindow: "month",
+              currentPeriodEnd: resetAt,
+            },
+          ],
+        }
+      : undefined,
   };
 }
