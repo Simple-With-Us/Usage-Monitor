@@ -57,4 +57,19 @@ describe("twilio adapter", () => {
       "SK123:restricted-secret"
     );
   });
+
+  it("does not label a non-USD account balance as dollars", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ balance: "42.50", currency: "EUR" }))
+      .mockResolvedValueOnce(json({ usage_records: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchUsage("auth-token", { accountId: "AC123" });
+
+    expect(result.balance).toBeNull();
+    expect(result.rawData).toMatchObject({
+      balance: { amount: 42.5, currency: "EUR", normalizedAsUsd: false },
+    });
+  });
 });

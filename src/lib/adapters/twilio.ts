@@ -55,7 +55,10 @@ export async function fetchUsage(
       end_date?: string;
     }>;
   };
-  const balance = balanceResponse.ok ? parseNumber(balanceData.balance) : null;
+  const balanceCurrency = balanceData.currency?.trim().toUpperCase() ?? null;
+  const balance = balanceResponse.ok && balanceCurrency === "USD"
+    ? parseNumber(balanceData.balance)
+    : null;
   const totalPrice = usageResponse.ok
     ? usageData.usage_records?.find((row) => row.category === "totalprice")
     : undefined;
@@ -77,7 +80,11 @@ export async function fetchUsage(
     credits: null,
     rawData: {
       balance: balanceResponse.ok
-        ? { balance: balanceData.balance ?? null, currency: balanceData.currency ?? null }
+        ? {
+            amount: parseNumber(balanceData.balance),
+            currency: balanceCurrency,
+            normalizedAsUsd: balanceCurrency === "USD",
+          }
         : null,
       usage: usageResponse.ok
         ? {

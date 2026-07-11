@@ -42,17 +42,20 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     }
   }
 
-  if (balance == null && data.balance_infos?.[0]) {
-    balance = parseNumber(data.balance_infos[0].total_balance);
-    credits = parseNumber(data.balance_infos[0].granted_balance);
-  }
-
   return {
     balance,
     totalCost: null,
     totalRequests: null,
     credits,
-    rawData: data,
+    rawData: {
+      available: data.is_available ?? null,
+      currencies: (data.balance_infos ?? []).map((info) => ({
+        currency: info.currency ?? null,
+        normalizedAsUsd: info.currency === "USD",
+      })),
+      note:
+        "Only an explicitly USD-denominated balance is normalized into the app's USD balance fields.",
+    },
     externalBilling: {
       source: "deepseek-account-balance",
       authoritative: true,
