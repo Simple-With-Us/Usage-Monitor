@@ -15,6 +15,11 @@ No adapter sends an inference, email, market-data, or other quota-bearing reques
 
 Credential-shaped provider configuration is stored in encrypted `Provider.secretConfig`. `config.adminApiKey`, `managementKey`, `apiKeySid`, `authUsername`, `apiSecret`, `secretKey`, tokens, passwords, authorization headers, and `extraHeaders` are decrypted only inside the adapter registry. Provider API responses return only public config and `secretConfigMeta` field names.
 
+Each Provider row is an independent account boundary: credentials, snapshots, plans, subscriptions,
+and status-key references are not shared with another same-name row. Rows are never implicitly
+grouped by provider name or credential. An explicit `groupId` is descriptive metadata only, and
+project allocations share cost attribution percentages rather than provider credentials or data.
+
 Authoritative feeds reconcile only after their complete response has been validated. Stripe and Anthropic reject missing/repeated cursors and malformed successful responses; Cloudflare requires consistent `result_info` totals across the complete subscription list; GitHub, Vercel, and Cloudflare PayGo reject malformed HTTP 200 shapes. A partial or ambiguous response books no partial cost and cannot delete previously reconciled state. OpenAI retains only aggregate/page-count diagnostics for Costs API pages, never the full cost payload.
 
 ## Direct cost and billing connections implemented
@@ -25,7 +30,6 @@ Authoritative feeds reconcile only after their complete response has been valida
 | Anthropic | Organization month-to-date cost report; cents converted to USD | Admin API key (`sk-ant-admin...`) in encrypted `adminApiKey` or primary key field | [Usage and Cost API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api) |
 | DeepSeek | Prepaid/granted balance and availability | API key | [User balance API](https://api-docs.deepseek.com/api/get-user-balance/) |
 | xAI | Prepaid balance, postpaid current invoice preview, billing cycle, monthly spending limits | `teamId`; encrypted `managementKey` (or primary key if it is a Management API key) | [Billing Management API](https://docs.x.ai/developers/rest-api-reference/management/billing) |
-| Mistral | Organization current usage/cost, payment/limit status, monthly spend cap, request/token limits | Backoffice Admin API key in encrypted `adminApiKey` | [Admin usage metrics](https://docs.mistral.ai/admin/admin-api/usage-metrics) |
 | Cloudflare | Fixed account subscriptions plus billing-grade PayGo contracted cost for the current billing period (restricted alpha); analytics remains usage-only | `accountId`; API token with Billing Read, or encrypted global key plus `accountEmail` | [Account subscriptions](https://developers.cloudflare.com/api/resources/accounts/subresources/subscriptions/methods/get/) and [PayGo billable usage](https://developers.cloudflare.com/api/resources/billing/subresources/usage/methods/paygo) |
 | Twilio | Account balance and ThisMonth `totalprice` Usage Record | `accountId` (Account SID); auth token, or restricted-key secret in the primary key field plus encrypted `apiKeySid`/`authUsername` with `/twilio/billing/usage/read` | [Usage Records API](https://www.twilio.com/docs/usage/api/usage-record) |
 | Apify | Billing cycle, usage USD, maximum usage, active plan, monthly base price and included credits; base + usage above included credits is canonical only when the reported cycle starts in the current UTC month | API token | [Account limits API](https://docs.apify.com/api/v2/users-me-limits-get) and [account API](https://docs.apify.com/api/v2/users-me-get) |
@@ -53,6 +57,7 @@ These APIs are useful direct replacements for manually typed status/limits, but 
 | LlamaIndex Cloud | Non-inference project control-plane authentication | No documented remaining-credit or billing endpoint; project details are not persisted | [API overview](https://developers.llamaindex.ai/python/cloud/llamaparse/api-v2-guide/) |
 | Google Gemini API | Non-inference models control-plane authentication and any returned rate-limit headers | Gemini API key does not grant Cloud Billing cost access | [Gemini billing](https://ai.google.dev/gemini-api/docs/billing) |
 | Alpaca | Brokerage account equity/status | Buying power/equity is not API credit or provider spend | [Trading API account](https://docs.alpaca.markets/reference/getaccount-1) |
+| Mistral | Organization usage counters, payment/limit status, monthly spend cap, and request/token limits | Public usage responses do not provide a stable monetary category schema, so limit counters are never labeled or booked as dollars | [Admin usage metrics](https://docs.mistral.ai/admin/admin-api/usage-metrics) |
 
 Langfuse's metrics API reports the cost of model calls observed by Langfuse, not the Langfuse subscription invoice. The adapter exposes `trackedLlmCostUsd` as diagnostic metadata but does not book it against the Langfuse provider, avoiding double count with OpenAI/Anthropic/etc. See [Langfuse Metrics API](https://langfuse.com/docs/metrics/features/metrics-api).
 
