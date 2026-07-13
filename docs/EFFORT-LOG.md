@@ -127,6 +127,7 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board:
 - **UI refactoring for Dashboard and Settings + API Type Safety (AG, S) — 2026-07-11.** Refactor monolithic page components (Dashboard, Settings) into discrete UI components and replace 'any' casting with PrismaClientKnownRequestError for P2002 checks.
 
 ## In Progress
+- **Favicon/brand icon refresh (CODEX, owner-directed 2026-07-13) — WIP.** Using an orange palette for both the in-app/header chart mark and the Jay signature favicon through Next's app icon convention; unrelated active lanes untouched.
 - **Provider account auto-enrichment + billing/subscription UX (CODEX, owner-directed 2026-07-12).**
   **READY FOR REVIEW — OPEN PR #107**
   (`codex-provider-account-enrichment`, commit `a640dd6`,

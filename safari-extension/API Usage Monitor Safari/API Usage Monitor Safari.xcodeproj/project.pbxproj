@@ -1,0 +1,943 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 110;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		69E5BE653004DF77009DE096 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE643004DF77009DE096 /* AppDelegate.swift */; };
+		69E5BE673004DF77009DE096 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE663004DF77009DE096 /* SceneDelegate.swift */; };
+		69E5BE6A3004DF77009DE096 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE683004DF77009DE096 /* LaunchScreen.storyboard */; };
+		69E5BE6D3004DF77009DE096 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE6B3004DF77009DE096 /* Main.storyboard */; };
+		69E5BE763004DF77009DE096 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE753004DF77009DE096 /* AppDelegate.swift */; };
+		69E5BE793004DF77009DE096 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE773004DF77009DE096 /* Main.storyboard */; };
+		69E5BE803004DF77009DE096 /* API Usage Monitor Safari Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69E5BE7F3004DF77009DE096 /* API Usage Monitor Safari Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		69E5BE8A3004DF77009DE096 /* API Usage Monitor Safari Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69E5BE893004DF77009DE096 /* API Usage Monitor Safari Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		69E5BE8F3004DF77009DE096 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE543004DF6F009DE096 /* Main.html */; };
+		69E5BE903004DF77009DE096 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE543004DF6F009DE096 /* Main.html */; };
+		69E5BE913004DF77009DE096 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE563004DF6F009DE096 /* Icon.png */; };
+		69E5BE923004DF77009DE096 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE563004DF6F009DE096 /* Icon.png */; };
+		69E5BE933004DF77009DE096 /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE573004DF6F009DE096 /* Style.css */; };
+		69E5BE943004DF77009DE096 /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE573004DF6F009DE096 /* Style.css */; };
+		69E5BE953004DF77009DE096 /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE583004DF6F009DE096 /* Script.js */; };
+		69E5BE963004DF77009DE096 /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE583004DF6F009DE096 /* Script.js */; };
+		69E5BE973004DF77009DE096 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE593004DF6F009DE096 /* ViewController.swift */; };
+		69E5BE983004DF77009DE096 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE593004DF6F009DE096 /* ViewController.swift */; };
+		69E5BE993004DF77009DE096 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE5A3004DF76009DE096 /* Assets.xcassets */; };
+		69E5BE9A3004DF77009DE096 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BE5A3004DF76009DE096 /* Assets.xcassets */; };
+		69E5BE9B3004DF77009DE096 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE5C3004DF77009DE096 /* SafariWebExtensionHandler.swift */; };
+		69E5BE9C3004DF77009DE096 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E5BE5C3004DF77009DE096 /* SafariWebExtensionHandler.swift */; };
+		69E5BEB33004DF78009DE096 /* popup in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEAE3004DF78009DE096 /* popup */; };
+		69E5BEB43004DF78009DE096 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEAF3004DF78009DE096 /* README.md */; };
+		69E5BEB53004DF78009DE096 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB03004DF78009DE096 /* icons */; };
+		69E5BEB63004DF78009DE096 /* scripts in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB13004DF78009DE096 /* scripts */; };
+		69E5BEB73004DF78009DE096 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB23004DF78009DE096 /* manifest.json */; };
+		69E5BEB83004DF78009DE096 /* popup in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEAE3004DF78009DE096 /* popup */; };
+		69E5BEB93004DF78009DE096 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEAF3004DF78009DE096 /* README.md */; };
+		69E5BEBA3004DF78009DE096 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB03004DF78009DE096 /* icons */; };
+		69E5BEBB3004DF78009DE096 /* scripts in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB13004DF78009DE096 /* scripts */; };
+		69E5BEBC3004DF78009DE096 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 69E5BEB23004DF78009DE096 /* manifest.json */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		69E5BE813004DF77009DE096 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 69E5BE4E3004DF6D009DE096 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 69E5BE7E3004DF77009DE096;
+			remoteInfo = "API Usage Monitor Safari Extension (iOS)";
+		};
+		69E5BE8B3004DF77009DE096 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 69E5BE4E3004DF6D009DE096 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 69E5BE883004DF77009DE096;
+			remoteInfo = "API Usage Monitor Safari Extension (macOS)";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		69E5BEA23004DF77009DE096 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			dstPath = "";
+			dstSubfolder = PlugIns;
+			files = (
+				69E5BE803004DF77009DE096 /* API Usage Monitor Safari Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+		};
+		69E5BEA93004DF77009DE096 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			dstPath = "";
+			dstSubfolder = PlugIns;
+			files = (
+				69E5BE8A3004DF77009DE096 /* API Usage Monitor Safari Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		69E5BE553004DF6F009DE096 /* Base */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = Base; path = Base.lproj/Main.html; sourceTree = "<group>"; };
+		69E5BE563004DF6F009DE096 /* Icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Icon.png; sourceTree = "<group>"; };
+		69E5BE573004DF6F009DE096 /* Style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = Style.css; sourceTree = "<group>"; };
+		69E5BE583004DF6F009DE096 /* Script.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Script.js; sourceTree = "<group>"; };
+		69E5BE593004DF6F009DE096 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		69E5BE5A3004DF76009DE096 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		69E5BE5C3004DF77009DE096 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		69E5BE613004DF77009DE096 /* API Usage Monitor Safari.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "API Usage Monitor Safari.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		69E5BE643004DF77009DE096 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		69E5BE663004DF77009DE096 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		69E5BE693004DF77009DE096 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		69E5BE6C3004DF77009DE096 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		69E5BE6E3004DF77009DE096 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		69E5BE733004DF77009DE096 /* API Usage Monitor Safari.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "API Usage Monitor Safari.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		69E5BE753004DF77009DE096 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		69E5BE783004DF77009DE096 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		69E5BE7A3004DF77009DE096 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		69E5BE7F3004DF77009DE096 /* API Usage Monitor Safari Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "API Usage Monitor Safari Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		69E5BE843004DF77009DE096 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		69E5BE893004DF77009DE096 /* API Usage Monitor Safari Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "API Usage Monitor Safari Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		69E5BE8E3004DF77009DE096 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		69E5BEAE3004DF78009DE096 /* popup */ = {isa = PBXFileReference; lastKnownFileType = folder; name = popup; path = "../../../chrome-extension/popup"; sourceTree = "<group>"; };
+		69E5BEAF3004DF78009DE096 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = "../../../chrome-extension/README.md"; sourceTree = "<group>"; };
+		69E5BEB03004DF78009DE096 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = "../../../chrome-extension/icons"; sourceTree = "<group>"; };
+		69E5BEB13004DF78009DE096 /* scripts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = scripts; path = "../../../chrome-extension/scripts"; sourceTree = "<group>"; };
+		69E5BEB23004DF78009DE096 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = "../../../chrome-extension/manifest.json"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		69E5BE5E3004DF77009DE096 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		69E5BE703004DF77009DE096 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		69E5BE7C3004DF77009DE096 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		69E5BE863004DF77009DE096 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		69E5BE4D3004DF6D009DE096 = {
+			isa = PBXGroup;
+			children = (
+				69E5BE523004DF6F009DE096 /* Shared (App) */,
+				69E5BE5B3004DF76009DE096 /* Shared (Extension) */,
+				69E5BE633004DF77009DE096 /* iOS (App) */,
+				69E5BE743004DF77009DE096 /* macOS (App) */,
+				69E5BE833004DF77009DE096 /* iOS (Extension) */,
+				69E5BE8D3004DF77009DE096 /* macOS (Extension) */,
+				69E5BE623004DF77009DE096 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		69E5BE523004DF6F009DE096 /* Shared (App) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE593004DF6F009DE096 /* ViewController.swift */,
+				69E5BE5A3004DF76009DE096 /* Assets.xcassets */,
+				69E5BE533004DF6F009DE096 /* Resources */,
+			);
+			path = "Shared (App)";
+			sourceTree = "<group>";
+		};
+		69E5BE533004DF6F009DE096 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE543004DF6F009DE096 /* Main.html */,
+				69E5BE563004DF6F009DE096 /* Icon.png */,
+				69E5BE573004DF6F009DE096 /* Style.css */,
+				69E5BE583004DF6F009DE096 /* Script.js */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		69E5BE5B3004DF76009DE096 /* Shared (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BEAD3004DF78009DE096 /* Resources */,
+				69E5BE5C3004DF77009DE096 /* SafariWebExtensionHandler.swift */,
+			);
+			path = "Shared (Extension)";
+			sourceTree = "<group>";
+		};
+		69E5BE623004DF77009DE096 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE613004DF77009DE096 /* API Usage Monitor Safari.app */,
+				69E5BE733004DF77009DE096 /* API Usage Monitor Safari.app */,
+				69E5BE7F3004DF77009DE096 /* API Usage Monitor Safari Extension.appex */,
+				69E5BE893004DF77009DE096 /* API Usage Monitor Safari Extension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		69E5BE633004DF77009DE096 /* iOS (App) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE643004DF77009DE096 /* AppDelegate.swift */,
+				69E5BE663004DF77009DE096 /* SceneDelegate.swift */,
+				69E5BE683004DF77009DE096 /* LaunchScreen.storyboard */,
+				69E5BE6B3004DF77009DE096 /* Main.storyboard */,
+				69E5BE6E3004DF77009DE096 /* Info.plist */,
+			);
+			path = "iOS (App)";
+			sourceTree = "<group>";
+		};
+		69E5BE743004DF77009DE096 /* macOS (App) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE753004DF77009DE096 /* AppDelegate.swift */,
+				69E5BE773004DF77009DE096 /* Main.storyboard */,
+				69E5BE7A3004DF77009DE096 /* Info.plist */,
+			);
+			path = "macOS (App)";
+			sourceTree = "<group>";
+		};
+		69E5BE833004DF77009DE096 /* iOS (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE843004DF77009DE096 /* Info.plist */,
+			);
+			path = "iOS (Extension)";
+			sourceTree = "<group>";
+		};
+		69E5BE8D3004DF77009DE096 /* macOS (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BE8E3004DF77009DE096 /* Info.plist */,
+			);
+			path = "macOS (Extension)";
+			sourceTree = "<group>";
+		};
+		69E5BEAD3004DF78009DE096 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				69E5BEAE3004DF78009DE096 /* popup */,
+				69E5BEAF3004DF78009DE096 /* README.md */,
+				69E5BEB03004DF78009DE096 /* icons */,
+				69E5BEB13004DF78009DE096 /* scripts */,
+				69E5BEB23004DF78009DE096 /* manifest.json */,
+			);
+			name = Resources;
+			path = "Shared (Extension)";
+			sourceTree = SOURCE_ROOT;
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		69E5BE603004DF77009DE096 /* API Usage Monitor Safari (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69E5BEA33004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari (iOS)" */;
+			buildPhases = (
+				69E5BE5D3004DF77009DE096 /* Sources */,
+				69E5BE5E3004DF77009DE096 /* Frameworks */,
+				69E5BE5F3004DF77009DE096 /* Resources */,
+				69E5BEA23004DF77009DE096 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				69E5BE823004DF77009DE096 /* PBXTargetDependency */,
+			);
+			name = "API Usage Monitor Safari (iOS)";
+			productName = "API Usage Monitor Safari (iOS)";
+			productReference = 69E5BE613004DF77009DE096 /* API Usage Monitor Safari.app */;
+			productType = "com.apple.product-type.application";
+		};
+		69E5BE723004DF77009DE096 /* API Usage Monitor Safari (macOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69E5BEAA3004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari (macOS)" */;
+			buildPhases = (
+				69E5BE6F3004DF77009DE096 /* Sources */,
+				69E5BE703004DF77009DE096 /* Frameworks */,
+				69E5BE713004DF77009DE096 /* Resources */,
+				69E5BEA93004DF77009DE096 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				69E5BE8C3004DF77009DE096 /* PBXTargetDependency */,
+			);
+			name = "API Usage Monitor Safari (macOS)";
+			productName = "API Usage Monitor Safari (macOS)";
+			productReference = 69E5BE733004DF77009DE096 /* API Usage Monitor Safari.app */;
+			productType = "com.apple.product-type.application";
+		};
+		69E5BE7E3004DF77009DE096 /* API Usage Monitor Safari Extension (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69E5BE9F3004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */;
+			buildPhases = (
+				69E5BE7B3004DF77009DE096 /* Sources */,
+				69E5BE7C3004DF77009DE096 /* Frameworks */,
+				69E5BE7D3004DF77009DE096 /* Resources */,
+			);
+			buildRules = (
+			);
+			name = "API Usage Monitor Safari Extension (iOS)";
+			productName = "API Usage Monitor Safari Extension (iOS)";
+			productReference = 69E5BE7F3004DF77009DE096 /* API Usage Monitor Safari Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		69E5BE883004DF77009DE096 /* API Usage Monitor Safari Extension (macOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69E5BEA63004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */;
+			buildPhases = (
+				69E5BE853004DF77009DE096 /* Sources */,
+				69E5BE863004DF77009DE096 /* Frameworks */,
+				69E5BE873004DF77009DE096 /* Resources */,
+			);
+			buildRules = (
+			);
+			name = "API Usage Monitor Safari Extension (macOS)";
+			productName = "API Usage Monitor Safari Extension (macOS)";
+			productReference = 69E5BE893004DF77009DE096 /* API Usage Monitor Safari Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		69E5BE4E3004DF6D009DE096 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					69E5BE603004DF77009DE096 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					69E5BE723004DF77009DE096 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					69E5BE7E3004DF77009DE096 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					69E5BE883004DF77009DE096 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+				};
+			};
+			buildConfigurationList = 69E5BE513004DF6D009DE096 /* Build configuration list for PBXProject "API Usage Monitor Safari" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 69E5BE4D3004DF6D009DE096;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 69E5BE623004DF77009DE096 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				69E5BE603004DF77009DE096 /* API Usage Monitor Safari (iOS) */,
+				69E5BE723004DF77009DE096 /* API Usage Monitor Safari (macOS) */,
+				69E5BE7E3004DF77009DE096 /* API Usage Monitor Safari Extension (iOS) */,
+				69E5BE883004DF77009DE096 /* API Usage Monitor Safari Extension (macOS) */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		69E5BE5F3004DF77009DE096 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+				69E5BE913004DF77009DE096 /* Icon.png in Resources */,
+				69E5BE6A3004DF77009DE096 /* LaunchScreen.storyboard in Resources */,
+				69E5BE8F3004DF77009DE096 /* Main.html in Resources */,
+				69E5BE953004DF77009DE096 /* Script.js in Resources */,
+				69E5BE993004DF77009DE096 /* Assets.xcassets in Resources */,
+				69E5BE6D3004DF77009DE096 /* Main.storyboard in Resources */,
+				69E5BE933004DF77009DE096 /* Style.css in Resources */,
+			);
+		};
+		69E5BE713004DF77009DE096 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+				69E5BE923004DF77009DE096 /* Icon.png in Resources */,
+				69E5BE943004DF77009DE096 /* Style.css in Resources */,
+				69E5BE793004DF77009DE096 /* Main.storyboard in Resources */,
+				69E5BE963004DF77009DE096 /* Script.js in Resources */,
+				69E5BE9A3004DF77009DE096 /* Assets.xcassets in Resources */,
+				69E5BE903004DF77009DE096 /* Main.html in Resources */,
+			);
+		};
+		69E5BE7D3004DF77009DE096 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+				69E5BEBA3004DF78009DE096 /* icons in Resources */,
+				69E5BEB93004DF78009DE096 /* README.md in Resources */,
+				69E5BEBC3004DF78009DE096 /* manifest.json in Resources */,
+				69E5BEB83004DF78009DE096 /* popup in Resources */,
+				69E5BEBB3004DF78009DE096 /* scripts in Resources */,
+			);
+		};
+		69E5BE873004DF77009DE096 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+				69E5BEB53004DF78009DE096 /* icons in Resources */,
+				69E5BEB43004DF78009DE096 /* README.md in Resources */,
+				69E5BEB73004DF78009DE096 /* manifest.json in Resources */,
+				69E5BEB33004DF78009DE096 /* popup in Resources */,
+				69E5BEB63004DF78009DE096 /* scripts in Resources */,
+			);
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		69E5BE5D3004DF77009DE096 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				69E5BE973004DF77009DE096 /* ViewController.swift in Sources */,
+				69E5BE653004DF77009DE096 /* AppDelegate.swift in Sources */,
+				69E5BE673004DF77009DE096 /* SceneDelegate.swift in Sources */,
+			);
+		};
+		69E5BE6F3004DF77009DE096 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				69E5BE983004DF77009DE096 /* ViewController.swift in Sources */,
+				69E5BE763004DF77009DE096 /* AppDelegate.swift in Sources */,
+			);
+		};
+		69E5BE7B3004DF77009DE096 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				69E5BE9B3004DF77009DE096 /* SafariWebExtensionHandler.swift in Sources */,
+			);
+		};
+		69E5BE853004DF77009DE096 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				69E5BE9C3004DF77009DE096 /* SafariWebExtensionHandler.swift in Sources */,
+			);
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		69E5BE823004DF77009DE096 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 69E5BE7E3004DF77009DE096 /* API Usage Monitor Safari Extension (iOS) */;
+			targetProxy = 69E5BE813004DF77009DE096 /* PBXContainerItemProxy */;
+		};
+		69E5BE8C3004DF77009DE096 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 69E5BE883004DF77009DE096 /* API Usage Monitor Safari Extension (macOS) */;
+			targetProxy = 69E5BE8B3004DF77009DE096 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		69E5BE543004DF6F009DE096 /* Main.html */ = {
+			isa = PBXVariantGroup;
+			children = (
+				69E5BE553004DF6F009DE096 /* Base */,
+			);
+			name = Main.html;
+			sourceTree = "<group>";
+		};
+		69E5BE683004DF77009DE096 /* LaunchScreen.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				69E5BE693004DF77009DE096 /* Base */,
+			);
+			name = LaunchScreen.storyboard;
+			sourceTree = "<group>";
+		};
+		69E5BE6B3004DF77009DE096 /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				69E5BE6C3004DF77009DE096 /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+		69E5BE773004DF77009DE096 /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				69E5BE783004DF77009DE096 /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		69E5BE9D3004DF77009DE096 /* Debug configuration for PBXProject "API Usage Monitor Safari" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		69E5BE9E3004DF77009DE096 /* Release configuration for PBXProject "API Usage Monitor Safari" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		69E5BEA03004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor.Extension;
+				PRODUCT_NAME = "API Usage Monitor Safari Extension";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		69E5BEA13004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor.Extension;
+				PRODUCT_NAME = "API Usage Monitor Safari Extension";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		69E5BEA43004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari (iOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor;
+				PRODUCT_NAME = "API Usage Monitor Safari";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		69E5BEA53004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari (iOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor;
+				PRODUCT_NAME = "API Usage Monitor Safari";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		69E5BEA73004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor.Extension;
+				PRODUCT_NAME = "API Usage Monitor Safari Extension";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		69E5BEA83004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor.Extension;
+				PRODUCT_NAME = "API Usage Monitor Safari Extension";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		69E5BEAB3004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari (macOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari";
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor;
+				PRODUCT_NAME = "API Usage Monitor Safari";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		69E5BEAC3004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari (macOS)" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "API Usage Monitor Safari";
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.jays.services.apiusagemonitor;
+				PRODUCT_NAME = "API Usage Monitor Safari";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		69E5BE513004DF6D009DE096 /* Build configuration list for PBXProject "API Usage Monitor Safari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69E5BE9D3004DF77009DE096 /* Debug configuration for PBXProject "API Usage Monitor Safari" */,
+				69E5BE9E3004DF77009DE096 /* Release configuration for PBXProject "API Usage Monitor Safari" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		69E5BE9F3004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69E5BEA03004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */,
+				69E5BEA13004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari Extension (iOS)" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		69E5BEA33004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69E5BEA43004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari (iOS)" */,
+				69E5BEA53004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari (iOS)" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		69E5BEA63004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69E5BEA73004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */,
+				69E5BEA83004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari Extension (macOS)" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		69E5BEAA3004DF77009DE096 /* Build configuration list for PBXNativeTarget "API Usage Monitor Safari (macOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69E5BEAB3004DF77009DE096 /* Debug configuration for PBXNativeTarget "API Usage Monitor Safari (macOS)" */,
+				69E5BEAC3004DF77009DE096 /* Release configuration for PBXNativeTarget "API Usage Monitor Safari (macOS)" */,
+			);
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 69E5BE4E3004DF6D009DE096 /* Project object */;
+	validationLevel = 1;
+}

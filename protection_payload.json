@@ -1,0 +1,10 @@
+{
+  "enforce_admins": true,
+  "required_status_checks": {
+    "strict": false,
+    "contexts": ["verify", "gitleaks"]
+  },
+  "required_pull_request_reviews": null,
+  "required_conversation_resolution": true,
+  "restrictions": null
+}
