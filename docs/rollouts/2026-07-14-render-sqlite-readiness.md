@@ -4,7 +4,7 @@
 
 Diagnosed and repaired a production restart livelock on the paid Render Starter service. Scheduled retention no longer performs a full SQLite `VACUUM` unless an operator explicitly opts in, the declared Render configuration uses database-independent liveness, and concurrent readiness requests reuse one outstanding database probe instead of queueing uncancellable Prisma queries.
 
-PR #178 merged as `d03b1b8` and deployed, but Render did not synchronize the declared health-check path: the live service still uses strict `/api/ready`. A follow-up compatibility flag therefore softens only the HTTP status of database-only readiness failures until the live Render path can be corrected. The body remains `{ ok:false, status:"not_ready" }`, and scheduler, backup, or startup failures remain HTTP 503.
+PR #178 merged as `d03b1b8` and deployed, but Render did not synchronize the declared health-check path: the live service still uses strict `/api/ready`. PR #180 (`40afc027`) added a temporary compatibility flag that softens the HTTP status of database-only readiness failures. Its first exact-revision live probe proved that the native Prisma/SQLite call itself can block the event loop beyond 10 seconds, before any status is returned. The active follow-up therefore skips that blocking probe only in compatibility mode. The body remains `{ ok:false, status:"not_ready" }`, and scheduler, backup, or startup failures remain HTTP 503.
 
 ## Why
 
@@ -45,12 +45,15 @@ Follow-up compatibility verification used Node `v24.14.0`:
 - Focused readiness suite — passed, 12/12 tests.
 - `npm run verify` — passed: ESLint; TypeScript; 73 Vitest files / 445 tests; safe-migration reproduction; SQLite backup checks; startup configuration checks; production build.
 - Independent adversarial review — no P0/P1/P2 findings; the flag cannot mask modeled non-database failures.
+- PR #180 hosted CI, CodeQL, and gitleaks passed; merge `40afc027` deployed as `dep-d9b00ggddkuc73dp2d6g`.
+- Exact-revision live probe: `/api/health` returned HTTP 200 with revision `40afc027`; the first `/api/ready` request exceeded 10 seconds, proving the event-loop-blocking gap. Recovery was not claimed from the later 2-second compatibility responses.
+- Probe-skip follow-up focused readiness suite — passed, 13/13 tests; TypeScript and lint passed under Node `v24.14.0`.
 
 Two accidental install attempts under the shell-default Node 26 were stopped at the engine guard before tests. The successful install and every verification command above used supported Node 24; this is additional evidence not to upgrade the repo to Node 26 now.
 
 ## Follow-ups
 
-- Merge and deploy the bounded compatibility follow-up, then set `RENDER_READINESS_HTTP_COMPATIBILITY=true` only while Render continues to use `/api/ready` for process health.
+- Merge and deploy the probe-skip compatibility follow-up; keep `RENDER_READINESS_HTTP_COMPATIBILITY=true` only while Render continues to use `/api/ready` for process health.
 - Correct the live Render service to `healthCheckPath: /api/health`, then disable the compatibility flag immediately; repository YAML alone is not runtime proof.
 - Verify sustained `/api/health` 200 responses, strict `/api/ready` recovery, stable instance uptime, and absence of the Prisma timeout/restart pattern.
 - Verify an authenticated usage-ingest request returns 2xx before unblocking Socratic.Trade replay PR #1563.

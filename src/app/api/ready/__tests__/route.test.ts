@@ -114,11 +114,11 @@ describe("GET /api/ready", () => {
   it("can soften only the HTTP status for a database-only Render compatibility window", async () => {
     vi.stubEnv("RENDER_READINESS_HTTP_COMPATIBILITY", "true");
     vi.spyOn(process, "uptime").mockReturnValue(301);
-    mocks.queryRawUnsafe.mockRejectedValue(new Error("database busy"));
 
     const response = await GET();
     const body = await response.json();
 
+    expect(mocks.queryRawUnsafe).not.toHaveBeenCalled();
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
       ok: false,
@@ -126,6 +126,8 @@ describe("GET /api/ready", () => {
       checks: {
         database: {
           ok: false,
+          latencyMs: 0,
+          probeSkipped: true,
           coldStartGraceActive: false,
           healthCheckCompatibilityActive: true,
         },
@@ -138,17 +140,38 @@ describe("GET /api/ready", () => {
     vi.stubEnv("LITESTREAM_REQUIRED", "true");
     vi.stubEnv("LITESTREAM_ACTIVE", "false");
     vi.spyOn(process, "uptime").mockReturnValue(301);
-    mocks.queryRawUnsafe.mockRejectedValue(new Error("database busy"));
 
     const response = await GET();
     const body = await response.json();
 
+    expect(mocks.queryRawUnsafe).not.toHaveBeenCalled();
     expect(response.status).toBe(503);
     expect(body).toMatchObject({
       ok: false,
       checks: {
         database: { healthCheckCompatibilityActive: false },
         backup: { ok: false },
+      },
+    });
+  });
+
+  it("keeps compatibility explicitly not-ready during the normal cold-start window", async () => {
+    vi.stubEnv("RENDER_READINESS_HTTP_COMPATIBILITY", "true");
+    vi.spyOn(process, "uptime").mockReturnValue(30);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: false,
+      status: "not_ready",
+      checks: {
+        database: {
+          probeSkipped: true,
+          coldStartGraceActive: false,
+          healthCheckCompatibilityActive: true,
+        },
       },
     });
   });

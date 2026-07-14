@@ -70,8 +70,12 @@ async function checkDatabase(): Promise<{
 }
 
 export async function GET() {
+  const databaseHealthCheckCompatibilityRequested =
+    process.env.RENDER_READINESS_HTTP_COMPATIBILITY === "true";
   const [database, scheduler, backup, startup] = await Promise.all([
-    checkDatabase(),
+    databaseHealthCheckCompatibilityRequested
+      ? Promise.resolve({ ok: false, latencyMs: 0, probeSkipped: true })
+      : checkDatabase(),
     Promise.resolve(getSchedulerRuntimeStatus()),
     Promise.resolve(getBackupRuntimeStatus()),
     Promise.resolve(getStartupRuntimeStatus()),
@@ -90,17 +94,19 @@ export async function GET() {
   // never reactivate after this process has completed one successful probe.
   const databaseColdStartGraceActive =
     databaseOnlyFailure &&
+    !databaseHealthCheckCompatibilityRequested &&
     !databaseProbeHasSucceeded &&
     process.uptime() * 1_000 < DATABASE_COLD_START_GRACE_MS;
   // Temporary operational bridge for services whose runtime health-check path
   // still points at /api/ready. The response body remains strictly not-ready,
   // so dependency monitors that inspect `ok` continue to alert; only the HTTP
-  // status is softened to prevent Render from restarting the sole SQLite
-  // process during transient database I/O. Disable this after the live Render
-  // healthCheckPath is corrected to /api/health.
+  // status is softened. Skip the SQLite probe in this mode because a native
+  // Prisma query waiting on a database lock can block the event loop past the
+  // host's request timeout, before an HTTP status can be returned. Disable this
+  // after the live Render healthCheckPath is corrected to /api/health.
   const databaseHealthCheckCompatibilityActive =
     databaseOnlyFailure &&
-    process.env.RENDER_READINESS_HTTP_COMPATIBILITY === "true";
+    databaseHealthCheckCompatibilityRequested;
   const status = ok
     ? "ready"
     : databaseColdStartGraceActive
