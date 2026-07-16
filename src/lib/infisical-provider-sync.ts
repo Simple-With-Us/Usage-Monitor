@@ -305,6 +305,12 @@ const CREDENTIAL_MAPPINGS: readonly CredentialMapping[] = [
   },
   {
     scope: "ct",
+    providerName: "unusual-whales",
+    attempts: appAttempts("ct", ["UNUSUAL_WHALES_API_KEY"]),
+    build: (values) => ({ apiKey: values.get("UNUSUAL_WHALES_API_KEY") }),
+  },
+  {
+    scope: "ct",
     providerName: "llamaindex",
     attempts: appAttempts("ct", ["LLAMAPARSE_API_KEY"]),
     build: (values) => ({ apiKey: values.get("LLAMAPARSE_API_KEY") }),
