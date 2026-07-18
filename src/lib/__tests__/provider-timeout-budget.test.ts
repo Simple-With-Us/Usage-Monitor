@@ -553,7 +553,7 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(findFirst).toHaveBeenCalledWith({
       where: {
-        providerId: "id-partial-retry",
+        providerId: { in: ["id-partial-retry"] },
         rawData: { not: expect.anything() },
       },
       orderBy: { fetchedAt: "desc" },

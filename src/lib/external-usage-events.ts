@@ -1190,7 +1190,7 @@ export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[
       : undefined;
 
     if (!provider) {
-      provider = resolveProviderIdentity(event.provider, allProviders);
+      provider = resolveProviderIdentity(event.provider, allProviders) || undefined;
     }
     if (!provider) continue;
 
