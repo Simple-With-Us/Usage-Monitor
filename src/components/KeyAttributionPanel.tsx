@@ -261,7 +261,7 @@ export default function KeyAttributionPanel() {
               <Field label="Provider-reported opaque key ID">
                 <input type="password" maxLength={512} autoComplete="off" value={providerReportedKeyId} onChange={(event) => setProviderReportedKeyId(event.target.value)} className={inputClass} placeholder="Optional; HMAC-fingerprinted and discarded" />
               </Field>
-              <p className="text-xs text-gray-500">The raw value is never stored or returned. This field is not a replacement for the provider credential used to poll billing.</p>
+              <p className="text-xs text-gray-500">The raw value is never stored or returned. Current v2 producer references are not auto-matched to this value; create an explicit binding below. This field is not a replacement for the provider credential used to poll billing.</p>
               <button disabled={pending} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Register identity</button>
             </form>
 
