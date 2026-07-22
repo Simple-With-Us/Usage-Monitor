@@ -47,6 +47,7 @@ function serializeIdentity(identity: {
   bindings: Array<{
     id: string;
     projectId: string | null;
+    projectName: string | null;
     producerId: string;
     producerKeyRef: string;
     providerConnectionRef: string | null;
@@ -304,7 +305,10 @@ export async function POST(request: NextRequest) {
         await tx.$executeRaw`UPDATE "ProviderKeyIdentity" SET "alias" = "alias" WHERE "id" = ${identityId}`;
         const identity = await tx.providerKeyIdentity.findUnique({ where: { id: identityId } });
         if (!identity || identity.status !== "active") throw new Error("identity_not_active");
-        if (projectId && !(await tx.project.findUnique({ where: { id: projectId }, select: { id: true } }))) {
+        const project = projectId
+          ? await tx.project.findUnique({ where: { id: projectId }, select: { id: true, name: true } })
+          : null;
+        if (projectId && !project) {
           throw new Error("project_not_found");
         }
         const candidates = await tx.providerKeyBinding.findMany({
@@ -324,6 +328,7 @@ export async function POST(request: NextRequest) {
           data: {
             identityId,
             projectId,
+            projectName: project?.name ?? null,
             producerId,
             producerKeyRef,
             providerConnectionRef,

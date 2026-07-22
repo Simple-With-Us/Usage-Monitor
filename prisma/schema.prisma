@@ -609,6 +609,9 @@ model ProviderKeyBinding {
   identity              ProviderKeyIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
   projectId             String?
   project               Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // Immutable display snapshot so a later project rename/deletion cannot erase
+  // which project the administrator selected for this effective period.
+  projectName           String?
   producerId            String
   producerKeyRef        String
   providerConnectionRef String?

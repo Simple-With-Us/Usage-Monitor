@@ -9,7 +9,8 @@ those API keys. Usage Monitor now has a separate, auditable identity layer for t
   HMAC-SHA256 fingerprint of the provider-reported stable opaque key ID.
 - `ProviderKeyBinding` maps one exact `producerId` + `producerKeyRef` to the identity and optional
   project for a half-open effective period. Reassignment closes the old binding before creating a
-  new one; similar labels never match.
+  new one; similar labels never match. The selected project name is snapshotted so a later rename or
+  deletion does not erase the administrator's historical choice.
 - `providerConnectionRef` and `billingAccountRef` are optional exact contextual constraints. They
   cannot identify a key by themselves.
 - Missing, unknown, or conflicting keys remain explicit `unattributed` results. Ambiguity fails

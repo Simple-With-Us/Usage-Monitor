@@ -6,6 +6,7 @@ interface Choice { id: string; name: string; displayName?: string }
 interface Binding {
   id: string;
   projectId: string | null;
+  projectName: string | null;
   producerId: string;
   producerKeyRef: string;
   providerConnectionRef: string | null;
@@ -263,7 +264,7 @@ export default function KeyAttributionPanel() {
                     <ul className="space-y-2">
                       {identity.bindings.map((binding) => (
                         <li key={binding.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-gray-900/60">
-                          <span><strong>{binding.producerId}</strong> / {binding.producerKeyRef}{binding.project ? ` → ${binding.project.name}` : " → project unattributed"}</span>
+                          <span><strong>{binding.producerId}</strong> / {binding.producerKeyRef}{binding.project?.name || binding.projectName ? ` → ${binding.project?.name ?? binding.projectName}` : " → project unattributed"}</span>
                           {binding.effectiveTo ? <span>closed {new Date(binding.effectiveTo).toLocaleDateString()}</span> : <button type="button" disabled={pending} onClick={() => void closeBinding(binding.id)} className="font-semibold text-blue-600 disabled:opacity-50">Close mapping</button>}
                         </li>
                       ))}

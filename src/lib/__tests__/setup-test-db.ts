@@ -73,6 +73,7 @@ CREATE TABLE "ProviderKeyBinding" (
   "id" TEXT NOT NULL PRIMARY KEY,
   "identityId" TEXT NOT NULL,
   "projectId" TEXT,
+  "projectName" TEXT,
   "producerId" TEXT NOT NULL,
   "producerKeyRef" TEXT NOT NULL,
   "providerConnectionRef" TEXT,
