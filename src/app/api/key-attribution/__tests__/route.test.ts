@@ -145,7 +145,7 @@ describe("provider key attribution API", () => {
     await prisma.externalUsageEvent.createMany({
       data: [
         {
-          idempotencyKey: "matched-v2-cost",
+          idempotencyKey: "event-a",
           sourceApp: "congress-trade",
           provider: "openai",
           keyRef: "configured-openai-primary",
@@ -161,7 +161,7 @@ describe("provider key attribution API", () => {
           },
         },
         {
-          idempotencyKey: "unmatched-v2-cost",
+          idempotencyKey: "event-b",
           sourceApp: "congress-trade",
           provider: "openai",
           keyRef: "unknown-key",
@@ -175,7 +175,7 @@ describe("provider key attribution API", () => {
           },
         },
         {
-          idempotencyKey: "provider-id-direct-match",
+          idempotencyKey: "event-c",
           sourceApp: "admin-usage-poller",
           provider: "openai",
           keyRef: adminProducerKeyRef,
@@ -189,7 +189,7 @@ describe("provider key attribution API", () => {
           },
         },
         {
-          idempotencyKey: "cumulative-cost-not-additive",
+          idempotencyKey: "event-d",
           sourceApp: "congress-trade",
           provider: "openai",
           keyRef: "configured-openai-primary",
@@ -205,7 +205,7 @@ describe("provider key attribution API", () => {
           },
         },
         {
-          idempotencyKey: "legacy-cost-not-in-v2-coverage",
+          idempotencyKey: "event-e",
           sourceApp: "legacy",
           provider: "openai",
           keyRef: "configured-openai-primary",
@@ -319,7 +319,7 @@ describe("provider key attribution API", () => {
 
     await prisma.externalUsageEvent.createMany({
       data: [beforeRetirement, afterRetirement].map((occurredAt, index) => ({
-        idempotencyKey: `retired-direct-key-${index}`,
+        idempotencyKey: `event-${index}`,
         sourceApp: "admin-usage-poller",
         provider: "openai",
         keyRef: producerKeyRef,
