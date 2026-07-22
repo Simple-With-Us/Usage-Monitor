@@ -14,6 +14,12 @@ import {
   receiptCashProviderId,
 } from "@/lib/receipt-cash";
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
+import {
+  MTD_SCAN_MEMO_TTL_MS,
+  clearMtdScanMemo,
+  getMtdScanMemo,
+  setMtdScanMemo,
+} from "@/lib/mtd-scan-memo";
 
 export const STATUS_METRIC_TYPES = new Set(["quota_sync", "credit_balance"]);
 
@@ -797,6 +803,10 @@ let loggedExternalEventsRawSizeOnce = false;
 // stale callers still receive their cached response immediately, while only
 // background/cold recomputation queues. Keeping it here also covers every
 // caller and avoids taking a higher-level lock before a nested budget compute.
+//
+// Wave H / E1: both provider and project MTD views share one raw+rollup scan
+// (attribution-shaped groupBy) with a short process-local memo so a cold
+// dashboard that loads provider then project status does not pay ~11s twice.
 let externalUsageCostAggregationTail: Promise<void> = Promise.resolve();
 
 async function withExclusiveExternalUsageCostAggregation<T>(
@@ -814,6 +824,34 @@ async function withExclusiveExternalUsageCostAggregation<T>(
   } finally {
     release();
   }
+}
+
+function mtdScanKey(monthStart: Date, rawCutoff: Date): string {
+  // rawCutoff for the live month is clamped to monthStart (see
+  // getExternalEventRawCutoff), so the effective scan window is the month
+  // start plus "use rollups for days older than rawCutoff". Key by the two
+  // UTC day starts only — not wall-clock ms on rawCutoff — so sequential
+  // default-`now` provider/project dashboard calls share one memo entry.
+  const monthKey = monthStart.toISOString().slice(0, 10);
+  const rawDay = rawCutoff.toISOString().slice(0, 10);
+  return `${monthKey}|${rawDay}`;
+}
+
+function emptyProviderPushedCost(): ProviderPushedCost {
+  return {
+    usagePushed: 0,
+    subscriptionPushed: 0,
+    subscriptionPushedManualUsd: 0,
+    estimatedApiEquivalentUsd: 0,
+    pricedEventCount: 0,
+    unpricedEventCount: 0,
+    unclassifiedCostEventCount: 0,
+  };
+}
+
+/** Drop the Wave H MTD scan memo (tests + post-write invalidation). */
+export function __resetMonthToDateExternalCostScanMemoForTests(): void {
+  clearMtdScanMemo();
 }
 
 /**
@@ -882,30 +920,99 @@ export async function sumMonthToDateExternalCostByProvider(
   monthStart: Date,
   rawCutoff: Date
 ): Promise<Map<string, ProviderPushedCost>> {
-  return withExclusiveExternalUsageCostAggregation(() =>
-    sumMonthToDateExternalCostByProviderUnserialized(monthStart, rawCutoff)
-  );
+  const material = await loadMonthToDateExternalCostMaterial(monthStart, rawCutoff);
+  return material.byProvider;
 }
 
-async function sumMonthToDateExternalCostByProviderUnserialized(
+// Month-to-date external cost split by (provider, sourceApp, projectId), across
+// both raw events and rollups. The project budget computation derives every
+// attribution slice it needs from this one result: direct per-project cost
+// (rows with a projectId), legacy sourceApp-name attribution (untagged rows
+// whose sourceApp matches a Project.name), and the residual that percentage
+// allocations distribute (provider cost not directly attributed to any
+// project). Returning the raw triples — rather than pre-summed maps — is what
+// lets budget-status avoid the previous double-count between the provider-keyed
+// and sourceApp-keyed aggregations.
+export async function sumMonthToDateExternalCostAttribution(
   monthStart: Date,
   rawCutoff: Date
-): Promise<Map<string, ProviderPushedCost>> {
+): Promise<ExternalCostAttributionRow[]> {
+  const material = await loadMonthToDateExternalCostMaterial(monthStart, rawCutoff);
+  return material.attribution;
+}
+
+/**
+ * Wave H / E1: one exclusive scan feeds both provider totals and project
+ * attribution. A short memo lets sequential cold computeBudgetStatus +
+ * computeProjectBudgetStatus share the same ~11s groupBy within TTL.
+ */
+async function loadMonthToDateExternalCostMaterial(
+  monthStart: Date,
+  rawCutoff: Date
+): Promise<{
+  byProvider: Map<string, ProviderPushedCost>;
+  attribution: ExternalCostAttributionRow[];
+}> {
+  // Under vitest, skip the process memo so mocked groupBy sequences and
+  // per-test SQLite fixtures never observe cross-call contamination. Production
+  // still memos so provider+project cold paths share one ~11s scan.
+  const memoEnabled = process.env.VITEST !== "true";
+  const key = mtdScanKey(monthStart, rawCutoff);
+  const nowMs = Date.now();
+  if (memoEnabled) {
+    const hit = getMtdScanMemo<
+      Map<string, ProviderPushedCost>,
+      ExternalCostAttributionRow[]
+    >();
+    if (hit && hit.key === key && hit.expiresAt > nowMs) {
+      return { byProvider: hit.byProvider, attribution: hit.attribution };
+    }
+  }
+
+  return withExclusiveExternalUsageCostAggregation(async () => {
+    if (memoEnabled) {
+      const again = getMtdScanMemo<
+        Map<string, ProviderPushedCost>,
+        ExternalCostAttributionRow[]
+      >();
+      if (again && again.key === key && again.expiresAt > Date.now()) {
+        return { byProvider: again.byProvider, attribution: again.attribution };
+      }
+    }
+
+    const material = await loadMonthToDateExternalCostMaterialUnserialized(
+      monthStart,
+      rawCutoff
+    );
+    if (memoEnabled) {
+      setMtdScanMemo({
+        key,
+        byProvider: material.byProvider,
+        attribution: material.attribution,
+        expiresAt: Date.now() + MTD_SCAN_MEMO_TTL_MS,
+      });
+    }
+    return material;
+  });
+}
+
+async function loadMonthToDateExternalCostMaterialUnserialized(
+  monthStart: Date,
+  rawCutoff: Date
+): Promise<{
+  byProvider: Map<string, ProviderPushedCost>;
+  attribution: ExternalCostAttributionRow[];
+}> {
   const rawSince = monthStart > rawCutoff ? monthStart : rawCutoff;
 
   if (!loggedExternalEventsRawSizeOnce) {
     loggedExternalEventsRawSizeOnce = true;
-    // Fire-and-forget: sizing telemetry must never add latency to (or, on
-    // failure, break) the real computation below. Guarded with a typeof
-    // check + try/catch (not just a .catch()) because some tests replace
-    // `prisma` with a partial mock that doesn't implement .count - that must
-    // stay a no-op here, never a thrown/rejected surprise.
     if (typeof prisma.externalUsageEvent?.count === "function") {
       try {
         prisma.externalUsageEvent
           .count({ where: { occurredAt: { gte: rawSince } } })
           .then((rawSinceRows) => {
-            // eslint-disable-next-line no-console -- one-time diagnostic, see comment above
+            // eslint-disable-next-line no-console -- one-time diagnostic
             console.info(
               "[external-events-size]",
               JSON.stringify({ rawSinceRows, monthStart, rawCutoff })
@@ -923,163 +1030,6 @@ async function sumMonthToDateExternalCostByProviderUnserialized(
   const receiptCandidates = await rawReceiptCashCandidates(rawSince);
   const [rawGroups, rollups] = await Promise.all([
     prisma.externalUsageEvent.groupBy({
-      by: ["provider", "sourceApp", "service", "metricType"],
-      where: {
-        occurredAt: { gte: rawSince },
-        metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-        ...NON_RECEIPT_CANDIDATE_WHERE,
-      },
-      _sum: { costUsd: true },
-      _count: { _all: true, costUsd: true },
-    }),
-    monthStart < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            day: { gte: monthStart, lt: rawCutoff },
-            metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-          },
-          select: {
-            provider: true,
-            sourceApp: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            eventCount: true,
-            pricedEventCount: true,
-            unpricedEventCount: true,
-            unclassifiedCostEventCount: true,
-            totalCostUsd: true,
-          },
-        })
-      : Promise.resolve([]),
-  ]);
-
-  const totals = new Map<string, ProviderPushedCost>();
-  const add = (
-    provider: string,
-    sourceApp: string,
-    service: string | null,
-    metricType: string,
-    cost: number,
-    counts: {
-      pricedEventCount: number;
-      unpricedEventCount: number;
-      unclassifiedCostEventCount: number;
-    }
-  ) => {
-    const key = normalizedProviderName(provider);
-    const bucket = totals.get(key) ?? {
-      usagePushed: 0,
-      subscriptionPushed: 0,
-      subscriptionPushedManualUsd: 0,
-      estimatedApiEquivalentUsd: 0,
-      pricedEventCount: 0,
-      unpricedEventCount: 0,
-      unclassifiedCostEventCount: 0,
-    };
-    if (isClaudeCodeAnalyticsTelemetry({ sourceApp, service })) {
-      bucket.estimatedApiEquivalentUsd += cost;
-      totals.set(key, bucket);
-      return;
-    }
-    if (metricType === SUBSCRIPTION_METRIC_TYPE) {
-      bucket.subscriptionPushed += cost;
-      if (sourceApp !== SUBSCRIPTION_SOURCE_APP) {
-        bucket.subscriptionPushedManualUsd += cost;
-      }
-    } else {
-      bucket.usagePushed += cost;
-    }
-    bucket.pricedEventCount += counts.pricedEventCount;
-    bucket.unpricedEventCount += counts.unpricedEventCount;
-    bucket.unclassifiedCostEventCount += counts.unclassifiedCostEventCount;
-    totals.set(key, bucket);
-  };
-
-  for (const row of rawGroups) {
-    add(
-      row.provider,
-      row.sourceApp,
-      row.service,
-      row.metricType,
-      row._sum.costUsd ?? 0,
-      {
-        pricedEventCount: row._count.costUsd,
-        unpricedEventCount: row._count._all - row._count.costUsd,
-        unclassifiedCostEventCount: 0,
-      }
-    );
-  }
-  for (const candidate of receiptCandidates) {
-    if (isReceiptCashEvent(candidate)) continue;
-    add(
-      candidate.provider,
-      candidate.sourceApp,
-      candidate.service,
-      candidate.metricType,
-      candidate.costUsd ?? 0,
-      {
-        pricedEventCount: candidate.costUsd == null ? 0 : 1,
-        unpricedEventCount: candidate.costUsd == null ? 1 : 0,
-        unclassifiedCostEventCount: 0,
-      }
-    );
-  }
-  for (const rollup of rollups) {
-    if (isReceiptCashEvent(rollup)) continue;
-    const hasCoverageCounts =
-      rollup.pricedEventCount != null ||
-      rollup.unpricedEventCount != null ||
-      rollup.unclassifiedCostEventCount != null;
-    add(
-      rollup.provider,
-      rollup.sourceApp,
-      rollup.service,
-      rollup.metricType,
-      rollup.totalCostUsd,
-      {
-        pricedEventCount: rollup.pricedEventCount ?? 0,
-        unpricedEventCount: rollup.unpricedEventCount ?? 0,
-        unclassifiedCostEventCount: hasCoverageCounts
-          ? rollup.unclassifiedCostEventCount ?? 0
-          : rollup.eventCount,
-      }
-    );
-  }
-  return totals;
-}
-
-// Month-to-date external cost split by (provider, sourceApp, projectId), across
-// both raw events and rollups. The project budget computation derives every
-// attribution slice it needs from this one result: direct per-project cost
-// (rows with a projectId), legacy sourceApp-name attribution (untagged rows
-// whose sourceApp matches a Project.name), and the residual that percentage
-// allocations distribute (provider cost not directly attributed to any
-// project). Returning the raw triples — rather than pre-summed maps — is what
-// lets budget-status avoid the previous double-count between the provider-keyed
-// and sourceApp-keyed aggregations.
-export async function sumMonthToDateExternalCostAttribution(
-  monthStart: Date,
-  rawCutoff: Date
-): Promise<ExternalCostAttributionRow[]> {
-  return withExclusiveExternalUsageCostAggregation(() =>
-    sumMonthToDateExternalCostAttributionUnserialized(monthStart, rawCutoff)
-  );
-}
-
-async function sumMonthToDateExternalCostAttributionUnserialized(
-  monthStart: Date,
-  rawCutoff: Date
-): Promise<ExternalCostAttributionRow[]> {
-  const rawSince = monthStart > rawCutoff ? monthStart : rawCutoff;
-
-  const receiptCandidates = await rawReceiptCashCandidates(rawSince);
-  const [rawGroups, rollups] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
       by: ["provider", "sourceApp", "service", "projectId", "metricType"],
       where: {
         occurredAt: { gte: rawSince },
@@ -1091,7 +1041,7 @@ async function sumMonthToDateExternalCostAttributionUnserialized(
     }),
     monthStart < rawCutoff
       ? prisma.externalUsageEventDailyRollup.findMany({
-          where: { 
+          where: {
             day: { gte: monthStart, lt: rawCutoff },
             metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
           },
@@ -1116,10 +1066,46 @@ async function sumMonthToDateExternalCostAttributionUnserialized(
       : Promise.resolve([]),
   ]);
 
-  const rows = new Map<string, ExternalCostAttributionRow>();
-  const add = (
+  const byProvider = new Map<string, ProviderPushedCost>();
+  const attributionMap = new Map<string, ExternalCostAttributionRow>();
+
+  const addProvider = (
     provider: string,
     sourceApp: string,
+    service: string | null,
+    metricType: string,
+    cost: number,
+    counts: {
+      pricedEventCount: number;
+      unpricedEventCount: number;
+      unclassifiedCostEventCount: number;
+    }
+  ) => {
+    const key = normalizedProviderName(provider);
+    const bucket = byProvider.get(key) ?? emptyProviderPushedCost();
+    if (isClaudeCodeAnalyticsTelemetry({ sourceApp, service })) {
+      bucket.estimatedApiEquivalentUsd += cost;
+      byProvider.set(key, bucket);
+      return;
+    }
+    if (metricType === SUBSCRIPTION_METRIC_TYPE) {
+      bucket.subscriptionPushed += cost;
+      if (sourceApp !== SUBSCRIPTION_SOURCE_APP) {
+        bucket.subscriptionPushedManualUsd += cost;
+      }
+    } else {
+      bucket.usagePushed += cost;
+    }
+    bucket.pricedEventCount += counts.pricedEventCount;
+    bucket.unpricedEventCount += counts.unpricedEventCount;
+    bucket.unclassifiedCostEventCount += counts.unclassifiedCostEventCount;
+    byProvider.set(key, bucket);
+  };
+
+  const addAttribution = (
+    provider: string,
+    sourceApp: string,
+    service: string | null,
     projectId: string | null,
     metricType: string,
     cost: number,
@@ -1129,15 +1115,18 @@ async function sumMonthToDateExternalCostAttributionUnserialized(
       unclassifiedCostEventCount: number;
     }
   ) => {
+    // Attribution deliberately excludes Claude analytics telemetry (estimate
+    // only on provider view) and receipt-cash rows (handled separately).
+    if (isClaudeCodeAnalyticsTelemetry({ sourceApp, service })) return;
     const key = `${normalizedProviderName(provider)}|${sourceApp.toLowerCase()}|${projectId ?? ""}|${metricType}`;
-    const existing = rows.get(key);
+    const existing = attributionMap.get(key);
     if (existing) {
       existing.costUsd += cost;
       existing.pricedEventCount += counts.pricedEventCount;
       existing.unpricedEventCount += counts.unpricedEventCount;
       existing.unclassifiedCostEventCount += counts.unclassifiedCostEventCount;
     } else {
-      rows.set(key, {
+      attributionMap.set(key, {
         provider,
         sourceApp,
         projectId,
@@ -1149,57 +1138,85 @@ async function sumMonthToDateExternalCostAttributionUnserialized(
   };
 
   for (const row of rawGroups) {
-    if (isClaudeCodeAnalyticsTelemetry(row)) continue;
-    add(
+    const counts = {
+      pricedEventCount: row._count.costUsd,
+      unpricedEventCount: row._count._all - row._count.costUsd,
+      unclassifiedCostEventCount: 0,
+    };
+    const cost = row._sum.costUsd ?? 0;
+    addProvider(row.provider, row.sourceApp, row.service, row.metricType, cost, counts);
+    addAttribution(
       row.provider,
       row.sourceApp,
+      row.service,
       row.projectId,
       row.metricType,
-      row._sum.costUsd ?? 0,
-      {
-        pricedEventCount: row._count.costUsd,
-        unpricedEventCount: row._count._all - row._count.costUsd,
-        unclassifiedCostEventCount: 0,
-      }
+      cost,
+      counts
     );
   }
   for (const candidate of receiptCandidates) {
     if (isReceiptCashEvent(candidate)) continue;
-    add(
+    const counts = {
+      pricedEventCount: candidate.costUsd == null ? 0 : 1,
+      unpricedEventCount: candidate.costUsd == null ? 1 : 0,
+      unclassifiedCostEventCount: 0,
+    };
+    const cost = candidate.costUsd ?? 0;
+    addProvider(
       candidate.provider,
       candidate.sourceApp,
+      candidate.service,
+      candidate.metricType,
+      cost,
+      counts
+    );
+    addAttribution(
+      candidate.provider,
+      candidate.sourceApp,
+      candidate.service,
       candidate.projectId,
       candidate.metricType,
-      candidate.costUsd ?? 0,
-      {
-        pricedEventCount: candidate.costUsd == null ? 0 : 1,
-        unpricedEventCount: candidate.costUsd == null ? 1 : 0,
-        unclassifiedCostEventCount: 0,
-      }
+      cost,
+      counts
     );
   }
   for (const rollup of rollups) {
-    if (isClaudeCodeAnalyticsTelemetry(rollup) || isReceiptCashEvent(rollup)) continue;
+    if (isReceiptCashEvent(rollup)) continue;
     const hasCoverageCounts =
       rollup.pricedEventCount != null ||
       rollup.unpricedEventCount != null ||
       rollup.unclassifiedCostEventCount != null;
-    add(
+    const counts = {
+      pricedEventCount: rollup.pricedEventCount ?? 0,
+      unpricedEventCount: rollup.unpricedEventCount ?? 0,
+      unclassifiedCostEventCount: hasCoverageCounts
+        ? rollup.unclassifiedCostEventCount ?? 0
+        : rollup.eventCount,
+    };
+    addProvider(
       rollup.provider,
       rollup.sourceApp,
+      rollup.service,
+      rollup.metricType,
+      rollup.totalCostUsd,
+      counts
+    );
+    addAttribution(
+      rollup.provider,
+      rollup.sourceApp,
+      rollup.service,
       rollup.projectId,
       rollup.metricType,
       rollup.totalCostUsd,
-      {
-        pricedEventCount: rollup.pricedEventCount ?? 0,
-        unpricedEventCount: rollup.unpricedEventCount ?? 0,
-        unclassifiedCostEventCount: hasCoverageCounts
-          ? rollup.unclassifiedCostEventCount ?? 0
-          : rollup.eventCount,
-      }
+      counts
     );
   }
-  return Array.from(rows.values());
+
+  return {
+    byProvider,
+    attribution: Array.from(attributionMap.values()),
+  };
 }
 
 export async function syncStatusToUsageSnapshot(events: ExternalUsageEventInput[]): Promise<void> {

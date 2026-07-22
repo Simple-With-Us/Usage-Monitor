@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 
@@ -6,6 +7,8 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_SNAPSHOT_RETENTION_DAYS = 45;
 const DEFAULT_EXTERNAL_EVENT_RETENTION_DAYS = 90;
 const DEFAULT_TOMBSTONE_RETENTION_DAYS = 180;
+/** Wave H / E10: null out rawData JSON on older snapshots while keeping metrics. */
+const DEFAULT_SNAPSHOT_RAW_DATA_RETENTION_DAYS = 14;
 // Smaller than the historical 1000: shrinks the peak in-flight row buffer
 // (and the per-batch upsert/delete transaction) that each pruning pass holds
 // at once, on the theory that a scheduler tick already running during boot
@@ -157,6 +160,65 @@ export function getExternalEventRawCutoff(now = new Date()): Date {
   const cutoff = retentionCutoff(now, days);
   const currentMonth = monthStartUtc(now);
   return cutoff < currentMonth ? cutoff : currentMonth;
+}
+
+export function getSnapshotRawDataCutoff(now = new Date()): Date {
+  const days = readPositiveIntEnv(
+    ["USAGE_SNAPSHOT_RAW_DATA_RETENTION_DAYS"],
+    DEFAULT_SNAPSHOT_RAW_DATA_RETENTION_DAYS
+  );
+  return retentionCutoff(now, days);
+}
+
+/**
+ * Wave H / E10: drop adapter rawData blobs from snapshots older than the
+ * raw-data retention window. Keeps numeric cost/balance/request columns and
+ * never deletes the snapshot row itself (those still roll into daily rollups).
+ */
+export async function stripStaleSnapshotRawData(
+  cutoff: Date,
+  batchSize: number
+): Promise<{ scanned: number; stripped: number }> {
+  // Partial test mocks may omit these methods; never fail maintenance for that.
+  if (
+    typeof prisma.usageSnapshot?.findMany !== "function" ||
+    typeof prisma.usageSnapshot?.updateMany !== "function"
+  ) {
+    return { scanned: 0, stripped: 0 };
+  }
+
+  let scanned = 0;
+  let stripped = 0;
+  while (true) {
+    // Only strip rawData from non-cash diagnostic snapshots early. Rows that
+    // still carry totalCost keep rawData until full snapshot retention so
+    // Mistral spend-limit quarantine (and similar provenance readers) can
+    // finish multi-pass drains without losing identification evidence.
+    const batch = await withInternalUsageWriteAdmission(() =>
+      prisma.usageSnapshot.findMany({
+        where: {
+          fetchedAt: { lt: cutoff },
+          rawData: { not: Prisma.DbNull },
+          totalCost: null,
+        },
+        select: { id: true },
+        orderBy: { fetchedAt: "asc" },
+        take: batchSize,
+      })
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    scanned += batch.length;
+    const result = await withInternalUsageWriteAdmission(() =>
+      prisma.usageSnapshot.updateMany({
+        where: { id: { in: batch.map((row) => row.id) } },
+        data: { rawData: Prisma.DbNull },
+      })
+    );
+    stripped += result?.count ?? 0;
+    if (batch.length < batchSize) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return { scanned, stripped };
 }
 
 function minDate(left: Date, right: Date): Date {
@@ -650,6 +712,9 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     batchSize,
     await latestSnapshotIdsByProvider()
   );
+  // E10: strip rawData from older-but-still-retained snapshot rows so disk
+  // and backups do not keep full upstream adapter payloads for 45 days.
+  await stripStaleSnapshotRawData(getSnapshotRawDataCutoff(now), batchSize);
   const externalUsageEvents = await pruneExternalUsageEvents(
     getExternalEventRawCutoff(now),
     batchSize

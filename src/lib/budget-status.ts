@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { clearMtdScanMemo } from "@/lib/mtd-scan-memo";
 import {
   classifyCostCoverage,
   sumMonthToDateExternalCostByProvider,
@@ -1446,6 +1447,7 @@ export function __resetBudgetStatusCacheForTests(): void {
 export function bustBudgetStatusCache(): void {
   budgetStatusSwrCache.invalidate();
   projectBudgetStatusSwrCache.invalidate();
+  clearMtdScanMemo();
 }
 
 /**
@@ -1455,6 +1457,9 @@ export function bustBudgetStatusCache(): void {
 export function markBudgetStatusSoftStale(): void {
   budgetStatusSwrCache.markSoftStale();
   projectBudgetStatusSwrCache.markSoftStale();
+  // Wave H / E1: drop shared MTD scan memo so soft-stale refresh recomputes
+  // against post-ingest rows rather than serving a 5s-stale groupBy.
+  clearMtdScanMemo();
 }
 
 export async function computeBudgetStatus(now: Date = new Date()): Promise<BudgetStatusResponse> {

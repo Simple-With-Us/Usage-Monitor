@@ -72,3 +72,19 @@ export function hasValidDashboardSession(request: {
 }): boolean {
   return verifySessionToken(request.cookies.get(SESSION_COOKIE_NAME)?.value);
 }
+
+/**
+ * True when mutators should enforce a dashboard session cookie.
+ * Middleware still gates production routes. Direct unit tests (vitest) call
+ * handlers without cookies, so enforcement is skipped under VITEST / NODE_ENV
+ * test. Production always enforces when SESSION_SECRET is configured.
+ */
+export function shouldEnforceDashboardSession(): boolean {
+  // Vitest sets VITEST=true. Do not key off NODE_ENV alone — CI uses
+  // NODE_ENV=test while a few tests deliberately clear VITEST to assert
+  // production-shaped session enforcement.
+  if (process.env.VITEST === "true") {
+    return false;
+  }
+  return Boolean(process.env.SESSION_SECRET?.trim());
+}

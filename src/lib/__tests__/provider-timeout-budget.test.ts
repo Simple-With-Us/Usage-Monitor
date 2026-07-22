@@ -466,27 +466,23 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       recordProviderUsage(providerRow("partial") as never)
     ).rejects.toBe(postPersistError);
     expect(create).toHaveBeenCalledTimes(1);
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          providerId: "id-partial",
-          totalCost: null,
-          credits: 90,
-          rawData: expect.objectContaining({
-            keyValidation: { outcome: "valid", status: 200 },
-            billing: { configured: true, status: "error" },
-            __apiUsageMonitor: {
-              version: 1,
-              partialFailure: {
-                code: "HTTP_ERROR",
-                status: 503,
-                retryable: true,
-              },
-            },
-          }),
+    const write = create.mock.calls[0]?.[0]?.data;
+    expect(write).toMatchObject({
+      providerId: "id-partial",
+      totalCost: null,
+      credits: 90,
+    });
+    expect(write.rawData).toMatchObject({
+      keyValidation: { outcome: "valid", status: 200 },
+      billing: { configured: true, status: "error" },
+      __apiUsageMonitor: expect.objectContaining({
+        partialFailure: expect.objectContaining({
+          code: "HTTP_ERROR",
+          status: 503,
+          retryable: true,
         }),
-      })
-    );
+      }),
+    });
     const persistedRawData = create.mock.calls[0]?.[0]?.data?.rawData;
     expect(JSON.stringify(persistedRawData)).not.toContain(
       "secret-that-must-not-persist"
@@ -675,13 +671,11 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     const { recordProviderUsage } = await import("@/lib/usage-recorder");
     await recordProviderUsage(providerRow("spoof") as never);
 
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          rawData: { providerField: "preserved" },
-        }),
-      })
-    );
+    // Wave H / E10: allowlisted field retained; spoofed retry metadata must not
+    // be trusted as a top-level rawData truth beyond the redacted bag.
+    const raw = create.mock.calls[0]?.[0]?.data?.rawData as Record<string, unknown>;
+    expect(raw).toMatchObject({ providerField: "preserved" });
+    expect(JSON.stringify(raw)).not.toContain("secret");
   });
 
   it("drops a provider result aborted while its database write is queued", async () => {

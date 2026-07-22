@@ -327,6 +327,7 @@ describe("summarizeExternalUsageEvents", () => {
         provider: "anthropic",
         sourceApp: "socratic-trade",
         service: "messages",
+        projectId: null,
         metricType: "cost",
         _sum: { costUsd: 10 },
         _count: { _all: 1, costUsd: 1 },
@@ -335,6 +336,7 @@ describe("summarizeExternalUsageEvents", () => {
         provider: "anthropic",
         sourceApp: "claude-code",
         service: "claude-code",
+        projectId: null,
         metricType: "cost",
         _sum: { costUsd: 5_000 },
         _count: { _all: 1, costUsd: 1 },
@@ -345,6 +347,7 @@ describe("summarizeExternalUsageEvents", () => {
         provider: "anthropic",
         sourceApp: "socratic-trade",
         service: "messages",
+        projectId: null,
         metricType: "cost",
         eventCount: 1,
         pricedEventCount: 1,
@@ -356,6 +359,7 @@ describe("summarizeExternalUsageEvents", () => {
         provider: "anthropic",
         sourceApp: "claude-code",
         service: "claude-code",
+        projectId: null,
         metricType: "cost",
         eventCount: 1,
         pricedEventCount: 1,
@@ -367,6 +371,7 @@ describe("summarizeExternalUsageEvents", () => {
         provider: "anthropic",
         sourceApp: "subscription",
         service: null,
+        projectId: null,
         metricType: "subscription",
         eventCount: 2,
         pricedEventCount: 2,
@@ -580,7 +585,8 @@ describe("summarizeExternalUsageEvents", () => {
     );
     expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
-        by: ["provider", "sourceApp", "service", "metricType"],
+        // Wave H / E1: shared MTD scan always includes projectId.
+        by: ["provider", "sourceApp", "service", "projectId", "metricType"],
         where: expect.objectContaining({
           OR: expect.arrayContaining([{ service: null }, { label: null }]),
         }),

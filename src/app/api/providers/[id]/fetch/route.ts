@@ -6,11 +6,16 @@ import {
   hasStPrimaryCredentialOwnership,
   providerCredentialManagementForClient,
 } from "@/lib/managed-provider-credential";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
 
   const provider = await prisma.provider.findUnique({ where: { id } });

@@ -317,8 +317,67 @@ const CREDENTIAL_MAPPINGS: readonly CredentialMapping[] = [
   {
     scope: "ct",
     providerName: "openai",
-    attempts: appAttempts("ct", ["OPENAI_API_KEY"]),
-    build: (values) => ({ apiKey: values.get("OPENAI_API_KEY") }),
+    // Wave H / E2: optional OPENAI_ADMIN_KEY → secretConfig.adminApiKey for
+    // organization Costs authority (see adapters/openai.ts). Prefer pairing
+    // with OPENAI_API_KEY; a pure admin-only mapping is not registered so we
+    // never create a second openai Provider row when both keys exist.
+    attempts: appAttempts("ct", ["OPENAI_API_KEY"], true, ["OPENAI_ADMIN_KEY"]),
+    build: (values) => ({
+      apiKey: values.get("OPENAI_API_KEY"),
+      ...(values.get("OPENAI_ADMIN_KEY")
+        ? { secretConfig: { adminApiKey: values.get("OPENAI_ADMIN_KEY")! } }
+        : {}),
+    }),
+  },
+  {
+    scope: "ct",
+    providerName: "anthropic",
+    attempts: appAttempts("ct", ["ANTHROPIC_ADMIN_KEY"], true),
+    build: (values) => ({
+      secretConfig: { adminApiKey: values.get("ANTHROPIC_ADMIN_KEY")! },
+    }),
+  },
+  {
+    scope: "st",
+    providerName: "anthropic",
+    attempts: appAttempts("st", ["ANTHROPIC_ADMIN_KEY"], true),
+    build: (values) => ({
+      secretConfig: { adminApiKey: values.get("ANTHROPIC_ADMIN_KEY")! },
+    }),
+  },
+  {
+    scope: "st",
+    providerName: "xai",
+    attempts: appAttempts("st", ["XAI_API_KEY"], true, [
+      "XAI_TEAM_ID",
+      "XAI_MANAGEMENT_KEY",
+    ]),
+    build: (values) => {
+      const teamId = values.get("XAI_TEAM_ID");
+      const managementKey = values.get("XAI_MANAGEMENT_KEY");
+      return {
+        apiKey: values.get("XAI_API_KEY"),
+        ...(teamId ? { publicConfig: { teamId } } : {}),
+        ...(managementKey ? { secretConfig: { managementKey } } : {}),
+      };
+    },
+  },
+  {
+    scope: "ct",
+    providerName: "xai",
+    attempts: appAttempts("ct", ["XAI_API_KEY"], true, [
+      "XAI_TEAM_ID",
+      "XAI_MANAGEMENT_KEY",
+    ]),
+    build: (values) => {
+      const teamId = values.get("XAI_TEAM_ID");
+      const managementKey = values.get("XAI_MANAGEMENT_KEY");
+      return {
+        apiKey: values.get("XAI_API_KEY"),
+        ...(teamId ? { publicConfig: { teamId } } : {}),
+        ...(managementKey ? { secretConfig: { managementKey } } : {}),
+      };
+    },
   },
   {
     scope: "ct",
@@ -348,8 +407,13 @@ const CREDENTIAL_MAPPINGS: readonly CredentialMapping[] = [
   {
     scope: "ct",
     providerName: "mistral",
-    attempts: appAttempts("ct", ["MISTRAL_API_KEY"]),
-    build: (values) => ({ apiKey: values.get("MISTRAL_API_KEY") }),
+    attempts: appAttempts("ct", ["MISTRAL_API_KEY"], true, ["MISTRAL_ADMIN_KEY"]),
+    build: (values) => ({
+      apiKey: values.get("MISTRAL_API_KEY"),
+      ...(values.get("MISTRAL_ADMIN_KEY")
+        ? { secretConfig: { adminApiKey: values.get("MISTRAL_ADMIN_KEY")! } }
+        : {}),
+    }),
   },
   {
     scope: "ct",
@@ -480,8 +544,11 @@ const SECRET_NAME_TO_PROVIDER: ReadonlyMap<string, string> = new Map<string, str
   ["GOOGLE_SERVICE_ACCOUNT_JSON", "google-ai"],
   ["DEEPSEEK_API_KEY", "deepseek"],
   ["XAI_API_KEY", "xai"],
+  ["XAI_MANAGEMENT_KEY", "xai"],
+  ["XAI_TEAM_ID", "xai"],
   ["GROK_API_KEY", "xai"],
   ["MISTRAL_API_KEY", "mistral"],
+  ["MISTRAL_ADMIN_KEY", "mistral"],
   ["OPENROUTER_API_KEY", "openrouter"],
   // Developer Platform
   ["GITHUB_TOKEN", "github"],

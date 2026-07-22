@@ -40,6 +40,7 @@ import {
   hashProviderBillingAccountId,
   projectProviderBillingAccountMatches,
 } from "@/lib/provider-billing-account";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 function decryptKey(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
@@ -355,6 +356,10 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
 
   const existing = await prisma.provider.findUnique({
@@ -578,9 +583,13 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
 
   const existing = await prisma.provider.findUnique({ where: { id } });

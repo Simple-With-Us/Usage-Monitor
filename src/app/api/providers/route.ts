@@ -37,6 +37,7 @@ import {
   hashProviderBillingAccountId,
   projectProviderBillingAccountMatches,
 } from "@/lib/provider-billing-account";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 function decryptKey(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
@@ -477,6 +478,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let input;
   try {
     input = parseProviderCreateInput(await readJsonBody(request));

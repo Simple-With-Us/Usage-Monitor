@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { computeProjectBudgetStatus, bustBudgetStatusCache } from "@/lib/budget-status";
 import { canonicalProjectKey } from "@/lib/provider-identity";
 import { backfillProjectIdFromMetadataName } from "@/lib/project-resolver";
-import { hasValidDashboardSession } from "@/lib/auth";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
   try {
@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   // Wave G / E18: defense-in-depth session re-check (middleware also gates).
-  if (!hasValidDashboardSession(request)) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

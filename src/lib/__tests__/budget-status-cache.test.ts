@@ -84,6 +84,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  const { clearMtdScanMemo } = await import("../mtd-scan-memo");
+  clearMtdScanMemo();
   await prisma.provider.deleteMany();
   __setBudgetStatusCacheOverrideForTests(true);
   __resetBudgetStatusCacheForTests();
@@ -367,32 +369,39 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     const firstProject = await computeProjectBudgetStatus(NOW);
     const firstProvider = await computeBudgetStatus(NOW);
 
-    let releaseProviderGroup!: (rows: never[]) => void;
-    const blockedProviderGroup = new Promise<never[]>((resolve) => {
-      releaseProviderGroup = resolve;
+    let releaseMtdScan!: (rows: never[]) => void;
+    const blockedMtdScan = new Promise<never[]>((resolve) => {
+      releaseMtdScan = resolve;
     });
     const originalGroupBy = prisma.externalUsageEvent.groupBy.bind(
       prisma.externalUsageEvent
     );
     const groupBySpy = vi.spyOn(prisma.externalUsageEvent, "groupBy");
-    let providerGroupBlocked = false;
+    let mtdScanBlocked = false;
+    // Wave H / E1: provider + attribution share one groupBy that always
+    // includes projectId. Block the first such heavy scan only.
     groupBySpy.mockImplementation((args) => {
       const by = Array.isArray(args.by) ? args.by : [];
       if (
-        !providerGroupBlocked &&
+        !mtdScanBlocked &&
         by.includes("provider") &&
-        !by.includes("projectId")
+        by.includes("projectId")
       ) {
-        providerGroupBlocked = true;
-        return blockedProviderGroup as never;
+        mtdScanBlocked = true;
+        return blockedMtdScan as never;
       }
       return originalGroupBy(args as never) as never;
     });
     const heavyAggregationCallCount = () =>
       groupBySpy.mock.calls.filter(([args]) => {
         const by = Array.isArray(args.by) ? args.by : [];
-        return by.includes("provider");
+        return by.includes("provider") && by.includes("projectId");
       }).length;
+
+    // Drop the Wave H MTD scan memo so the background refresh must re-scan
+    // (otherwise the 5s memo from the warm prime would skip groupBy entirely).
+    const { clearMtdScanMemo } = await import("../mtd-scan-memo");
+    clearMtdScanMemo();
 
     // Make both entries stale. The provider call returns its cached object and
     // starts a background refresh whose heavy groupBy is deliberately held.
@@ -402,18 +411,21 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     await waitUntil(async () => heavyAggregationCallCount() === 1);
 
     // The stale project call must also return immediately. Its background
-    // refresh reaches attribution, but the shared aggregation lease keeps it
-    // behind the still-held provider aggregation (including result handling).
+    // refresh reaches the shared MTD scan, but the exclusive lease keeps it
+    // behind the still-held first scan (and the 5s memo means it will not
+    // open a second groupBy once the first completes).
     const staleProject = await computeProjectBudgetStatus(NOW);
     expect(staleProject).toBe(firstProject);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(heavyAggregationCallCount()).toBe(1);
 
-    // Stop further zero-TTL refreshes, release the provider aggregate, and
-    // prove attribution starts only afterward. Then wait for the project
-    // background refresh to settle so it cannot leak into the next test.
+    // Stop further zero-TTL refreshes, release the blocked scan. Under vitest
+    // the process memo is disabled, so the queued project refresh pays a
+    // second groupBy after the lease releases (still serialized, never
+    // concurrent). Production keeps the 5s memo so cold provider+project
+    // only scan once.
     process.env.BUDGET_STATUS_CACHE_TTL_MS = "60000";
-    releaseProviderGroup([]);
+    releaseMtdScan([]);
     await waitUntil(async () => heavyAggregationCallCount() === 2);
     await waitUntil(async () =>
       (await computeProjectBudgetStatus(NOW)) !== firstProject

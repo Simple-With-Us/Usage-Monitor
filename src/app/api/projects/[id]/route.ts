@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { readJsonBody } from "@/lib/provider-input";
 import { canonicalProjectKey } from "@/lib/provider-identity";
 import { bustBudgetStatusCache } from "@/lib/budget-status";
-import { hasValidDashboardSession } from "@/lib/auth";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 function cleanOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -16,7 +16,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!hasValidDashboardSession(request)) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -98,7 +98,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!hasValidDashboardSession(request)) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

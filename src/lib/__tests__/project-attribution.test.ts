@@ -58,6 +58,12 @@ describe("project attribution (integration)", () => {
   });
 
   beforeEach(async () => {
+    const { clearMtdScanMemo } = await import("../mtd-scan-memo");
+    clearMtdScanMemo();
+    const { __resetBudgetStatusCacheForTests, __resetProjectBudgetStatusCacheForTests } =
+      await import("../budget-status");
+    __resetBudgetStatusCacheForTests();
+    __resetProjectBudgetStatusCacheForTests();
     await prisma.externalUsageEvent.deleteMany();
     await prisma.providerProjectAllocation.deleteMany();
     await prisma.providerPlan.deleteMany();
@@ -100,15 +106,24 @@ describe("project attribution (integration)", () => {
     ]);
   });
 
-  it("rejects project create without a dashboard session (Wave G / E18)", async () => {
-    const res = await createProject(
-      new NextRequest("http://localhost/api/projects", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "No Session Project" }),
-      })
-    );
-    expect(res.status).toBe(401);
+  it("rejects project create without a dashboard session outside vitest (Wave G/H / E18)", async () => {
+    // Under vitest, mutator session re-check is skipped so handlers can be unit
+    // tested without minting cookies. Force-enforce by clearing VITEST.
+    const prevVitest = process.env.VITEST;
+    process.env.VITEST = "false";
+    try {
+      const res = await createProject(
+        new NextRequest("http://localhost/api/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "No Session Project" }),
+        })
+      );
+      expect(res.status).toBe(401);
+    } finally {
+      if (prevVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = prevVitest;
+    }
   });
 
   it("backfills metadata.project rows when a Project is created via API (Wave G / E6)", async () => {

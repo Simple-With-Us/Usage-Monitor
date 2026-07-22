@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { hasValidDashboardSession } from "@/lib/auth";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 import { isUsageReadAuthorized } from "@/lib/ingest-auth";
 import { parseSubscriptionCreateInput } from "@/lib/subscription-input";
 import {
@@ -111,6 +111,9 @@ export async function GET(request: NextRequest) {
 // (it can't distinguish GET from POST), so this handler enforces the session
 // cookie itself now that middleware no longer gates this path.
 export async function POST(request: NextRequest) {
+  // Always enforce session here: middleware excludes the collection path so
+  // GET can accept read tokens, but POST must remain dashboard-session-only
+  // (including under vitest — tests assert 401 without a cookie).
   if (!hasValidDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
