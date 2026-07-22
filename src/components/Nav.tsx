@@ -28,6 +28,7 @@ export default function Nav() {
 
   const links = [
     { href: "/", label: "Dashboard" },
+    { href: "/attribution", label: "Attribution" },
     { href: "/settings", label: "Settings" },
   ];
 
@@ -78,7 +79,7 @@ export default function Nav() {
             </Link>
             <div className="hidden gap-1 sm:flex">
               {links.map((link) => {
-                const isActive = pathname === link.href;
+                const isActive = pathname === link.href || pathname.startsWith(`${link.href}/`);
                 return (
                   <Link
                     key={link.href}
@@ -157,7 +158,7 @@ export default function Nav() {
         {menuOpen && (
           <div id="mobile-navigation" className="space-y-1 border-t border-gray-200 py-3 dark:border-gray-800 sm:hidden">
             {links.map((link) => {
-              const isActive = pathname === link.href;
+              const isActive = pathname === link.href || pathname.startsWith(`${link.href}/`);
               return (
                 <Link
                   key={link.href}

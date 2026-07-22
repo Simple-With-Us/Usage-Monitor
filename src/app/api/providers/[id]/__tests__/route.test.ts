@@ -49,7 +49,31 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await prisma.providerKeyBinding.deleteMany();
+  await prisma.providerKeyIdentity.deleteMany();
   await prisma.provider.deleteMany();
+});
+
+describe("DELETE /api/providers/:id attribution history", () => {
+  it("requires deactivation instead of deleting a provider with key identity history", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "openai", displayName: "OpenAI", type: "builtin" },
+    });
+    await prisma.providerKeyIdentity.create({
+      data: { providerId: provider.id, alias: "Historical key" },
+    });
+
+    const response = await DELETE(
+      new NextRequest(`https://usage.jays.services/api/providers/${provider.id}`, {
+        method: "DELETE",
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+
+    expect(response.status).toBe(409);
+    expect(await prisma.provider.count({ where: { id: provider.id } })).toBe(1);
+    expect(await prisma.providerKeyIdentity.count({ where: { providerId: provider.id } })).toBe(1);
+  });
 });
 
 describe("retired built-in provider boundaries", () => {

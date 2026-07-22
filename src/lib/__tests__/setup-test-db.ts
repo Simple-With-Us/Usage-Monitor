@@ -56,6 +56,34 @@ CREATE TABLE "Project" (
   "updatedAt" DATETIME NOT NULL
 );
 
+CREATE TABLE "ProviderKeyIdentity" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "providerId" TEXT NOT NULL,
+  "alias" TEXT NOT NULL,
+  "description" TEXT,
+  "providerReportedKeyIdFingerprint" TEXT,
+  "status" TEXT NOT NULL DEFAULT 'active',
+  "retiredAt" DATETIME,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL,
+  CONSTRAINT "ProviderKeyIdentity_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+);
+
+CREATE TABLE "ProviderKeyBinding" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "identityId" TEXT NOT NULL,
+  "projectId" TEXT,
+  "producerId" TEXT NOT NULL,
+  "producerKeyRef" TEXT NOT NULL,
+  "providerConnectionRef" TEXT,
+  "billingAccountRef" TEXT,
+  "effectiveFrom" DATETIME NOT NULL,
+  "effectiveTo" DATETIME,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "ProviderKeyBinding_identityId_fkey" FOREIGN KEY ("identityId") REFERENCES "ProviderKeyIdentity" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "ProviderKeyBinding_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+);
+
 CREATE TABLE "ProviderProjectAllocation" (
   "id" TEXT NOT NULL PRIMARY KEY,
   "providerId" TEXT NOT NULL,
@@ -374,6 +402,12 @@ CREATE UNIQUE INDEX "ProviderExternalBilling_providerId_source_externalId_key" O
 CREATE INDEX "ProviderExternalBilling_providerId_status_idx" ON "ProviderExternalBilling"("providerId", "status");
 CREATE UNIQUE INDEX "Project_name_key" ON "Project"("name");
 CREATE UNIQUE INDEX "Project_nameKey_key" ON "Project"("nameKey");
+CREATE UNIQUE INDEX "ProviderKeyIdentity_providerId_providerReportedKeyIdFingerprint_key" ON "ProviderKeyIdentity"("providerId", "providerReportedKeyIdFingerprint");
+CREATE INDEX "ProviderKeyIdentity_providerId_status_idx" ON "ProviderKeyIdentity"("providerId", "status");
+CREATE UNIQUE INDEX "ProviderKeyBinding_identityId_producerId_producerKeyRef_effectiveFrom_key" ON "ProviderKeyBinding"("identityId", "producerId", "producerKeyRef", "effectiveFrom");
+CREATE INDEX "ProviderKeyBinding_producerId_producerKeyRef_effectiveFrom_effectiveTo_idx" ON "ProviderKeyBinding"("producerId", "producerKeyRef", "effectiveFrom", "effectiveTo");
+CREATE INDEX "ProviderKeyBinding_identityId_effectiveFrom_idx" ON "ProviderKeyBinding"("identityId", "effectiveFrom");
+CREATE INDEX "ProviderKeyBinding_projectId_effectiveFrom_idx" ON "ProviderKeyBinding"("projectId", "effectiveFrom");
 CREATE UNIQUE INDEX "ProviderProjectAllocation_providerId_projectId_key" ON "ProviderProjectAllocation"("providerId", "projectId");
 CREATE INDEX "UsageSnapshotDailyRollup_day_idx" ON "UsageSnapshotDailyRollup"("day");
 CREATE UNIQUE INDEX "UsageSnapshotDailyRollup_providerId_day_key" ON "UsageSnapshotDailyRollup"("providerId", "day");

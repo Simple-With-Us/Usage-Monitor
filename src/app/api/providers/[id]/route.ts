@@ -608,6 +608,19 @@ export async function DELETE(
     );
   }
 
+  const keyIdentityCount = await prisma.providerKeyIdentity.count({
+    where: { providerId: id },
+  });
+  if (keyIdentityCount > 0) {
+    return NextResponse.json(
+      {
+        error:
+          "This provider has auditable API-key attribution history. Deactivate it instead of deleting it.",
+      },
+      { status: 409 }
+    );
+  }
+
   await prisma.provider.delete({ where: { id } });
   bustBudgetStatusCache();
   return NextResponse.json({ success: true });

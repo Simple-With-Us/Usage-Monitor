@@ -72,6 +72,7 @@ model Provider {
   externalBillingChargeCorrections ExternalBillingChargeCorrection[]
   usageReconciliations  ProviderUsageReconciliation[]
   budgetControlEvents   BudgetControlEvent[]
+  keyIdentities         ProviderKeyIdentity[]
 }
 
 // Append-only audit trail for every automated budget-control action (pause,
@@ -574,6 +575,52 @@ model Project {
   allocations    ProviderProjectAllocation[]
   externalEvents ExternalUsageEvent[]
   subscriptions  Subscription[]
+  keyBindings    ProviderKeyBinding[]
+}
+
+// A provider-side API-key identity without the credential itself. The optional
+// fingerprint is an HMAC-SHA256 digest of a provider-reported stable opaque key
+// ID. Raw API keys and raw provider IDs are never persisted or returned.
+model ProviderKeyIdentity {
+  id                               String    @id @default(uuid())
+  providerId                       String
+  provider                         Provider  @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  alias                            String
+  description                      String?
+  providerReportedKeyIdFingerprint String?
+  status                           String    @default("active")
+  retiredAt                        DateTime?
+  createdAt                        DateTime  @default(now())
+  updatedAt                        DateTime  @updatedAt
+  bindings                         ProviderKeyBinding[]
+
+  @@unique([providerId, providerReportedKeyIdFingerprint])
+  @@index([providerId, status])
+}
+
+// Administrator-confirmed, effective-dated mapping from a producer's local
+// non-secret key reference to one provider key identity. A reassignment closes
+// the old row and creates a new row; it never rewrites prior event attribution.
+// providerConnectionRef and billingAccountRef are contextual constraints, not
+// identities by themselves, so producerId + producerKeyRef are always required.
+model ProviderKeyBinding {
+  id                    String               @id @default(uuid())
+  identityId            String
+  identity              ProviderKeyIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  projectId             String?
+  project               Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  producerId            String
+  producerKeyRef        String
+  providerConnectionRef String?
+  billingAccountRef     String?
+  effectiveFrom         DateTime
+  effectiveTo           DateTime?
+  createdAt             DateTime             @default(now())
+
+  @@unique([identityId, producerId, producerKeyRef, effectiveFrom])
+  @@index([producerId, producerKeyRef, effectiveFrom, effectiveTo])
+  @@index([identityId, effectiveFrom])
+  @@index([projectId, effectiveFrom])
 }
 
 // Recurring, fixed-fee cost (a SaaS plan, seat, add-on, etc.) attached to a
