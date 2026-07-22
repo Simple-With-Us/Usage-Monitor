@@ -10,6 +10,14 @@ export const config = {
 };
 
 export const isPublicPath = (pathname: string) => {
+  // PWA install shell must load without a dashboard session.
+  const publicAssetPaths = [
+    "/manifest.webmanifest",
+    "/sw.js",
+  ];
+  if (publicAssetPaths.includes(pathname)) return true;
+  if (pathname === "/pwa-icon" || pathname.startsWith("/pwa-icon/")) return true;
+
   const publicPaths = [
     "/login",
     "/api/auth/login",
