@@ -89,6 +89,12 @@ async function loadCoverage(
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const boundaries = new Set<number>([monthStart.getTime(), now.getTime()]);
+  for (const identity of identities) {
+    const retiredAt = identity.retiredAt?.getTime();
+    if (retiredAt != null && retiredAt > monthStart.getTime() && retiredAt < now.getTime()) {
+      boundaries.add(retiredAt);
+    }
+  }
   for (const binding of bindings) {
     const from = binding.effectiveFrom.getTime();
     const to = binding.effectiveTo?.getTime();

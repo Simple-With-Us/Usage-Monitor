@@ -182,6 +182,52 @@ describe("provider key attribution API", () => {
     expect(afterRetirement.identities[0].status).toBe("retired");
   });
 
+  it("does not extend a direct provider-ID match past identity retirement", async () => {
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const retiredAt = new Date(Math.max(monthStart.getTime() + 120_000, now.getTime() - 120_000));
+    const beforeRetirement = new Date(retiredAt.getTime() - 1_000);
+    const afterRetirement = new Date(retiredAt.getTime() + 1_000);
+    const provider = await prisma.provider.create({
+      data: { name: "openai", displayName: "OpenAI", type: "builtin" },
+    });
+    const providerKeyId = "retired-provider-key-id";
+    const identityResponse = await POST(request("POST", {
+      action: "create_identity",
+      providerId: provider.id,
+      alias: "Retired key",
+      providerReportedKeyId: providerKeyId,
+    }));
+    expect(identityResponse.status).toBe(201);
+    const identity = await prisma.providerKeyIdentity.findFirstOrThrow();
+    expect((await PATCH(request("PATCH", {
+      action: "retire_identity",
+      identityId: identity.id,
+      effectiveTo: retiredAt.toISOString(),
+    }))).status).toBe(200);
+
+    await prisma.externalUsageEvent.createMany({
+      data: [beforeRetirement, afterRetirement].map((occurredAt, index) => ({
+        idempotencyKey: `retired-direct-key-${index}`,
+        sourceApp: "admin-usage-poller",
+        provider: "openai",
+        keyRef: providerKeyId,
+        costUsd: 1,
+        occurredAt,
+        metadata: {
+          _usageTelemetrySchemaVersion: 2,
+          _coverageMode: "point",
+          _coverageRelationship: "disjoint",
+        },
+      })),
+    });
+
+    const body = await (await GET(request("GET"))).json();
+    expect(body.coverage.identityMatchedCostUsd).toBe(1);
+    expect(body.coverage.identityUnattributedCostUsd).toBe(1);
+    expect(body.coverage.reasons.no_effective_binding).toEqual({ costUsd: 1, eventCount: 1 });
+  });
+
   it("rejects an overlapping remap instead of guessing or rewriting history", async () => {
     const provider = await prisma.provider.create({
       data: { name: "openai", displayName: "OpenAI", type: "builtin" },
