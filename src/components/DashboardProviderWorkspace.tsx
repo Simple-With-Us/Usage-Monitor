@@ -631,8 +631,6 @@ function CompactFamilyCells({
   const accountPlural = family.activeCount === 1 ? "" : "s";
   const criticalSegment = family.criticalCount > 0 ? `, ${family.criticalCount} critical` : "";
   const healthAriaLabel = `${family.alertCount} open alert${alertPlural}${criticalSegment}, ${family.activeCount} active account${accountPlural}`;
-  const healthTitle = `${family.alertCount} open alert${alertPlural}${criticalSegment} · ${family.activeCount} active`;
-
   const lastSyncTitle = family.latestFetchedAt
     ? `${new Date(family.latestFetchedAt).toLocaleString()} · ${family.providerName}`
     : family.providerName;
@@ -671,17 +669,25 @@ function CompactFamilyCells({
       </td>
       <td data-label="Spend" className="px-4 py-2">
         {family.financialsAggregated ? (
-          <p
-            aria-label={`${family.displayName} month-to-date spend: ${familySpendLabel}`}
-            title={spendTitle}
-            className="flex items-center gap-1.5 text-sm sm:whitespace-nowrap"
-          >
-            <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">{familySpendLabel}</span>
-            <span aria-hidden="true" className={dotClass} />
-            <span className="sr-only">{costCoverageLabel(family)}</span>
-          </p>
+          <div role="group" aria-label={spendTitle}>
+            <p
+              aria-label={`${family.displayName} month-to-date spend: ${familySpendLabel}`}
+              className="flex items-center gap-1.5 text-sm sm:whitespace-nowrap"
+            >
+              <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">{familySpendLabel}</span>
+              <span aria-hidden="true" className={dotClass} />
+            </p>
+            <p className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+              {family.budgetUsd != null
+                ? `${formatCurrency(family.budgetUsd)} budget`
+                : family.projectedUsd != null
+                  ? `${formatCurrency(family.projectedUsd)} projected`
+                  : "Projection unavailable"}
+              {" · "}{costCoverageLabel(family)} coverage
+            </p>
+          </div>
         ) : (
-          <span className="block" title={`Coverage: ${costCoverageLabel(family)}`}>
+          <span className="block">
             <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-gray-100 sm:whitespace-nowrap">
               Account total unresolved <span aria-hidden="true" className={dotClass} />
               <span className="sr-only">Account identity unresolved</span>
@@ -690,18 +696,20 @@ function CompactFamilyCells({
           </span>
         )}
         {family.costCoverageCaveatCount > 0 && (
-          <p
-            className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-orange-700 dark:text-orange-300"
-            title={family.costCoverageCaveatMessage ?? "Usage-based costs are not fully visible for this provider."}
-          >
-            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
-            Cost coverage gap
-          </p>
+          <details className="mt-0.5 text-[11px] text-orange-700 dark:text-orange-300">
+            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 [&::-webkit-details-marker]:hidden">
+              <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+              Cost coverage gap
+            </summary>
+            <p className="mt-1 max-w-xs leading-relaxed">
+              {family.costCoverageCaveatMessage ?? "Usage-based costs are not fully visible for this provider."}
+            </p>
+          </details>
         )}
       </td>
       <td data-label="Funds / quota" className="px-4 py-2">
         {family.financialsAggregated ? (
-          <p className="text-sm sm:whitespace-nowrap" title={creditsBalanceTitle}>
+          <p className="text-sm sm:whitespace-nowrap" aria-label={creditsBalanceTitle}>
             {family.credits == null && family.balance == null ? (
               <span className="text-gray-500 dark:text-gray-400">--</span>
             ) : family.credits != null && family.balance != null ? (
@@ -725,7 +733,7 @@ function CompactFamilyCells({
         )}
       </td>
       <td data-label="Services" className="px-4 py-2">
-        <p className="text-sm sm:whitespace-nowrap" title={servicesTitle}>
+        <p className="text-sm sm:whitespace-nowrap" aria-label={servicesTitle}>
           <span className="font-medium tabular-nums text-gray-800 dark:text-gray-200">{recordCount}</span>
           {" · "}
           <span className="text-xs text-gray-500 dark:text-gray-400">{shortDate ?? "--"}</span>
@@ -735,7 +743,6 @@ function CompactFamilyCells({
         <span
           className="flex items-center gap-1.5 sm:whitespace-nowrap"
           aria-label={healthAriaLabel}
-          title={healthTitle}
         >
           {family.alertCount > 0 ? (
             <>
@@ -756,7 +763,7 @@ function CompactFamilyCells({
       <td data-label="Last sync" className="px-4 py-2 sm:px-6">
         <p
           className="text-sm tabular-nums text-gray-800 dark:text-gray-200 sm:whitespace-nowrap"
-          title={lastSyncTitle}
+          aria-label={lastSyncTitle}
         >
           {formatRelativeTime(family.latestFetchedAt, nowMs)}
         </p>

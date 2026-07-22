@@ -30,9 +30,10 @@ public enum TokenStoreError: Error, Equatable, Sendable {
 }
 
 /// Keychain-backed implementation. The token is stored as a generic password
-/// item keyed by `service` + `account`, with `kSecAttrAccessibleAfterFirstUnlock`
-/// so a background refresh / widget timeline can read it after the first unlock
-/// following a reboot.
+/// item keyed by `service` + `account`, with
+/// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` so a background refresh /
+/// widget timeline can read it after the first unlock following a reboot without
+/// allowing this bearer credential to migrate in an encrypted device backup.
 public struct KeychainTokenStore: TokenStoring {
     private let service: String
     private let account: String
@@ -87,14 +88,14 @@ public struct KeychainTokenStore: TokenStoring {
         // Try update-in-place first; fall back to insert.
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let updateStatus = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess { return }
         if updateStatus == errSecItemNotFound {
             var insert = baseQuery
             insert[kSecValueData as String] = data
-            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let addStatus = SecItemAdd(insert as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw TokenStoreError.keychain(addStatus)

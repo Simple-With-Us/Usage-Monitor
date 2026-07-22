@@ -16,7 +16,7 @@ name: UsageMonitor
 options:
   bundleIdPrefix: services.jays.usage
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
   createIntermediateGroups: true
   groupSortPosition: top
   generateEmptyDirectories: true
@@ -28,18 +28,15 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"                 # Swift 5 language mode (compiled by the Swift 6 toolchain)
-    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: minimal
-    # Headless CI/sandbox builds have no signing identity; app-group
-    # entitlements would otherwise fail to validate. Runtime signing is the
-    # owner's concern when they open the project in Xcode.
-    CODE_SIGNING_ALLOWED: NO
-    CODE_SIGNING_REQUIRED: NO
+    # Keep signing enabled in the tracked project so Archive/Release works.
+    # Headless builds pass CODE_SIGNING_ALLOWED=NO on the xcodebuild command
+    # line rather than permanently disabling signing in the project.
 
 targets:
   # -------------------------------------------------------------------------

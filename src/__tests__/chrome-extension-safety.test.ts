@@ -8,7 +8,7 @@ import path from "node:path";
 // nonexistent /api/ingest/keys endpoint under an <all_urls> grant. That exact
 // payload was removed once, then re-merged via a "restore extension" PR, so this
 // test exists to make any reintroduction fail CI. Because the Safari Xcode
-// project bundles this same chrome-extension/ folder as its build resources,
+// project bundles the reviewed manifest and popup from chrome-extension/,
 // keeping this folder clean also keeps the Safari build clean.
 
 const repoRoot = process.cwd();
@@ -94,11 +94,16 @@ describe("chrome-extension credential-scraping containment", () => {
     }
   });
 
+  it("keeps documented IPv6 loopback development available", () => {
+    const popup = readFileSync(path.join(extDir, "popup", "popup.js"), "utf8");
+    expect(popup).toContain("parsed.hostname === '[::1]'");
+  });
+
   it("Safari build resources carry no scraping payload", () => {
-    // Safari's Xcode project references chrome-extension/{manifest,popup,scripts}
-    // as build resources, so it inherits whatever lives there. It must also carry
+    // Safari's Xcode project references chrome-extension/{manifest,popup}
+    // as build resources, so it inherits that executable payload. It must also carry
     // no scraper of its own (its only script is Apple's app-UI boilerplate).
-    if (!existsSync(safariDir)) return; // tolerate a repo layout without Safari
+    expect(existsSync(safariDir)).toBe(true);
     const src = collectSource(safariDir);
     for (const [label, pattern] of [
       ["document.cookie read", /document\.cookie/],
@@ -108,5 +113,23 @@ describe("chrome-extension credential-scraping containment", () => {
     ] as Array<[string, RegExp]>) {
       expect(pattern.test(src), `safari-extension must not contain ${label}`).toBe(false);
     }
+  });
+
+  it("ships universal Safari targets backed by the reviewed launcher resources", () => {
+    const projectPath = path.join(
+      safariDir,
+      "Usage Monitor Safari",
+      "Usage Monitor Safari.xcodeproj",
+      "project.pbxproj",
+    );
+    expect(existsSync(projectPath)).toBe(true);
+    const project = readFileSync(projectPath, "utf8");
+    expect(project).toContain("Usage Monitor Safari Extension (iOS)");
+    expect(project).toContain("Usage Monitor Safari Extension (macOS)");
+    expect(project).toContain("../../../chrome-extension/popup");
+    expect(project).toContain("../../../chrome-extension/manifest.json");
+    expect(project).not.toContain("../../../chrome-extension/README.md");
+    expect(project).not.toContain("../../../chrome-extension/scripts");
+    expect(project).not.toContain("../../../chrome-extension/icons");
   });
 });

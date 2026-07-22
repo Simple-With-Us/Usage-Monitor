@@ -402,11 +402,11 @@ export default function DashboardPage() {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <p role="alert" className="text-red-600">{error}</p>
+        <p role="alert" className="text-red-600 dark:text-red-300">{error}</p>
         <button
           type="button"
           onClick={() => fetchProviders()}
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
         >
           Retry
         </button>
@@ -417,10 +417,10 @@ export default function DashboardPage() {
   return (
     <div className="space-y-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Dashboard</h1>
         <div className="flex items-center gap-3">
           {lastUpdatedAt && (
-            <span className="hidden text-xs text-gray-500 sm:inline">
+            <span className="hidden text-xs text-gray-500 dark:text-gray-400 sm:inline">
               Updated {new Date(lastUpdatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
             </span>
           )}
@@ -428,7 +428,7 @@ export default function DashboardPage() {
             type="button"
             onClick={() => void refreshDashboard()}
             disabled={refreshing}
-            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           >
             {refreshing ? "Refreshing…" : "Refresh"}
           </button>
@@ -436,7 +436,7 @@ export default function DashboardPage() {
       </div>
 
       {warnings.length > 0 && (
-        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
           {warnings.join(" ")}
         </div>
       )}

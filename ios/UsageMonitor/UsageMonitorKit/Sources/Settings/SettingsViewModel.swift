@@ -6,9 +6,10 @@ import Networking
 /// The phase of the token-connection flow, driving the connect button and the
 /// inline status row.
 enum ConnectionPhase: Equatable {
-    case idle          // no token stored, nothing entered
-    case verifying     // a candidate token is being validated
-    case connected     // a verified token is stored
+    case idle           // no token stored, nothing entered
+    case configured     // token exists, but was not verified in this process
+    case verifying      // a candidate token is being validated
+    case verified       // a live request verified the stored token
     case failed(APIError)
 }
 
@@ -44,7 +45,7 @@ final class SettingsViewModel {
         guard !didBind else { return }
         didBind = true
         hostInput = env.settings.baseHost
-        phase = env.hasToken ? .connected : .idle
+        phase = env.hasToken ? .configured : .idle
     }
 
     // MARK: Derived state
@@ -88,19 +89,6 @@ final class SettingsViewModel {
         return nil
     }
 
-    /// After a *non-authentication* failure (server down, offline, decoding),
-    /// the token itself wasn't rejected — offer to save it anyway so a user on a
-    /// flaky connection isn't blocked. A 401/403 is a definitive rejection and
-    /// gets no such escape hatch.
-    var offersSaveWithoutVerifying: Bool {
-        switch failure {
-        case .unauthorized?, .forbidden?, .missingToken?, .none:
-            return false
-        default:
-            return !trimmedToken.isEmpty
-        }
-    }
-
     // MARK: Actions
 
     /// Verify the entered token against the (possibly overridden) host and, on
@@ -118,30 +106,11 @@ final class SettingsViewModel {
         do {
             try await verifier.verify(token: token, host: hostInput)
             try persist(token: token, env: env)
-            phase = .connected
+            phase = .verified
             Haptics.success()
         } catch let error as APIError {
             phase = .failed(error)
             Haptics.error()
-        } catch let error as TokenStoreError {
-            phase = .failed(.transport(keychainMessage(error)))
-            Haptics.error()
-        } catch {
-            phase = .failed(.transport(error.localizedDescription))
-            Haptics.error()
-        }
-    }
-
-    /// Persist the entered token without a successful verification (only exposed
-    /// after a non-auth failure).
-    func saveWithoutVerifying() async {
-        guard let env else { return }
-        let token = trimmedToken
-        guard !token.isEmpty else { return }
-        do {
-            try persist(token: token, env: env)
-            phase = .connected
-            Haptics.success()
         } catch let error as TokenStoreError {
             phase = .failed(.transport(keychainMessage(error)))
             Haptics.error()

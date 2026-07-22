@@ -245,8 +245,10 @@ describe("ProviderTable cost coverage", () => {
       }),
     ]);
 
-    // Default density is compact (Wave D): short label + full text in title.
+    // Default density is compact: short label plus a touch/keyboard disclosure.
     expect(html).toContain("Coverage gap");
+    expect(html).toContain("Billing detail");
+    expect(html).toContain("<details");
     expect(html).toContain(
       "Usage-based costs (D1, R2, Workers, Queues overage) are not visible"
     );

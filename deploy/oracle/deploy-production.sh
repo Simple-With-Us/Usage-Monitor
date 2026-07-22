@@ -279,8 +279,13 @@ verify_backup_path() {
   dry_run_path="${DATA_DIR}/.deploy-garage-dry-run.db"
   unlink "${dry_run_path}" 2>/dev/null || true
 
+  # Freshness + max TXID prefer level-0 tip listing. Full `-level all` lists
+  # thousands of compacted objects over the S3 link and has timed out the
+  # deploy gate (false "no parseable LTX") under Coolify load even when Garage
+  # was healthy. When L0 is empty after compaction/quiet periods, fall back
+  # through higher levels without ever listing all compacted history.
   if ! read_backup_state; then
-    die "Garage returned no parseable LTX objects"
+    die "Garage returned no parseable LTX objects at levels 0-5 (list timeout, empty tip, or parse failure)"
     return 1
   fi
   if ! latest_epoch="$(date -u -d "${LAST_BACKUP_CREATED}" +%s)"; then
@@ -310,20 +315,21 @@ verify_backup_path() {
   log "Garage LTX freshness and authenticated restore dry-run passed."
 }
 
-read_backup_state() {
-  local listing
-  if ! listing="$(timeout 120 docker exec "${APP_CONTAINER}" \
-    /app/bin/litestream ltx -config /app/litestream.yml -level all /data/prod.db)"; then
-    return 1
-  fi
-  set_backup_state_from_listing "${listing}"
+# Prefer L0 tip (fast, small). Fall back L1..L5 when L0 is pruned during quiet
+# periods (Litestream's default L0 retention is brief; scheduler ticks every
+# 15m). Never use `-level all` — that listing timed out under Coolify load and
+# falsely blocked deploys. Authenticity remains covered by restore dry-run.
+list_garage_ltx_level() {
+  local level="$1"
+  timeout 60 docker exec "${APP_CONTAINER}" \
+    /app/bin/litestream ltx -config /app/litestream.yml -level "${level}" /data/prod.db
 }
 
-read_backup_state_offline() {
+list_garage_ltx_level_offline() {
   local revision="$1"
+  local level="$2"
   local image="${APP_IMAGE_REPOSITORY}:${revision}"
-  local listing
-  if ! listing="$(timeout --signal=TERM --kill-after=30s 180 \
+  timeout --signal=TERM --kill-after=15s 90 \
     docker run --rm --pull=never --read-only \
       --network "${APP_NETWORK}" \
       --env-file "${RUNTIME_ENV}" \
@@ -334,10 +340,29 @@ read_backup_state_offline() {
       -v "${DATA_DIR}:/data:ro" \
       --entrypoint /app/bin/litestream \
       "${image}" \
-      ltx -config /app/litestream.yml -level all /data/prod.db)"; then
-    return 1
-  fi
-  set_backup_state_from_listing "${listing}"
+      ltx -config /app/litestream.yml -level "${level}" /data/prod.db
+}
+
+read_backup_state_from_levels() {
+  local list_fn="$1"
+  shift
+  local listing level
+  for level in 0 1 2 3 4 5; do
+    if listing="$("${list_fn}" "$@" "${level}")" && \
+      set_backup_state_from_listing "${listing}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+read_backup_state() {
+  read_backup_state_from_levels list_garage_ltx_level
+}
+
+read_backup_state_offline() {
+  local revision="$1"
+  read_backup_state_from_levels list_garage_ltx_level_offline "${revision}"
 }
 
 set_backup_state_from_listing() {

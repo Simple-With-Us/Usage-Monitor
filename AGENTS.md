@@ -8,24 +8,28 @@ telemetry** from other apps into `ExternalUsageEvent` via `POST /api/ingest/usag
 **OTLP metrics** from Claude Code (or any OTLP exporter) via `POST /api/otlp/v1/metrics`,
 which map onto the same `ExternalUsageEvent` table (see "Claude Code OTLP ingest" below).
 
-## Cross-app contract (keep in sync)
+## Cross-app contract
 
-This repo is the **server half** of the usage-telemetry contract. The client half is
-`@jaywedgeworth22/congress-trading-shared`'s `src/usageTelemetry.ts`, and Socratic Trade
-(formerly Agentic Trading, App B) is the primary producer (`src/lib/usage-monitor-push.ts`). The ingest event shape,
-enum sets, and the idempotency-key algorithm **must stay byte-for-byte identical** across:
+This repo is the **receiver** for the versioned usage-telemetry contract. The exact
+`@jaywedgeworth22/congress-trading-shared` release pinned in `package.json` is the wire
+authority for v2 schemas, canonical idempotency, ACKs, and typed errors. Congress.Trade
+and Socratic.Trade are producers. `src/lib/usage-telemetry.ts` adapts validated v2 events
+to this repo's monitor-owned persistence shape; do not duplicate or loosen the v2 schema
+here. Its hand-written parser remains only for durable legacy v1 receipts and backlog.
 
-- `congress-trading-shared/src/usageTelemetry.ts` (Zod schemas + `deriveUsageTelemetryIdempotencyKey`)
-- `src/lib/usage-telemetry.ts` (this repo's hand-written parser — no dependency on the shared pkg)
+Fresh v2 producers must provide a durable `eventId`. The monitor hashes
+`producerId + eventId` using the shared length-prefixed SHA-256 algorithm. It returns the
+shared explicit ACK counts (`received`, `persisted`, `duplicates`, `pruned`, `rejected`)
+and typed retry/error responses. Do not dual-write v1 and v2 events.
 
 The optional top-level **`project`** field (per-project attribution) and the **`subscription`**
-`metricType` value are accepted here and mirrored in shared `UsageTelemetryEventSchema` (v1.4.2+).
+`metricType` value remain accepted by the legacy v1 parser and are represented in the shared v2 schema.
 `project` is intentionally excluded from the idempotency basis — keep it out of
 `deriveUsageTelemetryIdempotencyKey` so adding it never rekeys existing events.
 
 Monitor-only metricTypes `quota_sync` and `credit_balance` stay internal (not in the shared enum).
 
-Idempotency: when the producer omits `idempotencyKey`, the server derives the same 5-field SHA-256
+Legacy v1 idempotency: when the replayed event omits `idempotencyKey`, the server derives the same 5-field SHA-256
 key as shared (`sourceApp` + `provider` + `metricType` + `keyRef` + `occurredAt`). Explicit keys
 are persisted and upsert-deduped on `ExternalUsageEvent.idempotencyKey`.
 
@@ -38,7 +42,8 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
 ## Endpoints (App B integration)
 
 - `POST /api/ingest/usage` — Bearer `USAGE_INGEST_TOKEN` (or `x-usage-ingest-token`). Writes `ExternalUsageEvent`.
-- `GET /api/budget-status` — Bearer `USAGE_READ_TOKEN` (falls back to `USAGE_INGEST_TOKEN`).
+- `GET /api/budget-status` — dashboard session cookie OR Bearer `USAGE_READ_TOKEN`
+  (falls back to `USAGE_INGEST_TOKEN`).
   Returns per-provider month-to-date spend (poll snapshot + pushed cost, combined via
   `max()` to avoid double-counting) vs `ProviderPlan.monthlyBudgetUsd`. Logic in
   `src/lib/budget-status.ts`, reusing `buildProviderAlertState` from `src/lib/provider-alerts.ts`.

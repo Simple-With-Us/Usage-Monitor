@@ -54,6 +54,10 @@ public final class AlertsModel {
 
     public var resolved: [ResolvedAlert] { tracker.resolved }
 
+    public func useAccountScope(_ scopeID: String?) {
+        tracker.useAccountScope(scopeID)
+    }
+
     /// Apply the active severity filter.
     public func filtered(_ items: [ProviderAlertItem]) -> [ProviderAlertItem] {
         items.filter { filter.matches($0.alert.severity) }

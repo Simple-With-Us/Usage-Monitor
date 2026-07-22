@@ -36,6 +36,14 @@ public final class BudgetStore {
 
     private var apiClient: APIClient
     private let sink: BudgetSnapshotSink
+    private var dataSourceGeneration: UInt = 0
+    private var nextCacheOperationID: UInt = 0
+    private var latestCacheOperation: CacheOperation?
+
+    private struct CacheOperation {
+        let id: UInt
+        let task: Task<Void, Never>
+    }
 
     public init(apiClient: APIClient, sink: BudgetSnapshotSink = NullBudgetSnapshotSink()) {
         self.apiClient = apiClient
@@ -45,6 +53,20 @@ public final class BudgetStore {
     /// Swap in a new client after a host change (called by `AppEnvironment`).
     func replaceClient(_ client: APIClient) {
         self.apiClient = client
+        invalidateDataSource()
+    }
+
+    /// Immediately hide data owned by the prior host/credential, invalidate
+    /// any in-flight response, and serialize a persisted-cache clear after
+    /// earlier writes. New loads wait for this boundary before reading.
+    func invalidateDataSource() {
+        dataSourceGeneration &+= 1
+        state = .idle
+        lastUpdated = nil
+        lastError = nil
+        let sink = sink
+        sink.invalidate()
+        enqueueCacheOperation { await sink.clear() }
     }
 
     // MARK: - Derived accessors (nil-safe; empty when unloaded)
@@ -73,13 +95,17 @@ public final class BudgetStore {
     /// Full load: paint cached data immediately (offline-first) if present,
     /// then fetch fresh.
     public func load() async {
+        await drainCacheOperations()
+        let generation = dataSourceGeneration
         if state.value == nil {
             state = .loading
             if let cached = await sink.loadCached() {
+                guard generation == dataSourceGeneration else { return }
                 state = .loaded(cached)
                 lastUpdated = cached.generatedAtDate ?? lastUpdated
             }
         }
+        guard generation == dataSourceGeneration else { return }
         await fetch()
     }
 
@@ -91,23 +117,56 @@ public final class BudgetStore {
     /// Sign-out: drop in-memory and persisted money state so the next account
     /// (or offline paint) cannot show the previous token's spend.
     public func clearAll() async {
-        state = .idle
-        lastUpdated = nil
-        lastError = nil
-        await sink.clear()
+        invalidateDataSource()
+        await drainCacheOperations()
     }
 
     private func fetch() async {
+        await drainCacheOperations()
+        let generation = dataSourceGeneration
+        let client = apiClient
         do {
-            let response = try await apiClient.budgetStatus()
+            let response = try await client.budgetStatus()
+            guard generation == dataSourceGeneration else { return }
             state = .loaded(response)
             lastUpdated = Date()
             lastError = nil
-            await sink.store(response)
+            let sink = sink
+            let operation = enqueueCacheOperation { await sink.store(response) }
+            await operation.task.value
         } catch let error as APIError {
+            guard generation == dataSourceGeneration else { return }
             handle(error)
         } catch {
+            guard generation == dataSourceGeneration else { return }
             handle(.transport(error.localizedDescription))
+        }
+    }
+
+    @discardableResult
+    private func enqueueCacheOperation(
+        _ body: @escaping @Sendable () async -> Void
+    ) -> CacheOperation {
+        nextCacheOperationID &+= 1
+        let id = nextCacheOperationID
+        let previous = latestCacheOperation?.task
+        let task = Task {
+            if let previous { await previous.value }
+            await body()
+        }
+        let operation = CacheOperation(id: id, task: task)
+        latestCacheOperation = operation
+        return operation
+    }
+
+    /// Wait until every cache operation queued so far (including one appended
+    /// while awaiting) has crossed the identity boundary.
+    func drainCacheOperations() async {
+        while let operation = latestCacheOperation {
+            await operation.task.value
+            if latestCacheOperation?.id == operation.id {
+                latestCacheOperation = nil
+            }
         }
     }
 

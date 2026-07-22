@@ -53,10 +53,10 @@ struct ConnectionSection: View {
             Text("Server")
         } footer: {
             if !model.isHostValid {
-                Text("That doesn't look like a valid address.")
+                Text("Enter a secure HTTPS monitor address with no path, query, or sign-in details.")
                     .foregroundStyle(Theme.Colors.danger)
             } else {
-                Text("Requests go to \(model.resolvedHostDisplay). Leave empty to use the default monitor.")
+                Text("Requests go securely to \(model.resolvedHostDisplay). Leave empty to use the default monitor.")
             }
         }
 
@@ -65,13 +65,6 @@ struct ConnectionSection: View {
             statusRow
             tokenField
             connectButton
-            if model.offersSaveWithoutVerifying {
-                Button {
-                    Task { await model.saveWithoutVerifying() }
-                } label: {
-                    Label("Save token without verifying", systemImage: "square.and.arrow.down")
-                }
-            }
             if model.hasStoredToken {
                 Button(role: .destructive) {
                     model.showRemoveConfirmation = true
@@ -101,7 +94,7 @@ struct ConnectionSection: View {
     @ViewBuilder
     private var statusRow: some View {
         switch model.phase {
-        case .connected:
+        case .verified:
             HStack {
                 Label {
                     Text("Connected")
@@ -115,6 +108,21 @@ struct ConnectionSection: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Connected. Token verified.")
+
+        case .configured:
+            HStack {
+                Label {
+                    Text("Token configured")
+                        .foregroundStyle(Theme.Colors.primaryText)
+                } icon: {
+                    Image(systemName: "key.fill")
+                        .foregroundStyle(Theme.Colors.accent)
+                }
+                Spacer()
+                StatusBadge("Not checked", status: .neutral)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("API token configured, not verified this session")
 
         case .verifying:
             HStack(spacing: Theme.Spacing.sm) {
@@ -222,7 +230,7 @@ struct ConnectionSection: View {
             Text("Your token is stored securely in the device Keychain, never in iCloud or backups. Enter a new one above to replace it.")
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("Usage Monitor is a companion to your self-hosted monitor. Paste its read token to load your budgets — it's verified before being saved to the Keychain, never stored in plain text.")
+                Text("Paste your monitor's read token to load budgets. It is verified before being saved to the Keychain and is never stored in plain text.")
                 if let url = monitorURL {
                     Link(destination: url) {
                         Label("Where do I find my token?", systemImage: "questionmark.circle")

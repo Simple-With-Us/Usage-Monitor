@@ -24,6 +24,7 @@
 		9FC1AA41DEEF222CA0DD91F6 /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 37C47BD409744EC363A5D9C3 /* DesignSystem */; };
 		A25988FF08C31D2498209FB2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA93AC5DCCD01FBB2A560D25 /* Assets.xcassets */; };
 		B0D9919838E639EB7D80FEEA /* OfflineCache in Frameworks */ = {isa = PBXBuildFile; productRef = DCDD9B886592E046087C8AB8 /* OfflineCache */; };
+		B82FFD609432C0928F46DA8F /* AccountChangeNotifyingTokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB1864248318F2267ECF38E2 /* AccountChangeNotifyingTokenStore.swift */; };
 		C3186C23E4A15ACE7390C70A /* UsageMonitorWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F1AEB8CDA324975C39D57883 /* UsageMonitorWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C36A8008C72FC6F54DC9D91F /* AppCore in Frameworks */ = {isa = PBXBuildFile; productRef = BC8AFCFC7A57AE9488201CE1 /* AppCore */; };
 		C66672426BD66072764EF255 /* Models in Frameworks */ = {isa = PBXBuildFile; productRef = FB1941171577206B0A52D658 /* Models */; };
@@ -82,6 +83,7 @@
 		C8C3B26815D2E6893A2F0BD4 /* AppSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSmokeTests.swift; sourceTree = "<group>"; };
 		CCA5B2DBBB9F3790B7052B0B /* UsageMonitorTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = UsageMonitorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DA93AC5DCCD01FBB2A560D25 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EB1864248318F2267ECF38E2 /* AccountChangeNotifyingTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountChangeNotifyingTokenStore.swift; sourceTree = "<group>"; };
 		F1AEB8CDA324975C39D57883 /* UsageMonitorWidgetExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = UsageMonitorWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FCD5897C4158EE40F3B5B676 /* UsageMonitor.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = UsageMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -200,6 +202,7 @@
 			isa = PBXGroup;
 			children = (
 				A243768254FD0CD557A942D6 /* Resources */,
+				EB1864248318F2267ECF38E2 /* AccountChangeNotifyingTokenStore.swift */,
 				DA93AC5DCCD01FBB2A560D25 /* Assets.xcassets */,
 				C81B7D14B31665FDA6183BF8 /* OfflineCacheSnapshotSink.swift */,
 				2B30FDC3F50A61E4D10BC24B /* UsageMonitorApp.swift */,
@@ -317,7 +320,6 @@
 						ProvisioningStyle = Automatic;
 					};
 					4B4B11010774BFBB5561CA61 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 					5889469B5CB3C6B159E86759 = {
@@ -325,7 +327,6 @@
 						ProvisioningStyle = Automatic;
 					};
 					697B0B4631A2FF72678DE8B3 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -397,6 +398,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B82FFD609432C0928F46DA8F /* AccountChangeNotifyingTokenStore.swift in Sources */,
 				3F00B7EA559035693708214F /* OfflineCacheSnapshotSink.swift in Sources */,
 				276F317A99A928209250BE5E /* UsageMonitorApp.swift in Sources */,
 			);
@@ -469,13 +471,10 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -487,7 +486,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -533,13 +532,10 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -557,7 +553,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;

@@ -27,7 +27,7 @@ let package = Package(
     name: "UsageMonitorKit",
     defaultLocalization: "en",
     platforms: [
-        .iOS(.v17)
+        .iOS("26.0")
     ],
     products: [
         .library(name: "Models", targets: ["Models"]),
@@ -66,7 +66,7 @@ let package = Package(
         ),
         .target(
             name: "Alerts",
-            dependencies: ["AppCore", "DesignSystem", "Networking", "Models"]
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "PushScaffold"]
         ),
         .target(
             name: "ProjectBudgets",
@@ -83,7 +83,7 @@ let package = Package(
             name: "OfflineCache",
             dependencies: ["Models", "Networking", "WidgetShared"]
         ),
-        .target(name: "PushScaffold", dependencies: ["AppCore", "Models"]),
+        .target(name: "PushScaffold", dependencies: ["AppCore", "Models", "Networking"]),
 
         // ---- Tests (foundation-owned; feature agents add their own) -----
         .testTarget(

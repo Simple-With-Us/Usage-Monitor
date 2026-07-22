@@ -83,6 +83,9 @@ jobs:
       - name: Test Oracle deployment circuit breakers
         run: npm run test:oracle-deploy
 
+      - name: Verify Apple projects
+        run: npm run test:apple-projects
+
       - name: Audit high-severity dependencies
         run: npm audit --audit-level=high
 

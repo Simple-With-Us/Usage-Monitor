@@ -32,7 +32,7 @@ public enum APIError: Error, Equatable, Sendable {
     public var title: String {
         switch self {
         case .missingToken: return "No API token"
-        case .unauthorized: return "Token rejected"
+        case .unauthorized: return "Sign-in rejected"
         case .forbidden: return "Access denied"
         case .serverNotConfigured: return "Server unavailable"
         case .rateLimited: return "Too many requests"
@@ -49,9 +49,9 @@ public enum APIError: Error, Equatable, Sendable {
         case .missingToken:
             return "Add your usage read token in Settings to load budget data."
         case .unauthorized:
-            return "Your token was rejected. Re-enter it in Settings — it may have been rotated."
+            return "Your read token or dashboard session was rejected. Reconnect or sign in again in Settings."
         case .forbidden:
-            return "This token isn't allowed to read budget data."
+            return "This credential isn't allowed to perform that action."
         case .serverNotConfigured:
             return "The monitor hasn't enabled read access yet. Try again later."
         case let .rateLimited(retryAfter):

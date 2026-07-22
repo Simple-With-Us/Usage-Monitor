@@ -123,12 +123,9 @@ body {
    Only pure spacing tweaks live here (padding/gap/font-size) - nothing in
    this file hides content. Collapsing a secondary line in compact mode is
    done in the component itself (ProviderTable.tsx, ProviderCard.tsx, the
-   provider detail page) so the hidden text can be folded into a `title`
-   attribute on the element that stays visible. A blind CSS selector can't
-   do that (an element that's `display: none` can't be hovered for its
-   title), which is why this used to hide several field *labels* by
-   accident - see PR history for #601 if you're wondering why this comment
-   is unusually specific.
+   provider detail page) so secondary text can use an explicit disclosure or
+   accessible label. A blind CSS selector cannot preserve touch/keyboard
+   access, which is why this used to hide several field labels by accident.
 
    DashboardProviderWorkspace.tsx is intentionally NOT styled from here: it
    already ships its own compact/comfortable "Row density" control (see the

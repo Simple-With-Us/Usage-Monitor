@@ -6,7 +6,7 @@ Tracks API usage and cost across providers via **poller snapshots**, **pushed te
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/ingest/usage` | Ingest telemetry events from sibling apps (bearer token); optional `project` field attributes cost to a project |
+| `POST` | `/api/ingest/usage` | Ingest shared usage-telemetry v2 events from sibling apps (bearer token); durable `eventId`, typed ACK/errors, optional `project`; legacy v1 remains replay-only |
 | `GET` | `/api/budget-status` | Per-provider and per-project month-to-date spend vs monthly budget (read token) |
 | `POST` | `/api/otlp/v1/metrics` | Receive OTLP metrics from Claude Code (same bearer token as ingest); reads the `project` resource attribute |
 | `GET` | `/api/usage-events` | Usage summary grouped by source/provider/**project** (`?projectId=` filter) |

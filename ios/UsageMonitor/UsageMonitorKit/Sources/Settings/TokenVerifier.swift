@@ -24,13 +24,36 @@ protocol TokenVerifying: Sendable {
 /// Production verifier: builds a disposable client for the (possibly overridden)
 /// host and performs the standard `verifyToken()` probe against it.
 struct LiveTokenVerifier: TokenVerifying {
+    private let session: URLSession
+
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.makeCookieFreeSession()
+    }
+
     func verify(token: String, host: String) async throws {
         let configuration = APIConfiguration.fromUserInput(host) ?? .production
         let client = APIClient(
             configuration: configuration,
-            tokenStore: InMemoryTokenStore(token: token)
+            tokenStore: InMemoryTokenStore(token: token),
+            session: session
         )
         try await client.verifyToken()
+    }
+
+    /// Candidate bearer validation must not inherit the dashboard session from
+    /// the app-wide cookie jar. Otherwise the dual-auth budget route could
+    /// accept the cookie and make an invalid replacement token look verified.
+    static func makeCookieFreeSession(
+        protocolClasses: [AnyClass]? = nil
+    ) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        if let protocolClasses {
+            configuration.protocolClasses = protocolClasses
+        }
+        return URLSession(configuration: configuration)
     }
 }
 

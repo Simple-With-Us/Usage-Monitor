@@ -40,7 +40,8 @@ let ipCounter = 0;
 function nextRequest(
   body: unknown,
   token: string,
-  url = "https://usage.jays.services/api/ingest/usage"
+  url = "https://usage.jays.services/api/ingest/usage",
+  telemetryVersion?: 2
 ): NextRequest {
   ipCounter += 1;
   return new NextRequest(url, {
@@ -49,9 +50,31 @@ function nextRequest(
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "x-forwarded-for": `10.1.0.${ipCounter}`,
+      ...(telemetryVersion ? { "x-usage-telemetry-version": String(telemetryVersion) } : {}),
     },
     body: JSON.stringify(body),
   });
+}
+
+function v2Request(token = USAGE_TOKEN, includeVersionHeader = true): NextRequest {
+  return nextRequest(
+    {
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      producerInstanceId: "prod-a",
+      events: [{
+        eventId: "ledger-event-1",
+        provider: "openai",
+        producerKeyRef: "configured-openai-primary",
+        providerConnectionRef: "openai-org-primary",
+        billingAccountRef: "openai-billing-primary",
+        occurredAt: "2026-07-21T00:00:00.000Z",
+      }],
+    },
+    token,
+    "https://usage.jays.services/api/ingest/usage",
+    includeVersionHeader ? 2 : undefined
+  );
 }
 
 function ordinaryRequest(token = USAGE_TOKEN): NextRequest {
@@ -144,6 +167,86 @@ afterEach(() => {
 });
 
 describe("POST /api/ingest/usage admission", () => {
+  it("accepts v2 through the shared schema and returns explicit persistence counts", async () => {
+    externalUsageMocks.persist.mockResolvedValueOnce({
+      attempted: 1,
+      persisted: 0,
+      skippedPrunedDuplicates: 0,
+      newEvents: [],
+    });
+    const response = await POST(v2Request());
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      ok: true,
+      schemaVersion: 2,
+      received: 1,
+      persisted: 0,
+      duplicates: 1,
+      pruned: 0,
+      rejected: 0,
+    });
+    expect(externalUsageMocks.persist).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sourceApp: "socratic-trade",
+        keyRef: "configured-openai-primary",
+        metadata: expect.objectContaining({
+          _producerEventId: "ledger-event-1",
+          _producerInstanceId: "prod-a",
+          _providerConnectionRef: "openai-org-primary",
+          _billingAccountRef: "openai-billing-primary",
+        }),
+      }),
+    ]);
+  });
+
+  it("routes a v2 body through the shared schema without a custom version header", async () => {
+    const response = await POST(v2Request(USAGE_TOKEN, false));
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      ok: true,
+      schemaVersion: 2,
+      received: 1,
+      persisted: 1,
+    }));
+    expect(externalUsageMocks.persist).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sourceApp: "socratic-trade",
+        idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    ]);
+  });
+
+  it("returns the typed v2 error shape for a headerless invalid v2 body", async () => {
+    const response = await POST(nextRequest(
+      { schemaVersion: 2, producerId: "socratic-trade", events: [{}] },
+      USAGE_TOKEN
+    ));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      ok: false,
+      schemaVersion: 2,
+      error: expect.objectContaining({
+        code: "invalid_request",
+        retryable: false,
+      }),
+    }));
+    expect(externalUsageMocks.persist).not.toHaveBeenCalled();
+  });
+
+  it("returns the typed error/backoff contract to v2 clients", async () => {
+    const response = await POST(v2Request("wrong-token"));
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      ok: false,
+      schemaVersion: 2,
+      error: {
+        code: "unauthorized",
+        message: "Unauthorized",
+        retryable: false,
+      },
+    });
+  });
+
   it("rejects an overlapping writer before any database helper runs", async () => {
     const release = tryAcquireIngestAdmission();
     expect(release).not.toBeNull();

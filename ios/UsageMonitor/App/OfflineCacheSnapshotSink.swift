@@ -35,10 +35,22 @@ struct OfflineCacheSnapshotSink: BudgetSnapshotSink {
         BudgetDiskCache(directory: directory).load()
     }
 
-    /// Clear disk cache + widget snapshot (sign-out).
-    func clear() async {
+    /// Synchronous identity boundary for host/token/session changes. Both
+    /// stores perform bounded local deletes, so there is no termination window
+    /// in which another identity's money remains visible.
+    func invalidate() {
         BudgetDiskCache(directory: directory).clear()
-        SharedStore.shared.write(.empty)
+        SharedStore.shared.clear()
+        reloadWidgets()
+    }
+
+    /// Clear disk cache + widget snapshot (sign-out). Also called through the
+    /// serialized async cache-operation queue as a defensive second pass.
+    func clear() async {
+        invalidate()
+    }
+
+    private func reloadWidgets() {
         #if canImport(WidgetKit) && os(iOS)
         WidgetCenter.shared.reloadAllTimelines()
         #endif

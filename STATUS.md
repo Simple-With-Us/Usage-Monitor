@@ -1,32 +1,44 @@
 # Status
 
-Updated: 2026-07-14
+Updated: 2026-07-21
 
 ## Current state
 
-- Work is isolated on `codex/alert-persistence-config-generation` in `/Users/jay/.codex/worktrees/api-usage-monitor-alert-persistence-config-generation`, rebased onto fetched `origin/main` `0420eb0` (#209, Anthropic individual-account boundary).
-- Exact clean implementation HEAD is `930cbc37756b6c9a522f1b1d8dbe49feb282d644` on unchanged `origin/main` `0420eb0c73e3b35eafbe33301df2dee2770ff8ae`.
-- Fresh alert review and final SQLite startup-test re-review returned LAND with no P0-P3.
-- PR #204 (`56d532ec`) remains the production code path; no branch push, PR, merge, deploy, Render/config/provider/production mutation, provider call, or secret read occurred here.
-- Scheduler and OTLP metrics ingest remain disabled while alert persistence and shared writer admission are reviewed separately.
+- Native mobile-first work is isolated on `codex/mobile-first-ios-parity-20260721` in
+  `/Users/jay/apps/usage-monitor-mobile-first`.
+- The app now targets iOS 26 and retains automatic Release signing for team `CC8UTF7ATG`.
+- Existing Overview, Providers, Alerts, Projects, Settings, Widget, App Lock, offline cache, and
+  background-refresh surfaces are preserved. Settings now adds session-backed native provider and
+  subscription management without storing the dashboard password.
+- `GET /api/budget-status` accepts either the dedicated read bearer or a verified dashboard session;
+  mutations remain session-only.
+- No Oracle, DNS, writer, scheduler, production data, provider, or secret mutation occurred.
 
-## Implementation
+## Native hardening and management
 
-- The relevant corrective source paths were deliberately replayed from `/Users/jay/apps/api-usage-monitor-alert-persistence-corrective`; current-main provider route changes were preserved. Source `PLAN.md`, `STATUS.md`, and `docs/EFFORT-LOG.md` were inspected but not copied.
-- Alert delivery uses durable incident, evidence, parent-operation, trigger, and resolve generations with conditional writes around every external boundary. Activation refresh/reopen now mutates evidence and payload only in the same CAS that owns the parent lease.
-- Provider configuration changes that can alter alert evaluation without a new snapshot advance `Provider.alertConfigGeneration` atomically. Notifications persist config generation, source observation time, transition time, and state. For `stale_snapshot`, a newer source snapshot wins even if an older snapshot has a later stale deadline; the unchanged snapshot can still recur when it crosses its own deadline.
-- Alert delivery retains #209's `providerPollSnapshotExpected` capability calculation. API-key, public/secret config, and secret-clear updates now advance the same provider revision atomically, so Anthropic Admin capability false -> true cannot leave an equal-generation no-snapshot clear suppressing recurrence.
-- Parent and child claims/outcomes verify exact config, source/transition evidence, severity/message, parent generation, and child generation. A stale rev0 worker cannot trigger after disable rev1 and re-enable rev2; a newer activation can preempt a resolver/trigger parent only before that parent owns a live child claim.
-- Severity policy controls delivery eligibility without falsely resolving raw active incidents. Complete durable per-channel success repairs a later missing aggregate summary without resending. Reopen detection times cannot precede prior resolution, evidence, or the actual claim clock.
-- Existing providers and notifications migrate at revision 0. The checked-in pre-change SQL fixture proves both defaults plus legacy uncertainty survive `scripts/migrate-safe.mjs`.
-- Existing timestamp monotonicity, provider-loop completion, partial-result, and scheduler-health repairs from the corrective source remain intact.
-- The startup-index regression now disconnects its fixture Prisma client before child startup scripts, matching production ordering and preventing transient test-only DDL contention. Strict success assertions include bounded sanitized child error, signal, stdout, and stderr.
+- Candidate read tokens are verified in a cookie-free disposable session, so an existing dashboard
+  cookie cannot mask a bad replacement token.
+- Dashboard logout deletes the local cookie even if the server is offline. Host switches clear the
+  prior host's local session and token/host changes invalidate in-memory, disk, and widget money state.
+- Offline budget files are versioned, identity-scoped, atomic, backup-excluded, first-unlock protected,
+  size bounded, symlink rejecting, and stored with restrictive permissions.
+- Native full access lists providers and tracked subscriptions, safely toggles eligible providers,
+  edits or explicitly clears monthly budgets while preserving the rest of the plan, and pauses active
+  subscriptions after confirmation. Successful mutations refresh the shared budget/widget state.
+- Notification permission is requested only after explicit Settings opt-in; launch only restores APNs
+  registration for an already-authorized user.
 
-## Verification so far
+## Verification
 
-- Node `v24.18.0`; `npm ci` completed with 0 vulnerabilities and generated Prisma Client 6.19.3.
-- Focused Node 24 Vitest after rebase and capability integration: 9 files / 75 tests passed across alert delivery, provider alerts, maintenance, timeout budget, immutable migration, provider route, renewal, agent-sync, and provider routing. The core alert/provider integration subset is 4 files / 46 tests.
-- Scoped ESLint passed; `npm run typecheck` passed; Prisma validation passed with an inert local SQLite URL; `git diff --check` passed.
-- Focused startup-index verification passed one verbose run plus five repeated runs (12/12 assertions), scoped ESLint, TypeScript, and diff checks.
-- Serialized canonical Node 24 `npm run verify` passed: ESLint, TypeScript, 81 files / 534 tests, all four safe-migration scenarios, SQLite pre-migration backup, startup configuration, and Next.js 16.2.10 production build.
-- Push/PR, hosted checks, squash merge, and exact Render production verification remain.
+- XcodeGen generation: passed.
+- Generic iOS Simulator app/test-target `build-for-testing`: passed after the final security fixes.
+- Release simulator compile: passed after fixing preview-only code that leaked into Release.
+- Focused budget-route Vitest: 4/4 passed; scoped ESLint and TypeScript passed after the upstream rebase.
+- `git diff --check`: passed.
+- XCTest execution is blocked because this machine has no installed iOS Simulator runtime; test-target
+  compilation is green.
+
+## Remaining release stages
+
+Open a PR, resolve hosted review/checks, merge, and verify the deployed server SHA separately.
+The native binary still needs a real-device/App Store archive and TestFlight receipt before it is shipped.

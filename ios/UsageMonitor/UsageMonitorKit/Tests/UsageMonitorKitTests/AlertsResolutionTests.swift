@@ -121,6 +121,27 @@ final class AlertsResolutionTests: XCTestCase {
         XCTAssertEqual(reloaded.resolved.first?.providerId, "openai")
     }
 
+    @MainActor
+    func testTrackerKeepsAccountHistoriesIsolated() {
+        let suite = "test.alerts.scoped.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let tracker = ResolvedAlertTracker(defaults: defaults, accountScopeID: "account-a")
+        tracker.reconcile(
+            activeItems: [item(provider: "openai", code: "budget_warning", severity: .warning, message: "80%")],
+            now: now
+        )
+        tracker.reconcile(activeItems: [], now: now.addingTimeInterval(60))
+        XCTAssertEqual(tracker.resolved.count, 1)
+
+        tracker.useAccountScope("account-b")
+        XCTAssertTrue(tracker.resolved.isEmpty)
+
+        tracker.useAccountScope("account-a")
+        XCTAssertEqual(tracker.resolved.count, 1)
+    }
+
     // MARK: - Filtering & counting
 
     @MainActor

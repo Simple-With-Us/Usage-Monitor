@@ -4,28 +4,16 @@ import XCTest
 @testable import Networking
 import Models
 
-// ---------------------------------------------------------------------------
-// Settings-lane unit tests: token-connection flow, host validation, and the
-// server-status store — all driven by injected stubs so nothing touches the
-// network.
-//
-// ⚠️ INTEGRATION NOTE (for the Assemble agent): the `UsageMonitorKitTests`
-// target does NOT yet depend on the `Settings` product, so `@testable import
-// Settings` will not resolve until `Settings` is added to that test target's
-// dependencies in `Package.swift`:
-//
-//     .testTarget(
-//         name: "UsageMonitorKitTests",
-//         dependencies: ["Models", "Networking", "AppCore", "DesignSystem", "Settings"]
-//     )
-//
-// The Settings lane is forbidden from editing Package.swift, so this one-line
-// dependency addition is left to Assemble. Everything below compiles and passes
-// once that edit lands.
-// ---------------------------------------------------------------------------
-
 @MainActor
 final class SettingsFeatureTests: XCTestCase {
+
+    func testLiveVerifierUsesCookieFreeEphemeralSession() {
+        let session = LiveTokenVerifier.makeCookieFreeSession()
+
+        XCTAssertNil(session.configuration.httpCookieStorage)
+        XCTAssertFalse(session.configuration.httpShouldSetCookies)
+        XCTAssertEqual(session.configuration.httpCookieAcceptPolicy, .never)
+    }
 
     private func makeEnv(token: String? = nil, host: String = "") -> AppEnvironment {
         let defaults = UserDefaults(suiteName: "test.settings.\(UUID().uuidString)")!
@@ -44,10 +32,9 @@ final class SettingsFeatureTests: XCTestCase {
 
         await vm.connect()
 
-        XCTAssertEqual(vm.phase, .connected)
+        XCTAssertEqual(vm.phase, .verified)
         XCTAssertTrue(env.hasToken)
         XCTAssertEqual(vm.tokenInput, "", "The field is cleared once the token is safely stored.")
-        XCTAssertFalse(vm.offersSaveWithoutVerifying)
     }
 
     func testConnectRejectsBadTokenWithoutStoringIt() async {
@@ -60,10 +47,9 @@ final class SettingsFeatureTests: XCTestCase {
 
         XCTAssertEqual(vm.phase, .failed(.unauthorized))
         XCTAssertFalse(env.hasToken, "A rejected token must never reach the Keychain.")
-        XCTAssertFalse(vm.offersSaveWithoutVerifying, "401 is definitive — no save-anyway escape hatch.")
     }
 
-    func testServerErrorOffersSaveWithoutVerifyingThenSaves() async {
+    func testServerErrorDoesNotPersistUnverifiedToken() async {
         let env = makeEnv()
         let vm = SettingsViewModel(verifier: StubTokenVerifier(.failure(.serverNotConfigured)))
         vm.bind(to: env)
@@ -71,12 +57,7 @@ final class SettingsFeatureTests: XCTestCase {
 
         await vm.connect()
         XCTAssertEqual(vm.phase, .failed(.serverNotConfigured))
-        XCTAssertTrue(vm.offersSaveWithoutVerifying, "A server-side failure isn't the token's fault.")
         XCTAssertFalse(env.hasToken)
-
-        await vm.saveWithoutVerifying()
-        XCTAssertEqual(vm.phase, .connected)
-        XCTAssertTrue(env.hasToken)
     }
 
     func testConnectWithEmptyTokenFailsFast() async {
@@ -95,7 +76,7 @@ final class SettingsFeatureTests: XCTestCase {
         let env = makeEnv(token: "existing")
         let vm = SettingsViewModel(verifier: StubTokenVerifier(.success(())))
         vm.bind(to: env)
-        XCTAssertEqual(vm.phase, .connected, "Binding to an env with a stored token starts connected.")
+        XCTAssertEqual(vm.phase, .configured, "A stored token is configured but not live-verified after relaunch.")
 
         vm.removeToken()
 

@@ -11,8 +11,6 @@ public enum WidgetSnapshotBuilder {
     /// budgeted providers.
     /// - Parameter maxMeters: how many provider meters to keep for the widget.
     public static func snapshot(from response: BudgetStatusResponse, maxMeters: Int = 3) -> WidgetSnapshot {
-        let summary = response.summary
-
         let meters: [WidgetSnapshot.Meter] = response.providers
             .filter { $0.hasBudget }
             .sorted { ($0.percentUsed ?? 0) > ($1.percentUsed ?? 0) }

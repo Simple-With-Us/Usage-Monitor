@@ -18,7 +18,11 @@ site, and it transmits nothing to any endpoint.**
 1. Click the **Usage Monitor** icon in your toolbar.
 2. Enter your **Dashboard URL** (e.g. `http://localhost:4103` for local dev, or
    your hosted URL such as `https://usage.jays.services`).
-3. Click **Save URL** to remember it, or **Open Dashboard** to open it now.
+3. Click **Save URL** to remember it, **Open Dashboard** to open it now, or
+   **Open iPhone/iPad App** to follow the app's `usagemonitor://dashboard` link.
+
+Remote dashboard URLs must use HTTPS. Plain HTTP is accepted only for loopback
+development (`localhost`, `127.0.0.1`, or `::1`).
 
 No token is required or accepted — the extension only opens the dashboard, where
 you authenticate normally.
@@ -29,6 +33,14 @@ you authenticate normally.
 
 That is the extension's entire permission footprint: no host permissions, no
 content scripts, no `scripting`/`activeTab`, and no background worker.
+
+## Safari (macOS and iOS)
+
+`safari-extension/Usage Monitor Safari/Usage Monitor Safari.xcodeproj` is the
+universal Safari wrapper. Its iOS and macOS extension targets reference this
+same reviewed `manifest.json` and popup directly, so the Safari build cannot
+silently drift back to the removed scraper payload. Open the project in Xcode,
+select the iOS or macOS app scheme, and Archive with the configured team.
 
 ## Security notice — behavior change in v2.0.0
 

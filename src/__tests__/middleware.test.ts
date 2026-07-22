@@ -76,3 +76,22 @@ describe("middleware matcher — /api/subscriptions collection-only exclusion (s
     expect(isSessionGated("/api/subscriptionsfoo")).toBe(true);
   });
 });
+
+describe("middleware public install assets", () => {
+  it("serves the PWA shell without a dashboard session", () => {
+    for (const path of [
+      "/manifest.webmanifest",
+      "/sw.js",
+      "/pwa-icon/192",
+      "/pwa-icon/512",
+    ]) {
+      expect(isSessionGated(path)).toBe(false);
+    }
+  });
+
+  it("does not make similarly prefixed paths public", () => {
+    expect(isSessionGated("/manifest.webmanifest.backup")).toBe(true);
+    expect(isSessionGated("/sw.js.map")).toBe(true);
+    expect(isSessionGated("/pwa-icons/192")).toBe(true);
+  });
+});

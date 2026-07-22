@@ -7,6 +7,7 @@
 document.addEventListener('DOMContentLoaded', () => {
   const urlInput = document.getElementById('dashboardUrl');
   const openBtn = document.getElementById('openBtn');
+  const openAppBtn = document.getElementById('openAppBtn');
   const saveBtn = document.getElementById('saveBtn');
   const statusDiv = document.getElementById('status');
 
@@ -18,13 +19,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 2000);
   }
 
-  // Accept only http(s) origins; reject javascript:/data:/file: and garbage.
+  // Require HTTPS for remote dashboards. Plain HTTP is accepted only for
+  // loopback development, where no network hop can expose a login credential.
   function normalizeUrl(raw) {
     const trimmed = (raw || '').trim();
     if (!trimmed) return '';
     try {
       const parsed = new URL(trimmed);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+      const loopback = parsed.hostname === 'localhost'
+        || parsed.hostname === '127.0.0.1'
+        || parsed.hostname === '::1'
+        || parsed.hostname === '[::1]';
+      if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) return '';
       return (parsed.origin + parsed.pathname).replace(/\/+$/, '');
     } catch {
       return '';
@@ -38,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   saveBtn.addEventListener('click', () => {
     const url = normalizeUrl(urlInput.value);
     if (!url) {
-      setStatus('Enter a valid http(s) URL');
+      setStatus('Use HTTPS (or HTTP on localhost)');
       return;
     }
     urlInput.value = url;
@@ -48,12 +54,16 @@ document.addEventListener('DOMContentLoaded', () => {
   openBtn.addEventListener('click', () => {
     const url = normalizeUrl(urlInput.value);
     if (!url) {
-      setStatus('Enter a valid http(s) URL');
+      setStatus('Use HTTPS (or HTTP on localhost)');
       return;
     }
     chrome.storage.local.set({ dashboardUrl: url }, () => {
       chrome.tabs.create({ url });
       window.close();
     });
+  });
+
+  openAppBtn.addEventListener('click', () => {
+    window.location.href = 'usagemonitor://dashboard';
   });
 });

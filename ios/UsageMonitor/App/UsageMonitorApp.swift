@@ -6,6 +6,7 @@ import Alerts
 import ProjectBudgets
 import Settings
 import AppLock
+import Networking
 import OfflineCache
 import PushScaffold
 #if canImport(UIKit)
@@ -37,7 +38,10 @@ struct UsageMonitorApp: App {
         // The shared BudgetStore transparently persists every successful
         // response to disk (offline-first) and to the widget app group.
         _environment = State(
-            initialValue: AppEnvironment(snapshotSink: OfflineCacheSnapshotSink())
+            initialValue: AppEnvironment(
+                tokenStore: AccountChangeNotifyingTokenStore(),
+                snapshotSink: OfflineCacheSnapshotSink()
+            )
         )
     }
 
@@ -60,27 +64,43 @@ struct UsageMonitorApp: App {
                 pushRouter.consume()
             }
             .task {
-                // Notification permission is NOT requested cold on first launch —
-                // that context-free prompt (before the user has connected anything
-                // or seen a single alert) is the classic anti-pattern that trains
-                // "Don't Allow" and permanently kills the app's alert value.
-                //
-                // A brand-new user is prompted contextually instead: when they
-                // enable "Budget alerts" in Settings (see NotificationsSection).
-                // Here we only (re)request for a user who is already connected —
-                // i.e. a returning user with real budget data to be notified about
-                // — and register for remote (APNs) delivery when granted.
-                guard environment.hasToken else { return }
-                let granted = await PushScaffold.requestAuthorization()
-                if granted { PushScaffold.registerForRemoteNotifications() }
+                await AlertNotifier.activateAccountScope(
+                    AlertNotifier.currentAccountScopeID(hostOverride: environment.settings.baseHost)
+                )
+                // Permission is requested only from the contextual Settings
+                // control. On later launches, silently restore APNs registration
+                // only when the user opted in and authorization already exists.
+                guard environment.hasToken, AlertNotifier.isEnabled else { return }
+                let status = await PushScaffold.authorizationStatus()
+                guard status == .authorized || status == .provisional else { return }
+                PushScaffold.registerForRemoteNotifications()
+            }
+            .task {
+                for await _ in NotificationCenter.default.notifications(
+                    named: .usageMonitorAccountDidChange
+                ) {
+                    await activateCurrentAccountScope()
+                }
+            }
+            .onChange(of: environment.settings.baseHost) { _, _ in
+                Task { await activateCurrentAccountScope() }
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            Task {
+                await activateCurrentAccountScope()
+            }
             // Queue the next background budget refresh when leaving foreground.
             if phase == .background {
                 BackgroundRefreshManager.shared.schedule()
             }
         }
+    }
+
+    private func activateCurrentAccountScope() async {
+        await AlertNotifier.activateAccountScope(
+            AlertNotifier.currentAccountScopeID(hostOverride: environment.settings.baseHost)
+        )
     }
 
     /// Map a widget/app deep-link URL (`usagemonitor://dashboard`) to a tab.

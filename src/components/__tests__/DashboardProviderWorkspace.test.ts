@@ -210,7 +210,7 @@ describe("DashboardProviderWorkspace", () => {
     expect(html).toContain(
       'aria-label="Google AI month-to-date spend: Cost not reported"'
     );
-    expect(html).toContain(">Unknown</span>");
+    expect(html).toContain("Projection unavailable · Unknown coverage");
     expect(html).not.toContain("$0.00");
   });
 
@@ -229,7 +229,7 @@ describe("DashboardProviderWorkspace", () => {
       'aria-label="Google AI month-to-date spend: $0.00"'
     );
     expect(html).toContain(">$0.00</span>");
-    expect(html).toContain(">Complete</span>");
+    expect(html).toContain("$0.00 projected · Complete coverage");
     expect(html).not.toContain("Cost not reported");
   });
 
@@ -709,7 +709,7 @@ describe("Lane B compact markup (default state: compact density, attention sort,
     expect(html).toContain("See exact account values below");
   });
 
-  it("carries the budget text in the compact Spend cell's title", () => {
+  it("renders budget text visibly in the compact Spend cell", () => {
     const html = renderWorkspace([
       provider("p1", {
         spentUsd: 10,

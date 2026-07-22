@@ -22,15 +22,34 @@ public struct APIConfiguration: Sendable, Equatable {
         baseURL: URL(string: "https://usage.jays.services")!
     )
 
-    /// Build a configuration from a user-entered host string, tolerating a
-    /// missing scheme (defaults to https) and trailing slashes. Returns `nil`
-    /// for input that can't form a valid absolute URL.
+    /// Build a configuration from a user-entered monitor origin. A missing
+    /// scheme defaults to HTTPS; plaintext HTTP and URL credentials are never
+    /// accepted because authenticated requests may carry a bearer token or an
+    /// HttpOnly dashboard-session cookie.
     public static func fromUserInput(_ raw: String) -> APIConfiguration? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if !text.contains("://") { text = "https://" + text }
         while text.hasSuffix("/") { text.removeLast() }
-        guard let url = URL(string: text), url.host != nil else { return nil }
+
+        guard var components = URLComponents(string: text),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path.isEmpty
+        else {
+            return nil
+        }
+
+        // Store an origin, not an arbitrary base path. Normalizing the scheme
+        // and host also keeps settings comparisons/account cache scopes stable.
+        components.scheme = "https"
+        components.host = host.lowercased()
+        guard let url = components.url else { return nil }
         return APIConfiguration(baseURL: url)
     }
 }

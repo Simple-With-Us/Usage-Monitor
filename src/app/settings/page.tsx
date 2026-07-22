@@ -122,6 +122,7 @@ function SettingsPageContent() {
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [subscriptionsLoading, setSubscriptionsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loadErrors, setLoadErrors] = useState<Partial<Record<SettingsTab, string>>>({});
   const [modalOpen, setModalOpen] = useState(false);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [subscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
@@ -139,14 +140,17 @@ function SettingsPageContent() {
   const fetchProviders = useCallback(async () => {
     try {
       if (!providersLoaded.current) setLoading(true);
-      setError("");
+      setLoadErrors((current) => ({ ...current, connections: undefined }));
       const res = await fetch("/api/providers");
       if (!res.ok) throw new Error("Failed to fetch providers");
       const data = await res.json();
       setProviders(data);
       providersLoaded.current = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      setLoadErrors((current) => ({
+        ...current,
+        connections: err instanceof Error ? err.message : "Failed to load providers",
+      }));
     } finally {
       setLoading(false);
     }
@@ -155,14 +159,17 @@ function SettingsPageContent() {
   const fetchProjects = useCallback(async () => {
     try {
       if (!projectsLoaded.current) setProjectsLoading(true);
-      setError("");
+      setLoadErrors((current) => ({ ...current, projects: undefined }));
       const res = await fetch("/api/projects");
       if (!res.ok) throw new Error("Failed to fetch projects");
       const data = await res.json();
       setProjects(data);
       projectsLoaded.current = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load projects");
+      setLoadErrors((current) => ({
+        ...current,
+        projects: err instanceof Error ? err.message : "Failed to load projects",
+      }));
     } finally {
       setProjectsLoading(false);
     }
@@ -171,14 +178,17 @@ function SettingsPageContent() {
   const fetchSubscriptions = useCallback(async () => {
     try {
       if (!subscriptionsLoaded.current) setSubscriptionsLoading(true);
-      setError("");
+      setLoadErrors((current) => ({ ...current, services: undefined }));
       const res = await fetch("/api/subscriptions");
       if (!res.ok) throw new Error("Failed to fetch subscriptions");
       const data = await res.json();
       setSubscriptions(data);
       subscriptionsLoaded.current = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load subscriptions");
+      setLoadErrors((current) => ({
+        ...current,
+        services: err instanceof Error ? err.message : "Failed to load subscriptions",
+      }));
     } finally {
       setSubscriptionsLoading(false);
     }
@@ -476,8 +486,38 @@ function SettingsPageContent() {
         </div>
       </div>
 
+      {Object.values(loadErrors).some(Boolean) && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+        >
+          <span>
+            {Object.entries(loadErrors)
+              .filter((entry): entry is [string, string] => Boolean(entry[1]))
+              .map(([section, message]) => `${section}: ${message}`)
+              .join(" ")}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const retries: Promise<void>[] = [];
+              if (loadErrors.connections) retries.push(fetchProviders());
+              if (loadErrors.projects) retries.push(fetchProjects());
+              if (loadErrors.services) retries.push(fetchSubscriptions());
+              void Promise.all(retries);
+            }}
+            className="font-semibold underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+          >
+            Retry loading settings
+          </button>
+        </div>
+      )}
+
       {error && (
-        <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
+        <p
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+        >
           {error}
         </p>
       )}

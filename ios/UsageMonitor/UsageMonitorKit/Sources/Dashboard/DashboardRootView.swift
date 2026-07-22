@@ -205,6 +205,7 @@ enum DashboardHaptics {
 
 // MARK: - Previews
 
+#if DEBUG
 #Preview("Overview — loaded") {
     DashboardRootView()
         .environment(DashboardPreview.store(.sample))
@@ -225,3 +226,4 @@ enum DashboardHaptics {
     DashboardRootView()
         .environment(DashboardPreview.store(.sampleEmpty, statusCode: 503))
 }
+#endif

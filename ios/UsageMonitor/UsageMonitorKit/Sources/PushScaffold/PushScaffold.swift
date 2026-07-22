@@ -115,6 +115,7 @@ public enum PushScaffold {
     @discardableResult
     public static func scheduleAlertNotifications(
         for items: [(providerTitle: String, providerId: String, alert: ProviderAlert)],
+        accountScopeID: String,
         minimumSeverity: AlertSeverity = .warning
     ) async -> [String] {
         let center = UNUserNotificationCenter.current()
@@ -122,14 +123,17 @@ public enum PushScaffold {
         guard !surfaced.isEmpty else { return [] }
 
         let pending = await center.pendingNotificationRequests().map(\.identifier)
-        let pendingSet = Set(pending)
+        var knownIdentifiers = Set(pending)
 
         var scheduled: [String] = []
         for item in surfaced {
             // Include provider id so identical codes on two providers do not collide.
-            let identifier =
-                "\(PushIdentifiers.localAlertPrefix)\(item.providerId)|\(item.alert.id)"
-            guard !pendingSet.contains(identifier) else { continue }
+            let identifier = notificationIdentifier(
+                accountScopeID: accountScopeID,
+                providerID: item.providerId,
+                alertID: item.alert.id
+            )
+            guard !knownIdentifiers.contains(identifier) else { continue }
 
             let content = UNMutableNotificationContent()
             content.title = "\(item.providerTitle): \(item.alert.title)"
@@ -147,6 +151,7 @@ public enum PushScaffold {
             do {
                 try await center.add(request)
                 scheduled.append(identifier)
+                knownIdentifiers.insert(identifier)
             } catch {
                 continue
             }
@@ -158,12 +163,54 @@ public enum PushScaffold {
     @discardableResult
     public static func scheduleAlertNotifications(
         for alerts: [ProviderAlert],
+        accountScopeID: String = "legacy",
         minimumSeverity: AlertSeverity = .warning
     ) async -> [String] {
         await scheduleAlertNotifications(
             for: alerts.map { (providerTitle: $0.title, providerId: "unknown", alert: $0) },
+            accountScopeID: accountScopeID,
             minimumSeverity: minimumSeverity
         )
+    }
+
+    /// Stable request identity. Account scope is required so identical provider
+    /// alert IDs from two monitor accounts never suppress each other.
+    public static func notificationIdentifier(
+        accountScopeID: String,
+        providerID: String,
+        alertID: String
+    ) -> String {
+        "\(PushIdentifiers.localAlertPrefix)\(accountScopeID)|\(providerID)|\(alertID)"
+    }
+
+    /// Remove notifications that belong to the account being disconnected.
+    public static func removeNotifications(accountScopeID: String) async {
+        let center = UNUserNotificationCenter.current()
+        let prefix = "\(PushIdentifiers.localAlertPrefix)\(accountScopeID)|"
+        let pending = await center.pendingNotificationRequests()
+            .map(\.identifier)
+            .filter { $0.hasPrefix(prefix) }
+        center.removePendingNotificationRequests(withIdentifiers: pending)
+
+        let delivered = await center.deliveredNotifications()
+            .map { $0.request.identifier }
+            .filter { $0.hasPrefix(prefix) }
+        center.removeDeliveredNotifications(withIdentifiers: delivered)
+    }
+
+    /// Upgrade cleanup for notification identifiers created before account
+    /// scoping existed. Used only when no prior active scope is recorded.
+    public static func removeAllAlertNotifications() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+            .map(\.identifier)
+            .filter { $0.hasPrefix(PushIdentifiers.localAlertPrefix) }
+        center.removePendingNotificationRequests(withIdentifiers: pending)
+
+        let delivered = await center.deliveredNotifications()
+            .map { $0.request.identifier }
+            .filter { $0.hasPrefix(PushIdentifiers.localAlertPrefix) }
+        center.removeDeliveredNotifications(withIdentifiers: delivered)
     }
 }
 

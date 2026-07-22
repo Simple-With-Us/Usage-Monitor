@@ -521,9 +521,9 @@ export default function ProviderTable({
                 </td>
                 <td data-label="Spend / Budget" className="px-6 py-4">
                   {(() => {
-                    // Compact mode shows only the amount + budget lines; every
-                    // other detail below is folded into this title instead of
-                    // being dropped, so it's still reachable on hover/focus.
+                    // Compact mode keeps the amount + budget lines concise and
+                    // exposes secondary billing detail through a real disclosure,
+                    // so keyboard and touch users are not dependent on title text.
                     const projectionText =
                       spendCoverage === "complete" && provider.projectedEomUsd != null
                         ? `Projected ${formatUsd(provider.projectedEomUsd)}`
@@ -550,10 +550,10 @@ export default function ProviderTable({
                         `Provider billing: ${billingRecordCount} record${billingRecordCount === 1 ? "" : "s"} · ${connectedBilling.serviceName || connectedBilling.planName || connectedBilling.kind}${connectedBilling.status ? ` · ${connectedBilling.status}` : ""}${staleBillingCount > 0 ? ` · ${staleBillingCount} stale` : ""}`
                       );
                     }
-                    const compactDetailTitle = detailParts.join(" · ");
+                    const compactDetailText = detailParts.join(" · ");
 
                     return (
-                      <div className="text-xs" title={density === "compact" ? compactDetailTitle : undefined}>
+                      <div className="text-xs">
                         <p
                           className="font-medium text-gray-900 dark:text-gray-100"
                           title={
@@ -589,12 +589,12 @@ export default function ProviderTable({
                         )}
                         {provider.costCoverageCaveat &&
                           (density === "compact" ? (
-                            <p
-                              className="mt-1 font-medium text-orange-700 dark:text-orange-300"
-                              title={provider.costCoverageCaveat.message}
-                            >
-                              Coverage gap
-                            </p>
+                            <details className="mt-1 text-orange-700 dark:text-orange-300">
+                              <summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+                                Coverage gap
+                              </summary>
+                              <p className="mt-1 max-w-sm leading-relaxed">{provider.costCoverageCaveat.message}</p>
+                            </details>
                           ) : (
                             <p className="mt-1 font-medium text-orange-700 dark:text-orange-300">
                               Cost coverage gap: {provider.costCoverageCaveat.message}
@@ -603,6 +603,14 @@ export default function ProviderTable({
                         <p className="text-gray-600 dark:text-gray-300">
                           Budget {formatUsd(provider.plan?.monthlyBudgetUsd)}
                         </p>
+                        {density === "compact" && (
+                          <details className="mt-1 text-gray-500 dark:text-gray-400">
+                            <summary className="cursor-pointer font-medium text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300">
+                              Billing detail
+                            </summary>
+                            <p className="mt-1 max-w-sm leading-relaxed">{compactDetailText}</p>
+                          </details>
+                        )}
                         {density === "comfortable" && (
                           <>
                             <span className="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-gray-500 dark:bg-gray-700 dark:text-gray-300">

@@ -113,6 +113,9 @@ for (const [pattern, message] of [
   [/lastTickSucceeded/, "fresh scheduler-tick acceptance"],
   [/wait_for_backup_advancement/, "post-cutover Garage TXID advancement"],
   [/capture_quiescent_backup_watermark/, "post-stop Garage watermark capture"],
+  [/ltx -config \/app\/litestream\.yml -level "\$\{level\}"/, "per-level LTX tip listing (not full history)"],
+  [/for level in 0 1 2 3 4 5/, "L0-then-L1..L5 fallback when tip is compacted"],
+  [/list_garage_ltx_level/, "shared LTX level lister for online/offline paths"],
   [/-integrity-check full/, "post-cutover Garage restore"],
   [/name != '_deploy_heartbeat'/, "quoted exclusion for the unmanaged deployment heartbeat object"],
   [/verify_render_retirement/, "durable Render retirement proof"],
@@ -128,6 +131,7 @@ for (const [pattern, message] of [
 forbidText(deploy, /reset --hard|docker (system|builder) prune|rm -rf/, "broad destructive cleanup is forbidden");
 forbidText(deploy, /name != "_deploy_heartbeat"/, "SQLite identifiers must not be shell-quote corrupted");
 forbidText(deploy, /set -x/, "deployment must never trace secrets");
+forbidText(deploy, /ltx[^\n]*-level all/, "full LTX history listing is forbidden (Coolify timeout false-block)");
 
 requireText(poller, /MAX_FAILURES=3/, "poller must have a bounded retry circuit breaker");
 requireText(poller, /blocked-sha/, "poller must persist the blocked revision");

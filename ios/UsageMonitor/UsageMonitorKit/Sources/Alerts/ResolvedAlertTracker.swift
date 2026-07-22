@@ -154,19 +154,33 @@ public final class ResolvedAlertTracker {
     private let defaults: UserDefaults
     private let maxAge: TimeInterval
     private let maxCount: Int
-    private let activeKey = "alerts.trackedActive.v1"
-    private let resolvedKey = "alerts.resolved.v1"
+    private var accountScopeID: String
+
+    private var activeKey: String { "alerts.trackedActive.v2.\(accountScopeID)" }
+    private var resolvedKey: String { "alerts.resolved.v2.\(accountScopeID)" }
 
     public init(
         defaults: UserDefaults = .standard,
+        accountScopeID: String = "legacy",
         maxAge: TimeInterval = 7 * 24 * 60 * 60,
         maxCount: Int = 30
     ) {
         self.defaults = defaults
         self.maxAge = maxAge
         self.maxCount = maxCount
+        self.accountScopeID = accountScopeID
         self.trackedActive = Self.decode([TrackedActiveAlert].self, from: defaults.data(forKey: activeKey)) ?? []
         self.resolved = Self.decode([ResolvedAlert].self, from: defaults.data(forKey: resolvedKey)) ?? []
+    }
+
+    /// Move the observable tracker to another credential/host scope. Each
+    /// account retains its own resolved history; no alert state crosses over.
+    public func useAccountScope(_ scopeID: String?) {
+        let scopeID = scopeID ?? "disconnected"
+        guard scopeID != accountScopeID else { return }
+        accountScopeID = scopeID
+        trackedActive = Self.decode([TrackedActiveAlert].self, from: defaults.data(forKey: activeKey)) ?? []
+        resolved = Self.decode([ResolvedAlert].self, from: defaults.data(forKey: resolvedKey)) ?? []
     }
 
     /// Fold a freshly-loaded active set into the tracker. Only call this once a

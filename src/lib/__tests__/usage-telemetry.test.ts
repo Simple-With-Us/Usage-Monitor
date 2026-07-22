@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   MAX_NEGATIVE_SUBSCRIPTION_COST_USD,
   parseUsageTelemetryBatch,
+  parseUsageTelemetryV2Batch,
 } from "../usage-telemetry";
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,63 @@ import {
 // All derived keys must be exactly 64 hex characters (SHA-256).
 const SHA256_HEX_LENGTH = 64;
 const HEX_PATTERN = /^[0-9a-f]{64}$/;
+
+describe("usage telemetry v2 shared contract", () => {
+  it("maps producer/account identity and uses the shared canonical event key", async () => {
+    const [event] = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      producerInstanceId: "prod-a",
+      events: [{
+        eventId: "event-123",
+        provider: "openai",
+        producerKeyRef: "configured-openai-primary",
+        providerConnectionRef: "openai-org-primary",
+        billingAccountRef: "openai-billing-primary",
+        coverage: {
+          scope: "billing_account",
+          mode: "cumulative",
+          relationship: "supersedes",
+          reportThrough: "2026-07-21T00:00:00.000Z",
+        },
+        occurredAt: "2026-07-21T01:00:00.000Z",
+      }],
+    });
+
+    expect(event.sourceApp).toBe("socratic-trade");
+    expect(event.keyRef).toBe("configured-openai-primary");
+    expect(event.idempotencyKey).toBe(
+      "7c279ae3726c337274cae8be0ce409952c360c2402209090c35ff77f1b061f31"
+    );
+    expect(event.metadata).toMatchObject({
+      _usageTelemetrySchemaVersion: 2,
+      _producerEventId: "event-123",
+      _producerInstanceId: "prod-a",
+      _providerConnectionRef: "openai-org-primary",
+      _billingAccountRef: "openai-billing-primary",
+      _coverageScope: "billing_account",
+      _coverageMode: "cumulative",
+      _coverageRelationship: "supersedes",
+    });
+  });
+
+  it("rejects a missing event identity and ambiguous account scope", async () => {
+    await expect(parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      events: [{ provider: "openai" }],
+    })).rejects.toThrow();
+    await expect(parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      events: [{
+        eventId: "event-1",
+        provider: "openai",
+        coverage: { scope: "account", mode: "point" },
+      }],
+    })).rejects.toThrow();
+  });
+});
 
 describe("deriveIdempotencyKey", () => {
   // ---- Shared contract vectors (byte-for-byte with congress-trading-shared) ---

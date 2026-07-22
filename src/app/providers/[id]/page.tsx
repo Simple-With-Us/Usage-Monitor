@@ -244,13 +244,22 @@ export default function ProviderDetailPage() {
   if (error || !provider) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <p role="alert" className="text-red-600">{error || "Not found"}</p>
-        <Link
-          href="/"
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
-        >
-          Back to Dashboard
-        </Link>
+        <p role="alert" className="text-red-600 dark:text-red-300">{error || "Not found"}</p>
+        <div className="flex flex-wrap justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => void fetchData()}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
+          >
+            Retry
+          </button>
+          <Link
+            href="/"
+            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+          >
+            Back to dashboard
+          </Link>
+        </div>
       </div>
     );
   }

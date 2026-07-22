@@ -20,6 +20,32 @@ final class PushScaffoldTests: XCTestCase {
         XCTAssertEqual(PushScaffold.deviceTokenHexString(from: Data()), "")
     }
 
+    func testNotificationIdentityIsAccountScoped() {
+        let first = PushScaffold.notificationIdentifier(
+            accountScopeID: "account-a",
+            providerID: "openai",
+            alertID: "budget_warning"
+        )
+        let second = PushScaffold.notificationIdentifier(
+            accountScopeID: "account-b",
+            providerID: "openai",
+            alertID: "budget_warning"
+        )
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(first.contains("account-a|openai|budget_warning"))
+    }
+
+    func testDeliveryHistoryForgetsClearedAndDoesNotRecordFailedSchedules() {
+        let next = AlertNotifier.nextDeliveryHistory(
+            previous: ["openai|warning", "anthropic|critical"],
+            surfaced: ["openai|warning", "mistral|warning", "xai|warning"],
+            successfullyScheduled: ["mistral|warning"]
+        )
+        XCTAssertEqual(next, ["openai|warning", "mistral|warning"])
+        XCTAssertFalse(next.contains("xai|warning"), "failed schedules must remain retryable")
+        XCTAssertFalse(next.contains("anthropic|critical"), "cleared alerts must be re-notifiable")
+    }
+
     // MARK: - Deep-link parsing
 
     func testExplicitTabWins() {

@@ -35,9 +35,11 @@
     "test:sqlite-backup": "node scripts/test-sqlite-pre-migration-backup.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
     "test:oracle-deploy": "node scripts/test-oracle-deploy-config.mjs",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:startup-config && npm run test:oracle-deploy && npm run build"
+    "test:apple-projects": "bash scripts/verify-apple-projects.sh",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run build"
   },
   "dependencies": {
+    "@jaywedgeworth22/congress-trading-shared": "git+https://github.com/jaywedgeworth22/congress-trading-shared.git#v2.0.0",
     "@prisma/client": "^6.0.0",
     "lucide-react": "^1.25.0",
     "next": "^15.5.19",
@@ -48,7 +50,8 @@
     "react-dom": "^19.0.0",
     "react-is": "^19.0.0",
     "recharts": "^3.9.2",
-    "uuid": "^14.0.1"
+    "uuid": "^14.0.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.6",

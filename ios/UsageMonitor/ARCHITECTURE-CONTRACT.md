@@ -6,14 +6,15 @@ today (SPM package `UsageMonitorKit` + a thin app target + a widget extension).
 Do not re-architect it — extend it. If something here disagrees with the code,
 the code wins; fix the doc.
 
-**Status (2026-07-20):** Dashboard, Providers, Alerts, Project budgets (read-only),
-Settings, OfflineCache, Widget, and AppLock are **shipped features**, not
-placeholders. Account Overview / widget totals are **provider-scoped** (do not
-mix server project-summary budget with provider total spend). Project add/edit
-is disabled until a bearer mutation API exists.
+**Status (2026-07-21):** Dashboard, Providers, Alerts, Project budgets
+(read-only), Settings, protected account-scoped OfflineCache, Widget, AppLock,
+and session-backed native provider/subscription management are implemented.
+Account Overview / widget totals are **provider-scoped** (do not mix server
+project-summary budget with provider total spend). Project add/edit remains
+disabled until its server-validated native mutation flow is implemented.
 
 Toolchain on the build host: **Swift 6.4** (`swift --version`), **Xcode 27.0**
-(`xcodebuild -version`). Package targets iOS 17+.
+(`xcodebuild -version`). Package targets iOS 26+ for the owner's single-user device fleet.
 
 ---
 
@@ -67,26 +68,27 @@ allow-list. On that list (reachable **without** a browser session):
 `/api/subscriptions` (its `[id]` sub-route stays session-gated). Those route
 handlers then **self-authenticate**.
 
-Auth mechanism for the app's token: the server's `tokenFromRequest` reads the
-`Authorization: Bearer <token>` header first (falling back to an
-`x-usage-ingest-token` header). **The `APIClient` sends `Authorization: Bearer`,
-which the server accepts** — verified in `src/lib/ingest-auth.ts`. The expected
-value is `USAGE_READ_TOKEN` (falling back to `USAGE_INGEST_TOKEN`).
+The app supports two deliberately separate credentials. A scoped read token is
+stored in Keychain and sent as `Authorization: Bearer`; a dashboard password is
+sent once to `/api/auth/login` and retained only as the server's HttpOnly
+session cookie. The password is never stored. Read endpoints accept either the
+session or the expected `USAGE_READ_TOKEN` (falling back to
+`USAGE_INGEST_TOKEN`); mutations remain session-only.
 
 | Endpoint | Reachable with the app's bearer token? | Notes |
 |---|---|---|
-| `GET /api/budget-status` | **Yes** | Primary data source. Returns the **full** project budget response (providers + projects + summary + embedded alerts) — the handler calls `computeProjectBudgetStatus()`. Returns **503** when no read token is configured server-side. |
+| `GET /api/budget-status` | **Yes** | Primary data source. Bearer or dashboard session. Returns **503** for a non-session client when no read token is configured server-side. |
 | `GET /api/subscriptions` | **Yes** | Bearer- OR session-authorized. Collection GET only. |
 | `GET /api/health` | **Yes** (public) | No token. |
 | `GET /api/ready` | **Yes** (public) | No token. Per-IP rate limited (30/60s). |
-| `GET /api/providers` (rich) | **No** | Session-cookie gated; **not** reachable with a bearer token today. Documented backend follow-up if a lane needs richer per-provider data than budget-status already carries. |
-| `GET /api/providers/{id}` | **No** | Same — session-gated. Providers detail must be built from the `ProviderBudgetStatus` already in the budget-status response. |
+| `GET /api/providers?view=dashboard` | **Session only** | Bounded native management inventory; secret values are not modeled client-side. |
+| `PUT /api/providers/{id}` | **Session only** | Native exposes active-state and full-plan-preserving budget edits. |
+| `PUT /api/subscriptions/{id}` | **Session only** | Native currently exposes the safe pause transition only. |
 
-**Consequence for lanes:** there is effectively **one** authenticated fetch —
-`budgetStatus()` — and it powers Dashboard, Providers (+ detail), Alerts, and
-Project budgets. Do not add per-provider or per-project network calls; the data
-is already in the shared response. `subscriptions()`, `health()`, `readiness()`
-exist for Settings/diagnostics.
+**Consequence for lanes:** `budgetStatus()` remains the sole daily-driver money
+fetch and powers Dashboard, Providers (+ detail), Alerts, and Project budgets.
+The session-only calls are management inventory/actions in Settings; feature
+lanes must not replace the shared budget fetch with per-provider calls.
 
 ---
 
@@ -99,20 +101,26 @@ directly, never build your own `APIClient` for budget data** (use the shared
 
 Public methods (all `async throws`):
 
-- `budgetStatus() -> BudgetStatusResponse`  — `GET /api/budget-status` (auth)
+- `budgetStatus() -> BudgetStatusResponse`  — `GET /api/budget-status` (bearer or session)
 - `subscriptions() -> [SubscriptionSummary]` — `GET /api/subscriptions` (auth)
 - `health() -> ServerHealth`                 — `GET /api/health` (public)
 - `readiness() -> ServerReadiness`           — `GET /api/ready` (public)
 - `verifyToken() -> BudgetStatusResponse` `@discardableResult` — cheapest
   authenticated call; **Settings must call this before persisting a token.**
+- `login(password:)`, `logout()`, `sessionStatus()`, `accessCapabilities()` —
+  transient password login and dashboard-session lifecycle.
+- `providerInventory()`, `setProviderActive(...)`,
+  `setProviderMonthlyBudget(...)`, `pauseSubscription(id:)` — bounded,
+  server-validated native management.
 - `var hasToken: Bool`
 
 Construction: `APIClient(configuration: APIConfiguration = .production,
-tokenStore: TokenStoring = KeychainTokenStore(), session: URLSession = .shared)`.
+tokenStore: TokenStoring = KeychainTokenStore(), session: URLSession? = nil)`.
 
 `APIConfiguration` — `baseURL` + `timeout` (default 20s). `.production` →
-`https://usage.jays.services`. `.fromUserInput(_:)` tolerates a missing scheme /
-trailing slash for the Settings host override.
+`https://usage.jays.services`. `.fromUserInput(_:)` accepts only a secure HTTPS
+origin (a missing scheme defaults to HTTPS); credentials, paths, queries,
+fragments, and plaintext HTTP are rejected.
 
 `TokenStoring` protocol → `KeychainTokenStore` (real; `kSecAttrAccessible­
 AfterFirstUnlock` so widget/background reads work) and `InMemoryTokenStore`
@@ -212,6 +220,8 @@ declared; extra fields are ignored.
   cost/cadence/renewal + `provider`/`project` refs; `nextRenewalDate`, `isLive`,
   `cadenceLabel`.
 - `ServerHealth`, `ServerReadiness` — `/health` + `/ready` payloads.
+- `AccessCapabilities`, `DashboardSessionStatus`, `ProviderManagementItem`,
+  and mutation receipts — bounded full-access state and provider inventory.
 - `ISO8601DateParser` (`DateParsing.swift`), `PreviewFixtures.swift` — seeded
   data for previews/tests.
 
@@ -249,18 +259,18 @@ shared components there if a lane needs one; keep them model-free.)
 
 ## 6. Feature lanes (each owns exactly one `Sources/<Target>/` directory)
 
-All five feature roots today are **PLACEHOLDERS** (an `EmptyState`/minimal body).
-Each keeps a `public struct <Name>RootView: View` with a `public init()` — the
-app target mounts these via `AppFeatures.live`. **Do not rename the root type or
-change its `init` signature.** Add sibling files in your own folder.
+All five feature roots are implemented. Each keeps a
+`public struct <Name>RootView: View` with a `public init()` — the app target
+mounts these via `AppFeatures.live`. **Do not rename the root type or change its
+`init` signature.** Add sibling files in the owning folder.
 
 | Lane | Directory | Public root (mounted) | Tab slot | Reads | Uses (DesignSystem / Models) | Status |
 |---|---|---|---|---|---|---|
-| **Dashboard** | `Sources/Dashboard/` | `DashboardRootView` | `.dashboard` (Overview) | `@Environment(BudgetStore.self)` → `summary`, `providers` | `StatTile`, `LabeledBudgetMeter`, `SparklineCard`, `SectionHeader`, `RefreshableScrollView`, `CurrencyFormat`; `BudgetSummary`/`ProviderBudgetStatus` + `Theme.SemanticStatus(_:)` | Placeholder |
-| **Providers** | `Sources/Providers/` | `ProvidersRootView` | `.providers` | `BudgetStore.providers` | `ProviderRow`, `BudgetMeter`, `StatusBadge`; push detail from `ProviderBudgetStatus` (all fields already present — **no per-provider fetch**) | Placeholder |
-| **Alerts** | `Sources/Alerts/` | `AlertsRootView` | `.alerts` | `BudgetStore.alertItems` (`[ProviderAlertItem]`, pre-sorted) | `StatusBadge`, `EmptyState`; `ProviderAlert.title`/`.symbolName`, `Theme.SemanticStatus(alert.severity)` | Placeholder (renders a basic list) |
-| **ProjectBudgets** | `Sources/ProjectBudgets/` | `ProjectBudgetsRootView` | `.projects` | `BudgetStore.projects` (`[ProjectBudgetStatus]`, may be empty) | `LabeledBudgetMeter`, `ProviderRow`; surface `directUsd`/`allocatedUsd`/`incompleteAllocatedProviderCount` | Placeholder |
-| **Settings** | `Sources/Settings/` | `SettingsRootView` | `.settings` | `@Environment(AppEnvironment.self)` → `settings`, `apiClient`, `hasToken`, `setToken(_:)`, `reconfigure(host:)` | token entry (**must** `try await apiClient.verifyToken()` before `setToken`), appearance picker (`AppTheme`), host override (`reconfigure`), app-lock toggle (`settings.appLockEnabled`), server health via `apiClient.health()`/`readiness()` | Placeholder |
+| **Dashboard** | `Sources/Dashboard/` | `DashboardRootView` | `.dashboard` (Overview) | `@Environment(BudgetStore.self)` → `summary`, `providers` | Account overview, pace chart, top providers, refresh/stale/error states | Implemented |
+| **Providers** | `Sources/Providers/` | `ProvidersRootView` | `.providers` | `BudgetStore.providers` | Searchable budget list and provider detail from the shared snapshot | Implemented |
+| **Alerts** | `Sources/Alerts/` | `AlertsRootView` | `.alerts` | `BudgetStore.alertItems` (`[ProviderAlertItem]`, pre-sorted) | Severity feed, detail, resolution state, local-notification integration | Implemented |
+| **ProjectBudgets** | `Sources/ProjectBudgets/` | `ProjectBudgetsRootView` | `.projects` | `BudgetStore.projects` (`[ProjectBudgetStatus]`, may be empty) | Project attribution, allocation caveats, and read-only detail | Implemented (read-only) |
+| **Settings** | `Sources/Settings/` | `SettingsRootView` | `.settings` | `AppEnvironment`, public health, bearer + session access | Secure connection, full-access login, provider/subscription management, notifications, appearance, app lock | Implemented |
 
 Feature lanes may add their own `LoadState`-based `@Observable` stores for
 non-budget data (e.g. Settings' `subscriptions()`/`health()`), and add test
