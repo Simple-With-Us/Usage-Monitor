@@ -8,6 +8,7 @@ export interface AttributionIdentity {
   providerId: string;
   providerName: string;
   status: string;
+  createdAt: Date;
   retiredAt: Date | null;
   providerReportedKeyIdFingerprint: string | null;
 }
@@ -16,6 +17,7 @@ export interface AttributionBinding {
   id: string;
   identityId: string;
   projectId: string | null;
+  projectName: string | null;
   producerId: string;
   producerKeyRef: string;
   providerConnectionRef: string | null;
@@ -40,6 +42,7 @@ export type AttributionResolution =
       identityId: string;
       bindingId: string | null;
       projectId: string | null;
+      projectName: string | null;
       matchedBy: "provider_reported_key_id" | "producer_key_ref" | "both";
     }
   | {
@@ -51,17 +54,33 @@ export type AttributionResolution =
         | "ambiguous_binding";
     };
 
-function fingerprintKeyMaterial(): string {
-  const value =
+function fingerprintKeyMaterials(): string[] {
+  const primary =
     process.env.ATTRIBUTION_IDENTITY_HMAC_KEY?.trim() ||
     process.env.ENCRYPTION_KEY?.trim() ||
     "";
-  if (value.length < 32) {
+  const previous = (process.env.ATTRIBUTION_IDENTITY_HMAC_PREVIOUS_KEYS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const values = [primary, ...previous];
+  if (!primary || values.some((value) => value.length < 32)) {
     throw new Error(
-      "ATTRIBUTION_IDENTITY_HMAC_KEY or ENCRYPTION_KEY must be at least 32 characters"
+      "Attribution HMAC keys must each be at least 32 characters"
     );
   }
-  return value;
+  return [...new Set(values)];
+}
+
+function fingerprintWithKey(providerId: string, providerReportedKeyId: string, key: string): string {
+  return crypto
+    .createHmac("sha256", key)
+    .update(FINGERPRINT_DOMAIN)
+    .update("\0")
+    .update(providerId)
+    .update("\0")
+    .update(providerReportedKeyId)
+    .digest("hex");
 }
 
 /**
@@ -77,14 +96,16 @@ export function fingerprintProviderReportedKeyId(
   if (!normalizedProviderId || !normalizedKeyId) {
     throw new Error("providerId and providerReportedKeyId are required");
   }
-  return crypto
-    .createHmac("sha256", fingerprintKeyMaterial())
-    .update(FINGERPRINT_DOMAIN)
-    .update("\0")
-    .update(normalizedProviderId)
-    .update("\0")
-    .update(normalizedKeyId)
-    .digest("hex");
+  return fingerprintWithKey(normalizedProviderId, normalizedKeyId, fingerprintKeyMaterials()[0]);
+}
+
+function fingerprintProviderReportedKeyIdCandidates(
+  providerId: string,
+  providerReportedKeyId: string
+): string[] {
+  return fingerprintKeyMaterials().map((key) =>
+    fingerprintWithKey(providerId.trim(), providerReportedKeyId.trim(), key)
+  );
 }
 
 export function displayProviderKeyFingerprint(value: string | null): string | null {
@@ -112,31 +133,28 @@ export function resolveProviderKeyAttribution(
   bindings: readonly AttributionBinding[]
 ): AttributionResolution {
   const providerIdentities = identities.filter((identity) => {
-    const existedAtObservation =
-      identity.status === "active" ||
-      (identity.retiredAt != null && observation.occurredAt.getTime() < identity.retiredAt.getTime());
-    return (
-      existedAtObservation &&
-      canonicalProviderKey(identity.providerName) === canonicalProviderKey(observation.providerName)
-    );
+    return canonicalProviderKey(identity.providerName) === canonicalProviderKey(observation.providerName);
   });
+  const isNotPastRetirement = (identity: AttributionIdentity) =>
+    identity.status === "active" ||
+    (identity.retiredAt != null &&
+      observation.occurredAt.getTime() < identity.retiredAt.getTime());
 
   const producerKeyRef = observation.producerKeyRef?.trim() || null;
   const explicitProviderReportedKeyId = observation.providerReportedKeyId?.trim() || null;
-  // Shared v2.0 has no separate providerReportedKeyId field. When a producer
-  // uses the provider's opaque stable ID as producerKeyRef, compare its HMAC
-  // automatically; a local alias simply will not match and falls through to
-  // the administrator binding path.
-  const providerReportedCandidate = explicitProviderReportedKeyId ?? producerKeyRef;
   let providerReportedMatches: AttributionIdentity[] = [];
-  if (providerReportedCandidate) {
+  if (explicitProviderReportedKeyId) {
     providerReportedMatches = providerIdentities.filter(
       (identity) =>
+        identity.createdAt.getTime() <= observation.occurredAt.getTime() &&
+        isNotPastRetirement(identity) &&
         identity.providerReportedKeyIdFingerprint != null &&
-        identity.providerReportedKeyIdFingerprint ===
-          fingerprintProviderReportedKeyId(identity.providerId, providerReportedCandidate)
+        fingerprintProviderReportedKeyIdCandidates(
+          identity.providerId,
+          explicitProviderReportedKeyId
+        ).includes(identity.providerReportedKeyIdFingerprint)
     );
-    if (explicitProviderReportedKeyId && providerReportedMatches.length === 0) {
+    if (providerReportedMatches.length === 0) {
       return { status: "unattributed", reason: "unknown_provider_key" };
     }
     if (providerReportedMatches.length > 1) {
@@ -149,6 +167,7 @@ export function resolveProviderKeyAttribution(
         const identity = providerIdentities.find((candidate) => candidate.id === binding.identityId);
         return Boolean(
           identity &&
+            isNotPastRetirement(identity) &&
             binding.producerId === observation.producerId &&
             binding.producerKeyRef === producerKeyRef &&
             sameOptionalConstraint(binding.providerConnectionRef, observation.providerConnectionRef) &&
@@ -173,6 +192,7 @@ export function resolveProviderKeyAttribution(
       identityId: providerReportedIdentity?.id ?? binding!.identityId,
       bindingId: binding?.id ?? null,
       projectId: binding?.projectId ?? null,
+      projectName: binding?.projectName ?? null,
       matchedBy: providerReportedIdentity
         ? binding
           ? "both"
@@ -215,7 +235,10 @@ export function parseOptionalAttributionString(
 
 export function parseAttributionDate(value: unknown, field: string): Date {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value.trim())) {
+    throw new Error(`${field} must be an ISO date-time with a timezone`);
+  }
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) throw new Error(`${field} must be an ISO date`);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`${field} must be an ISO date-time with a timezone`);
   return parsed;
 }
