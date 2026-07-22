@@ -7,7 +7,13 @@ const prismaMock = vi.hoisted(() => {
     usageSnapshot: { findMany: vi.fn(), deleteMany: vi.fn() },
     usageSnapshotDailyRollup: { findMany: vi.fn(), findUnique: vi.fn(), upsert: vi.fn() },
     externalUsageEvent: { findMany: vi.fn(), deleteMany: vi.fn() },
-    externalUsageEventDailyRollup: { findMany: vi.fn(), findUnique: vi.fn(), upsert: vi.fn() },
+    externalUsageEventDailyRollup: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
     externalUsageEventTombstone: { findMany: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
     $executeRawUnsafe: vi.fn(),
   };
@@ -50,6 +56,8 @@ describe("usage-retention wrapper", () => {
     resetEnv();
     vi.clearAllMocks();
     prismaMock.__transactionDepth = 0;
+    // Wave I / E6 rehash runs first in retention; empty by default.
+    prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
   });
 
   afterEach(() => {

@@ -148,8 +148,14 @@ export const SELF_BURNING_PROBE_MIN_REFRESH_MIN: Readonly<
   Record<string, number>
 > = {
   twelvedata: 60,
+  // Catalog name is `unusual-whales`; normalizeProbeKey strips separators.
   unusualwhales: 60,
 };
+
+/** Collapse case/separator differences so catalog names match floor keys. */
+export function normalizeProbeProviderKey(providerName: string): string {
+  return providerName.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 function parseRefreshInterval(
   value: unknown,
@@ -166,7 +172,7 @@ function parseRefreshInterval(
       `refreshIntervalMin must be between 1 and ${MAX_REFRESH_INTERVAL_MIN}`
     );
   }
-  const floorKey = providerName?.trim().toLowerCase() ?? "";
+  const floorKey = providerName ? normalizeProbeProviderKey(providerName) : "";
   const floor = SELF_BURNING_PROBE_MIN_REFRESH_MIN[floorKey];
   if (floor != null && parsed < floor) {
     throw new Error(

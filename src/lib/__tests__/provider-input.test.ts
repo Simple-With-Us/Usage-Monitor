@@ -97,6 +97,17 @@ describe("self-burning probe refresh floors (E20)", () => {
     expect(() =>
       parseProviderUpdateInput({ refreshIntervalMin: 15 }, "unusualwhales")
     ).toThrow(/at least 60 minutes/);
+    // Catalog name is hyphenated; floor keys must still match after normalize.
+    expect(() =>
+      parseProviderCreateInput({
+        name: "unusual-whales",
+        displayName: "Unusual Whales",
+        refreshIntervalMin: 5,
+      })
+    ).toThrow(/at least 60 minutes/);
+    expect(() =>
+      parseProviderUpdateInput({ refreshIntervalMin: 15 }, "unusual-whales")
+    ).toThrow(/at least 60 minutes/);
   });
 
   it("allows hourly-or-slower refresh for self-burning probes", () => {
@@ -107,5 +118,12 @@ describe("self-burning probe refresh floors (E20)", () => {
         refreshIntervalMin: 60,
       }).refreshIntervalMin
     ).toBe(60);
+    expect(
+      parseProviderCreateInput({
+        name: "unusual-whales",
+        displayName: "Unusual Whales",
+        refreshIntervalMin: 1440,
+      }).refreshIntervalMin
+    ).toBe(1440);
   });
 });

@@ -3,7 +3,7 @@ import XCTest
 @testable import AppCore
 @testable import Networking
 import Models
-import WidgetShared
+@testable import WidgetShared
 
 /// OfflineCache lane tests: disk round-trip (with timestamp + legacy fallback),
 /// the "stale as of <time>" indicator logic, and the widget snapshot derivation.
@@ -158,7 +158,9 @@ final class OfflineCacheTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: cache.cacheFileURL.path)
         let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
         XCTAssertEqual(permissions.intValue & 0o777, 0o600)
-        let values = try cache.cacheFileURL.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        let values = try cache.cacheFileURL.resourceValues(
+            forKeys: [URLResourceKey.isExcludedFromBackupKey]
+        )
         XCTAssertEqual(values.isExcludedFromBackup, true)
 
         #if os(iOS)
@@ -281,7 +283,9 @@ final class OfflineCacheTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
         XCTAssertEqual(permissions.intValue & 0o777, 0o600)
-        let values = try fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        let values = try fileURL.resourceValues(
+            forKeys: [URLResourceKey.isExcludedFromBackupKey]
+        )
         XCTAssertEqual(values.isExcludedFromBackup, true)
 
         #if os(iOS)
