@@ -44,6 +44,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  process.env.ATTRIBUTION_IDENTITY_HMAC_KEY = "test-attribution-key-material-longer-than-32-characters";
+  delete process.env.ATTRIBUTION_IDENTITY_HMAC_PREVIOUS_KEYS;
   await prisma.providerKeyBinding.deleteMany();
   await prisma.providerKeyIdentity.deleteMany();
   await prisma.externalUsageEvent.deleteMany();
@@ -70,6 +72,30 @@ describe("provider key attribution API", () => {
       if (originalSessionSecret == null) delete process.env.SESSION_SECRET;
       else process.env.SESSION_SECRET = originalSessionSecret;
     }
+  });
+
+  it("rejects duplicate provider identities across an HMAC key rotation", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "openai", displayName: "OpenAI", type: "builtin" },
+    });
+    const rawProviderKeyId = "stable-provider-key-id";
+    process.env.ATTRIBUTION_IDENTITY_HMAC_KEY = "old-attribution-key-material-longer-than-32-characters";
+    expect((await POST(request("POST", {
+      action: "create_identity",
+      providerId: provider.id,
+      alias: "Original",
+      providerReportedKeyId: rawProviderKeyId,
+    }))).status).toBe(201);
+
+    process.env.ATTRIBUTION_IDENTITY_HMAC_KEY = "new-attribution-key-material-longer-than-32-characters";
+    process.env.ATTRIBUTION_IDENTITY_HMAC_PREVIOUS_KEYS = "old-attribution-key-material-longer-than-32-characters";
+    expect((await POST(request("POST", {
+      action: "create_identity",
+      providerId: provider.id,
+      alias: "Duplicate after rotation",
+      providerReportedKeyId: rawProviderKeyId,
+    }))).status).toBe(409);
+    expect(await prisma.providerKeyIdentity.count()).toBe(1);
   });
 
   it("stores only an HMAC identity and reports exact matched vs unattributed pushed-v2 cost", async () => {

@@ -99,7 +99,7 @@ export function fingerprintProviderReportedKeyId(
   return fingerprintWithKey(normalizedProviderId, normalizedKeyId, fingerprintKeyMaterials()[0]);
 }
 
-function fingerprintProviderReportedKeyIdCandidates(
+export function fingerprintProviderReportedKeyIdCandidates(
   providerId: string,
   providerReportedKeyId: string
 ): string[] {

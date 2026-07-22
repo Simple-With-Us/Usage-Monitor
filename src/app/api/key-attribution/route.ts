@@ -4,6 +4,7 @@ import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/a
 import {
   displayProviderKeyFingerprint,
   fingerprintProviderReportedKeyId,
+  fingerprintProviderReportedKeyIdCandidates,
   parseAttributionDate,
   parseOptionalAttributionString,
   parseRequiredAttributionString,
@@ -333,22 +334,40 @@ export async function POST(request: NextRequest) {
         "providerReportedKeyId",
         512
       );
-      if (!(await prisma.provider.findUnique({ where: { id: providerId }, select: { id: true } }))) {
-        return NextResponse.json({ error: "providerId does not match a known provider" }, { status: 400 });
-      }
-      const identity = await prisma.providerKeyIdentity.create({
-        data: {
-          providerId,
-          alias,
-          description,
-          providerReportedKeyIdFingerprint: providerReportedKeyId
-            ? fingerprintProviderReportedKeyId(providerId, providerReportedKeyId)
-            : null,
-        },
-        include: {
-          provider: { select: { name: true, displayName: true } },
-          bindings: { include: { project: { select: { id: true, name: true } } } },
-        },
+      const candidateFingerprints = providerReportedKeyId
+        ? fingerprintProviderReportedKeyIdCandidates(providerId, providerReportedKeyId)
+        : [];
+      const identity = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE "Provider" SET "id" = "id" WHERE "id" = ${providerId}`;
+        if (!(await tx.provider.findUnique({ where: { id: providerId }, select: { id: true } }))) {
+          throw new Error("provider_not_found");
+        }
+        if (
+          candidateFingerprints.length > 0 &&
+          await tx.providerKeyIdentity.findFirst({
+            where: {
+              providerId,
+              providerReportedKeyIdFingerprint: { in: candidateFingerprints },
+            },
+            select: { id: true },
+          })
+        ) {
+          throw new Error("provider_key_identity_exists");
+        }
+        return tx.providerKeyIdentity.create({
+          data: {
+            providerId,
+            alias,
+            description,
+            providerReportedKeyIdFingerprint: providerReportedKeyId
+              ? fingerprintProviderReportedKeyId(providerId, providerReportedKeyId)
+              : null,
+          },
+          include: {
+            provider: { select: { name: true, displayName: true } },
+            bindings: { include: { project: { select: { id: true, name: true } } } },
+          },
+        });
       });
       return NextResponse.json(serializeIdentity(identity), { status: 201 });
     }
@@ -445,6 +464,12 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return NextResponse.json({ error: "This provider key identity or binding already exists" }, { status: 409 });
+    }
+    if (error instanceof Error && error.message === "provider_not_found") {
+      return NextResponse.json({ error: "providerId does not match a known provider" }, { status: 400 });
+    }
+    if (error instanceof Error && error.message === "provider_key_identity_exists") {
+      return NextResponse.json({ error: "This provider key identity already exists" }, { status: 409 });
     }
     if (error instanceof Error && error.message === "identity_not_active") {
       return NextResponse.json({ error: "identityId does not match an active identity" }, { status: 400 });

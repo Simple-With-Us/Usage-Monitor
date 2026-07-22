@@ -48,7 +48,7 @@ provider IDs into `producerKeyRef` as a workaround.
 
 ## Verification
 
-- Node 24 focused Vitest: 3 files / 31 tests passed.
+- Node 24 focused Vitest: 3 files / 32 tests passed.
 - Node 24 `tsc --noEmit`: passed.
 - Scoped ESLint and `git diff --check`: passed.
 - Disposable SQLite `prisma db push --skip-generate`: passed; both new tables, foreign keys,
