@@ -33,7 +33,8 @@ max/dedup rules.
 
 Shared telemetry v2.0 carries `producerKeyRef`, `providerConnectionRef`, and `billingAccountRef`.
 It does not have a separate `providerReportedKeyId` field. For v2.0, an opaque provider-reported
-stable key reference may be the `producerKeyRef`; a distinct additive contract field can be
+stable key reference may be the `producerKeyRef`; the monitor HMAC-compares that reference to
+registered provider identities before consulting administrator bindings. A distinct additive contract field can be
 considered only after the receiver and producers land with backward-compatibility tests.
 
 ## Verification

@@ -580,7 +580,7 @@ model Project {
 
 // A provider-side API-key identity without the credential itself. The optional
 // fingerprint is an HMAC-SHA256 digest of a provider-reported stable opaque key
-// ID. Raw API keys and raw provider IDs are never persisted or returned.
+// ID. This identity layer never persists or returns the raw submitted value.
 model ProviderKeyIdentity {
   id                               String    @id @default(uuid())
   providerId                       String

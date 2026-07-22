@@ -109,7 +109,7 @@ async function loadCoverage(
     identityUnattributedEventCount: 0,
     unclassifiedCostEventCount: 0,
     reasons: {} as Record<string, { costUsd: number; eventCount: number }>,
-    byIdentity: {} as Record<string, { costUsd: number; eventCount: number; projectId: string | null }>,
+    byIdentity: {} as Record<string, { costUsd: number; eventCount: number }>,
   };
 
   for (let index = 0; index < ordered.length - 1; index += 1) {
@@ -164,7 +164,6 @@ async function loadCoverage(
         const identityTotal = totals.byIdentity[resolution.identityId] ?? {
           costUsd: 0,
           eventCount: 0,
-          projectId: row.projectId ?? resolution.projectId,
         };
         identityTotal.costUsd += costUsd;
         identityTotal.eventCount += eventCount;

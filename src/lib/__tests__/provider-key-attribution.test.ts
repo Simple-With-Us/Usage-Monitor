@@ -171,6 +171,13 @@ describe("resolveProviderKeyAttribution", () => {
     ).toMatchObject({ status: "matched", identityId: "identity-a", matchedBy: "provider_reported_key_id" });
     expect(
       resolveProviderKeyAttribution(
+        observation({ producerKeyRef: providerReportedKeyId }),
+        withFingerprint,
+        []
+      )
+    ).toMatchObject({ status: "matched", identityId: "identity-a", matchedBy: "provider_reported_key_id" });
+    expect(
+      resolveProviderKeyAttribution(
         observation({ producerKeyRef: null, providerReportedKeyId: "unknown" }),
         withFingerprint,
         []

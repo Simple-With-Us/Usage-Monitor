@@ -110,6 +110,19 @@ describe("provider key attribution API", () => {
           },
         },
         {
+          idempotencyKey: "provider-id-direct-match",
+          sourceApp: "admin-usage-poller",
+          provider: "openai",
+          keyRef: rawProviderKeyId,
+          costUsd: 4,
+          occurredAt: eventTime,
+          metadata: {
+            _usageTelemetrySchemaVersion: 2,
+            _coverageMode: "point",
+            _coverageRelationship: "disjoint",
+          },
+        },
+        {
           idempotencyKey: "cumulative-cost-not-additive",
           sourceApp: "congress-trade",
           provider: "openai",
@@ -141,21 +154,20 @@ describe("provider key attribution API", () => {
     expect(body.coverage).toMatchObject({
       scope: "pushed_v2_cost_events",
       aggregation: "proven_disjoint_point_or_window_event_sum",
-      totalCostUsd: 5,
-      identityMatchedCostUsd: 3,
+      totalCostUsd: 9,
+      identityMatchedCostUsd: 7,
       identityUnattributedCostUsd: 2,
       projectAttributedCostUsd: 3,
-      projectUnattributedCostUsd: 2,
-      totalEventCount: 3,
-      identityMatchedEventCount: 2,
+      projectUnattributedCostUsd: 6,
+      totalEventCount: 4,
+      identityMatchedEventCount: 3,
       identityUnattributedEventCount: 1,
       unclassifiedCostEventCount: 1,
     });
     expect(body.coverage.reasons.no_effective_binding).toEqual({ costUsd: 2, eventCount: 1 });
     expect(body.coverage.byIdentity[storedIdentity.id]).toEqual({
-      costUsd: 3,
-      eventCount: 2,
-      projectId: project.id,
+      costUsd: 7,
+      eventCount: 3,
     });
     expect(JSON.stringify(body)).not.toContain(rawProviderKeyId);
 
@@ -166,7 +178,7 @@ describe("provider key attribution API", () => {
     }));
     expect(retireResponse.status).toBe(200);
     const afterRetirement = await (await GET(request("GET"))).json();
-    expect(afterRetirement.coverage.identityMatchedCostUsd).toBe(3);
+    expect(afterRetirement.coverage.identityMatchedCostUsd).toBe(7);
     expect(afterRetirement.identities[0].status).toBe("retired");
   });
 

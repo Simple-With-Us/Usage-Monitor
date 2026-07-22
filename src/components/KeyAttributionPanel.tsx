@@ -36,7 +36,7 @@ interface Coverage {
   identityUnattributedEventCount: number;
   unclassifiedCostEventCount: number;
   reasons: Record<string, { costUsd: number; eventCount: number }>;
-  byIdentity: Record<string, { costUsd: number; eventCount: number; projectId: string | null }>;
+  byIdentity: Record<string, { costUsd: number; eventCount: number }>;
   note: string;
 }
 interface Payload {

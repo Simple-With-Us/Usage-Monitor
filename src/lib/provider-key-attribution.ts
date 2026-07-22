@@ -121,15 +121,22 @@ export function resolveProviderKeyAttribution(
     );
   });
 
+  const producerKeyRef = observation.producerKeyRef?.trim() || null;
+  const explicitProviderReportedKeyId = observation.providerReportedKeyId?.trim() || null;
+  // Shared v2.0 has no separate providerReportedKeyId field. When a producer
+  // uses the provider's opaque stable ID as producerKeyRef, compare its HMAC
+  // automatically; a local alias simply will not match and falls through to
+  // the administrator binding path.
+  const providerReportedCandidate = explicitProviderReportedKeyId ?? producerKeyRef;
   let providerReportedMatches: AttributionIdentity[] = [];
-  if (observation.providerReportedKeyId?.trim()) {
+  if (providerReportedCandidate) {
     providerReportedMatches = providerIdentities.filter(
       (identity) =>
         identity.providerReportedKeyIdFingerprint != null &&
         identity.providerReportedKeyIdFingerprint ===
-          fingerprintProviderReportedKeyId(identity.providerId, observation.providerReportedKeyId!)
+          fingerprintProviderReportedKeyId(identity.providerId, providerReportedCandidate)
     );
-    if (providerReportedMatches.length === 0) {
+    if (explicitProviderReportedKeyId && providerReportedMatches.length === 0) {
       return { status: "unattributed", reason: "unknown_provider_key" };
     }
     if (providerReportedMatches.length > 1) {
@@ -137,7 +144,6 @@ export function resolveProviderKeyAttribution(
     }
   }
 
-  const producerKeyRef = observation.producerKeyRef?.trim() || null;
   const bindingMatches = producerKeyRef
     ? bindings.filter((binding) => {
         const identity = providerIdentities.find((candidate) => candidate.id === binding.identityId);
