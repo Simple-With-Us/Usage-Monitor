@@ -461,6 +461,47 @@ to ask. After each coherent finished unit: commit → push → `gh pr create` (o
 merge when CI is green. A remote branch with no PR is unfinished. Canonical:
 `/Users/jay/apps/AGENT-SYNC.md` "Always commit + land finished work".
 
+## Never wait and watch for PRs to merge / Idle-polling forbidden (Owner ruling 2026-09-01 — ALL seats)
+
+**Never passively wait, watch, or loop-poll for PRs to merge or CI checks to pass.**
+Sitting and watching PRs or polling CI in a loop wastes valuable agent tokens, context window, time, and money/quota.  Almost invariably, when PRs are left to sit, they get blocked by merge conflicts, outdated branches, failing CI checks, or unaddressed review comments.
+
+**Binding rules:**
+1. **Actively Drive PRs to Completion**: Proactively inspect mergeability, conflicts, CI checks, and review comments.
+2. **Resolve Conflicts & Outdated Branches Immediately**: If a branch is outdated or has merge conflicts with `main`, merge/rebase `main` into the branch, resolve conflicts locally, verify tests/build pass, and push immediately.
+3. **Resolve Review Comments & CI Failures Directly**: Fix failing checks or review comments at the root cause and push updates.
+4. **Merge & Deploy Promptly**: As soon as checks pass and the unit is verified, merge the PR to `main` (auto-deploying to production).
+5. **No Idle-Watching Loops**: Never run `sleep` loops, polling timers, or idle watch loops waiting for a PR.  Conclude the turn cleanly or work on actionable tasks.
+
+**A PR that is not merging is waiting on an ACTION, not on time.**  Diagnose which one and
+fix it — every cause is something you act on yourself:
+
+| Symptom | Diagnose with | The action |
+| --- | --- | --- |
+| Unresolved review threads | `gh pr view <n> --json reviewThreads` | Triage the batch, reply, resolve |
+| Merge conflict | `gh pr view <n> --json mergeable,mergeStateStatus` | Merge `origin/main`, resolve, push |
+| Required check failing (`verify`, `gitleaks`) | `gh pr checks <n>` | Read the log, fix the cause, push |
+| Check never dispatched | `gh run list --branch <branch>` | Re-run or re-trigger the workflow |
+| Auto-merge never armed | `gh pr view <n> --json autoMergeRequest` | `gh pr merge <n> --squash --auto` |
+
+**The loop to run:** arm auto-merge the moment the PR exists
+(`gh pr merge <n> --squash --auto`), then go do the next useful thing.  If you genuinely
+need the result before you can continue, take ONE **bounded** wait
+(`gh pr checks <n> --watch`) — never an open-ended `sleep` loop.  When that bounded wait
+ends and the PR still has not merged, diagnose from the table above; **do not start another
+wait.**
+
+**Review-bot threads block the merge forever.**  Triage the whole batch against current
+HEAD in one pass: fix the real findings, reply with a specific technical reason on the ones
+already addressed or genuinely wrong, then resolve.  They never resolve themselves — and do
+not blind-resolve to force a merge.
+
+**Same for background jobs** — CI, a Coolify deploy, a collector or archive run.  If the
+only thing you would do this turn is check whether something finished, do other useful work
+or end your turn.  A turn whose entire output is "still running" is pure quota burn.
+
+Canonical: `/Users/jay/apps/AGENT-SYNC.md` § Never idle-watch a PR.
+
 ## Fleet docs (start here)
 
 | What | Live / repo path | GitHub |

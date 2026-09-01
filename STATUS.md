@@ -1,4 +1,26 @@
-## Current (2026-08-31 AG — Sentry observability expansion)
+## Current (2026-09-01 CLAUDE — "never idle-watch a PR" landed + extended)
+
+Owner ruling 2026-09-01: agents "should never just wait and watch for things to merge since
+that wastes tokens/time and they inevitably almost invariably end up slowly wasting
+money/quota while the PR sits there with conflicts or comments/issues unresolved."
+
+The rule had already been written for this repo and never committed — a peer seat left
+`## Never wait and watch for PRs to merge / Idle-polling forbidden` as an **uncommitted**
+working-tree edit in the owner's integration tree (` M AGENTS.md`, 12 insertions vs
+`origin/main`), so no other seat could read it.  The rule about not letting work sit was
+itself sitting unlanded.  Their heading, framing, and binding rules 1-5 are adopted
+**verbatim** (authorship preserved; their pending local diff is now a no-op subset of
+`main`), extended with the parts the ruling requires and the text lacked: a
+symptom -> diagnosis -> action table, arm auto-merge at PR-open, the bounded-wait carve-out
+(one `gh pr checks <n> --watch` is legal, an open-ended `sleep` loop is not, and a bounded
+wait that ends unmerged means diagnose rather than wait again), review-bot thread triage
+discipline, background jobs -> end the turn instead of narrating "standing by", and a
+cross-reference to the canonical `/Users/jay/apps/AGENT-SYNC.md` § Never idle-watch a PR.
+
+Docs only.  Owner's integration tree untouched — it will still show ` M AGENTS.md` until
+pulled.  Rollout: `docs/rollouts/2026-09-01-never-idle-watch-rule.md`.
+
+## Prior (2026-08-31 AG — Sentry observability expansion)
 
 Expands Sentry observability in Usage-Monitor utilizing the fleet's $5,000 credit sponsored tier: enabled masked Session Replay by default on web client (`replaysOnErrorSampleRate: 1.0`, `replaysSessionSampleRate: 0.1`) with complete text and media redaction, raised default trace sampling to 0.2 across server/edge/client, added `dealdex` to tracked fleet projects on the dashboard Sentry health card, and verified inert behavior when Sentry env vars are absent. Rollout: `docs/rollouts/2026-08-31-sentry-observability-expansion.md`.
 
