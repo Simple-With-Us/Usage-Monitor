@@ -314,6 +314,18 @@ describe("parseGrokBilling", () => {
     expect(row.resetAt).toBeNull();
     expect(row.remainingUnknown).toBe(false);
   });
+
+  it("treats creditUsagePercent 0 as remaining 100 and derives monthly from dates", () => {
+    const [row] = parseGrokBilling({
+      config: {
+        creditUsagePercent: 0,
+        currentPeriod: { start: "2026-09-01T00:00:00Z", end: "2026-10-01T00:00:00Z" },
+      },
+    });
+    expect(row.remainingPercent).toBe(100);
+    expect(row.usedPercent).toBe(0);
+    expect(row.quotaWindow).toBe("monthly");
+  });
 });
 
 describe("grokAuthRecord", () => {
@@ -350,9 +362,10 @@ describe("grokAuthRecord", () => {
     expect(grokAuthRecord(auth)).toEqual(auth);
   });
 
-  it("returns an empty record for a non-object auth file", () => {
+  it("returns an empty record for a non-object or missing auth file", () => {
     expect(grokAuthRecord(null)).toEqual({});
     expect(grokAuthRecord("not-json-object")).toEqual({});
+    expect(resolveCredentialField(grokAuthRecord(null), ["key"])).toBeNull();
   });
 });
 

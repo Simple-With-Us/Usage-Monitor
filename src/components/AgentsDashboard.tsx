@@ -7,7 +7,7 @@ import {
   formatAgentSeatPrimary,
   formatAgentTokenValue,
 } from "@/lib/agent-telemetry-accuracy";
-import { AGENT_WINDOW_CHIPS, type AgentWindowId } from "@/lib/agent-window-chips";
+import FleetQuotaMatrixCard from "@/components/FleetQuotaMatrixCard";
 
 const SENTENCE_GAP = "\u00a0 ";
 
@@ -18,15 +18,16 @@ function withSentenceGaps(text: string): string {
 export function AgentsDashboard() {
   const [data, setData] = useState<AgentsOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [windowParam, setWindowParam] = useState<AgentWindowId>("30d");
   const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
 
+  // Fixed 30-day overview — no 5h/24h/7d/30d/All lookback strip. Agent Bar
+  // parity for remaining quota lives in FleetQuotaMatrixCard (/api/quota-windows).
   useEffect(() => {
     let unmounted = false;
     const fetchOverview = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`/api/agents-overview?window=${windowParam}`);
+        const res = await fetch(`/api/agents-overview?window=30d`);
         if (res.ok) {
           const json = await res.json();
           if (!unmounted) setData(json);
@@ -44,7 +45,7 @@ export function AgentsDashboard() {
       unmounted = true;
       clearInterval(interval);
     };
-  }, [windowParam]);
+  }, []);
 
   const formatTokens = (tokens: number) => {
     if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(2)}B`;
@@ -64,37 +65,21 @@ export function AgentsDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Top Header & Window Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground flex items-center gap-2.5">
-            <span>🤖</span>
-            <span>AI Coding Agents</span>
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Live Mac process status, token telemetry when a seat reports it, and PAYG API-equivalent cost.
-            {SENTENCE_GAP}Seats without accurate telemetry say so instead of showing zero usage.
-          </p>
-        </div>
-
-        {/* Compact 5h / 7d / 30d chips.  All Time stays on one line.  gap-4 is
-            four spaces of separation so the labels do not crowd or wrap. */}
-        <div className="flex flex-nowrap items-center gap-4 self-start sm:self-auto shrink-0 overflow-x-auto text-xs font-medium">
-          {AGENT_WINDOW_CHIPS.map((chip) => (
-            <button
-              key={chip.id}
-              onClick={() => setWindowParam(chip.id)}
-              className={`whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 transition-colors ${
-                windowParam === chip.id
-                  ? "bg-muted text-foreground shadow-sm font-semibold"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {chip.label}
-            </button>
-          ))}
-        </div>
+      {/* Top Header — no odd lookback chips; Agent Bar quotas are below. */}
+      <div className="border-b border-border pb-4">
+        <h1 className="text-2xl font-bold tracking-tight text-foreground flex items-center gap-2.5">
+          <span>🤖</span>
+          <span>Coding Agents</span>
+        </h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Live Mac process status, token telemetry when a seat reports it, and PAYG API-equivalent cost.
+          {SENTENCE_GAP}Subscription quota windows match Agent Bar (shared UM data).
+          {SENTENCE_GAP}Seats without accurate telemetry say so instead of showing zero usage.
+        </p>
       </div>
+
+      {/* Agent Bar parity: remaining% per provider window via /api/quota-windows */}
+      <FleetQuotaMatrixCard />
 
       {loading && !data ? (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 animate-pulse">

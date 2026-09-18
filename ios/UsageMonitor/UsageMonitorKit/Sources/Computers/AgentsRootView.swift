@@ -1,16 +1,21 @@
 import SwiftUI
 import AppCore
+import Dashboard
 import DesignSystem
 import Models
 import Networking
 
 /// Root of the **Agents** lane (tab `.agents`).
 ///
-/// AI Coding Agent telemetry, live Mac process execution, 5-hour quota burn,
-/// and PAYG API-equivalent cost comparison.
+/// Agent Bar–aligned subscription quota windows (shared UM `/api/quota-windows`
+/// data) plus AI coding-agent telemetry for a fixed 30-day overview window.
+/// Intentionally no 5h/24h/7d/30d/All lookback strip — those pills were not
+/// Agent Bar UX and the baked `?window=` client path 404'd.
 public struct AgentsRootView: View {
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
     @State private var store: AgentsStore
+    /// Same Agent Bar → UM quota-windows feed the Overview card uses.
+    @State private var quotaWindowsStore = QuotaWindowsStore()
 
     public init() {
         _store = State(initialValue: AgentsStore())
@@ -23,7 +28,18 @@ public struct AgentsRootView: View {
     public var body: some View {
         NavigationStack {
             List {
-                windowSelector
+                // Agent Bar parity: live subscription quota windows (shared
+                // `/api/quota-windows` data), not the odd 5h/24h/7d/30d/All
+                // lookback strip that only drove agents-overview.
+                Section {
+                    SubscriptionQuotasCard(
+                        store: quotaWindowsStore,
+                        onOpenSettings: { env?.selectTab?(.settings) }
+                    )
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowBackground(Color.clear)
+                }
+
                 content
             }
             .listStyle(.insetGrouped)
@@ -31,34 +47,18 @@ public struct AgentsRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 guard let env else { return }
-                await store.refresh(using: env.apiClient)
+                async let overview: Void = store.refresh(using: env.apiClient)
+                async let quotas: Void = quotaWindowsStore.refresh(using: env.apiClient)
+                _ = await (overview, quotas)
             }
         }
         .task(id: env?.accessIdentityRevision) {
             guard let env else { return }
             store.reset()
-            await store.loadIfNeeded(using: env.apiClient)
-        }
-    }
-
-    @ViewBuilder
-    private var windowSelector: some View {
-        Section {
-            Picker("Window", selection: Binding(
-                get: { store.window },
-                set: { newWindow in
-                    guard let env else { return }
-                    Task { await store.setWindow(newWindow, using: env.apiClient) }
-                }
-            )) {
-                Text("5h").tag("5h")
-                Text("24h").tag("24h")
-                Text("7d").tag("7d")
-                Text("30d").tag("30d")
-                Text("All").tag("all")
-            }
-            .pickerStyle(.segmented)
-            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            quotaWindowsStore.reset()
+            async let overview: Void = store.loadIfNeeded(using: env.apiClient)
+            async let quotas: Void = quotaWindowsStore.loadIfNeeded(using: env.apiClient)
+            _ = await (overview, quotas)
         }
     }
 

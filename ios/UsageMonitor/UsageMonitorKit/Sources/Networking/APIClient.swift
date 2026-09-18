@@ -128,8 +128,18 @@ public actor APIClient {
     /// `GET /api/agents-overview?window=` — AI coding agent telemetry, live run
     /// status, subscription quotas, and PAYG API-equivalent cost savings.
     /// Bearer read token or dashboard session.
+    ///
+    /// Window is a query item, not a path suffix.  `endpoint(path:)` uses
+    /// `appendingPathComponent`, which percent-encodes `?` (`%3F`).  Inlining
+    /// `?window=` produced `/api/agents-overview%3Fwindow=30d`, a Next.js 404
+    /// that the Agents tab surfaces as "Request failed".
     public func agentsOverview(window: String = "30d") async throws -> AgentsOverviewResponse {
-        try await get("/api/agents-overview?window=\(window)", authorization: .read, timeout: Self.operationsTimeout)
+        try await get(
+            "/api/agents-overview",
+            queryItems: [URLQueryItem(name: "window", value: window)],
+            authorization: .read,
+            timeout: Self.operationsTimeout
+        )
     }
 
     /// Validate the currently stored bearer token without accepting a dashboard
