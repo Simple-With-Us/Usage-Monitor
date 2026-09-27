@@ -1,0 +1,76 @@
+# Regenerate the Playwright visual baselines on the CI runner itself.
+#
+# Baselines in tests/e2e/visual.spec.ts-snapshots/ must match the
+# ubuntu-latest runner's font stack exactly: regenerating them on a dev
+# machine once produced PNGs that drifted 2-3% on CI (different fallback
+# fonts + font metrics), failing the suite with no visible cause.
+#
+# Usage: Actions -> "Regenerate visual baselines" -> Run workflow, with
+# `branch` set to the feature branch carrying the UI change.  The workflow
+# regenerates the PNGs on the runner, commits them back to that branch, and
+# then runs the full suite WITHOUT --update-snapshots to prove it is green.
+# Never run this against main directly: baselines land via PR like any
+# other change.
+#
+# Re-run this whenever the runner image changes (e.g. the ubuntu-latest
+# migration) if the visual suite starts failing on font rendering.
+
+name: Regenerate visual baselines
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to regenerate baselines on (committed back to it)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Same throwaway test values as the E2E smoke job (e2e.yml).
+    env:
+      DD_TRACE_ENABLED: 'false'
+      DATABASE_URL: file:./prisma/playwright-visual-test.db
+      DASHBOARD_PASSWORD: visual-test-password
+      SESSION_SECRET: visual-test-session-secret-not-production
+      E2E_TEST_PASSWORD: visual-test-password
+    steps:
+      - name: Refuse to run against main
+        if: inputs.branch == 'main'
+        run: |
+          echo "Regenerate on a feature branch and land via PR — never directly on main."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: echo "DATABASE_URL=file:${RUNNER_TEMP}/api-usage-monitor-e2e.db" >> "$GITHUB_ENV"
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      # Fail closed if the deterministic font is missing: silent fallback
+      # rendering is what made baselines machine-specific before.
+      - name: Verify DejaVu fonts are installed
+        run: fc-list | grep -qi dejavu || (echo "DejaVu fonts missing on runner" && exit 1)
+      - run: npx prisma db push --skip-generate
+      - run: npm run build
+      - run: npx playwright test tests/e2e/visual.spec.ts --update-snapshots
+      - name: Commit regenerated baselines
+        run: |
+          git config user.name "muse-visual-regen"
+          git config user.email "muse-visual-regen@users.noreply.github.com"
+          git add tests/e2e/visual.spec.ts-snapshots/
+          if git diff --cached --quiet; then
+            echo "No baseline changes."
+          else
+            git commit -m "test(e2e): regenerate visual baselines on ubuntu-latest runner"
+            git push origin "HEAD:${{ inputs.branch }}"
+          fi
+      # Prove the regenerated baselines actually pass (GITHUB_TOKEN pushes
+      # do not retrigger CI, so verify in this same run).
+      - run: npx playwright test

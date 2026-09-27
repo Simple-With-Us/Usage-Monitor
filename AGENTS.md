@@ -527,10 +527,22 @@ screen, or attach a screenshot; verification is the visual suite plus CI.
 Native Mac UI (`macos/`) and iOS (`ios/`) are verified through code review and
 CI — Playwright cannot drive them.  Baselines render deterministically: frozen
 clock, stubbed `/api/*` fixtures, blocked cross-origin traffic, disabled
-animations, pinned DejaVu fonts, and `maxDiffPixelRatio: 0.01` so sub-pixel
-font-rendering differences between machines don't fail the suite.  Regenerate baselines with the same fixtures
-before re-screenshotting; never commit screenshots taken against a live
-account.
+animations, DejaVu fonts pinned via the committed
+`tests/e2e/visual-determinism.css`, and `maxDiffPixelRatio: 0.01` so sub-pixel
+font-rendering differences don't fail the suite.  The stylesheet MUST be
+applied with page.addStyleTag() AFTER page.goto(): navigation replaces the
+document and wipes pre-navigation injections — the suite pinned fonts
+pre-navigation until 2026-09-27, when CI showed 2-3% pixel drift on
+text-heavy pages because the pinning had never applied and each machine
+rendered with its own fallback fonts.  Baselines are generated on the
+ubuntu-latest runner itself via the "Regenerate visual baselines"
+workflow_dispatch workflow (Actions -> run on the feature branch; it commits
+the PNGs back and re-runs the suite to prove green) — never on a dev
+machine, whose font stack differs from the runner's.  Re-run it when the
+runner image changes and the suite starts failing on font rendering.  The
+E2E smoke job uploads test-results/ as an artifact on failure, since the job
+log alone only says "exit code 1".  Never commit screenshots taken against a
+live account.
 
 ## Cursor Cloud specific instructions
 

@@ -1,4 +1,9 @@
+import path from 'node:path';
 import { test, expect, type Page, type Route } from '@playwright/test';
+
+// Committed determinism stylesheet (DejaVu font pinning).  Applied AFTER
+// navigation — see pinFonts below.
+const DETERMINISM_CSS = path.resolve(__dirname, 'visual-determinism.css');
 
 // Automated visual verification for the web UI (owner directive 2026-09-27).
 // Jay never takes manual screenshots or runs local UI preview sessions, so
@@ -15,8 +20,14 @@ import { test, expect, type Page, type Route } from '@playwright/test';
 //   - Cross-origin requests (analytics RUM, fonts, external probes) are
 //     aborted — the app must render fully offline.
 //   - animations: 'disabled' + caret: 'hide' per screenshot; fonts are pinned
-//     to DejaVu (the app's first-choice font is not installed on CI runners
-//     or this lane's VM, and fallback rendering differs per machine).
+//     to DejaVu via the committed visual-determinism.css, applied AFTER
+//     navigation (page.addStyleTag() is wiped by page.goto(), so the old
+//     pre-navigation call never took effect — CI diffs of 2-3% on
+//     text-heavy pages on 2026-09-27 were fallback-font rendering, not
+//     real UI changes).
+//   - Baselines are generated on the ubuntu-latest CI runner itself via the
+//     regenerate-visual-baselines workflow, so the committed PNGs always
+//     match the runner's font stack exactly.
 //
 // Auth: the dashboard pages require a dashboard_session cookie. Tests log in
 // through the real POST /api/auth/login using E2E_TEST_PASSWORD, which the
@@ -52,18 +63,16 @@ async function freezeClock(page: Page): Promise<void> {
   }, FROZEN_NOW_ISO);
 }
 
-/** Force DejaVu rendering so baselines are portable across machines. */
+/** Force DejaVu rendering so baselines are portable across machines.
+ *
+ * MUST be called after page.goto(): navigation replaces the document and
+ * wipes anything injected with page.addStyleTag() beforehand.  (The suite
+ * called this pre-navigation until 2026-09-27, when CI showed 2-3% pixel
+ * drift on text-heavy pages — the pinning had never applied and both
+ * machines rendered with their own fallback fonts.)
+ */
 async function pinFonts(page: Page): Promise<void> {
-  await page.addStyleTag({
-    content: `
-      *, *::before, *::after {
-        font-family: "DejaVu Sans", sans-serif !important;
-      }
-      code, kbd, pre, samp, tt {
-        font-family: "DejaVu Sans Mono", monospace !important;
-      }
-    `,
-  });
+  await page.addStyleTag({ path: DETERMINISM_CSS });
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {
@@ -143,16 +152,19 @@ async function login(page: Page): Promise<void> {
   expect(response.ok(), 'login should succeed with the test password').toBeTruthy();
 }
 
+/** Pre-navigation determinism: clock freeze + API stubs.  addInitScript and
+ *  route handlers live for the page's lifetime, so these survive goto().
+ *  Font pinning is separate (pinFonts) because style tags do NOT survive. */
 async function settle(page: Page): Promise<void> {
   await freezeClock(page);
   await stubApi(page);
-  await pinFonts(page);
 }
 
 test.describe('visual: login page', () => {
   test('login form renders', async ({ page }) => {
     await settle(page);
     await page.goto('/login');
+    await pinFonts(page);
     await expect(page.getByRole('heading', { name: 'Log in', exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot('login.png', { ...stableShot, fullPage: true });
   });
@@ -160,6 +172,7 @@ test.describe('visual: login page', () => {
   test('login form shows invalid-password error', async ({ page }) => {
     await settle(page);
     await page.goto('/login');
+    await pinFonts(page);
     await page.getByLabel(/password/i).fill('definitely-wrong-password');
     await page.getByRole('button', { name: 'Log in', exact: true }).click();
     await expect(page.getByRole('alert')).toBeVisible();
@@ -173,6 +186,7 @@ test.describe('visual: dashboard', () => {
     await settle(page);
     await login(page);
     await page.goto('/');
+    await pinFonts(page);
     await page.waitForLoadState('networkidle');
     // Stable marker: the hero section renders once provider data settles.
     await expect(page.locator('main')).toBeVisible();
@@ -186,6 +200,7 @@ test.describe('visual: providers page', () => {
     await settle(page);
     await login(page);
     await page.goto('/providers');
+    await pinFonts(page);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('providers.png', { ...stableShot, fullPage: true });
@@ -198,6 +213,7 @@ test.describe('visual: money page', () => {
     await settle(page);
     await login(page);
     await page.goto('/money');
+    await pinFonts(page);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('money.png', { ...stableShot, fullPage: true });
@@ -210,6 +226,7 @@ test.describe('visual: settings page', () => {
     await settle(page);
     await login(page);
     await page.goto('/settings');
+    await pinFonts(page);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('settings.png', { ...stableShot, fullPage: true });

@@ -1,0 +1,19 @@
+/* Deterministic font pinning for the Playwright visual suite
+ * (tests/e2e/visual.spec.ts).
+ *
+ * Applied via page.addStyleTag() AFTER navigation: navigation wipes
+ * injected style tags, so the old pre-navigation addStyleTag() call never
+ * took effect — CI then rendered with per-machine fallback fonts and
+ * text-heavy pages drifted 2-3% of pixels (plus a 20px fullPage height
+ * difference on /settings from different font metrics), 2026-09-27.
+ *
+ * DejaVu ships on ubuntu-latest runners and the dev VM.  The
+ * regenerate-visual-baselines workflow fails closed if it is ever missing,
+ * so baselines can never again be generated against a silent fallback.
+ */
+*, *::before, *::after {
+  font-family: "DejaVu Sans", sans-serif !important;
+}
+code, kbd, pre, samp, tt {
+  font-family: "DejaVu Sans Mono", monospace !important;
+}
