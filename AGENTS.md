@@ -517,6 +517,20 @@ Deploys: Coolify/GitHub on Hetzner. Legacy Oracle
 `usage-monitor-auto-deploy.timer` docs remain in `deploy/oracle/README.md` for
 history; prefer Coolify + `DEPLOY.md` / fleet `COOLIFY.md`.
 
+## Visual verification policy (owner 2026-09-27)
+
+Web UI is verified via Playwright screenshot assertions with committed baselines
+(`tests/e2e/visual.spec.ts`, baselines in
+`tests/e2e/visual.spec.ts-snapshots/`).  Jay never takes manual screenshots or
+runs local UI preview sessions.  Do not ask him to open a page, preview a
+screen, or attach a screenshot; verification is the visual suite plus CI.
+Native Mac UI (`macos/`) and iOS (`ios/`) are verified through code review and
+CI — Playwright cannot drive them.  Baselines render deterministically: frozen
+clock, stubbed `/api/*` fixtures, blocked cross-origin traffic, disabled
+animations, pinned DejaVu fonts.  Regenerate baselines with the same fixtures
+before re-screenshotting; never commit screenshots taken against a live
+account.
+
 ## Cursor Cloud specific instructions
 
 Standard local setup/verify commands live in `README.md` (Quick start) and the **Verify**

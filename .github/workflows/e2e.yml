@@ -13,8 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # This throwaway SQLite smoke job has no Datadog agent or production secrets.
+    # The visual suite (tests/e2e/visual.spec.ts) asserts committed screenshot
+    # baselines in tests/e2e/visual.spec.ts-snapshots/ against a fixed fixture
+    # world: frozen clock, stubbed /api/* responses, no live data. DB and auth
+    # below are throwaway, test-only values.
     env:
       DD_TRACE_ENABLED: 'false'
+      DATABASE_URL: file:./prisma/playwright-visual-test.db
+      DASHBOARD_PASSWORD: visual-test-password
+      SESSION_SECRET: visual-test-session-secret-not-production
+      E2E_TEST_PASSWORD: visual-test-password
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

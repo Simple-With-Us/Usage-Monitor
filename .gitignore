@@ -31,3 +31,8 @@ coverage/
 # single `git add -A` would stage a credential that signs pushes for every app in the team.
 # One APNs key is team-wide, so leaking it is not scoped to one app.
 *.p8
+
+# Playwright local run artifacts (baselines live in *-snapshots/, committed).
+test-results/
+playwright-report/
+playwright/.auth/
