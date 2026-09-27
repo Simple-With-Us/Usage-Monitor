@@ -177,7 +177,11 @@ jobs:
             echo "::error::Infisical universal-auth login failed."
             exit 1
           fi
-          echo "::add-mask::$TOKEN"
+          if [[ "$TOKEN" == *$'\n'* || "$TOKEN" == *$'\r'* ]]; then
+            echo '::error::Infisical returned a multiline token.' >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
           for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
@@ -190,12 +194,17 @@ jobs:
             if [ -z "$val" ]; then
               continue
             fi
-            echo "::add-mask::$val"
-            {
-              echo "${name}<<INFISICAL_EOF"
-              printf '%s\n' "$val"
-              echo "INFISICAL_EOF"
-            } >> "$GITHUB_ENV"
+            if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+              echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${val//'%'/'%25'}"
+            printf -v "$name" '%s' "$val"
+            export "$name"
+            # Certificate credentials belong only to this load/import step.
+            if [[ "$name" == ASC_KEY_ID || "$name" == ASC_ISSUER_ID ]]; then
+              printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
+            fi
           done
           # Keep multiline PEM out of GITHUB_ENV and every later step environment.
           # Only its mode-600 file path crosses the step boundary.
@@ -210,21 +219,11 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
-          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val
-
-      - name: Import signing + ASC key
-        if: steps.gate.outputs.should_ship == '1'
-        run: |
-          if [ -z "${ASC_KEY_ID}" ]; then
-            echo "::error::ASC_KEY_ID empty after Infisical prod export. Copy ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, IOS_DIST_P12_BASE64, IOS_DIST_P12_PASSWORD from Congress.Trade (same team CC8UTF7ATG). Do not mint a new key. Do not restart a Mac runner."
-            exit 1
-          fi
+          ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
+          export ASC_KEY_PATH
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
+          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
-      # Via the in-repo wrappers rather than /Users/jay/apps/ios-fleet directly:
-      # the wrappers pin DEVELOPER_DIR to stable Xcode and resolve --repo-root,
-      # so the workflow cannot drift from what a local operator runs.
-      # No --force-ship. Standing rate limit is DEFAULT_MIN_INTERVAL_SEC=3600.
       - name: Ship UsageMonitor to TestFlight
         if: steps.gate.outputs.should_ship == '1'
         env:
