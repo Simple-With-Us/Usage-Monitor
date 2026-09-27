@@ -538,7 +538,7 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board: this f
 
 ## Completed
 
-- **2026-09-27 — CODEX — Completed on merge — Public overview accuracy (issue #1560, board `43829b4c`, branch `codex/public-copy-20260927`).**  Scope: public README and coordination pointers; clarify supported behavior and access, remove private inventory references, and link the Simple With Us app catalog.  Validation: scoped copy/source review, linked-file checks, and `git diff --check`; hosted CI gates this merge.  Runtime and release workflows unchanged.
+- **2026-09-27 — CODEX — COMPLETED — Public overview accuracy (issue #1560, board `43829b4c`, branch `codex/public-copy-20260927`).**  Scope: public README and coordination pointers; clarify supported behavior and access, remove private inventory references, and link the Simple With Us app catalog.  Validation: scoped copy/source review, linked-file checks, and `git diff --check`; PR #1561 merged as `3974fd5f` after all hosted checks passed; GitHub main verified.  Runtime and release workflows unchanged.
 - **2026-09-13 - FX - COMPLETED - Ship Usage Local Monitor TestFlight so Import Package tap fix reaches the phone.** <!-- wb-agent-report:2f2f5f410a2a44c1a88cfb3224dd7aa5 -->
 
 
