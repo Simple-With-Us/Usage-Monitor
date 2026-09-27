@@ -24,7 +24,15 @@ import { test, expect, type Page, type Route } from '@playwright/test';
 
 const FROZEN_NOW_ISO = '2026-09-27T20:00:00.000Z';
 
-const stableShot = { animations: 'disabled', caret: 'hide' } as const;
+const stableShot = {
+  animations: 'disabled',
+  caret: 'hide',
+  // Cross-machine font rendering (local VM vs ubuntu-latest CI) differs at
+  // the sub-pixel level even with DejaVu pinned; allow 1% differing pixels so
+  // the suite stays green across machines while still catching real UI
+  // regressions (fleet convention, same as Harness's visual suite).
+  maxDiffPixelRatio: 0.01,
+} as const;
 
 /** Pin the wall clock to FROZEN_NOW_ISO in the page before any app code runs. */
 async function freezeClock(page: Page): Promise<void> {
