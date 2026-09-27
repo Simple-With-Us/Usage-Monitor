@@ -30,8 +30,7 @@ resume. Cloud agent-phase coordination requires regular runtime variables
 Use `scripts/codex-coordination.sh` for Slack reads/posts and GitHub access. Apple Notes is
 Mac-only; cloud completion notes must include a handoff body for local publication.
 
-Next.js + Prisma (**SQLite**, not Postgres — production on the
-production Coolify host, see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`; SSH: `ssh coolify`. Legacy Oracle scripts under `deploy/oracle/` are historical.) app at `usage.jays.services`. It tracks API usage/cost three ways: **poll adapters**
+Next.js + Prisma (**SQLite**, not Postgres) app at `usage.jays.services`, hosted through Coolify.  Private deployment details are maintained outside this public repository; legacy Oracle scripts are historical.  It tracks API usage/cost three ways: **poll adapters**
 (`src/lib/adapters/*`, one per provider) that snapshot into `UsageSnapshot`; **pushed
 telemetry** from other apps into `ExternalUsageEvent` via `POST /api/ingest/usage`; and
 **OTLP metrics** from Claude Code (or any OTLP exporter) via `POST /api/otlp/v1/metrics`,
@@ -456,7 +455,7 @@ Optional `SENTRY_READ_TOKEN`/`SENTRY_ORG` configure the Sentry Health card above
 
 ### Infisical project and secret runner
 
-The Infisical project `usage-monitor` (see `fleet-ops:ATTACK-MAP.md` for project ID) is configured for project-specific secrets/variables under the shared automation machine identity (`INFISICAL_AUTOMATION_CLIENT_ID` / `INFISICAL_AUTOMATION_CLIENT_SECRET`). `scripts/infisical-run.mjs` executes arbitrary commands with Infisical secrets injected into `process.env`:
+The Infisical project `usage-monitor` (consult the authorized operations workspace for deployment-specific identifiers) is configured for project-specific secrets/variables under the shared automation machine identity (`INFISICAL_AUTOMATION_CLIENT_ID` / `INFISICAL_AUTOMATION_CLIENT_SECRET`). `scripts/infisical-run.mjs` executes arbitrary commands with Infisical secrets injected into `process.env`:
 - `node scripts/infisical-run.mjs --check` verifies project secret access.
 - `node scripts/infisical-run.mjs -- npm run start` runs the application with Infisical secrets.
 - `src/lib/infisical-provider-sync.ts` supports the `"um"` scope and falls back to `INFISICAL_AUTOMATION_CLIENT_ID` / `INFISICAL_AUTOMATION_CLIENT_SECRET` when scope-specific client credentials are omitted.
@@ -514,7 +513,7 @@ described a runner-offload feature that did not exist and offered a fallback run
 did nothing.  If you find a comment describing runner routing, trust the `runs-on:` value,
 not the comment.
 
-Deploys: Coolify/GitHub on Hetzner (`167.233.254.55`). Legacy Oracle
+Deploys: Coolify/GitHub on Hetzner. Legacy Oracle
 `usage-monitor-auto-deploy.timer` docs remain in `deploy/oracle/README.md` for
 history; prefer Coolify + `DEPLOY.md` / fleet `COOLIFY.md`.
 
