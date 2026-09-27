@@ -106,4 +106,26 @@ cmp "$tmp_dir/fixture" "$workflow_key"
 [[ "$(file_mode "$workflow_key")" == 600 ]]
 [[ ! -s "$tmp_dir/workflow-stderr" ]]
 
+# Re-importing the canonical path or its compatibility symlink preserves input.
+python3 - "$repo_root/scripts/ios-appstore-gm-prepare.sh" "$tmp_dir/normalize-key.sh" <<'PYTHON'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+block = text.split('# Normalize into a separate file', 1)[1].split('# Compatibility alias', 1)[0]
+pathlib.Path(sys.argv[2]).write_text('set -euo pipefail\numask 077\ndie() { exit 1; }\n# Normalize into a separate file' + block)
+PYTHON
+mkdir "$tmp_dir/canonical"
+cp "$tmp_dir/fixture" "$tmp_dir/canonical/key.p8"
+ln -s "$tmp_dir/canonical/key.p8" "$tmp_dir/key-alias.p8"
+for source_path in "$tmp_dir/canonical/key.p8" "$tmp_dir/key-alias.p8"; do
+  env -u ASC_KEY_P8 ASC_KEY_STD_DIR="$tmp_dir/canonical" \
+    KEY_PATH="$tmp_dir/canonical/key.p8" ASC_KEY_PATH="$source_path" \
+    bash "$tmp_dir/normalize-key.sh" > "$tmp_dir/normalize-stdout" 2> "$tmp_dir/normalize-stderr"
+  python3 - "$tmp_dir/fixture" "$tmp_dir/canonical/key.p8" <<'PYTHON'
+import pathlib, sys
+assert pathlib.Path(sys.argv[1]).read_text().rstrip() == pathlib.Path(sys.argv[2]).read_text().rstrip()
+PYTHON
+  [[ "$(file_mode "$tmp_dir/canonical/key.p8")" == 600 ]]
+  [[ ! -s "$tmp_dir/normalize-stdout" && ! -s "$tmp_dir/normalize-stderr" ]]
+done
+
 echo 'synthetic ASC key-file and workflow handoff passed'
