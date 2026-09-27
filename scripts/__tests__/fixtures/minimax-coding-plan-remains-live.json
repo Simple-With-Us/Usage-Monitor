@@ -1,0 +1,29 @@
+{
+  "base_resp": { "status_code": 0, "status_msg": "success" },
+  "model_remains": [
+    {
+      "model_name": "general",
+      "current_interval_usage_count": 0,
+      "current_interval_total_count": 0,
+      "current_weekly_usage_count": 0,
+      "current_weekly_total_count": 0,
+      "current_interval_remaining_percent": 97,
+      "current_weekly_remaining_percent": 92,
+      "start_time": "2026-09-26T00:00:00Z",
+      "end_time": "2026-09-27T00:00:00Z",
+      "weekly_end_time": "2026-10-03T00:00:00Z"
+    },
+    {
+      "model_name": "video",
+      "current_interval_usage_count": 5,
+      "current_interval_total_count": 5,
+      "current_weekly_usage_count": 0,
+      "current_weekly_total_count": 0,
+      "current_interval_remaining_percent": 100,
+      "current_weekly_remaining_percent": 100,
+      "start_time": "2026-09-26T00:00:00Z",
+      "end_time": "2026-09-27T00:00:00Z",
+      "weekly_end_time": "2026-10-03T00:00:00Z"
+    }
+  ]
+}

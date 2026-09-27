@@ -480,11 +480,21 @@ describe("parseMinimaxRemains", () => {
     expect(rows["MiniMax-Text-01 (daily window)"].remainingPercent).toBe(90);
   });
 
-  it("adds a plan-wide headline row across models", () => {
-    expect(readings[0].label).toBe("Coding plan (all models)");
-    // 50 of 300 used across both models.
-    expect(readings[0].remainingPercent).toBe(83.33);
-    expect(readings[0].resetAt).toBe("2026-09-13T00:00:00.000Z");
+  it("does not invent a plan-wide headline by summing per-model counts", () => {
+    expect(readings.some((r) => r.label === "Coding plan (all models)")).toBe(false);
+    expect(readings).toHaveLength(2);
+  });
+
+  it("prefers remaining_percent over misleading count fields (live API shape)", () => {
+    const live = parseMinimaxRemains(fixture("minimax-coding-plan-remains-live.json"));
+    const rows = byLabel(live);
+    expect(live[0].label).toBe("Coding plan (all models)");
+    expect(live[0].remainingPercent).toBe(97);
+    expect(rows["general (daily window)"].remainingPercent).toBe(97);
+    expect(rows["general (weekly window)"].remainingPercent).toBe(92);
+    expect(rows["general (weekly window)"].resetAt).toBe("2026-10-03T00:00:00.000Z");
+    expect(rows["video (daily window)"].remainingPercent).toBe(100);
+    expect(rows["video (weekly window)"].remainingPercent).toBe(100);
   });
 
   it("returns nothing when base_resp reports a failure", () => {
@@ -524,7 +534,7 @@ describe("collector wiring", () => {
       ["codex", "codex-wham-usage.json", "openai", 2],
       ["grok", "grok-billing-credits.json", "xai", 1],
       ["grok", "grok-billing-config.json", "xai", 1],
-      ["minimax", "minimax-coding-plan-remains.json", "minimax", 3],
+      ["minimax", "minimax-coding-plan-remains.json", "minimax", 2],
     ];
     for (const [providerKey, file, provider, count] of cases) {
       const events = eventsForProvider(providerKey, fixture(file), {
