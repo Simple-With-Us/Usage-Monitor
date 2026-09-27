@@ -5,7 +5,9 @@
 # IOS_DIST_P12_PASSWORD) and imports the iOS Distribution identity.
 # Never prints secret values.  Never mint a new key.  Fail closed on a
 # beta macOS host.
+set +o xtrace
 set -euo pipefail
+umask 077
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "[ios-gm] $*"; }
@@ -21,7 +23,10 @@ fi
 
 : "${ASC_KEY_ID:?ASC_KEY_ID required}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID required}"
-: "${ASC_KEY_P8:?ASC_KEY_P8 required}"
+# Current CI passes ASC_KEY_PATH; retain ASC_KEY_P8 for local legacy callers.
+if [[ -z "${ASC_KEY_PATH:-}" ]]; then
+  : "${ASC_KEY_P8:?ASC_KEY_P8 or ASC_KEY_PATH required}"
+fi
 : "${IOS_DIST_P12_BASE64:?IOS_DIST_P12_BASE64 required}"
 : "${IOS_DIST_P12_PASSWORD:?IOS_DIST_P12_PASSWORD required}"
 
@@ -36,10 +41,21 @@ ASC_KEY_STD_DIR="${HOME}/.appstoreconnect/private_keys"
 mkdir -p "$ASC_KEY_STD_DIR" "$SECRETS_DIR"
 chmod 700 "$ASC_KEY_STD_DIR" "$SECRETS_DIR"
 KEY_PATH="${ASC_KEY_STD_DIR}/AuthKey_${ASC_KEY_ID}.p8"
-# Normalize CRLF / trailing spaces; keep a single trailing newline.
-printf '%s' "$ASC_KEY_P8" | tr -d '\r' | sed -e 's/[[:space:]]*$//' > "$KEY_PATH"
-printf '\n' >> "$KEY_PATH"
-chmod 600 "$KEY_PATH"
+# Normalize into a separate file so a canonical path or compatibility alias
+# can be used as input without truncating its own inode.
+KEY_TEMP="$(mktemp "${ASC_KEY_STD_DIR}/.AuthKey.XXXXXX")"
+trap 'rm -f "$KEY_TEMP"' EXIT
+if [[ -n "${ASC_KEY_PATH:-}" ]]; then
+  [[ -s "$ASC_KEY_PATH" ]] || die "ASC_KEY_PATH has no key file"
+  tr -d '\r' < "$ASC_KEY_PATH" | sed -e 's/[[:space:]]*$//' > "$KEY_TEMP"
+else
+  printf '%s' "$ASC_KEY_P8" | tr -d '\r' | sed -e 's/[[:space:]]*$//' > "$KEY_TEMP"
+fi
+printf '\n' >> "$KEY_TEMP"
+grep -q '[^[:space:]]' "$KEY_TEMP" || die "ASC key file is empty"
+chmod 600 "$KEY_TEMP"
+mv -f "$KEY_TEMP" "$KEY_PATH"
+trap - EXIT
 # Compatibility alias some older scripts still open.
 ln -sfn "$KEY_PATH" "${SECRETS_DIR}/AuthKey.p8"
 

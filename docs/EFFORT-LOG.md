@@ -157,6 +157,7 @@ Protocol: /Users/jay/apps/EFFORT-LOG-PROTOCOL.md (canonical). Live board: this f
 (mirror: docs/EFFORT-LOG.md in the repo). As of 2026-07-18.
 
 ## In Progress
+- **2026-09-27 — CODEX — IN PROGRESS — Stage iOS signing key through a file path (board `d28bdcfd`, issue #1559, branch `codex/ios-signing-loader-20260927`, worktree `~/apps/usage-codex-ios-signing-loader`).**  Workflow disabled pending owner credential decision; scope is ship workflow, helper, and synthetic fixture test.
 - **2026-09-24 — GROK-BUILD — IN PROGRESS — Coding Agents Mac status pill layout and DeepSeek PAYG per-event UTC pricing (board `23423c63`, branch `grok/deepseek-payg-mac-pill`, claimed: Thu, Sep 24, 2026).**  Extra-ship no.  Active/Idle on Mac and the hero chip stay on one line.  deepseek-flash, deepseek-v4-flash, and deepseek-v4-pro are priced from each event's UTC peak window instead of a flat catalog rate.
 - **2026-09-16 - CLAUDE - IN_PROGRESS - Live Coolify deploy path lost the gating the retired Oracle pipeline had — nothing ties deploy to green CI.** <!-- wb-agent-report:d0f5f1dbaf1940df9a99d6b34b4ad99b -->
 - **2026-09-16 - CLAUDE - IN_PROGRESS - UM Platforms Slack probe unavailable + token-investigate.** <!-- wb-agent-report:1f414cf38d104439a8ad808f0fe6a724 -->
