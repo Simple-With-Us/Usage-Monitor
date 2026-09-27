@@ -17,5 +17,5 @@
       "labels": ["dependencies", "major"]
     }
   ],
-  "vulnerabilityAlerts": { "labels": ["security"] }
+  "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }
 }
