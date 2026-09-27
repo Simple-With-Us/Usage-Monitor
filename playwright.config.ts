@@ -28,8 +28,10 @@ export default defineConfig({
     // 1.63 defaults headless launches to `chromium-headless-shell`, which
     // `npx playwright install chromium` does NOT download — without this,
     // CI fails with "Executable doesn't exist at .../chromium_headless_shell-1243/...".
+    // `--no-sandbox` matches Harness: CI runners can't always use the
+    // Chromium sandbox.
     // (Fleet convention, same as Harness's visual suite.)
-    launchOptions: { channel: 'chromium' },
+    launchOptions: { channel: 'chromium', args: ['--no-sandbox'] },
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: {
