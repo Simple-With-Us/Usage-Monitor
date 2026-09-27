@@ -527,7 +527,8 @@ screen, or attach a screenshot; verification is the visual suite plus CI.
 Native Mac UI (`macos/`) and iOS (`ios/`) are verified through code review and
 CI — Playwright cannot drive them.  Baselines render deterministically: frozen
 clock, stubbed `/api/*` fixtures, blocked cross-origin traffic, disabled
-animations, pinned DejaVu fonts.  Regenerate baselines with the same fixtures
+animations, pinned DejaVu fonts, and `maxDiffPixelRatio: 0.01` so sub-pixel
+font-rendering differences between machines don't fail the suite.  Regenerate baselines with the same fixtures
 before re-screenshotting; never commit screenshots taken against a live
 account.
 
