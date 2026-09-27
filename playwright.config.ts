@@ -21,7 +21,16 @@ export default defineConfig({
   testDir: './tests/e2e',
   timeout: 60_000,
   reporter: 'list',
-  use: { baseURL },
+  use: {
+    baseURL,
+    // `channel: "chromium"` pins the full Chromium build (not the
+    // headless shell) so local runs and CI render identically. Playwright
+    // 1.63 defaults headless launches to `chromium-headless-shell`, which
+    // `npx playwright install chromium` does NOT download — without this,
+    // CI fails with "Executable doesn't exist at .../chromium_headless_shell-1243/...".
+    // (Fleet convention, same as Harness's visual suite.)
+    launchOptions: { channel: 'chromium' },
+  },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: {
     command: 'npm start -- -H 127.0.0.1 -p 3000',
