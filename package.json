@@ -61,16 +61,16 @@
     "verify": "npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run build"
   },
   "dependencies": {
-    "@datadog/browser-logs": "^7.13.0",
+    "@datadog/browser-logs": "^7.14.0",
     "@datadog/browser-rum": "^7.9.0",
     "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.7.0",
     "@prisma/client": "^6.0.0",
     "@sentry/nextjs": "^10.75.2",
-    "dd-trace": "^6.16.0",
-    "lucide-react": "^1.47.0",
+    "dd-trace": "^6.17.0",
+    "lucide-react": "^1.48.0",
     "next": "16.3.6",
     "next-themes": "^0.4.6",
-    "postal-mime": "^3.0.0",
+    "postal-mime": "^3.0.1",
     "protobufjs": "^8.8.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
@@ -89,7 +89,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "autoprefixer": "^10.6.1",
-    "browserslist": "^4.29.0",
+    "browserslist": "^4.29.1",
     "dotenv": "^18.0.3",
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.3.6",
@@ -99,7 +99,7 @@
     "tailwindcss": "^3.4.19",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
-    "wrangler": "4.136.3"
+    "wrangler": "4.140.0"
   },
   "overrides": {
     "minimatch": "^10.0.3",
