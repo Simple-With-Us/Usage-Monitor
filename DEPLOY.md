@@ -187,7 +187,7 @@ defaults and valid values for local development.
 - `SENTRY_READ_TOKEN` (optional; enables the read-only Sentry Health dashboard card, an org-auth
   token or internal integration token with `project:read`/`event:read` scope — never sent to the
   client, absent by default)
-- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `jays-services`)
+- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `simple-with-us`)
 - `ALERT_SLACK_WEBHOOK_URL` / `ALERT_WEBHOOK_URL` / `ALERT_RESEND_API_KEY` +
   `ALERT_EMAIL_FROM` + `ALERT_EMAIL_TO` / `ALERT_PAGERDUTY_ROUTING_KEY` (optional delivery
   destinations; Resend needs all three email values)

@@ -125,7 +125,7 @@ describe("sentry-health", () => {
     ).toHaveLength(1);
   });
 
-  it("defaults SENTRY_ORG to jays-services when unset", async () => {
+  it("defaults SENTRY_ORG to simple-with-us when unset", async () => {
     process.env.SENTRY_READ_TOKEN = "test-sentry-token";
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response("[]", { status: 200, headers: { "content-type": "application/json" } })
@@ -134,7 +134,7 @@ describe("sentry-health", () => {
     const result = await fetchSentryHealth();
     expect(result.configured).toBe(true);
     if (!result.configured) throw new Error("expected configured result");
-    expect(result.org).toBe("jays-services");
+    expect(result.org).toBe("simple-with-us");
   });
 
   it("captures a per-project error without failing the whole request", async () => {
