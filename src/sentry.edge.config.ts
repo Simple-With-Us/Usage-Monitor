@@ -13,7 +13,26 @@ if (dsn) {
     dsn,
     environment: nonEmptyEnv(process.env.SENTRY_ENVIRONMENT),
     tracesSampleRate: parseTracesSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE),
-    enableLogs: true,
+    // v11: `enableLogs` was removed (logs flow via Sentry.logger.* and logging
+    // integrations; the Sentry.logger call sites here are unaffected). v11 also
+    // replaced `sendDefaultPii` with per-category `dataCollection` - a behavior
+    // change, not a rename. This repo never set sendDefaultPii, so v10 was
+    // restrictive-by-default while v11 collects everything unless pinned. Keep
+    // the v10 posture explicitly (migration guide "Keeping the v10 collection
+    // defaults"); the scrubber hooks below remain the last line of defense.
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: {
+        request: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+        response: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      },
+      httpBodies: [],
+      urlQueryParams: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      graphQL: { document: false, variables: false },
+    },
     // Mirror the server config's defensive scrubber for both error and
     // transaction paths. The middleware can emit sampled request
     // transactions (e.g. /api/bills.ics?token=...) and those go through
