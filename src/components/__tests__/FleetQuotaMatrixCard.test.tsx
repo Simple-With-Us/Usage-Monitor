@@ -41,10 +41,10 @@ function normalizeGaps(text: string): string {
 
 /**
  * A mixed /api/quota-windows payload: two anthropic windows with real
- * percentages, one Antigravity window whose label mentions Claude (the
- * exact "Claude and GPT models" routing bucket this whole change exists to
- * stop rendering as the user's Claude plan), one Grok window, and Codex /
- * MiniMax reporting nothing yet.
+ * percentages, one Antigravity window carrying the legacy "Claude and GPT
+ * models" label (the routing bucket this whole change exists to stop
+ * rendering as the user's Claude plan, shown as "Third-Party Models"), one
+ * Grok window, and Codex / MiniMax reporting nothing yet.
  */
 const mixedPayload = {
   ok: true,
@@ -198,12 +198,55 @@ describe("buildProviderGroups", () => {
     expect(anthropic.windows.every((w) => w.via === null)).toBe(true);
   });
 
-  it("marks the Antigravity window via Antigravity even though its label says Claude and GPT", () => {
+  it("marks the Antigravity window via Antigravity and shows the legacy Claude and GPT label as Third-Party Models", () => {
     const groups = buildProviderGroups(mixedPayload);
     const antigravity = groups.find((g) => g.provider === "google-antigravity")!;
     expect(antigravity.windows).toHaveLength(1);
-    expect(antigravity.windows[0].label).toBe("Claude and GPT models");
+    expect(antigravity.windows[0].label).toBe("Third-Party Models");
     expect(antigravity.windows[0].via).toBe("antigravity");
+  });
+
+  it("maps every legacy Antigravity label variant and keeps the window suffix", () => {
+    const variants: Array<[string, string]> = [
+      ["Claude and GPT models (weekly)", "Third-Party Models (weekly)"],
+      ["Claude & GPT models (5h)", "Third-Party Models (5h)"],
+      ["Claude/GPT", "Third-Party Models"],
+      ["Third-Party Models (5h)", "Third-Party Models (5h)"],
+      ["Gemini Models (weekly)", "Gemini Models (weekly)"],
+    ];
+    for (const [legacy, expected] of variants) {
+      const groups = buildProviderGroups({
+        ok: true,
+        providerGroups: [
+          {
+            provider: "google-antigravity",
+            providerLabel: "Antigravity",
+            via: "antigravity",
+            expected: true,
+            windows: [{ id: "w", label: legacy, remainingPercent: 50, via: "antigravity" }],
+          },
+        ],
+      });
+      const antigravity = groups.find((g) => g.provider === "google-antigravity")!;
+      expect(antigravity.windows[0].label).toBe(expected);
+    }
+  });
+
+  it("does not rewrite a same-named label on a non-Antigravity window", () => {
+    const groups = buildProviderGroups({
+      ok: true,
+      providerGroups: [
+        {
+          provider: "anthropic",
+          providerLabel: "Claude",
+          via: null,
+          expected: true,
+          windows: [{ id: "w", label: "Claude and GPT models", remainingPercent: 50, via: null }],
+        },
+      ],
+    });
+    const anthropic = groups.find((g) => g.provider === "anthropic")!;
+    expect(anthropic.windows[0].label).toBe("Claude and GPT models");
   });
 
   it("leaves Codex and MiniMax with zero windows for the empty-state row", () => {
@@ -234,7 +277,8 @@ describe("QuotaWindowCard rendering", () => {
     );
 
     expect(html).toContain("via Antigravity");
-    expect(html).toContain("Claude and GPT models");
+    expect(html).toContain("Third-Party Models");
+    expect(html).not.toContain("Claude and GPT models");
     expect(html).toContain("40.0% remaining");
   });
 });

@@ -25,6 +25,25 @@
  * @property {boolean} isExhausted
  */
 
+/**
+ * Display name for Antigravity's shared non-Gemini model pool.  `agy` and
+ * `antigravity-usage` name that group "Claude and GPT models"; the dashboard,
+ * the iOS app and the Mac app all show it as "Third-Party Models".  Only the
+ * human `label` is rewritten -- `metadata.modelGroup`, bucket ids, series keys
+ * and event ids keep the raw CLI value so stored data and idempotency do not
+ * move.  Mirrors `antigravityDisplayLabel` in src/lib/quota-windows.ts, which
+ * also fixes labels already ingested.
+ */
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party Models";
+
+/** Map a raw Antigravity group name onto its display name; others pass through. */
+export function antigravityGroupDisplayName(name) {
+  if (typeof name !== "string") return name;
+  return /^\s*claude\s*(?:and|&|\/|\+|,)\s*gpt(?:[\s-]*models?)?\s*$/i.test(name)
+    ? ANTIGRAVITY_THIRD_PARTY_LABEL
+    : name;
+}
+
 /** Clamp to a sane 0-100 percentage, or null when the input is not a number. */
 export function clampPercent(value) {
   const n = Number(value);

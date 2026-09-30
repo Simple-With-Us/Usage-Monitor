@@ -79,6 +79,10 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   skip target when `via === "antigravity"`; an exhausted Claude or Codex plan
   window never emits one.  The response is additive-only -- iOS and BotFleet read
   `windows` and `skipModelTypes`, which keep every field they have had.
+  Antigravity's non-Gemini pool is named "Claude and GPT models" by the CLI and
+  displayed as "Third-Party Models" (collectors emit it, `projectQuotaWindows`
+  also maps already-ingested labels; raw group names, bucket ids and
+  `metadata.modelGroup` stay as the CLI reported them).
   `windows[]` also carries `providerKey` / `providerLabel` / `via`, and the body
   carries `providerGroups` with one entry per provider including the expected
   providers that have reported nothing yet.

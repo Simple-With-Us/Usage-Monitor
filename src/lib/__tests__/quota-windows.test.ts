@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ANTIGRAVITY_THIRD_PARTY_LABEL,
+  antigravityDisplayLabel,
   projectQuotaWindows,
   quotaProviderKey,
   quotaProviderLabel,
@@ -112,7 +114,7 @@ describe("provider grouping", () => {
   const events = [
     {
       provider: "google-antigravity",
-      label: "Claude and GPT models",
+      label: "Third-Party Models",
       credits: 42,
       limit: 100,
       occurredAt: "2026-09-12T12:00:00.000Z",
@@ -151,8 +153,9 @@ describe("provider grouping", () => {
     expect(anthropic?.via).toBeNull();
 
     const antigravity = result.windows.find((row) => row.provider === "google-antigravity");
-    // Antigravity's own routing bucket is named after Claude and GPT.  It is
-    // NOT the user's Claude plan, so it must be marked.
+    // Antigravity's own routing bucket holds Claude and GPT models (shown as
+    // "Third-Party Models").  It is NOT the user's Claude plan, so it must be
+    // marked.
     expect(antigravity?.providerLabel).toBe("Antigravity");
     expect(antigravity?.via).toBe("antigravity");
   });
@@ -215,11 +218,11 @@ describe("provider grouping", () => {
     expect(result.skipModelTypes).toEqual([]);
   });
 
-  it("emits group skip targets for Antigravity Claude/GPT and Gemini buckets without modelId", () => {
+  it("emits group skip targets for Antigravity Third-Party and Gemini buckets without modelId", () => {
     const result = projectQuotaWindows([
       {
         provider: "google-antigravity",
-        label: "Claude and GPT models",
+        label: "Third-Party Models",
         credits: 0,
         limit: 100,
         occurredAt: "2026-09-12T12:00:00.000Z",
@@ -309,5 +312,81 @@ describe("provider grouping", () => {
     const healthy = result.windows.find((row) => row.modelId === "gemini-3.1-pro-high");
     expect(healthy?.skip).toBe(false);
     expect(healthy?.skipReason).toBeNull();
+  });
+});
+
+describe("Antigravity third-party pool display label", () => {
+  const base = {
+    provider: "google-antigravity",
+    credits: 40,
+    limit: 100,
+    occurredAt: "2026-09-12T12:00:00.000Z",
+  };
+
+  it("uses Third-Party Models as the display name", () => {
+    expect(ANTIGRAVITY_THIRD_PARTY_LABEL).toBe("Third-Party Models");
+  });
+
+  it("maps the legacy Claude and GPT label variants and keeps the window suffix", () => {
+    expect(antigravityDisplayLabel("Claude and GPT models")).toBe("Third-Party Models");
+    expect(antigravityDisplayLabel("Claude and GPT models (weekly)")).toBe(
+      "Third-Party Models (weekly)",
+    );
+    expect(antigravityDisplayLabel("Claude and GPT models (5h)")).toBe("Third-Party Models (5h)");
+    expect(antigravityDisplayLabel("Claude & GPT models (5h)")).toBe("Third-Party Models (5h)");
+    expect(antigravityDisplayLabel("claude/gpt")).toBe("Third-Party Models");
+    expect(antigravityDisplayLabel("Claude and GPT (weekly)")).toBe("Third-Party Models (weekly)");
+  });
+
+  it("passes every other label through untouched", () => {
+    expect(antigravityDisplayLabel("Third-Party Models (5h)")).toBe("Third-Party Models (5h)");
+    expect(antigravityDisplayLabel("Gemini Models (weekly)")).toBe("Gemini Models (weekly)");
+    expect(antigravityDisplayLabel("Claude Opus 4.6 (Thinking)")).toBe("Claude Opus 4.6 (Thinking)");
+    expect(antigravityDisplayLabel("Claude and GPT-OSS")).toBe("Claude and GPT-OSS");
+    expect(antigravityDisplayLabel(null)).toBeNull();
+    expect(antigravityDisplayLabel(undefined)).toBeUndefined();
+  });
+
+  it("shows already-ingested legacy labels as Third-Party Models without touching the stored event", () => {
+    const stored = {
+      ...base,
+      label: "Claude and GPT models (weekly)",
+      metadata: { bucketId: "3p-weekly", quotaWindow: "weekly", modelGroup: "Claude and GPT models" },
+    };
+    const result = projectQuotaWindows([stored]);
+    expect(result.windows[0]?.label).toBe("Third-Party Models (weekly)");
+    // The stored row and its raw group name are display-mapped, never rewritten.
+    expect(stored.label).toBe("Claude and GPT models (weekly)");
+    expect(stored.metadata.modelGroup).toBe("Claude and GPT models");
+    expect(result.windows[0]?.id).toBe("3p-weekly");
+  });
+
+  it("collapses a legacy and a new reading of one label-keyed series onto the newest", () => {
+    const result = projectQuotaWindows([
+      { ...base, label: "Third-Party Models (5h)", credits: 70, occurredAt: "2026-09-12T12:00:00.000Z" },
+      { ...base, label: "Claude and GPT models (5h)", credits: 10, occurredAt: "2026-09-12T08:00:00.000Z" },
+    ]);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.label).toBe("Third-Party Models (5h)");
+    expect(result.windows[0]?.remainingPercent).toBe(70);
+  });
+
+  it("uses the display label in skipReason and still emits Claude/GPT skip targets", () => {
+    for (const label of ["Claude and GPT models", "Third-Party Models"]) {
+      const result = projectQuotaWindows([{ ...base, label, credits: 0 }]);
+      expect(result.windows[0]?.label).toBe("Third-Party Models");
+      expect(result.windows[0]?.skipReason).toBe("Third-Party Models remaining 0%");
+      const models = result.skipModelTypes.map((row) => row.model);
+      expect(models).toContain("claude-opus-4-6-thinking");
+      expect(models).toContain("gpt-oss-120b-medium");
+      expect(models.some((model) => model.startsWith("gemini"))).toBe(false);
+    }
+  });
+
+  it("does not rewrite the same label on another provider's window", () => {
+    const result = projectQuotaWindows([
+      { ...base, provider: "anthropic", label: "Claude and GPT models", metadata: { bucketId: "x" } },
+    ]);
+    expect(result.windows[0]?.label).toBe("Claude and GPT models");
   });
 });
