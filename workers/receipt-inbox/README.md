@@ -44,6 +44,12 @@ Required public intake Worker secrets:
   rule below is confirmed.
 - `RECEIPT_FALLBACK_ADDRESS` — a private, Cloudflare-verified destination. The
   Worker forwards each admitted original here before parsing or storage work.
+- `RECEIPT_NO_FORWARD_LOCAL_PART` — optional reserved local-part on
+  `receipts.jays.services` whose intake is filed **without** fallback
+  forwarding. Use it for agent-forwarded originals, where the forwarder already
+  holds a copy and a forwarded duplicate would only add noise to the owner's
+  mailbox. Keep the value a Worker secret and out of the repo; when unset, all
+  intake forwards as before.
 
 Required private lifecycle-auditor Worker secrets:
 
@@ -70,6 +76,9 @@ npm exec -- wrangler secret put RECEIPT_INBOX_EVIDENCE_TOKEN --config workers/re
 npm exec -- wrangler secret put RECEIPT_INBOX_ADDRESS --config workers/receipt-inbox/wrangler.jsonc
 npm exec -- wrangler secret put RECEIPT_INBOX_RETENTION_ACK --config workers/receipt-inbox/wrangler.jsonc
 npm exec -- wrangler secret put RECEIPT_FALLBACK_ADDRESS --config workers/receipt-inbox/wrangler.jsonc
+# Optional: reserved local-part that files without fallback forwarding
+# (agent-forwarded originals). Keep the value out of the repo.
+npm exec -- wrangler secret put RECEIPT_NO_FORWARD_LOCAL_PART --config workers/receipt-inbox/wrangler.jsonc
 npm exec -- wrangler secret put CLOUDFLARE_ACCOUNT_ID --config workers/receipt-lifecycle-auditor/wrangler.jsonc
 npm exec -- wrangler secret put RECEIPT_LIFECYCLE_AUDIT_TOKEN --config workers/receipt-lifecycle-auditor/wrangler.jsonc
 npm run receipt-inbox:deploy

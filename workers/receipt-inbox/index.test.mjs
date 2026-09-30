@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleEmail, handleFetch, inspectAttachments, isDedicatedReceiptAddress, isReceiptInboxAddress, ReceiptInboxIndex, senderAuthentication, validateLifecycleRules } from "./src/index.mjs";
+import { handleEmail, handleFetch, inspectAttachments, isDedicatedReceiptAddress, isNoForwardRecipient, isReceiptInboxAddress, ReceiptInboxIndex, senderAuthentication, validateLifecycleRules } from "./src/index.mjs";
 
 if (typeof crypto.subtle.timingSafeEqual !== "function") {
   Object.defineProperty(crypto.subtle, "timingSafeEqual", {
@@ -287,6 +287,66 @@ describe("receipt inbox email worker", () => {
     });
     await expect(handleEmail(fallbackFailure, env)).rejects.toThrow("simulated fallback failure");
     expect(rawRead).toBe(false);
+  });
+
+  it("matches the no-forward local-part case-insensitively and ignores other recipients", () => {
+    expect(isNoForwardRecipient("filing-only@receipts.jays.services", "filing-only")).toBe(true);
+    expect(isNoForwardRecipient("FILING-ONLY@receipts.jays.services", "filing-only")).toBe(true);
+    expect(isNoForwardRecipient("other@receipts.jays.services", "filing-only")).toBe(false);
+    expect(isNoForwardRecipient("filing-only@receipts.jays.services", "")).toBe(false);
+    expect(isNoForwardRecipient("filing-only@receipts.jays.services", "   ")).toBe(false);
+    expect(isNoForwardRecipient("filing-only@receipts.jays.services", undefined)).toBe(false);
+    expect(isNoForwardRecipient(undefined, "filing-only")).toBe(false);
+  });
+
+  it("files no-forward intake without fallback forwarding or fallback configuration", async () => {
+    const { env } = createEnvironment();
+    env.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    const message = receiptMessage(rawReceipt("no-forward receipt"), {
+      to: "filing-only@receipts.jays.services",
+    });
+    await handleEmail(message, env);
+    expect(message.forwardedTo).toBeUndefined();
+    expect(message.rejected).toBeUndefined();
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+    const summary = await handleFetch(new Request("https://receipt-inbox.jays.services/v1/receipts/summary", {
+      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+    }), env).then((response) => response.json());
+    expect(summary.items).toHaveLength(1);
+    expect(summary.items[0].forwardedToFallback).toBe(false);
+
+    // No-forward intake does not require the fallback destination either.
+    const { env: envNoFallback } = createEnvironment();
+    envNoFallback.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    delete envNoFallback.RECEIPT_FALLBACK_ADDRESS;
+    const messageNoFallback = receiptMessage(rawReceipt("no-forward receipt"), {
+      to: "FILING-ONLY@receipts.jays.services",
+    });
+    await handleEmail(messageNoFallback, envNoFallback);
+    expect(messageNoFallback.forwardedTo).toBeUndefined();
+    expect(messageNoFallback.rejected).toBeUndefined();
+    expect(envNoFallback.RECEIPTS_BUCKET.objects.size).toBe(1);
+
+    // The normal path still forwards.
+    const { env: envNormal } = createEnvironment();
+    const normal = receiptMessage(rawReceipt("normal receipt"));
+    await handleEmail(normal, envNormal);
+    expect(normal.forwardedTo).toBe("socratic.trade@jays.services");
+  });
+
+  it("reports healthy on /health for no-forward-only deployments", async () => {
+    const { env } = createEnvironment();
+    env.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    delete env.RECEIPT_FALLBACK_ADDRESS;
+    const health = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
+      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+    }), env).then((response) => response.json());
+    expect(health.ok).toBe(true);
+
+    // Normal recipients are still rejected without a fallback.
+    const normal = receiptMessage(rawReceipt("normal receipt"));
+    await handleEmail(normal, env);
+    expect(normal.rejected).toBe("Receipt fallback is not configured");
   });
 
   it("recovers a pending reservation after an R2 failure instead of suppressing the retry", async () => {
