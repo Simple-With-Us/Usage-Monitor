@@ -165,6 +165,21 @@ export function isDedicatedReceiptAddress(value) {
   return isReceiptInboxAddress(value);
 }
 
+// Optional no-forward intake: when the recipient's local-part matches the
+// configured RECEIPT_NO_FORWARD_LOCAL_PART (a Worker secret, never logged),
+// the message is filed without fallback forwarding. This is the path for
+// agent-forwarded originals, where the forwarder already holds a copy and a
+// forwarded duplicate would only add noise to the owner's mailbox. The value
+// is env-configured so the reserved local-part never appears in the repo.
+export function isNoForwardRecipient(value, noForwardLocalPart) {
+  if (typeof value !== "string" || typeof noForwardLocalPart !== "string") return false;
+  const configured = noForwardLocalPart.trim().toLowerCase();
+  if (!configured) return false;
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return false;
+  return value.slice(0, at).trim().toLowerCase() === configured;
+}
+
 function evidenceKey(id) {
   return `evidence/${id}.eml`;
 }
@@ -223,10 +238,14 @@ export async function handleEmail(message, env, _ctx) {
     message.setReject("Receipt evidence retention is not configured");
     return;
   }
+  // No-forward intake (agent-forwarded originals) files without fallback
+  // forwarding, so it never needs the fallback destination configured.
+  const noForward = isNoForwardRecipient(message.to, env.RECEIPT_NO_FORWARD_LOCAL_PART);
   if (
-    typeof env.RECEIPT_FALLBACK_ADDRESS !== "string"
-    || !/^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
-    || typeof message.forward !== "function"
+    !noForward
+    && (typeof env.RECEIPT_FALLBACK_ADDRESS !== "string"
+      || !/^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
+      || typeof message.forward !== "function")
   ) {
     message.setReject("Receipt fallback is not configured");
     return;
@@ -257,12 +276,18 @@ export async function handleEmail(message, env, _ctx) {
 
   // Cloudflare does not promise automatic retries for Email Worker exceptions.
   // Preserve every admitted original at a verified private destination before
-  // parsing, R2, or lifecycle checks can fail.
-  await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
+  // parsing, R2, or lifecycle checks can fail. No-forward intake skips this:
+  // the forwarder already holds the original and is the backstop if storage
+  // fails below.
+  if (!noForward) {
+    await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
+  }
 
-  const ready = await readiness(env);
+  const ready = await readiness(env, { requireFallback: !noForward });
   if (!ready.ready) {
-    throw new Error("Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback");
+    throw new Error(noForward
+      ? "Receipt inbox storage or lifecycle readiness is unavailable"
+      : "Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback");
   }
 
   const raw = await new Response(message.raw).arrayBuffer();
@@ -310,6 +335,7 @@ export async function handleEmail(message, env, _ctx) {
     receivedAt,
     senderDomain: senderDomain(message.from),
     senderAuthentication: senderAuthentication(),
+    forwardedToFallback: !noForward,
     rawSizeBytes: raw.byteLength,
     attachmentCount: attachments.attachmentCount,
     supportedAttachmentCount: attachments.supportedAttachmentCount,
@@ -364,7 +390,7 @@ export async function storeAndCommitEvidence(env, id, raw) {
   await indexRequest(env, `/commit/${id}`, { method: "POST" });
 }
 
-async function hasValidConfiguration(env) {
+async function hasValidConfiguration(env, { requireFallback = true } = {}) {
   const structurallyValid = isReceiptInboxAddress(env.RECEIPT_INBOX_ADDRESS)
     && typeof env.RECEIPT_INBOX_IDENTITY_KEY === "string"
     && env.RECEIPT_INBOX_IDENTITY_KEY.length >= 32
@@ -372,8 +398,9 @@ async function hasValidConfiguration(env) {
     && env.RECEIPT_INBOX_READ_TOKEN.length >= 32
     && typeof env.RECEIPT_INBOX_EVIDENCE_TOKEN === "string"
     && env.RECEIPT_INBOX_EVIDENCE_TOKEN.length >= 32
-    && typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
-    && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
+    && (!requireFallback
+      || (typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
+        && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)))
     && typeof env.LIFECYCLE_AUDITOR?.fetch === "function"
     && env.RECEIPT_INBOX_RETENTION_ACK === RETENTION_ACK;
   if (!structurallyValid) return false;
@@ -388,8 +415,8 @@ async function hasValidConfiguration(env) {
   return tokensDistinct;
 }
 
-async function readiness(env) {
-  if (!(await hasValidConfiguration(env))) return { ready: false, reason: "invalid_configuration" };
+async function readiness(env, { requireFallback = true } = {}) {
+  if (!(await hasValidConfiguration(env, { requireFallback }))) return { ready: false, reason: "invalid_configuration" };
   try {
     const lifecycle = await ensureLifecycleAudit(env);
     if (!lifecycle.ok) return { ready: false, reason: "lifecycle_unverified" };
@@ -724,6 +751,7 @@ export class ReceiptInboxIndex {
         expenseDate: item.expenseDate || null,
         dueDate: item.dueDate || null,
         classificationAction: item.classificationAction || null,
+        forwardedToFallback: item.forwardedToFallback !== false,
         }));
       return json({
         configured: true,
