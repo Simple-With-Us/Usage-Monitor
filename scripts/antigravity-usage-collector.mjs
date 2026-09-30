@@ -51,7 +51,8 @@
 //     and an explicit window kind. `response` is only a rendered view of it,
 //     and is parsed solely as a fallback for CLI versions that omit `command`.
 //  2. Quota is NOT per model. Antigravity meters per model *group* ("Gemini
-//     Models", "Claude and GPT models"), and each group has two independent
+//     Models", "Claude and GPT models" -- displayed as "Third-Party Models",
+//     see antigravityGroupDisplayName), and each group has two independent
 //     windows — weekly and 5h. So one reading is four series, and the series
 //     identity is (group, bucket), never the group alone.
 //  3. `usage` in the envelope is the token cost of running THIS CLI
@@ -65,6 +66,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { antigravityGroupDisplayName } from "./lib/quota-event.mjs";
 import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
 
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -208,7 +210,9 @@ function parseUsageCommandGroups(command) {
 
       records.push({
         seriesKey,
-        label: `${groupName ?? "Antigravity"} (${window ?? bucketName ?? "quota"})`,
+        // Display label only: the raw group name stays in `group` (stored as
+        // metadata.modelGroup) and in `seriesKey`, so event ids do not move.
+        label: `${antigravityGroupDisplayName(groupName) ?? "Antigravity"} (${window ?? bucketName ?? "quota"})`,
         group: groupName,
         bucketId,
         window: window ?? bucketName,
@@ -310,7 +314,9 @@ function parseUsageResponseText(responseText) {
 
     records.push({
       seriesKey: window ? `${name}|${window}` : name,
-      label: window ? `${name} (${window})` : name,
+      label: window
+        ? `${antigravityGroupDisplayName(name)} (${window})`
+        : antigravityGroupDisplayName(name),
       group,
       window,
       percentRemaining,

@@ -24,8 +24,9 @@ export interface QuotaWindow {
   providerLabel: string;
   /**
    * Set to "antigravity" when the window comes from Antigravity's own routing
-   * buckets rather than the named vendor's subscription.  Antigravity reports a
-   * bucket called "Claude and GPT models"; that is NOT the user's Claude plan.
+   * buckets rather than the named vendor's subscription.  Antigravity's CLI
+   * names its non-Gemini pool "Claude and GPT models" (shown as "Third-Party
+   * Models", see antigravityDisplayLabel); that is NOT the user's Claude plan.
    */
   via: string | null;
   sourceApp: string | null;
@@ -131,6 +132,32 @@ export function quotaProviderVia(provider: string): string | null {
   return quotaProviderKey(provider) === "google-antigravity" ? "antigravity" : null;
 }
 
+/**
+ * Display name for Antigravity's shared non-Gemini model pool.  The CLI calls
+ * the pool "Claude and GPT models"; that raw name is still what the collector
+ * stores in `metadata.modelGroup` and what older ingested events carry in
+ * `label`, so it is only ever rewritten at display time.  Mirrors
+ * `antigravityGroupDisplayName` in scripts/lib/quota-event.mjs and
+ * `AntigravityQuotaGroups` in the macOS app.
+ */
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party Models";
+
+// "Claude and GPT models", "Claude & GPT models", "Claude/GPT", ... as a
+// label prefix.  The lookahead stops it rewriting a longer model name such as
+// "Claude and GPT-OSS", and leaves a trailing "(weekly)" / "(5h)" intact.
+const LEGACY_THIRD_PARTY_LABEL =
+  /^\s*claude\s*(?:and|&|\/|\+|,)\s*gpt(?:[\s-]*models?)?(?=\s|\(|$)/i;
+
+/**
+ * Map the legacy Antigravity "Claude and GPT models" label (new or already
+ * ingested) onto "Third-Party Models".  Any other label passes through.
+ * Callers gate this on the window being an Antigravity routing bucket.
+ */
+export function antigravityDisplayLabel<T extends string | null | undefined>(label: T): T {
+  if (typeof label !== "string") return label;
+  return label.replace(LEGACY_THIRD_PARTY_LABEL, ANTIGRAVITY_THIRD_PARTY_LABEL) as T;
+}
+
 const CLAUDE_GPT_MODELS = [
   "claude-opus-4-6-thinking",
   "claude-sonnet-4-6",
@@ -195,7 +222,14 @@ function skipTargetsFor(window: QuotaWindow): SkipModelType[] {
     return [{ instanceId: ANTIGRAVITY_INSTANCE, model: window.modelId }];
   }
   const group = `${window.label} ${window.provider}`.toLowerCase();
-  if (group.includes("claude") || group.includes("gpt")) {
+  // "third-party" is the display label for this pool; claude/gpt still match
+  // the raw CLI name and any per-model label.
+  if (
+    group.includes("third-party") ||
+    group.includes("third party") ||
+    group.includes("claude") ||
+    group.includes("gpt")
+  ) {
     return CLAUDE_GPT_MODELS.map((model) => ({ instanceId: ANTIGRAVITY_INSTANCE, model }));
   }
   if (group.includes("gemini")) {
@@ -213,7 +247,15 @@ export function projectQuotaWindows(
     const meta = asRecord(event.metadata);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
-    const series = modelId ?? bucketId ?? `${event.provider}:${event.label ?? ""}`;
+    // Display label only: stored events keep their original label, so rows
+    // ingested before the rename read "Third-Party Models" too.  Normalized
+    // before the series key so an old and a new reading of the same bucket
+    // still collapse onto one series.
+    const label =
+      quotaProviderVia(event.provider) === "antigravity"
+        ? antigravityDisplayLabel(event.label)
+        : event.label;
+    const series = modelId ?? bucketId ?? `${event.provider}:${label ?? ""}`;
     if (latest.has(series)) continue;
 
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
@@ -234,7 +276,7 @@ export function projectQuotaWindows(
       sourceApp: event.service ?? null,
       modelId,
       modelType: modelId,
-      label: event.label ?? modelId ?? event.provider,
+      label: label ?? modelId ?? event.provider,
       remainingPercent,
       remainingUnknown,
       isExhausted,
@@ -244,7 +286,7 @@ export function projectQuotaWindows(
       skip: status === "exhausted",
       skipReason:
         status === "exhausted"
-          ? `${event.label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
+          ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
           : null,
       occurredAt: iso(event.occurredAt),
       source: asString(meta.source),

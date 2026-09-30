@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { Gauge, Clock } from "lucide-react";
 import {
   EXPECTED_QUOTA_PROVIDERS,
+  antigravityDisplayLabel,
   quotaProviderKey,
   quotaProviderLabel,
   quotaProviderVia,
@@ -41,9 +42,10 @@ export interface NormalizedGroup {
 /**
  * Provider row logos keyed by canonical providerKey — NEVER by matching text
  * inside a window's label. Antigravity routes several vendors' models under
- * its own subscription (its "Claude and GPT models" bucket is not the user's
- * Claude plan), so the per-row logo must come from the group's providerKey
- * alone, not from anything the window happens to be labelled.
+ * its own subscription (its non-Gemini pool, which the Antigravity CLI calls
+ * "Claude and GPT models" and this card shows as "Third-Party Models", is not
+ * the user's Claude plan), so the per-row logo must come from the group's
+ * providerKey alone, not from anything the window happens to be labelled.
  */
 const PROVIDER_LOGOS: Record<string, string> = {
   anthropic: "/logos/claude.svg",
@@ -91,15 +93,20 @@ function normalizeWindow(
   const rec = asRecord(raw);
   const remainingPercent = asNumber(rec.remainingPercent);
   const remainingUnknown = rec.remainingUnknown === true || remainingPercent == null;
+  const via = asString(rec.via) ?? fallbackVia;
+  const label = asString(rec.label) ?? "Quota window";
   return {
     id: asString(rec.id) ?? fallbackId,
-    label: asString(rec.label) ?? "Quota window",
+    // The API already maps Antigravity's "Claude and GPT models" bucket to
+    // "Third-Party Models"; repeating it here keeps an older cached or
+    // proxied response from showing the legacy name.
+    label: via === "antigravity" ? antigravityDisplayLabel(label) : label,
     window: asString(rec.window),
     remainingPercent,
     remainingUnknown,
     status: normalizeStatus(rec.status, remainingUnknown),
     resetAt: asString(rec.resetAt),
-    via: asString(rec.via) ?? fallbackVia,
+    via,
   };
 }
 

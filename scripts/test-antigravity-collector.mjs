@@ -125,6 +125,35 @@ check("structured command payload is the preferred source", () => {
   assertEqual(records[1].window, "5h", "the second bucket is the 5h window");
 });
 
+check("the Claude and GPT group is displayed as Third-Party Models", () => {
+  const records = extractQuotaRecords(REAL_ENVELOPE);
+  assertEqual(records[2].label, "Third-Party Models (weekly)", "structured label for the weekly bucket");
+  assertEqual(records[3].label, "Third-Party Models (5h)", "structured label for the 5h bucket");
+  // Only the display label moves: the raw CLI group, bucket id and series key
+  // stay as the CLI reported them, so stored data and eventIds do not change.
+  assertEqual(records[2].group, "Claude and GPT models", "raw group name is kept");
+  assertEqual(records[2].seriesKey, "3p-weekly", "series key is still the bucket id");
+  const events = buildEvents(REAL_ENVELOPE, OCCURRED_AT);
+  assertEqual(events[2].label, "Third-Party Models (weekly)", "event label");
+  assertEqual(events[3].label, "Third-Party Models (5h)", "event label");
+  assertEqual(events[2].metadata.modelGroup, "Claude and GPT models", "raw group name in metadata");
+  assertEqual(events[2].metadata.bucketId, "3p-weekly", "bucket id unchanged");
+  assertEqual(events[0].label, "Gemini Models (weekly)", "Gemini label is unchanged");
+  for (const event of events) {
+    assert(!/Claude and GPT/.test(event.label), `${event.label}: legacy label leaked`);
+  }
+});
+
+check("the rendered-text fallback shows the same Third-Party Models label", () => {
+  const { command, ...withoutCommand } = REAL_ENVELOPE;
+  void command;
+  const records = extractQuotaRecords(withoutCommand);
+  assertEqual(records[2].label, "Third-Party Models (Weekly Limit Remaining)", "fallback label");
+  assertEqual(records[2].group, "Claude and GPT models", "raw group name is kept");
+  assertEqual(records[2].seriesKey, "Claude and GPT models|Weekly Limit Remaining", "series key is unchanged");
+  assertEqual(records[0].label, "Gemini Models (Weekly Limit Remaining)", "Gemini label is unchanged");
+});
+
 check("quota is metered per group and window, never per group alone", () => {
   const records = extractQuotaRecords(REAL_ENVELOPE);
   const groups = new Set(records.map((r) => r.group));

@@ -46,6 +46,7 @@ import {
   sessionKeyFor,
   walkFiles,
 } from "./lib/run-session-token-collector.mjs";
+import { antigravityGroupDisplayName } from "./lib/quota-event.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -81,7 +82,7 @@ async function collectAntigravityQuota() {
           eventId: `agy-quota:${bucket.id}:${bucket.reset_time}`,
           provider: "google-antigravity",
           service: "antigravity-cli",
-          label: `${group.name} (${bucket.window || "window"})`,
+          label: `${antigravityGroupDisplayName(group.name)} (${bucket.window || "window"})`,
           metricType: "quota",
           billingMode: "actual",
           confidence: "actual",
