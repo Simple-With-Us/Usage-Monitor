@@ -334,6 +334,21 @@ describe("receipt inbox email worker", () => {
     expect(normal.forwardedTo).toBe("socratic.trade@jays.services");
   });
 
+  it("reports healthy on /health for no-forward-only deployments", async () => {
+    const { env } = createEnvironment();
+    env.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    delete env.RECEIPT_FALLBACK_ADDRESS;
+    const health = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
+      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+    }), env).then((response) => response.json());
+    expect(health.ok).toBe(true);
+
+    // Normal recipients are still rejected without a fallback.
+    const normal = receiptMessage(rawReceipt("normal receipt"));
+    await handleEmail(normal, env);
+    expect(normal.rejected).toBe("Receipt fallback is not configured");
+  });
+
   it("recovers a pending reservation after an R2 failure instead of suppressing the retry", async () => {
     const { env, storage } = createEnvironment();
     env.RECEIPTS_BUCKET.failNextPut = true;

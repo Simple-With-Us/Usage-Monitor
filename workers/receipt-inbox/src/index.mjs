@@ -283,7 +283,7 @@ export async function handleEmail(message, env, _ctx) {
     await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
   }
 
-  const ready = await readiness(env, { requireFallback: !noForward });
+  const ready = await readiness(env);
   if (!ready.ready) {
     throw new Error(noForward
       ? "Receipt inbox storage or lifecycle readiness is unavailable"
@@ -390,7 +390,15 @@ export async function storeAndCommitEvidence(env, id, raw) {
   await indexRequest(env, `/commit/${id}`, { method: "POST" });
 }
 
-async function hasValidConfiguration(env, { requireFallback = true } = {}) {
+async function hasValidConfiguration(env) {
+  // A deployment is valid with a fallback address (normal intake forwards
+  // before storing) or with no-forward intake configured (file-only).  The
+  // per-recipient gate in handleEmail still rejects normal recipients when
+  // no fallback is configured.
+  const fallbackValid = typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
+    && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS);
+  const noForwardConfigured = typeof env.RECEIPT_NO_FORWARD_LOCAL_PART === "string"
+    && env.RECEIPT_NO_FORWARD_LOCAL_PART.trim() !== "";
   const structurallyValid = isReceiptInboxAddress(env.RECEIPT_INBOX_ADDRESS)
     && typeof env.RECEIPT_INBOX_IDENTITY_KEY === "string"
     && env.RECEIPT_INBOX_IDENTITY_KEY.length >= 32
@@ -398,9 +406,7 @@ async function hasValidConfiguration(env, { requireFallback = true } = {}) {
     && env.RECEIPT_INBOX_READ_TOKEN.length >= 32
     && typeof env.RECEIPT_INBOX_EVIDENCE_TOKEN === "string"
     && env.RECEIPT_INBOX_EVIDENCE_TOKEN.length >= 32
-    && (!requireFallback
-      || (typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
-        && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)))
+    && (fallbackValid || noForwardConfigured)
     && typeof env.LIFECYCLE_AUDITOR?.fetch === "function"
     && env.RECEIPT_INBOX_RETENTION_ACK === RETENTION_ACK;
   if (!structurallyValid) return false;
@@ -415,8 +421,8 @@ async function hasValidConfiguration(env, { requireFallback = true } = {}) {
   return tokensDistinct;
 }
 
-async function readiness(env, { requireFallback = true } = {}) {
-  if (!(await hasValidConfiguration(env, { requireFallback }))) return { ready: false, reason: "invalid_configuration" };
+async function readiness(env) {
+  if (!(await hasValidConfiguration(env))) return { ready: false, reason: "invalid_configuration" };
   try {
     const lifecycle = await ensureLifecycleAudit(env);
     if (!lifecycle.ok) return { ready: false, reason: "lifecycle_unverified" };
