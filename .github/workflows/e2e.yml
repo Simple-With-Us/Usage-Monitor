@@ -24,7 +24,7 @@ jobs:
       SESSION_SECRET: visual-test-session-secret-not-production
       E2E_TEST_PASSWORD: visual-test-password
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
