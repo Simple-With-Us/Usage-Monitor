@@ -168,6 +168,34 @@ describe("projectQuotaWindows", () => {
     ]);
   });
 
+  it("keeps attributed ids distinct from arbitrary legacy bucket ids", () => {
+    const legacyId = JSON.stringify(["machine", "bucket"]);
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
+      },
+      {
+        provider: "anthropic",
+        label: "legacy window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-10-03T11:00:00.000Z",
+        metadata: { bucketId: legacyId },
+      },
+    ]);
+
+    expect(result.windows.map((window) => window.id)).toEqual([
+      JSON.stringify(["producer", "machine", "bucket", 0]),
+      legacyId,
+    ]);
+    expect(new Set(result.windows.map((window) => window.id)).size).toBe(2);
+  });
+
   it("retains legacy ids and omits provenance fields when metadata has no producer identity", () => {
     const result = projectQuotaWindows([
       {
