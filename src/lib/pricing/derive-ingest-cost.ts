@@ -35,6 +35,7 @@ import {
   getModelPricing,
   PRICING_SNAPSHOT_META,
 } from "./model-pricing";
+import { appSettings } from "@/lib/app-settings";
 
 export const DERIVED_COST_METADATA_KEYS = [
   "_derivedCostUsd",
@@ -44,7 +45,7 @@ export const DERIVED_COST_METADATA_KEYS = [
 ] as const;
 
 export function ingestCostDerivationEnabled(): boolean {
-  const raw = process.env.INGEST_COST_DERIVATION_ENABLED?.trim().toLowerCase();
+  const raw = appSettings.get("INGEST_COST_DERIVATION_ENABLED")?.trim().toLowerCase();
   return raw === "true" || raw === "1" || raw === "yes";
 }
 

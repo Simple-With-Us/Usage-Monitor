@@ -11,6 +11,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
+import { appSettings } from "@/lib/app-settings";
 
 export interface SchedulerRunSummary {
   total: number;
@@ -569,7 +570,7 @@ export function getStartupRuntimeStatus(): {
 const DEFAULT_DISK_WARN_FREE_BYTES = 5 * 1024 * 1024 * 1024;
 
 function diskWarnFreeBytes(): number {
-  const configured = Number(process.env.READY_DISK_WARN_FREE_BYTES);
+  const configured = Number(appSettings.get("READY_DISK_WARN_FREE_BYTES"));
   return Number.isFinite(configured) && configured >= 0
     ? configured
     : DEFAULT_DISK_WARN_FREE_BYTES;

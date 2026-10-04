@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "crypto";
 import type { NextRequest } from "next/server";
+import { appSettings } from "@/lib/app-settings";
 
 // Shared bearer/header parsing for ingest-style routes. Ordinary usage and
 // OTLP use USAGE_INGEST_TOKEN; private-safe billing receipt imports use their
@@ -54,7 +55,7 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
   }
 
   const expected = process.env.USAGE_INGEST_TOKEN?.trim();
-  const requireScoped = process.env.USAGE_INGEST_REQUIRE_SCOPED_TOKENS === "true";
+  const requireScoped = appSettings.get("USAGE_INGEST_REQUIRE_SCOPED_TOKENS") === "true";
   if (expected && !requireScoped && safeEqual(actual, expected)) {
     return {
       credentialId: "unscoped",
@@ -87,7 +88,7 @@ export function isBillingReceiptIngestAuthorized(request: NextRequest): boolean 
  * also forge ingest events with the same secret.
  */
 export function resolveUsageReadToken(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = appSettings.settingsEnv()
 ): string | undefined {
   const read = env.USAGE_READ_TOKEN?.trim();
   if (read) return read;
@@ -109,7 +110,7 @@ export function resolveUsageReadToken(
  * material.
  */
 export function getUsageReadTokenReadiness(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = appSettings.settingsEnv()
 ): {
   required: boolean;
   dedicated: boolean;

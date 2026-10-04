@@ -63,7 +63,7 @@
   "dependencies": {
     "@datadog/browser-logs": "^7.15.0",
     "@datadog/browser-rum": "^7.9.0",
-    "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.7.0",
+    "@jaywedgeworth22/congress-trading-shared": "github:Simple-With-Us/congress-trading-shared#semver:^2.7.1",
     "@prisma/client": "^6.0.0",
     "@sentry/nextjs": "^11.1.0",
     "dd-trace": "^6.17.0",

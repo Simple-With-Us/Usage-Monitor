@@ -1,4 +1,5 @@
 import { adapterHttpAbortStorage } from "@/lib/adapters/helpers";
+import { appSettings } from "@/lib/app-settings";
 import { prisma } from "@/lib/prisma";
 import { fetchProviderUsage } from "@/lib/adapters";
 import { AdapterError, type AdapterErrorCode } from "@/lib/adapters/helpers";
@@ -61,7 +62,7 @@ function assertProviderAttemptCurrent(
 }
 
 function resolveProviderTimeoutMs(): number {
-  const raw = process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_PROVIDER_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROVIDER_TIMEOUT_MS;
