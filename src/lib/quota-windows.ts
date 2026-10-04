@@ -80,6 +80,7 @@ export const EXPECTED_QUOTA_PROVIDERS = [
   "xai",
   "minimax",
   "grok-bot",
+  "muse",
 ] as const;
 
 /** Event `provider` values that should collapse onto one canonical key. */
@@ -101,6 +102,7 @@ const PROVIDER_ALIASES: Record<string, string> = {
   "minimax-code": "minimax",
   "grok-bot": "grok-bot",
   gbu: "grok-bot",
+  muse: "muse",
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -110,6 +112,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   xai: "Grok",
   minimax: "MiniMax",
   "grok-bot": "Grok Bot",
+  muse: "Muse",
 };
 
 /** Collapse an event `provider` onto the key its windows are grouped under. */

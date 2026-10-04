@@ -169,6 +169,7 @@ describe("provider grouping", () => {
       "xai",
       "minimax",
       "grok-bot",
+      "muse",
     ]);
     const byProvider = new Map(result.providerGroups.map((group) => [group.provider, group]));
     expect(byProvider.get("anthropic")?.windows).toHaveLength(1);
