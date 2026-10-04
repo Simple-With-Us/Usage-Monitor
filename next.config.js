@@ -59,8 +59,11 @@ module.exports = nextConfig;
 // SENTRY_AUTH_TOKEN; without it the upload is disabled explicitly (silent,
 // never a build failure). Every existing option and header above is passed
 // through untouched.
+// @sentry/nextjs 11 moved withSentryConfig to the /config entry. The package
+// root is the runtime SDK and does not export it (requiring the root yields
+// undefined, and the call throws "withSentryConfig is not a function").
 if (process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN) {
-  const { withSentryConfig } = require("@sentry/nextjs");
+  const { withSentryConfig } = require("@sentry/nextjs/config");
   module.exports = withSentryConfig(nextConfig, {
     org: process.env.SENTRY_ORG,
     project: process.env.SENTRY_SELF_PROJECT || "usage-monitor",
