@@ -74,23 +74,38 @@ _cpu_from_top() {
   # exiting on the first match.
   top -l 2 -n 0 2>/dev/null \
     | awk -F'[:,]' '/CPU usage/ && /user/ {
+          # macOS prints each value and its label in the SAME field
+          # (" 7.31% user"), so strip the number from the field that matched
+          # the label.  Taking $(i+1) instead reads the NEXT value (sys for
+          # user, idle for sys) and reports sys+idle = 100 - user.
           for (i = 1; i <= NF; i++) {
-            if ($i ~ /user/) u = $(i + 1)
-            if ($i ~ /sys/)  s = $(i + 1)
+            if ($i ~ /user/) { gsub(/[^0-9.]/, "", $i); u = $i }
+            if ($i ~ /sys/)  { gsub(/[^0-9.]/, "", $i); s = $i }
           }
-          gsub(/[^0-9.]/, "", u); gsub(/[^0-9.]/, "", s)
           if (u != "" || s != "") { v = u + s; if (v > 100) v = 100; last = v }
         }
         END { if (last == "") exit 1; printf "%.1f", last }'
 }
 _cpu_from_iostat() {
+  # The `id` (idle) column index depends on the host's /dev/disk* count (3
+  # columns per disk before `us sy id`), so resolve it from the header row
+  # instead of assuming a fixed $12; a wrong index reads the 1m load average
+  # as idle and reports ~97% CPU on a lightly loaded host.
   iostat -w 1 -c 2 2>/dev/null \
-    | awk '/^ *[0-9]/ && NF>11 { idle = $12 }          # 3 disk groups x3 cols, then us sy id
-          END { if (idle == "") exit 1; v = 100 - idle; if (v < 0) v = 0; if (v > 100) v = 100
-                printf "%.1f", v }'
+    | awk 'BEGIN { idcol = 0 }
+           $0 ~ /us[ \t]+sy[ \t]+id/ {
+             for (i = 1; i <= NF; i++) if ($i == "id") { idcol = i; break }
+             next
+           }
+           /^ *[0-9]/ && idcol > 0 { idle = $idcol }
+           END { if (idle == "") exit 1; v = 100 - idle; if (v < 0) v = 0; if (v > 100) v = 100
+                 printf "%.1f", v }'
 }
-CPU_USAGE="$(_cpu_from_top)"
-[ -z "$CPU_USAGE" ] && CPU_USAGE="$(_cpu_from_iostat)"
+# Under `set -euo pipefail` a failing command substitution aborts the whole
+# script, so neutralize each probe's status inside the substitution: a failed
+# probe must fall through to the next fallback, not skip the heartbeat POST.
+CPU_USAGE="$(_cpu_from_top || true)"
+[ -z "$CPU_USAGE" ] && CPU_USAGE="$(_cpu_from_iostat || true)"
 [ -z "$CPU_USAGE" ] && CPU_USAGE=0
 CPU_USAGE="$(printf '%.1f' "$CPU_USAGE" 2>/dev/null || echo 0)"
 
