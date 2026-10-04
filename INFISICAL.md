@@ -23,7 +23,7 @@ Usage-Monitor-specific application of it.
 
 Two delivery paths, one source of truth:
 
-1. **Tunable knobs — runtime loader** (`src/lib/app-settings.ts`, 17 keys).
+1. **Tunable knobs — runtime loader** (`src/lib/app-settings.ts`, 18 keys).
    Loaded at startup into an in-memory cache, refreshed in the background,
    writable by admins with write-through.  The schema (types, bounds, defaults)
    is `APP_SETTING_DEFS` in `src/lib/app-settings.ts`:
@@ -47,6 +47,7 @@ Two delivery paths, one source of truth:
    | `ALERT_DELIVERY_MAX_ATTEMPTS` | int | `3` | Max alert delivery attempts per channel |
    | `ALERT_UNASSIGNED_SPEND_FLOOR_USD` | float | `25` | Unassigned-spend floor for project-budget alerts |
    | `INFISICAL_SETTINGS_REFRESH_MS` | int | `300000` | Background cache refresh interval (restart-applied) |
+   | `PROVIDER_MANIFEST_JSON` | string | `'{"version":"1","providers":[]}'` | Backend-driven provider display registry (key, label, icon hint, sort order, aliases, quota terms) served via `/api/quota-windows` `providerGroups[]`; display/config only, no secrets |
 
    `INFISICAL_SETTINGS_REFRESH_MS` seeds the refresh timer at boot, so a
    change to it takes effect on the next restart — everything else is live

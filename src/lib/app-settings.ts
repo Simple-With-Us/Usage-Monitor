@@ -211,6 +211,15 @@ export const APP_SETTING_DEFS: AppSettingDef[] = [
     description:
       "Background cache refresh interval (ms). Restart-applied: it seeds the refresh timer at boot.",
   },
+  {
+    key: "PROVIDER_MANIFEST_JSON",
+    type: "string",
+    // "No overrides" — an unset knob serves the compiled-in seed manifest
+    // (see DEFAULT_PROVIDER_MANIFEST in src/lib/provider-manifest.ts).
+    defaultValue: '{"version":"1","providers":[]}',
+    description:
+      "Backend-driven provider display registry served via /api/quota-windows' providerGroups[]. Display/config only — no secrets. JSON shape: { version: '1', providers: [{ key, label?, sortOrder?, iconHint?, aliases?, expected?, terms?: { defaultWindowLabel?, via? } }] }. Manifest wins per-field over compiled defaults; malformed JSON falls back to defaults.",
+  },
 ];
 
 const SETTING_DEF_BY_KEY = new Map(APP_SETTING_DEFS.map((d) => [d.key, d]));

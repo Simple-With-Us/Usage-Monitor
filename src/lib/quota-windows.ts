@@ -1,3 +1,11 @@
+import {
+  DEFAULT_PROVIDER_MANIFEST,
+  type ResolvedProviderConfig,
+  type ResolvedProviderManifest,
+  normalizeProviderKey,
+  resolveProviderManifest,
+} from "@/lib/provider-manifest";
+
 export type QuotaWindowStatus = "available" | "near_cap" | "exhausted" | "unknown";
 
 export interface QuotaEventLike {
@@ -18,7 +26,7 @@ export interface SkipModelType {
 export interface QuotaWindow {
   id: string;
   provider: string;
-  /** Canonical provider key the window is grouped under (see PROVIDER_ALIASES). */
+  /** Canonical provider key the window is grouped under (see ResolvedProviderManifest.aliasToKey). */
   providerKey: string;
   /** Human label for the provider, e.g. "Claude".  Additive; safe to ignore. */
   providerLabel: string;
@@ -50,8 +58,16 @@ export interface QuotaProviderGroup {
   provider: string;
   providerLabel: string;
   via: string | null;
-  /** True for the five providers the dashboard always shows a row for. */
+  /** True for the providers the dashboard always shows a row for. */
   expected: boolean;
+  /** Display order (lower first).  Optional; additive. */
+  sortOrder?: number;
+  /** Icon-asset hint.  Optional; apps fall back to a neutral mark when absent. */
+  iconHint?: string;
+  /** Quota-window display terms (only what's not derivable from windows[]). */
+  terms?: {
+    defaultWindowLabel?: string;
+  };
   windows: QuotaWindow[];
 }
 
@@ -63,74 +79,16 @@ export interface QuotaWindowsResponse {
    * Windows grouped by provider, with an entry for every expected provider even
    * when it has reported nothing yet (empty `windows`).  A provider that is
    * missing should be visible, not silently absent.
+   *
+   * `sortOrder`, `iconHint`, and `terms` are sourced from the backend
+   * provider-manifest (PROVIDER_MANIFEST_JSON Infisical knob, merged on top of
+   * compiled defaults).  Apps may use them as a primary display signal so a
+   * new provider can be added with no app release.
    */
   providerGroups: QuotaProviderGroup[];
 }
 
 const ANTIGRAVITY_INSTANCE = "antigravity";
-
-/**
- * Canonical provider keys for subscription quota reporting, in display order.
- * The dashboard renders a row for every one of these, reported or not.
- */
-export const EXPECTED_QUOTA_PROVIDERS = [
-  "anthropic",
-  "openai",
-  "google-antigravity",
-  "xai",
-  "minimax",
-  "grok-bot",
-] as const;
-
-/** Event `provider` values that should collapse onto one canonical key. */
-const PROVIDER_ALIASES: Record<string, string> = {
-  anthropic: "anthropic",
-  "claude-code": "anthropic",
-  claude: "anthropic",
-  openai: "openai",
-  "openai-codex": "openai",
-  codex: "openai",
-  google: "google-antigravity",
-  "google-antigravity": "google-antigravity",
-  antigravity: "google-antigravity",
-  "antigravity-cli": "google-antigravity",
-  xai: "xai",
-  "grok-build": "xai",
-  grok: "xai",
-  minimax: "minimax",
-  "minimax-code": "minimax",
-  "grok-bot": "grok-bot",
-  gbu: "grok-bot",
-};
-
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Claude",
-  openai: "Codex",
-  "google-antigravity": "Antigravity",
-  xai: "Grok",
-  minimax: "MiniMax",
-  "grok-bot": "Grok Bot",
-};
-
-/** Collapse an event `provider` onto the key its windows are grouped under. */
-export function quotaProviderKey(provider: string): string {
-  const raw = String(provider ?? "").trim().toLowerCase();
-  return PROVIDER_ALIASES[raw] ?? raw;
-}
-
-/** Human label for a provider key.  Falls back to the raw slug. */
-export function quotaProviderLabel(provider: string): string {
-  const key = quotaProviderKey(provider);
-  return PROVIDER_LABELS[key] ?? (key || "Unknown");
-}
-
-/**
- * Antigravity routes to several vendors' models under its own subscription, so
- * its buckets must never be presented as the user's Claude or ChatGPT plan.
- */
-export function quotaProviderVia(provider: string): string | null {
-  return quotaProviderKey(provider) === "google-antigravity" ? "antigravity" : null;
-}
 
 /**
  * Display name for Antigravity's shared non-Gemini model pool.  The CLI calls
@@ -238,10 +196,60 @@ function skipTargetsFor(window: QuotaWindow): SkipModelType[] {
   return [];
 }
 
+/**
+ * Compute the Antigravity via marker for a canonical key.  Reads the
+ * resolved manifest so an admin can add a new antigravity-routed provider
+ * via Infisical without a code change.  Falls back to the historical
+ * `google-antigravity` heuristic when the manifest hasn't marked a provider.
+ */
+function viaFor(
+  canonicalKey: string,
+  manifest: ResolvedProviderManifest,
+): string | null {
+  const cfg = manifest.byKey.get(canonicalKey);
+  if (cfg?.terms?.via) return cfg.terms.via;
+  if (canonicalKey === "google-antigravity") return "antigravity";
+  return null;
+}
+
+/** Canonical provider key the window is grouped under. */
+export function quotaProviderKey(
+  provider: string,
+  manifest?: ResolvedProviderManifest,
+): string {
+  const resolved = manifest ?? resolveProviderManifest(null);
+  return normalizeProviderKey(provider, resolved);
+}
+
+/** Human label for a provider key.  Falls back to the raw slug. */
+export function quotaProviderLabel(
+  provider: string,
+  manifest?: ResolvedProviderManifest,
+): string {
+  const resolved = manifest ?? resolveProviderManifest(null);
+  const key = normalizeProviderKey(provider, resolved);
+  const cfg = resolved.byKey.get(key);
+  if (cfg) return cfg.label;
+  return key || "Unknown";
+}
+
+/** Antigravity via marker; backward-compatible public API. */
+export function quotaProviderVia(
+  provider: string,
+  manifest?: ResolvedProviderManifest,
+): string | null {
+  const resolved = manifest ?? resolveProviderManifest(null);
+  const key = normalizeProviderKey(provider, resolved);
+  return viaFor(key, resolved);
+}
+
 export function projectQuotaWindows(
   events: QuotaEventLike[],
   now = new Date(),
+  manifest?: ResolvedProviderManifest,
 ): QuotaWindowsResponse {
+  const resolved = manifest ?? resolveProviderManifest(null);
+
   const latest = new Map<string, QuotaWindow>();
   for (const event of events) {
     const meta = asRecord(event.metadata);
@@ -251,8 +259,9 @@ export function projectQuotaWindows(
     // ingested before the rename read "Third-Party Models" too.  Normalized
     // before the series key so an old and a new reading of the same bucket
     // still collapse onto one series.
+    const eventCanonicalKey = normalizeProviderKey(event.provider, resolved);
     const label =
-      quotaProviderVia(event.provider) === "antigravity"
+      viaFor(eventCanonicalKey, resolved) === "antigravity"
         ? antigravityDisplayLabel(event.label)
         : event.label;
     const series = modelId ?? bucketId ?? `${event.provider}:${label ?? ""}`;
@@ -270,9 +279,12 @@ export function projectQuotaWindows(
     latest.set(series, {
       id: series,
       provider: event.provider,
-      providerKey: quotaProviderKey(event.provider),
-      providerLabel: quotaProviderLabel(event.provider),
-      via: quotaProviderVia(event.provider),
+      providerKey: eventCanonicalKey,
+      providerLabel: (() => {
+        const cfg = resolved.byKey.get(eventCanonicalKey);
+        return cfg?.label ?? (eventCanonicalKey || "Unknown");
+      })(),
+      via: viaFor(eventCanonicalKey, resolved),
       sourceApp: event.service ?? null,
       modelId,
       modelType: modelId,
@@ -309,34 +321,47 @@ export function projectQuotaWindows(
     generatedAt: now.toISOString(),
     windows,
     skipModelTypes,
-    providerGroups: groupWindowsByProvider(windows),
+    providerGroups: groupWindowsByProvider(windows, resolved),
   };
 }
 
 /**
  * Group windows by canonical provider.  Every expected provider gets a group
- * even with no windows, so the dashboard can show "no quota report yet" instead
- * of quietly omitting the provider.
+ * even with no windows, so the dashboard can show "no quota report yet"
+ * instead of quietly omitting the provider.  Carries the backend manifest's
+ * display fields (`sortOrder`, `iconHint`, `terms`) onto each group so apps
+ * can render without hardcoded provider lists.
  */
-export function groupWindowsByProvider(windows: QuotaWindow[]): QuotaProviderGroup[] {
+/**
+ * Canonical provider keys for subscription quota reporting, in display order.
+ * Re-exported for backward compatibility; the live source is the resolved
+ * provider-manifest (see src/lib/provider-manifest.ts).  This array stays the
+ * frozen list of compiled-in defaults so existing callers keep working.
+ */
+export const EXPECTED_QUOTA_PROVIDERS: readonly string[] = Object.freeze(
+  DEFAULT_PROVIDER_MANIFEST.providers.map((p) => p.key),
+);
+
+export function groupWindowsByProvider(
+  windows: QuotaWindow[],
+  manifest?: ResolvedProviderManifest,
+): QuotaProviderGroup[] {
+  const resolved = manifest ?? resolveProviderManifest(null);
+
   const groups = new Map<string, QuotaProviderGroup>();
-  for (const provider of EXPECTED_QUOTA_PROVIDERS) {
-    groups.set(provider, {
-      provider,
-      providerLabel: quotaProviderLabel(provider),
-      via: quotaProviderVia(provider),
-      expected: true,
-      windows: [],
-    });
+  for (const cfg of resolved.providers) {
+    groups.set(cfg.key, manifestGroupFromConfig(cfg));
   }
   for (const window of windows) {
     const key = window.providerKey;
     let group = groups.get(key);
     if (!group) {
+      // A window arrived for a key not in the resolved manifest — surface
+      // it as a non-expected group so the user still sees the data.
       group = {
         provider: key,
-        providerLabel: quotaProviderLabel(key),
-        via: quotaProviderVia(key),
+        providerLabel: window.providerLabel || key,
+        via: window.via,
         expected: false,
         windows: [],
       };
@@ -348,4 +373,20 @@ export function groupWindowsByProvider(windows: QuotaWindow[]): QuotaProviderGro
     group.windows.sort((a, b) => a.label.localeCompare(b.label));
   }
   return [...groups.values()];
+}
+
+function manifestGroupFromConfig(cfg: ResolvedProviderConfig): QuotaProviderGroup {
+  const group: QuotaProviderGroup = {
+    provider: cfg.key,
+    providerLabel: cfg.label,
+    via: cfg.terms?.via ?? (cfg.key === "google-antigravity" ? "antigravity" : null),
+    expected: cfg.expected,
+    sortOrder: cfg.sortOrder,
+    iconHint: cfg.iconHint,
+    windows: [],
+  };
+  if (cfg.terms?.defaultWindowLabel) {
+    group.terms = { defaultWindowLabel: cfg.terms.defaultWindowLabel };
+  }
+  return group;
 }

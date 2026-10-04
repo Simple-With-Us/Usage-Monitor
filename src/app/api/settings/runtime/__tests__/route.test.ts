@@ -97,6 +97,22 @@ describe("PUT /api/settings/runtime", () => {
     expect(process.env.ALERT_MIN_SEVERITY).toBe("critical");
     delete process.env.ALERT_MIN_SEVERITY;
   });
+
+  it("write-through saves PROVIDER_MANIFEST_JSON (env-fallback mode)", async () => {
+    const manifest = JSON.stringify({
+      version: "1",
+      providers: [{ key: "muse", label: "Muse", sortOrder: 100, expected: true }],
+    });
+    const response = await PUT(
+      request("PUT", sessionHeaders(), { key: "PROVIDER_MANIFEST_JSON", value: manifest })
+    );
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.ok).toBe(true);
+    expect(data.key).toBe("PROVIDER_MANIFEST_JSON");
+    expect(process.env.PROVIDER_MANIFEST_JSON).toBe(manifest);
+    delete process.env.PROVIDER_MANIFEST_JSON;
+  });
 });
 
 describe("POST /api/settings/runtime", () => {
