@@ -548,10 +548,15 @@ enum WidgetTopicPresentation {
         case .alerts:
             return alertsContent(from: snapshot)
         case .providers:
+            // Providers is a spend ranking by definition; the intent's
+            // sortOrder defaults to .utilisation (indistinguishable from an
+            // explicit pick), so only re-rank when the owner explicitly
+            // opted into utilisation — otherwise every default-configured
+            // widget inverts from "top spenders" to "closest to budget".
             return providersContent(
                 from: snapshot,
                 maxMeters: max(maxMeters, 6),
-                sortOrder: sortOrder
+                sortOrder: sortOrder == .utilisation ? .spend : sortOrder
             )
         case .projects:
             return projectsContent(
@@ -612,8 +617,11 @@ enum WidgetTopicPresentation {
             WidgetProjectsContent(
                 generatedAt: snapshot.generatedAt,
                 projects: rows,
-                totalSpentUsd: rows.reduce(0) { $0 + $1.spentUsd },
-                totalBudgetUsd: rows.reduce(0) { $0 + ($1.budgetUsd ?? 0) },
+                // Hero figures are project totals: reduce over the full
+                // snapshot list, not the row-truncated one, or the headline
+                // silently becomes a subtotal of the visible rows.
+                totalSpentUsd: snapshot.projects.reduce(0) { $0 + $1.spentUsd },
+                totalBudgetUsd: snapshot.projects.reduce(0) { $0 + ($1.budgetUsd ?? 0) },
                 deepLink: URL(string: "usageclientmonitor://projects")
             )
         )

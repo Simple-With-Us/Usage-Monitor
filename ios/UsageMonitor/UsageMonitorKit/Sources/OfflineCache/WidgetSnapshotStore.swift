@@ -11,7 +11,11 @@ import WidgetKit
 /// so a successful budget poll cannot wipe a later LLM, host, or Mac cache.
 public enum WidgetSnapshotStore {
 
-    public static func updateBudget(_ response: BudgetStatusResponse, maxMeters: Int = 3) {
+    /// Persist the latest budget snapshot for the widget.  The storage cap
+    /// must be >= the largest render-time Rows option (Full = 8): a smaller
+    /// cap makes the Rows option silently do nothing on the Budget topic,
+    /// because the render-time truncation can only shrink what was stored.
+    public static func updateBudget(_ response: BudgetStatusResponse, maxMeters: Int = 8) {
         let budget = WidgetSnapshotBuilder.snapshot(from: response, maxMeters: maxMeters)
         SharedStore.shared.update { current in
             current = budget.mergingPreservedSections(from: current)

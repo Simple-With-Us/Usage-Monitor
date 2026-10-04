@@ -118,6 +118,40 @@ final class WidgetSnapshotResolverTests: XCTestCase {
         XCTAssertEqual(read.snapshot?.totalSpentUsd, 3)
     }
 
+    /// Kodus review fix: a newer Local write must not wipe the Client's
+    /// server-owned sections.  The Local payload carries only the budget core
+    /// and its `generatedAt` is the device clock — always newer than the
+    /// server timestamp — so a whole-payload newest-wins pick flipped the
+    /// LLM/Servers/Mac/Alerts/Quotas topics back to "Open the app to load …"
+    /// on every Local reload.  The merged snapshot keeps the newer budget
+    /// core but the Client's sections.
+    func testNewerLocalWriteKeepsClientServerSections() throws {
+        let base = Date(timeIntervalSince1970: 1_780_000_000)
+        var clientSnapshot = snapshot(generatedAt: base, totalSpentUsd: 7)
+        clientSnapshot.quotas = WidgetSnapshot.QuotaSection(
+            generatedAt: base,
+            windows: [
+                WidgetSnapshot.QuotaSection.Window(
+                    id: "anthropic-5h",
+                    providerId: "anthropic",
+                    providerLabel: "Anthropic",
+                    label: "5h",
+                    remainingFraction: 0.42
+                )
+            ]
+        )
+        try writeClient(clientSnapshot)
+        try writeLocal(snapshot(generatedAt: base.addingTimeInterval(60), totalSpentUsd: 42))
+
+        let read = resolver.readDetailed()
+        XCTAssertEqual(read.diagnostics.source, .local)
+        // Budget core follows the newer (Local) payload ...
+        XCTAssertEqual(read.snapshot?.totalSpentUsd, 42)
+        // ... but the Client's server-owned sections survive.
+        XCTAssertEqual(read.snapshot?.quotas?.windows.first?.providerId, "anthropic")
+        XCTAssertEqual(read.snapshot?.quotas?.windows.first?.remainingFraction ?? 0, 0.42, accuracy: 0.0001)
+    }
+
     /// Neither app has written: stay empty and say so, rather than inventing zeros.
     func testEmptyContainerReportsNoSource() {
         let read = resolver.readDetailed()

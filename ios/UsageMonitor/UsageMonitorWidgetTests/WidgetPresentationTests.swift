@@ -447,6 +447,33 @@ final class WidgetTopicPresentationTests: XCTestCase {
         XCTAssertEqual(providers.deepLink?.absoluteString, "usageclientmonitor://providers")
     }
 
+    /// Kodus review fix: `topicContent` forwarded the intent's default
+    /// `.utilisation` sort into the Providers topic, inverting it from "top
+    /// spenders" to "closest to budget".  The placeholder's spend and
+    /// utilisation orders coincide, so this uses meters where they diverge:
+    /// "Cheap" is 90% used but spent little, "Rich" spent the most at 20%.
+    /// The default-configured Providers topic must rank by spend.
+    func testTopicContentProvidersDefaultsToSpendRanking() {
+        var snapshot = WidgetSnapshot.empty
+        snapshot.month = "2026-08"
+        snapshot.generatedAt = Date(timeIntervalSince1970: 1_720_000_000)
+        snapshot.spenders = [
+            WidgetSnapshot.Meter(id: "cheap", name: "Cheap", spentUsd: 45, budgetUsd: 50, percentUsed: 0.9, status: "warning", projectedEomUsd: nil),
+            WidgetSnapshot.Meter(id: "rich", name: "Rich", spentUsd: 200, budgetUsd: 1000, percentUsed: 0.2, status: "ok", projectedEomUsd: nil),
+        ]
+        let content = WidgetTopicPresentation.topicContent(
+            from: snapshot,
+            topic: .providers,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service
+        )
+        guard case .providers(let providers) = content else {
+            return XCTFail("expected providers content")
+        }
+        XCTAssertEqual(providers.meters.map(\.name), ["Rich", "Cheap"])
+    }
+
     func testProvidersEmptySpendIsUnavailableNotZero() {
         var snapshot = WidgetSnapshot.empty
         snapshot.month = "2026-08"

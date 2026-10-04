@@ -95,12 +95,24 @@ public enum WidgetSnapshotBuilder {
         maxWindows: Int = 8
     ) -> WidgetSnapshot.QuotaSection {
         let sorted = response.windows.sorted { (lhs: QuotaWindow, rhs: QuotaWindow) in
-            // Most-urgent first: exhausted, then lowest remaining, then a
-            // soonest reset, then a stable name order.
-            if lhs.isExhausted != rhs.isExhausted { return lhs.isExhausted }
-            let lr = lhs.displayRemainingPercent
-            let rr = rhs.displayRemainingPercent
-            if lr != rr { return lr < rr }
+            // Most-urgent first: exhausted, then lowest *known* remaining,
+            // then a soonest reset, then a stable name order.  A window with
+            // no number is unknown, not urgent, so it sinks below every
+            // known window — otherwise an absent value (displayRemainingPercent
+            // fabricates 0) outranks a real one and the tile headlines
+            // "Unknown".  The exhaustion key matches the emitted flag below
+            // (isExhausted || status == .exhausted), not just isExhausted.
+            let lExhausted = lhs.isExhausted || lhs.status == .exhausted
+            let rExhausted = rhs.isExhausted || rhs.status == .exhausted
+            if lExhausted != rExhausted { return lExhausted }
+            let lKnown = lhs.remainingPercent != nil && !lhs.remainingUnknown
+            let rKnown = rhs.remainingPercent != nil && !rhs.remainingUnknown
+            if lKnown != rKnown { return lKnown }
+            if lKnown {
+                let lr = lhs.displayRemainingPercent
+                let rr = rhs.displayRemainingPercent
+                if lr != rr { return lr < rr }
+            }
             let lReset = lhs.resetAtDate ?? .distantFuture
             let rReset = rhs.resetAtDate ?? .distantFuture
             if lReset != rReset { return lReset < rReset }

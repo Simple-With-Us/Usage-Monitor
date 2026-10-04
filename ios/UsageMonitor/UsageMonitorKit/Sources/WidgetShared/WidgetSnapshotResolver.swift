@@ -99,25 +99,19 @@ public struct WidgetSnapshotResolver {
         let client = store.read()
         let local = readLocalSnapshot()
 
-        let chosen: WidgetSnapshot?
+        let chosen = Self.merge(client: client, local: local)
+        // Diagnostics source: the payload that owns the merged budget core
+        // (the newer of the two); the server-owned sections always come from
+        // the Client payload when it exists (see merge).
         let source: WidgetSnapshotSource?
         switch (client, local) {
         case let (c?, l?):
-            if l.generatedAt > c.generatedAt {
-                chosen = l
-                source = .local
-            } else {
-                chosen = c
-                source = .client
-            }
-        case let (c?, nil):
-            chosen = c
+            source = l.generatedAt > c.generatedAt ? .local : .client
+        case (.some, nil):
             source = .client
-        case let (nil, l?):
-            chosen = l
+        case (nil, .some):
             source = .local
         case (nil, nil):
-            chosen = nil
             source = nil
         }
 
@@ -142,23 +136,96 @@ public struct WidgetSnapshotResolver {
     /// exactly the loop Jay hit: the app loaded fine and the widget still
     /// said the same thing. When the app group itself is unavailable, no amount
     /// of tapping will ever help, so say that instead of repeating a dead end.
+    ///
+    /// Answered directly from `containerURL`: the full readDetailed() path
+    /// JSON-decodes both payloads (up to 1 MiB each) plus legacy-cleanup file
+    /// I/O, which is wasted work inside WidgetKit's memory/CPU budget on
+    /// exactly the path the widget takes most often (the empty state).
     public var isAppGroupUnavailable: Bool {
-        !readDetailed().diagnostics.containerAvailable
+        containerURL == nil
     }
 
     // MARK: - Local payload
+
+    /// Merge the two payloads per-section instead of picking the whole newer
+    /// one.  The Local payload carries only the budget core (`projects` is
+    /// always `[]`; `llm`/`servers`/`mac`/`alerts`/`quotas` are always nil)
+    /// and its `generatedAt` is the device clock, so a whole-payload
+    /// newest-wins pick lets any Local reload (bootstrap, pull-to-refresh,
+    /// add-provider, import) — always "newer" than the server timestamp —
+    /// wipe the Client's server-owned sections and flip those topics back to
+    /// "Open the app to load …".  Rule: the budget core comes from the newer
+    /// payload (both apps produce genuine budget data), while the
+    /// server-owned sections prefer the Client's non-nil value and fall back
+    /// to Local only when the Client file is absent.
+    private static func merge(
+        client: WidgetSnapshot?,
+        local: WidgetSnapshot?
+    ) -> WidgetSnapshot? {
+        switch (client, local) {
+        case let (c?, nil):
+            return c
+        case let (nil, l?):
+            return l
+        case let (c?, l?):
+            let base = l.generatedAt > c.generatedAt ? l : c
+            return WidgetSnapshot(
+                generatedAt: base.generatedAt,
+                month: base.month,
+                totalSpentUsd: base.totalSpentUsd,
+                totalBudgetUsd: base.totalBudgetUsd,
+                projectedEomUsd: base.projectedEomUsd,
+                percentUsed: base.percentUsed,
+                overBudget: base.overBudget,
+                warning: base.warning,
+                topMeters: base.topMeters,
+                projects: c.projects.isEmpty ? l.projects : c.projects,
+                llm: c.llm ?? l.llm,
+                servers: c.servers ?? l.servers,
+                spenders: c.spenders.isEmpty ? l.spenders : c.spenders,
+                mac: c.mac ?? l.mac,
+                alerts: c.alerts ?? l.alerts,
+                quotas: c.quotas ?? l.quotas
+            )
+        case (nil, nil):
+            return nil
+        }
+    }
 
     /// Local writes a bare `WidgetSnapshot` with a default-configured
     /// `JSONEncoder`, so dates are `deferredToDate` (seconds since the 2001
     /// reference date) — **not** the Client's `.iso8601`.  Decoding it with the
     /// Client's decoder fails on every `Date`, which is why this is a separate
     /// decoder rather than a reuse of `SharedStore`'s.
+    /// The app-group container is shared with a second app, so the Local file
+    /// is read at a cross-app trust boundary: reject symlinks and bound the
+    /// size (same 1 MiB cap as the Client reader in SharedStore) before
+    /// decoding, or a symlink/oversized file can exhaust the widget
+    /// extension's small memory budget (jetsam).
+    private static let maximumLocalFileSize = 1 * 1_024 * 1_024
+
     private func readLocalSnapshot() -> WidgetSnapshot? {
         guard let url = fileURL(Self.localFileName) else { return nil }
+        guard isSafeRegularFile(url), isWithinSizeLimit(url) else { return nil }
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
             return nil
         }
         return try? JSONDecoder().decode(WidgetSnapshot.self, from: data)
+    }
+
+    private func isSafeRegularFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ]) else { return false }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
+    private func isWithinSizeLimit(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber
+        else { return false }
+        return size.intValue <= Self.maximumLocalFileSize
     }
 
     private func fileURL(_ name: String) -> URL? {

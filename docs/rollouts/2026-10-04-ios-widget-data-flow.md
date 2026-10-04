@@ -59,9 +59,18 @@ the owner described.
 ### `WidgetSnapshotResolver` (new, `WidgetShared`)
 
 A `struct` with an injectable container (not a bag of statics) that reads the
-freshest payload regardless of which app wrote it:
+freshest app-group snapshot regardless of which app wrote it:
 
-- reads both filenames, picks the newer `generatedAt`;
+- reads both filenames and merges them **per-section** (Kodus review fix,
+  2026-10-04): the budget core comes from the newer payload — both apps
+  produce genuine budget data — while the server-owned sections
+  (`llm`/`servers`/`mac`/`alerts`/`quotas`, plus `projects`/`spenders`)
+  prefer the Client's non-nil value and fall back to Local only when the
+  Client file is absent. A whole-payload newest-wins pick was a regression:
+  the Local payload's `generatedAt` is the device clock, always newer than
+  the server timestamp, so every Local reload (bootstrap, pull-to-refresh,
+  add-provider, import) wiped those sections back to "Open the app to
+  load …" — precisely the loop this PR set out to fix;
 - a corrupt Local payload falls back to the Client's good one instead of blanking
   the widget;
 - returns `WidgetSnapshotDiagnostics` naming the source, the payload age, whether
