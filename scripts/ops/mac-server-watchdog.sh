@@ -43,9 +43,56 @@ OS_VERSION="$(sw_vers -productVersion 2>/dev/null || echo "macOS")"
 CHIP_NAME="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || uname -m)"
 ARCH="$(uname -m 2>/dev/null || echo "arm64")"
 
-# Calculate CPU Usage % (normalized across cores)
-CORES="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 8)"
-CPU_USAGE="$(ps -A -o %cpu | awk -v cores="$CORES" '{s+=$1} END {printf "%.1f", s / (cores > 0 ? cores : 8)}')"
+# Calculate CPU Usage % (whole-machine, already normalized across cores)
+#
+# 2026-10-03 (MINIMAX).  This used to be:
+#     CPU_USAGE="$(ps -A -o %cpu | awk -v cores="$CORES" '{s+=$1} END {printf "%.1f", s/cores}')"
+# which is not a measurement of current CPU.  On macOS `ps -o %cpu` is a
+# per-process average over the process's whole life, not an instantaneous
+# reading, so summing ~1000 of those lifetime averages and dividing by core
+# count produces a number that barely tracks reality.  Measured on this Mac
+# while HogHunter showed the machine at 86-91% busy, this formula reported
+# 55-59%, and under a deliberate 3-core burn it went DOWN (58.8 -> 54.5 ->
+# 57.5) instead of up.  A load metric that cannot see known load is not a
+# load metric.  HogHunter's Sources/Sampling/CpuMath.swift is the reference
+# for the correct approach.
+#
+# Correct method: read the kernel's own CPU tick counters and take 1 - idle/total.
+# Two sources, both from the same counters, differing only in window:
+#   top    = ~1-minute decaying average, i.e. what Activity Monitor's top bar
+#            shows.  This is the primary, because a human comparing this card
+#            against Activity Monitor or HogHunter is comparing against this.
+#   iostat = 1-second instantaneous window, far spikier.  Kept as the fallback
+#            for hosts where `top` is unavailable or restricted.
+# On a noisy host the two can disagree by 20+ points honestly (one is a 1s
+# window, the other a 1m average), so prefer the stable one rather than the
+# larger sample count.
+CPU_USAGE=""
+_cpu_from_top() {
+  # `top -l 2` prints a CPU line per sample.  The FIRST sample has no measured
+  # interval behind it (top has just started), so keep the LAST one rather than
+  # exiting on the first match.
+  top -l 2 -n 0 2>/dev/null \
+    | awk -F'[:,]' '/CPU usage/ && /user/ {
+          for (i = 1; i <= NF; i++) {
+            if ($i ~ /user/) u = $(i + 1)
+            if ($i ~ /sys/)  s = $(i + 1)
+          }
+          gsub(/[^0-9.]/, "", u); gsub(/[^0-9.]/, "", s)
+          if (u != "" || s != "") { v = u + s; if (v > 100) v = 100; last = v }
+        }
+        END { if (last == "") exit 1; printf "%.1f", last }'
+}
+_cpu_from_iostat() {
+  iostat -w 1 -c 2 2>/dev/null \
+    | awk '/^ *[0-9]/ && NF>11 { idle = $12 }          # 3 disk groups x3 cols, then us sy id
+          END { if (idle == "") exit 1; v = 100 - idle; if (v < 0) v = 0; if (v > 100) v = 100
+                printf "%.1f", v }'
+}
+CPU_USAGE="$(_cpu_from_top)"
+[ -z "$CPU_USAGE" ] && CPU_USAGE="$(_cpu_from_iostat)"
+[ -z "$CPU_USAGE" ] && CPU_USAGE=0
+CPU_USAGE="$(printf '%.1f' "$CPU_USAGE" 2>/dev/null || echo 0)"
 
 # Calculate Memory Usage % (via vm_stat)
 PAGE_SIZE="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)"
