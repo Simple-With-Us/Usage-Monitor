@@ -122,6 +122,11 @@ struct UsageMonitorApp: App {
             Task {
                 await activateCurrentAccountScope()
             }
+            if phase == .active {
+                // Ensure secondary widget data (LLM, Mac, Servers) loads even if the user
+                // doesn't navigate to those specific tabs.
+                Task { await BackgroundRefreshManager.shared.performRefresh() }
+            }
             // Queue the next background budget refresh when leaving foreground.
             if phase == .background, PlatformRuntime.supportsBackgroundAppRefresh {
                 BackgroundRefreshManager.shared.schedule()
