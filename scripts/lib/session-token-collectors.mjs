@@ -33,6 +33,7 @@ export const ANTIGRAVITY_STATUSLINE_PRODUCER_ID = "antigravity-statusline";
 export const CLAUDE_PRODUCER_ID = "claude-code";
 export const DEEPSEEK_PRODUCER_ID = "deepseek-dsh";
 export const CURSOR_PRODUCER_ID = "cursor-agent";
+export const MUSE_PRODUCER_ID = "muse";
 
 const TOKEN_TYPES = ["input", "output", "cacheRead", "cacheCreation"];
 
