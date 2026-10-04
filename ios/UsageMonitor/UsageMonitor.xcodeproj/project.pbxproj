@@ -23,6 +23,7 @@
 		43BB491704B8779FB0BAAD2A /* Models in Frameworks */ = {isa = PBXBuildFile; productRef = 578CB27F890CAE1DDEB4F688 /* Models */; };
 		484D7BC266DC175D2274DAD3 /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = F8E4DDCCA164861B780DEDCC /* DesignSystem */; };
 		55874EE36B4368FB887FB24C /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8C50CA96B4A3F94299A6121F /* PrivacyInfo.xcprivacy */; };
+		5617640324CEC8CBE522EBCC /* WidgetSnapshotResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */; };
 		5A881DF7F756C82B4BAB59D7 /* LocalBudget in Frameworks */ = {isa = PBXBuildFile; productRef = 87FAB76F5E354143A475532D /* LocalBudget */; };
 		5C12427D9391EE93838A7FDA /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 01C1A13CED0B1B95124CBDC8 /* DesignSystem */; };
 		5D7B4982B98EF255980605B5 /* WidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792B1B2FC84FE1924C7CD1A6 /* WidgetPresentation.swift */; };
@@ -43,6 +44,7 @@
 		C155B87B338BD9E084925657 /* AppLock in Frameworks */ = {isa = PBXBuildFile; productRef = BAF14D074525FC55D08ED25C /* AppLock */; };
 		C3186C23E4A15ACE7390C70A /* UsageMonitorWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F1AEB8CDA324975C39D57883 /* UsageMonitorWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C36A8008C72FC6F54DC9D91F /* AppCore in Frameworks */ = {isa = PBXBuildFile; productRef = BC8AFCFC7A57AE9488201CE1 /* AppCore */; };
+		C584B751698C498F6A6896C8 /* TopicWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 604ADA18306399C45FD1B592 /* TopicWidgets.swift */; };
 		C66672426BD66072764EF255 /* Models in Frameworks */ = {isa = PBXBuildFile; productRef = FB1941171577206B0A52D658 /* Models */; };
 		D59524D4370F4A67319835B6 /* ServerStatus in Frameworks */ = {isa = PBXBuildFile; productRef = 79E6B0A358710B3AED46C63A /* ServerStatus */; };
 		D7A3794CC04F7C2FC1E5BC8A /* WidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = F5DE3993265E786D85889937 /* WidgetShared */; };
@@ -100,6 +102,7 @@
 		345CB985D932922EA66F6D73 /* BudgetWidgetIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BudgetWidgetIntent.swift; sourceTree = "<group>"; };
 		37A37C7541E4CEA8D9236FFF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5EB1FDD22E0727C2B30590AB /* AppUpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePrompt.swift; sourceTree = "<group>"; };
+		604ADA18306399C45FD1B592 /* TopicWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicWidgets.swift; sourceTree = "<group>"; };
 		685168BCC902543D51E9E6BA /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		6CF0AEBB3717E9EAC8485618 /* LocalUsageMonitor.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LocalUsageMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7445650B16A6EDC5905BFD04 /* AppUpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePrompt.swift; sourceTree = "<group>"; };
@@ -109,6 +112,7 @@
 		8C50CA96B4A3F94299A6121F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		90D22095A081B9D89B4CED0E /* LocalUsageMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUsageMonitorApp.swift; sourceTree = "<group>"; };
 		9EB62C1B4DB2DCA2D9888180 /* UsageMonitorKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = UsageMonitorKit; path = UsageMonitorKit; sourceTree = SOURCE_ROOT; };
+		AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSnapshotResolverTests.swift; sourceTree = "<group>"; };
 		BB83A7A318DCAACF119C1A48 /* LocalUsageMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LocalUsageMonitor.entitlements; sourceTree = "<group>"; };
 		C81B7D14B31665FDA6183BF8 /* OfflineCacheSnapshotSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCacheSnapshotSink.swift; sourceTree = "<group>"; };
 		C8C3B26815D2E6893A2F0BD4 /* AppSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSmokeTests.swift; sourceTree = "<group>"; };
@@ -187,6 +191,7 @@
 			isa = PBXGroup;
 			children = (
 				1FEDFB3CAEE756FB7630C7E0 /* WidgetPresentationTests.swift */,
+				AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */,
 			);
 			path = UsageMonitorWidgetTests;
 			sourceTree = "<group>";
@@ -211,6 +216,7 @@
 				1A60D1536CCEEF82C0761204 /* GlanceWidgets.swift */,
 				028258141B7C69C684D9238D /* Info.plist */,
 				D3FA9AE664C5C606A9368339 /* PrivacyInfo.xcprivacy */,
+				604ADA18306399C45FD1B592 /* TopicWidgets.swift */,
 				764AB0422F0A2B31B88D25D2 /* UsageMonitorWidget.entitlements */,
 				8A4F16263E10D7A4C46F8FC1 /* UsageMonitorWidgetBundle.swift */,
 				792B1B2FC84FE1924C7CD1A6 /* WidgetPresentation.swift */,
@@ -509,6 +515,7 @@
 			files = (
 				A33EA13C79DE4913AEC1B6D2 /* BudgetWidgetIntent.swift in Sources */,
 				A4110388FFF447EBB21D6BE5 /* GlanceWidgets.swift in Sources */,
+				C584B751698C498F6A6896C8 /* TopicWidgets.swift in Sources */,
 				E813273A1FAAB7D3E13847EC /* UsageMonitorWidgetBundle.swift in Sources */,
 				5D7B4982B98EF255980605B5 /* WidgetPresentation.swift in Sources */,
 			);
@@ -537,6 +544,7 @@
 			files = (
 				29A5ED6DA3DD8518200726E2 /* WidgetPresentation.swift in Sources */,
 				DAED714153D252B9557AD1B3 /* WidgetPresentationTests.swift in Sources */,
+				5617640324CEC8CBE522EBCC /* WidgetSnapshotResolverTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

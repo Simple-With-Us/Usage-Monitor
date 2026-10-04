@@ -3,6 +3,8 @@ import Observation
 import AppCore
 import Models
 import Networking
+import OfflineCache
+import WidgetShared
 
 /// Backs the Overview "Subscription Quotas" card. Same four-phase
 /// `LoadState` shape as `IntelligenceStore` / `PortfolioHistoryStore`: a
@@ -40,6 +42,10 @@ public final class QuotaWindowsStore {
         do {
             let response = try await client.fetchQuotaWindows()
             state = .loaded(response)
+            // Mirror into the app group so the Quotas widget topic has data.
+            // Previously this response only ever reached the in-app card, so a
+            // widget on this data had nothing to read.
+            WidgetSnapshotStore.updateQuotas(response)
         } catch let error as APIError {
             handle(error)
         } catch {

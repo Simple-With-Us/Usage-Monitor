@@ -486,4 +486,205 @@ final class WidgetTopicPresentationTests: XCTestCase {
         )
         guard case .providers = providers else { return XCTFail("expected providers") }
     }
+
+    // MARK: - Quotas topic
+
+    private func quotaWindow(
+        id: String = "anthropic-5h",
+        provider: String = "anthropic",
+        label: String = "5h",
+        remaining: Double? = 0.5,
+        exhausted: Bool = false,
+        nearCap: Bool = false
+    ) -> WidgetSnapshot.QuotaSection.Window {
+        WidgetSnapshot.QuotaSection.Window(
+            id: id,
+            providerId: provider,
+            providerLabel: provider.capitalized,
+            label: label,
+            remainingFraction: remaining,
+            isExhausted: exhausted,
+            isNearCap: nearCap
+        )
+    }
+
+    private func snapshotWithQuotas(_ windows: [WidgetSnapshot.QuotaSection.Window]) -> WidgetSnapshot {
+        var snapshot = WidgetSnapshot.placeholder
+        snapshot.quotas = WidgetSnapshot.QuotaSection(
+            generatedAt: Date(timeIntervalSince1970: 1_780_000_000),
+            windows: windows
+        )
+        return snapshot
+    }
+
+    func testQuotaTopicRendersWindows() {
+        let content = WidgetTopicPresentation.topicContent(
+            from: snapshotWithQuotas([quotaWindow(), quotaWindow(id: "codex-5h", provider: "codex")]),
+            topic: .quotas,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service
+        )
+        guard case .quota(let quota) = content else { return XCTFail("expected quota") }
+        XCTAssertEqual(quota.windows.count, 2)
+    }
+
+    /// A window the server described but gave no number must read "Unknown",
+    /// never a fabricated 0% — that is the whole point of the section.
+    func testQuotaRemainingCaptionNeverInventsAPercent() {
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaRemainingCaption(quotaWindow(remaining: nil)),
+            "Unknown"
+        )
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaRemainingCaption(quotaWindow(remaining: nil, exhausted: true)),
+            "Exhausted"
+        )
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaRemainingCaption(quotaWindow(remaining: 0.125)),
+            "13% left"
+        )
+    }
+
+    func testQuotaStatusSeparatesExhaustedNearCapAndHealthy() {
+        XCTAssertEqual(WidgetTopicPresentation.quotaStatus(quotaWindow(remaining: 0.8)), .ok)
+        XCTAssertEqual(WidgetTopicPresentation.quotaStatus(quotaWindow(remaining: 0.15)), .warning)
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaStatus(quotaWindow(remaining: 0.15, exhausted: true)),
+            .danger
+        )
+        // No number = unknown, not "all used up".
+        XCTAssertEqual(WidgetTopicPresentation.quotaStatus(quotaWindow(remaining: nil)), .neutral)
+    }
+
+    func testQuotaFractionUsedIsInverseOfRemaining() {
+        XCTAssertEqual(WidgetTopicPresentation.quotaFractionUsed(quotaWindow(remaining: 0.25)), 0.75, accuracy: 0.0001)
+        XCTAssertEqual(WidgetTopicPresentation.quotaFractionUsed(quotaWindow(remaining: nil)), 0, accuracy: 0.0001)
+    }
+
+    func testQuotaTopicIsUnavailableWithoutCache() {
+        let content = WidgetTopicPresentation.topicContent(
+            from: .empty,
+            topic: .quotas,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service
+        )
+        guard case .unavailable = content else { return XCTFail("expected unavailable") }
+    }
+
+    // MARK: - Projects topic
+
+    func testProjectsTopicRendersEveryProject() {
+        let content = WidgetTopicPresentation.topicContent(
+            from: .placeholder,
+            topic: .projects,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service
+        )
+        guard case .projects(let projects) = content else { return XCTFail("expected projects") }
+        XCTAssertEqual(projects.projects.count, WidgetSnapshot.placeholder.projects.count)
+    }
+
+    func testProjectsTopicIsUnavailableWithoutProjects() {
+        let content = WidgetTopicPresentation.topicContent(
+            from: .empty,
+            topic: .projects,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service
+        )
+        guard case .unavailable = content else { return XCTFail("expected unavailable") }
+    }
+
+    // MARK: - Sort order
+
+    /// "Closest to budget" and "highest spend" are genuinely different lists;
+    /// this is the reason the option exists, so pin both.
+    func testSortOrderChangesRanking() {
+        let meters = [
+            WidgetSnapshot.Meter(
+                id: "a", name: "A", spentUsd: 10, budgetUsd: 100,
+                percentUsed: 0.10, status: "ok"
+            ),
+            WidgetSnapshot.Meter(
+                id: "b", name: "B", spentUsd: 90, budgetUsd: 100,
+                percentUsed: 0.90, status: "warning"
+            )
+        ]
+
+        let byUtilisation = WidgetPresentation.rank(meters, by: .utilisation)
+        XCTAssertEqual(byUtilisation.map(\.id), ["b", "a"])
+
+        let bySpend = WidgetPresentation.rank(meters, by: .spend)
+        XCTAssertEqual(bySpend.map(\.id), ["b", "a"])
+
+        // A case where they disagree: cheap-but-nearly-spent vs rich-and-idle.
+        let disputed = [
+            WidgetSnapshot.Meter(
+                id: "cheap", name: "Cheap", spentUsd: 5, budgetUsd: 10,
+                percentUsed: 0.50, status: "warning"
+            ),
+            WidgetSnapshot.Meter(
+                id: "rich", name: "Rich", spentUsd: 500, budgetUsd: 10_000,
+                percentUsed: 0.05, status: "ok"
+            )
+        ]
+        XCTAssertEqual(WidgetPresentation.rank(disputed, by: .utilisation).map(\.id), ["cheap", "rich"])
+        XCTAssertEqual(WidgetPresentation.rank(disputed, by: .spend).map(\.id), ["rich", "cheap"])
+    }
+
+    /// A provider with no budget is "unknown utilisation", not 0%, so it must
+    /// sort below every budgeted row rather than to the top of the list.
+    func testSortByUtilisationSinksUnbudgetedRows() {
+        let meters = [
+            WidgetSnapshot.Meter(
+                id: "nobudget", name: "No Budget", spentUsd: 500,
+                budgetUsd: nil, percentUsed: nil, status: "unconfigured"
+            ),
+            WidgetSnapshot.Meter(
+                id: "budgeted", name: "Budgeted", spentUsd: 5, budgetUsd: 100,
+                percentUsed: 0.05, status: "ok"
+            )
+        ]
+        XCTAssertEqual(
+            WidgetPresentation.rank(meters, by: .utilisation).map(\.id),
+            ["budgeted", "nobudget"]
+        )
+    }
+
+    /// Equal rows must keep a stable order, or every refresh reshuffles the
+    /// widget while the owner is looking at it.
+    func testSortIsStableForEqualRows() {
+        let meters = [
+            WidgetSnapshot.Meter(
+                id: "b", name: "Beta", spentUsd: 5, budgetUsd: 10,
+                percentUsed: 0.5, status: "ok"
+            ),
+            WidgetSnapshot.Meter(
+                id: "a", name: "Alpha", spentUsd: 5, budgetUsd: 10,
+                percentUsed: 0.5, status: "ok"
+            )
+        ]
+        XCTAssertEqual(
+            WidgetPresentation.rank(meters, by: .utilisation).map(\.id),
+            ["a", "b"]
+        )
+    }
+
+    /// Row count is a real Edit Widget option, so it must actually truncate.
+    func testRowCountTruncatesListTopics() {
+        let snapshot = WidgetSnapshot.placeholder
+        let many = WidgetTopicPresentation.topicContent(
+            from: snapshot,
+            topic: .projects,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service,
+            maxMeters: 1
+        )
+        guard case .projects(let projects) = many else { return XCTFail("expected projects") }
+        XCTAssertEqual(projects.projects.count, 1)
+    }
 }

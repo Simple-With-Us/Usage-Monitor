@@ -10,9 +10,6 @@ import WidgetKit
 /// Budget, LLM, server, and Mac refreshes each update only their own fields
 /// so a successful budget poll cannot wipe a later LLM, host, or Mac cache.
 public enum WidgetSnapshotStore {
-    private static var lastWidgetReload = Date.distantPast
-    private static let minimumWidgetReloadInterval: TimeInterval = 60
-    private static let reloadLock = NSLock()
 
     public static func updateBudget(_ response: BudgetStatusResponse, maxMeters: Int = 3) {
         let budget = WidgetSnapshotBuilder.snapshot(from: response, maxMeters: maxMeters)
@@ -58,15 +55,17 @@ public enum WidgetSnapshotStore {
         reloadWidgetsIfNeeded()
     }
 
-    public static func reloadWidgetsIfNeeded(force: Bool = false, now: Date = Date()) {
-        reloadLock.lock()
-        defer { reloadLock.unlock() }
-        guard force || now.timeIntervalSince(lastWidgetReload) >= minimumWidgetReloadInterval else {
-            return
+    public static func updateQuotas(_ response: QuotaWindowsResponse, now: Date = Date()) {
+        let section = WidgetSnapshotBuilder.quotaSection(from: response, now: now)
+        SharedStore.shared.update { current in
+            current = current.replacingQuotas(section)
         }
-        lastWidgetReload = now
-        #if canImport(WidgetKit) && os(iOS)
-        WidgetCenter.shared.reloadAllTimelines()
-        #endif
+        reloadWidgetsIfNeeded()
+    }
+
+    public static func reloadWidgetsIfNeeded(force: Bool = false, now: Date = Date()) {
+        // Single throttle + WidgetCenter call now live in one shared reloader
+        // so the Client and the Local app cannot drift apart again.
+        WidgetTimelineReloader.reload(force: force, now: now)
     }
 }

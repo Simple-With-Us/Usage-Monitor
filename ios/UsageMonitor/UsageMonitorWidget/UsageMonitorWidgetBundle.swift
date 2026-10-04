@@ -17,6 +17,7 @@ struct UsageMonitorWidgetBundle: WidgetBundle {
         BudgetSummaryWidget()
         MacGlanceWidget()
         AlertsGlanceWidget()
+        QuotasGlanceWidget()
     }
 }
 
@@ -44,12 +45,12 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
     func snapshot(for configuration: SelectBudgetIntent, in context: Context) async -> BudgetEntry {
         let snapshot = context.isPreview
             ? WidgetSnapshot.placeholder
-            : (SharedStore.shared.read() ?? .empty)
+            : (WidgetSnapshotResolver.shared.read() ?? .empty)
         return entry(snapshot: snapshot, configuration: configuration)
     }
 
     func timeline(for configuration: SelectBudgetIntent, in context: Context) async -> Timeline<BudgetEntry> {
-        let snapshot = SharedStore.shared.read() ?? .empty
+        let snapshot = WidgetSnapshotResolver.shared.read() ?? .empty
         let item = entry(snapshot: snapshot, configuration: configuration)
         // The app refreshes the snapshot on foreground / background fetch; the
         // widget just re-reads periodically.  30 min is a battery-safe cadence
@@ -65,7 +66,9 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
             topic: configuration.resolvedTopic,
             budgetFocus: configuration.focus,
             llmProviderId: configuration.llmProvider?.id,
-            serverFocus: configuration.resolvedServerFocus
+            serverFocus: configuration.resolvedServerFocus,
+            maxMeters: configuration.maxMeters,
+            sortOrder: configuration.sort
         )
     }
 
@@ -74,7 +77,9 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
         topic: WidgetTopic,
         budgetFocus: WidgetBudgetFocus,
         llmProviderId: String?,
-        serverFocus: WidgetServerFocus
+        serverFocus: WidgetServerFocus,
+        maxMeters: Int = 3,
+        sortOrder: WidgetSortOrder = .utilisation
     ) -> BudgetEntry {
         BudgetEntry(
             date: Date(),
@@ -84,7 +89,9 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
                 topic: topic,
                 budgetFocus: budgetFocus,
                 llmProviderId: llmProviderId,
-                serverFocus: serverFocus
+                serverFocus: serverFocus,
+                maxMeters: maxMeters,
+                sortOrder: sortOrder
             )
         )
     }
@@ -114,10 +121,12 @@ struct BudgetSummaryWidget: Widget {
         switch content {
         case .budget(let budget): return budget.deepLink
         case .llm(let llm): return llm.deepLink
+        case .quota(let quota): return quota.deepLink
         case .server(let server): return server.deepLink
         case .mac(let mac): return mac.deepLink
         case .alerts(let alerts): return alerts.deepLink
         case .providers(let providers): return providers.deepLink
+        case .projects(let projects): return projects.deepLink
         case .unavailable(let unavailable): return unavailable.deepLink
         }
     }
@@ -187,6 +196,8 @@ struct UsageMonitorWidgetView: View {
             BudgetTopicView(entry: entry, budget: budget, family: family)
         case .llm(let llm):
             LlmTopicView(entry: entry, llm: llm, family: family)
+        case .quota(let quota):
+            QuotaTopicView(entry: entry, quota: quota, family: family)
         case .server(let server):
             ServerTopicView(entry: entry, server: server, family: family)
         case .mac(let mac):
@@ -195,6 +206,8 @@ struct UsageMonitorWidgetView: View {
             AlertsTopicView(alerts: alerts, family: family, showsList: false)
         case .providers(let providers):
             ProvidersTopicView(providers: providers, family: family)
+        case .projects(let projects):
+            ProjectsTopicView(entry: entry, projects: projects, family: family)
         }
     }
 }

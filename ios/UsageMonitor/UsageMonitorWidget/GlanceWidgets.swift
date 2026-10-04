@@ -7,11 +7,19 @@ import DesignSystem
 
 /// Machine stats need their own tile: three live percents do not fit a
 /// budget-style hero.  Same extension bundle and size families.
+///
+/// This used to be a `StaticConfiguration` with no Edit Widget options at all,
+/// even though the snapshot can carry flags, process rows, and an explicit
+/// host identity worth choosing between.
 struct MacGlanceWidget: Widget {
     let kind = "MacGlanceWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: DedicatedTopicProvider(topic: .mac)) { entry in
+        AppIntentConfiguration(
+            kind: kind,
+            intent: SelectMacIntent.self,
+            provider: DedicatedTopicProvider(topic: .mac)
+        ) { entry in
             UsageMonitorWidgetView(entry: entry)
                 .containerBackground(Theme.Colors.background, for: .widget)
                 .widgetURL(URL(string: "usageclientmonitor://computers"))
@@ -27,7 +35,11 @@ struct AlertsGlanceWidget: Widget {
     let kind = "AlertsGlanceWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: DedicatedTopicProvider(topic: .alerts)) { entry in
+        AppIntentConfiguration(
+            kind: kind,
+            intent: SelectMacIntent.self,
+            provider: DedicatedTopicProvider(topic: .alerts)
+        ) { entry in
             DedicatedAlertsWidgetView(entry: entry)
                 .containerBackground(Theme.Colors.background, for: .widget)
                 .widgetURL(URL(string: "usageclientmonitor://alerts"))
@@ -38,28 +50,58 @@ struct AlertsGlanceWidget: Widget {
     }
 }
 
-struct DedicatedTopicProvider: TimelineProvider {
+/// Quotas gets a dedicated tile because "how much plan is left" is the question
+/// people check most often, and burying it in a topic picker means it is never
+/// on the Home Screen.
+struct QuotasGlanceWidget: Widget {
+    let kind = "QuotasGlanceWidget"
+
+    var body: some WidgetConfiguration {
+        AppIntentConfiguration(
+            kind: kind,
+            intent: SelectMacIntent.self,
+            provider: DedicatedTopicProvider(topic: .quotas)
+        ) { entry in
+            UsageMonitorWidgetView(entry: entry)
+                .containerBackground(Theme.Colors.background, for: .widget)
+                .widgetURL(URL(string: "usageclientmonitor://dashboard"))
+        }
+        .configurationDisplayName("Quotas")
+        .description("How much of each plan window is left.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+    }
+}
+
+struct DedicatedTopicProvider: AppIntentTimelineProvider {
+    typealias Intent = SelectMacIntent
     let topic: WidgetTopic
 
-    func placeholder(in context: Context) -> BudgetEntry {
-        entry(snapshot: .placeholder)
+    init(topic: WidgetTopic) {
+        self.topic = topic
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (BudgetEntry) -> Void) {
+    func placeholder(in context: Context) -> BudgetEntry {
+        entry(snapshot: .placeholder, configuration: nil)
+    }
+
+    func snapshot(for configuration: SelectMacIntent, in context: Context) async -> BudgetEntry {
         let snapshot = context.isPreview
             ? WidgetSnapshot.placeholder
-            : (SharedStore.shared.read() ?? .empty)
-        completion(entry(snapshot: snapshot))
+            : (WidgetSnapshotResolver.shared.read() ?? .empty)
+        return entry(snapshot: snapshot, configuration: configuration)
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<BudgetEntry>) -> Void) {
-        let snapshot = SharedStore.shared.read() ?? .empty
+    func timeline(for configuration: SelectMacIntent, in context: Context) async -> Timeline<BudgetEntry> {
+        let snapshot = WidgetSnapshotResolver.shared.read() ?? .empty
         let next = Calendar.current.date(byAdding: .minute, value: 30, to: Date())
             ?? Date().addingTimeInterval(1800)
-        completion(Timeline(entries: [entry(snapshot: snapshot)], policy: .after(next)))
+        return Timeline(
+            entries: [entry(snapshot: snapshot, configuration: configuration)],
+            policy: .after(next)
+        )
     }
 
-    private func entry(snapshot: WidgetSnapshot) -> BudgetEntry {
+    private func entry(snapshot: WidgetSnapshot, configuration: SelectMacIntent?) -> BudgetEntry {
         BudgetEntry(
             date: Date(),
             snapshot: snapshot,
@@ -68,7 +110,9 @@ struct DedicatedTopicProvider: TimelineProvider {
                 topic: topic,
                 budgetFocus: .overall,
                 llmProviderId: nil,
-                serverFocus: .service
+                serverFocus: .service,
+                maxMeters: configuration?.maxMeters ?? 4,
+                sortOrder: configuration?.sort ?? .utilisation
             )
         )
     }

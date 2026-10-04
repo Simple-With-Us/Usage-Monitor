@@ -81,7 +81,13 @@ public enum LocalWidgetSnapshotWriter {
             LocalAppGroup.defaults.set(now.timeIntervalSince1970, forKey: "widget.snapshot.writtenAt")
         } catch {
             // Best-effort — never fail money path for widget I/O.
+            return
         }
+
+        // The write is useless unless WidgetKit is told to re-read. The Local
+        // app never called this, so even a correct payload sat unread until the
+        // widget's own 30-minute timeline policy elapsed.
+        WidgetTimelineReloader.reload(force: true, now: now)
     }
 
     private static func monthLabel(_ monthStart: Date) -> String {

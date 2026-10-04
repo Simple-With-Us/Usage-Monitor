@@ -140,6 +140,9 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
         if let mac = try? await client.macHealth() {
             WidgetSnapshotStore.updateMac(mac)
         }
+        if let quotas = try? await client.fetchQuotaWindows() {
+            WidgetSnapshotStore.updateQuotas(quotas)
+        }
     }
 
     private func reloadWidgets() {
