@@ -11,6 +11,7 @@ import {
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
   getStartupRuntimeStatus,
+  isSchedulerEnabled,
 } from "@/lib/runtime-health";
 import { getIngestAdmissionMetrics } from "@/lib/ingest-admission";
 import { getDatadogReadiness } from "@/lib/datadog-options";
@@ -274,8 +275,9 @@ export async function GET(request: Request) {
   // becoming a second SQLite writer. That intentional circuit breaker must not
   // make strict HTTP readiness fail; production keeps the default-required
   // behavior whenever the flag is unset or true.
-  const schedulerRequired =
-    process.env.USAGE_SCHEDULER_ENABLED?.trim().toLowerCase() !== "false";
+  // Resolved through the settings service (same as instrumentation.ts) so a
+  // knob that lives only in Infisical cannot split the two answers.
+  const schedulerRequired = isSchedulerEnabled();
   const schedulerReady = !schedulerRequired || schedulerReadiness.ok;
   // Backup health is honest in checks.backup, but does NOT gate overall `ok`.
   // This app's money-truth is the live SQLite on /data; R2 Litestream is

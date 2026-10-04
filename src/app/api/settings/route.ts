@@ -69,8 +69,24 @@ export async function PUT(request: NextRequest) {
       // FIRST, then the local cache.  A failed Infisical write fails the save
       // so the cache and Infisical never diverge silently.  In env-fallback
       // mode (local dev, no creds) set() writes process.env.
-      await appSettings.set("ALERT_EMAIL_ENABLED", emailEnabled ? "true" : "false");
-      await appSettings.set("ALERT_DISABLE_EMAIL", emailEnabled ? "false" : "true");
+      // One logical toggle, two keys: if the second write fails after the
+      // first succeeded, roll the first back so the pair never diverges
+      // (e.g. ENABLED=true with DISABLE=true would silently keep email off).
+      const previousEnabled = appSettings.get("ALERT_EMAIL_ENABLED");
+      const previousDisable = appSettings.get("ALERT_DISABLE_EMAIL");
+      try {
+        await appSettings.set("ALERT_EMAIL_ENABLED", emailEnabled ? "true" : "false");
+        await appSettings.set("ALERT_DISABLE_EMAIL", emailEnabled ? "false" : "true");
+      } catch (error) {
+        // Best-effort rollback so the pair never diverges after a partial write.
+        if (previousEnabled !== undefined) {
+          await appSettings.set("ALERT_EMAIL_ENABLED", previousEnabled).catch(() => {});
+        }
+        if (previousDisable !== undefined) {
+          await appSettings.set("ALERT_DISABLE_EMAIL", previousDisable).catch(() => {});
+        }
+        throw error;
+      }
     }
 
     if (["info", "warning", "critical"].includes(minSeverity)) {

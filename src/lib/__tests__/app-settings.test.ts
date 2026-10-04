@@ -291,4 +291,56 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
       expect(fresh.get(key)).toBeUndefined();
     }
   });
+
+  it("getAll() returns only declared knob keys, never cached secrets", async () => {
+    const { fetchImpl } = makeMockFetch({
+      rawSecrets: [
+        { secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: "10000" },
+        { secretKey: "USAGE_INGEST_TOKEN", secretValue: "not-a-real-token" },
+        { secretKey: "DATABASE_URL", secretValue: "file:not-real.db" },
+      ],
+    });
+    await appSettings.init({
+      clientId: "id",
+      clientSecret: "secret",
+      environment: "dev",
+      refreshIntervalMs: 0,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(appSettings.isInfisicalMode).toBe(true);
+    const all = appSettings.getAll();
+    expect(all["ADAPTER_HTTP_TIMEOUT_MS"]).toBe("10000");
+    expect(all["USAGE_INGEST_TOKEN"]).toBeUndefined();
+    expect(all["DATABASE_URL"]).toBeUndefined();
+    for (const key of Object.keys(all)) {
+      expect(APP_SETTING_KEYS.has(key)).toBe(true);
+    }
+  });
+
+  it("get() falls back to process.env for keys absent from the Infisical cache", async () => {
+    const { fetchImpl } = makeMockFetch({
+      rawSecrets: [
+        { secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: "10000" },
+      ],
+    });
+    await appSettings.init({
+      clientId: "id",
+      clientSecret: "secret",
+      environment: "dev",
+      refreshIntervalMs: 0,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(appSettings.isInfisicalMode).toBe(true);
+    process.env.ADAPTER_PROVIDER_TIMEOUT_MS = "45000";
+    try {
+      // In the cache: wins.  Absent from the cache: env fallback, not undefined.
+      expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
+      expect(appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS")).toBe("45000");
+      expect(appSettings.getBool("USAGE_SCHEDULER_ENABLED", true)).toBe(true);
+    } finally {
+      delete process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+    }
+  });
 });

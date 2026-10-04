@@ -12,16 +12,25 @@ export async function register() {
   // The import is dynamic (not a top-level static import) so the shared
   // package never enters the edge-runtime (middleware) bundle.
   // See INFISICAL.md and src/lib/app-settings.ts.
-  let settingsGet: ((key: string) => string | undefined) | undefined;
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { appSettings } = await import("@/lib/app-settings");
     await appSettings.init();
     // On-demand refresh for operators: `kill -HUP <pid>` re-reads Infisical.
     // The background timer (default 5 min) handles the steady state.
+    // A rejected refresh must not become an unhandled rejection (Node's
+    // default --unhandled-rejections=throw would kill the server on a
+    // transient Infisical outage): log it and keep serving the
+    // last-known-good cache, per the INFISICAL.md contract.
     process.on("SIGHUP", () => {
-      void appSettings.refresh();
+      void appSettings
+        .refresh()
+        .catch((error: unknown) =>
+          console.error(
+            "[app-settings] SIGHUP refresh failed; serving last-known-good cache:",
+            error instanceof Error ? error.message : String(error)
+          )
+        );
     });
-    settingsGet = (key: string) => appSettings.get(key);
   }
 
   // Datadog APM + log injection.  Fail closed on missing/partial keys in
@@ -112,13 +121,12 @@ export async function register() {
   // is tracked as a follow-up. See @/lib/budget-status.
 
   // USAGE_SCHEDULER_ENABLED is a tunable knob owned by the settings service
-  // (Infisical cache in production, process.env in env-fallback mode); the
-  // process.env fallback covers a key absent from the Infisical cache.
-  if (
-    !isUsageSchedulerEnabled(
-      settingsGet?.("USAGE_SCHEDULER_ENABLED") ?? process.env.USAGE_SCHEDULER_ENABLED
-    )
-  ) {
+  // (Infisical cache in production, process.env in env-fallback mode) and
+  // resolved through isSchedulerEnabled() — the same single source of truth
+  // /api/ready uses — so the two can never disagree about whether the
+  // scheduler should be running.
+  const { isSchedulerEnabled } = await import("@/lib/runtime-health");
+  if (!isSchedulerEnabled()) {
     console.warn(
       "[usage-scheduler] disabled by USAGE_SCHEDULER_ENABLED=false"
     );

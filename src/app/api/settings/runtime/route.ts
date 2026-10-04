@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import {
   appSettings,
@@ -46,22 +47,28 @@ export async function PUT(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const { key, value } = (body ?? {}) as { key?: unknown; value?: unknown };
-  if (typeof key !== "string" || !key.trim()) {
-    return NextResponse.json({ error: "key is required" }, { status: 400 });
-  }
-  if (typeof value !== "string") {
+  // Trust boundary: validate the untrusted body with a strict Zod schema
+  // (unknown fields rejected) instead of a type assertion.
+  const parsed = z
+    .object({
+      key: z.string().trim().min(1),
+      value: z.string(),
+    })
+    .strict()
+    .safeParse(body ?? {});
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: "value must be a string" },
+      { error: "Invalid request body" },
       { status: 400 }
     );
   }
+  const { key, value } = parsed.data;
 
   try {
-    const normalized = await appSettings.set(key.trim(), value);
+    const normalized = await appSettings.set(key, value);
     return NextResponse.json({
       ok: true,
-      key: key.trim(),
+      key,
       value: normalized,
       mode: appSettings.isInfisicalMode ? "infisical" : "env",
     });

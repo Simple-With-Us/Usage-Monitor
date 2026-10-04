@@ -150,6 +150,21 @@ export function markSchedulerStarted(at = new Date()): void {
   state.scheduler.startedAt ??= at.toISOString();
 }
 
+/**
+ * Single source of truth for the USAGE_SCHEDULER_ENABLED knob, resolved
+ * through the settings service (Infisical cache in production, process.env
+ * in env-fallback mode).  instrumentation.ts's scheduler gate and
+ * /api/ready's readiness computation must both use this — never a direct
+ * process.env read — or the two disagree whenever the knob lives only in
+ * Infisical (scheduler disabled at boot while /api/ready still requires
+ * it, or a second poller on a standby host while readiness reports green).
+ */
+export function isSchedulerEnabled(): boolean {
+  return (
+    appSettings.get("USAGE_SCHEDULER_ENABLED")?.trim().toLowerCase() !== "false"
+  );
+}
+
 export function markSchedulerTickStarted(at = new Date()): void {
   state.scheduler.tickInProgress = true;
   state.scheduler.lastTickStartedAt = at.toISOString();

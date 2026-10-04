@@ -443,10 +443,17 @@ export class AppSettingsService {
     return this.infisicalMode;
   }
 
-  /** Raw string read.  Memory-only in Infisical mode; process.env in env mode. */
+  /**
+   * Raw string read.  Infisical cache first when in Infisical mode, then
+   * process.env (a knob that exists only in the deploy-time env — the
+   * env-sync path INFISICAL.md documents, or a key never created in the
+   * Infisical project — must not read as undefined while getWithSource and
+   * the settingsEnv() proxy both see it).  Never hits the network.
+   */
   get(key: string): string | undefined {
     if (this.infisicalMode && this.client) {
-      return this.client.get(key);
+      const cached = this.client.get(key);
+      if (cached != null && cached !== "") return cached;
     }
     const raw = process.env[key];
     return raw == null || raw === "" ? undefined : raw;
@@ -457,15 +464,17 @@ export class AppSettingsService {
     return this.get(key) !== undefined;
   }
 
-  /** Snapshot of all knob values. Memory-only in Infisical mode. */
+  /**
+   * Snapshot of the declared non-secret knob values.  The Infisical load
+   * caches EVERY secret for the project, so this must iterate APP_SETTING_KEYS
+   * and read only those — returning the raw client cache here would expose
+   * credentials to any caller of this method.
+   */
   getAll(): Record<string, string> {
-    if (this.infisicalMode && this.client) {
-      return this.client.getAll();
-    }
     const out: Record<string, string> = {};
     for (const key of APP_SETTING_KEYS) {
-      const value = process.env[key];
-      if (value != null && value !== "") out[key] = value;
+      const value = this.get(key);
+      if (value !== undefined) out[key] = value;
     }
     return out;
   }

@@ -10,8 +10,9 @@ Usage-Monitor-specific application of it.
 
 ## Project
 
-- Infisical project: `usage-monitor`, ID `86e35e51-91bc-4dfd-a045-4484726b9c40`
-  (jays-services org), environments `dev` / `staging` / `prod`, secret path `/`.
+- Infisical project: `usage-monitor`, environments `dev` / `staging` / `prod`,
+  secret path `/`.  Deployment-specific project identifiers are maintained
+  in the private operations inventory, not committed here.
 - The shared fleet automation machine identity holds Admin on this project.
   The server authenticates with universal-auth as that identity
   (`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET`, falling back to the
@@ -90,7 +91,9 @@ add a test.
   in the app's own SQLite store.  They are explicitly out of scope and are
   never written to Infisical.
 - **Local dev overrides.**  Documented in `.env.example`; never commit real
-  values.  Copy it to `.env` for local development.
+  values.  Run local development through the Infisical-backed launcher
+  (`node scripts/infisical-run.mjs -- npm run dev`); do not create or load
+  a local dotenv file.
 - **Build-time constants** that never change at runtime.
 
 ## Runtime contract
