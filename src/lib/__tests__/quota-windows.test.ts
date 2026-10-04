@@ -163,8 +163,8 @@ describe("projectQuotaWindows", () => {
 
     expect(result.windows).toHaveLength(2);
     expect(result.windows.map((window) => window.id)).toEqual([
-      JSON.stringify(["machine:a", "b:c"]),
-      JSON.stringify(["machine", "a:b:c"]),
+      JSON.stringify(["producer", "machine:a", "b:c"]),
+      JSON.stringify(["producer", "machine", "a:b:c"]),
     ]);
   });
 
@@ -190,7 +190,7 @@ describe("projectQuotaWindows", () => {
     ]);
 
     expect(result.windows.map((window) => window.id)).toEqual([
-      JSON.stringify(["producer", "machine", "bucket", 0]),
+      JSON.stringify(["producer", "machine", "bucket"]),
       legacyId,
     ]);
     expect(new Set(result.windows.map((window) => window.id)).size).toBe(2);
@@ -211,6 +211,84 @@ describe("projectQuotaWindows", () => {
     expect(result.windows[0]?.id).toBe("anthropic:five_hour");
     expect(result.windows[0]).not.toHaveProperty("producerInstanceId");
     expect(result.windows[0]?.machine).toBe("Unattributed Mac");
+  });
+
+  it("drops an unattributed window when an attributed reading of the same series exists", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: {
+          bucketId: "third-party",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: { bucketId: "third-party" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.producerInstanceId).toBe("macbook");
+  });
+
+  it("builds skipModelTypes from the freshest reading per series, not every machine's", () => {
+    const event = (credits: number, occurredAt: string, machine: string) => ({
+      provider: "google-antigravity",
+      label: "Third-Party Models",
+      credits,
+      limit: 100,
+      occurredAt,
+      metadata: {
+        bucketId: "third-party",
+        _producerInstanceId: machine,
+        modelId: "claude-opus-4-6",
+      },
+    });
+    const result = projectQuotaWindows([
+      event(0, "2026-10-03T10:00:00.000Z", "machine-a"),
+      event(60, "2026-10-03T11:00:00.000Z", "machine-b"),
+    ]);
+
+    // machine-a is exhausted but machine-b (freshest) has 60% left: fleet
+    // routing must not treat the model as exhausted.
+    expect(result.windows).toHaveLength(2);
+    expect(result.skipModelTypes).toEqual([]);
+  });
+
+  it("keeps a producer window's id in the fixed namespace across unrelated rows", () => {
+    const event = (producerInstanceId: string, bucketId: string, label: string) => ({
+      provider: "anthropic",
+      label,
+      credits: 50,
+      limit: 100,
+      occurredAt: "2026-10-03T12:00:00.000Z",
+      metadata: { bucketId, _producerInstanceId: producerInstanceId },
+    });
+    const first = projectQuotaWindows([event("machine", "bucket", "5h window")]);
+    const withLegacy = projectQuotaWindows([
+      event("machine", "bucket", "5h window"),
+      {
+        provider: "anthropic",
+        label: "legacy window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-10-03T11:00:00.000Z",
+        metadata: { bucketId: "some-legacy-bucket" },
+      },
+    ]);
+
+    const id = JSON.stringify(["producer", "machine", "bucket"]);
+    expect(first.windows[0]?.id).toBe(id);
+    expect(withLegacy.windows.find((w) => w.producerInstanceId === "machine")?.id).toBe(id);
   });
 });
 

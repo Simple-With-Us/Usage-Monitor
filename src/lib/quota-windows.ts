@@ -274,10 +274,18 @@ export function projectQuotaWindows(
     // Preserve historical IDs exactly when provenance is absent.  For
     // attributed windows, encode the identity and series as a JSON tuple so
     // delimiters inside either value cannot make two machines share a key.
-    const id = producerInstanceId ? JSON.stringify([producerInstanceId, series]) : series;
+    // The tuple always starts with the reserved "producer" marker: a fixed
+    // intrinsic namespace so the id never flips forms as unrelated rows
+    // arrive in the 14-day window (React keys / client caches stay stable).
+    const id = producerInstanceId
+      ? JSON.stringify(["producer", producerInstanceId, series])
+      : series;
+    // Unattributed events keep the bare series key so an attributed reading
+    // of the same bucket can supersede them (see the post-map filter below);
+    // attributed events live in a per-producer namespace.
     const dedupeKey = producerInstanceId
       ? JSON.stringify(["producer", producerInstanceId, series])
-      : JSON.stringify(["legacy", series]);
+      : series;
     if (latest.has(dedupeKey)) continue;
 
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
@@ -324,30 +332,51 @@ export function projectQuotaWindows(
   }
 
   const projected = [...latest.values()];
+  // Prefer attributed readings: an unattributed window whose series is also
+  // reported by a producer-attributed window is a duplicate view of the same
+  // bucket (unattributed collectors omit the producer id), so drop it and
+  // keep only the attributed one.
+  const claimedByProducer = new Set(
+    projected
+      .filter(({ window }) => window.producerInstanceId)
+      .map(({ series }) => series),
+  );
+  const attributed = projected.filter(
+    ({ window, series }) =>
+      window.producerInstanceId !== undefined ||
+      !claimedByProducer.has(series),
+  );
   // Legacy IDs are intentionally unchanged, including arbitrary bucket IDs.
   // Reserve them before assigning machine IDs so a legacy bucket that happens
   // to equal a serialized tuple cannot collide with a producer-attributed row.
   const usedIds = new Set(
-    projected
+    attributed
       .filter(({ window }) => !window.producerInstanceId)
       .map(({ window }) => window.id),
   );
-  const windows = projected.map(({ window, series }) => {
+  const windows = attributed.map(({ window }) => {
     if (!window.producerInstanceId) return window;
-
-    let id = JSON.stringify([window.producerInstanceId, series]);
-    let suffix = 0;
-    while (usedIds.has(id)) {
-      id = JSON.stringify(["producer", window.producerInstanceId, series, suffix]);
-      suffix += 1;
-    }
-    usedIds.add(id);
-    window.id = id;
+    // The id was already assigned in the fixed "producer" namespace above;
+    // record it so a later legacy row could not silently reuse it.  No
+    // suffix scan: the id must never change shape between responses.
+    usedIds.add(window.id);
     return window;
   });
+  // skipModelTypes drives fleet-wide Antigravity instance routing: build it
+  // from the single freshest reading per series across producers, so one
+  // machine's stale exhausted reading cannot reroute the whole fleet while
+  // another machine still has quota.  occurredAt is a normalized ISO string,
+  // so lexicographic comparison is chronological.
+  const freshestPerSeries = new Map<string, QuotaWindow>();
+  for (const { series, window } of attributed) {
+    const held = freshestPerSeries.get(series);
+    if (!held || held.occurredAt < window.occurredAt) {
+      freshestPerSeries.set(series, window);
+    }
+  }
   const skipModelTypes: SkipModelType[] = [];
   const seenSkip = new Set<string>();
-  for (const window of windows) {
+  for (const window of freshestPerSeries.values()) {
     for (const target of skipTargetsFor(window)) {
       const key = `${target.instanceId}:${target.model}`;
       if (seenSkip.has(key)) continue;

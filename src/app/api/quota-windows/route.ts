@@ -52,7 +52,11 @@ export async function GET(request: NextRequest) {
       occurredAt: { gte: since },
     },
     orderBy: { occurredAt: "desc" },
-    take: 400,
+    // Producer-scoped projection keeps one window per (machine, series) in
+    // JS, so the fetch budget must cover every machine's newest reading per
+    // series: with too small a take, the newest raw events evict a machine's
+    // window and silently remove its dashboard quota.
+    take: 2000,
     select: {
       provider: true,
       service: true,
