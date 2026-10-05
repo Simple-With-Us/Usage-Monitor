@@ -108,6 +108,14 @@ export const DEFAULT_PROVIDER_MANIFEST: ProviderManifest = {
       expected: true,
       terms: { defaultWindowLabel: "weekly" },
     },
+    {
+      key: "muse",
+      label: "Muse",
+      sortOrder: 70,
+      iconHint: "muse",
+      expected: true,
+      terms: { defaultWindowLabel: "weekly" },
+    },
   ],
 };
 

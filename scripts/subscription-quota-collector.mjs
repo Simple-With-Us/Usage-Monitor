@@ -39,6 +39,10 @@
 //     name is read from the environment first, then ~/.secrets/global-api-keys
 //     via resolveCollectorToken.
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
+//   CLAUDE_CODE_OAUTH_CREDENTIALS_JSON — Claude Code OAuth credential JSON
+//     (same shape as ~/.claude/.credentials.json).  Inject via env or a
+//     launchd wrapper; see scripts/claude-code-oauth-credentials-from-keychain.sh
+//     and docs/rollouts/2026-09-12-subscription-quota-collector.md.
 //   CLAUDE_HOME / CODEX_HOME / GROK_HOME / MINIMAX_CONFIG_PATH / GBU_BIN to override
 //     credential locations or the gbu binary path
 //   PATH should include $HOME/.gbu/bin and $HOME/.local/bin so `gbu` resolves
@@ -73,6 +77,7 @@ import {
   parseMinimaxRemains,
   parseGbuJson,
 } from "./lib/subscription-quota-parsers.mjs";
+import { parseClaudeCodeCredentialsJson } from "./lib/claude-code-oauth-credentials.mjs";
 
 /** MiniMax has no seat in session-token-collectors yet; give it its own id. */
 export const MINIMAX_PRODUCER_ID = "minimax-code";
@@ -100,6 +105,24 @@ function log(message) {
 async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Read Claude OAuth credentials from CLAUDE_CODE_OAUTH_CREDENTIALS_JSON only. */
+function readClaudeCredentialsFromEnv() {
+  const raw = process.env.CLAUDE_CODE_OAUTH_CREDENTIALS_JSON;
+  if (raw == null || !String(raw).trim()) return null;
+  return parseClaudeCodeCredentialsJson(raw, { logImpl: log });
+}
+
+/** Legacy file path when env injection is unset (older CLI releases). */
+async function readClaudeCredentialsFromFile() {
+  const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
+  try {
+    const text = await readFile(path, "utf8");
+    return parseClaudeCodeCredentialsJson(text, { logImpl: log });
   } catch {
     return null;
   }
@@ -291,8 +314,11 @@ const PROVIDERS = {
     defaultSource: hostOf(CLAUDE_USAGE_URL),
     parse: (payload, context) => parseClaudeUsage(payload, context),
     async fetch() {
-      const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
-      const credentials = await readJson(path);
+      // Env-injected JSON first (launchd wrapper or operator export), then the
+      // legacy file path for older CLI releases.  Keychain is never read here;
+      // operators use scripts/claude-code-oauth-credentials-from-keychain.sh.
+      const credentials =
+        readClaudeCredentialsFromEnv() ?? (await readClaudeCredentialsFromFile());
       const oauth = asRecord(asRecord(credentials).claudeAiOauth);
       const token = resolveCredentialField(oauth, ["accessToken", "access_token"]);
       if (!token) return { skipped: "no Claude Code OAuth credential found" };

@@ -399,11 +399,13 @@ describe("buildProviderGroups fallbacks", () => {
     expect(groups.find((g) => g.provider === "acme")?.windows[0]?.status).toBe("unknown");
   });
 
-  it("tolerates a non-object payload and still returns all six expected groups", () => {
+  it("tolerates a non-object payload and still returns every expected group", () => {
     expect(buildProviderGroups(null).map((g) => g.provider)).toEqual(
       defaultProviderGroups().map((g) => g.provider),
     );
-    expect(buildProviderGroups([]).map((g) => g.providerLabel)).toEqual([...EXPECTED_LABELS, "Grok Bot"]);
+    expect(buildProviderGroups([]).map((g) => g.providerLabel)).toEqual(
+      defaultProviderGroups().map((g) => g.providerLabel),
+    );
   });
 });
 
