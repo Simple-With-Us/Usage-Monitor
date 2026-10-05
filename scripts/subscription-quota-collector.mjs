@@ -84,6 +84,14 @@ const execFileAsync = promisify(execFile);
 const GBU_TIMEOUT_MS = 20_000;
 const GBU_MAX_STDOUT_BYTES = 1_048_576;
 
+// macOS keychain read for Claude Code's modern OAuth credential storage.
+// Modern Claude Code stores the credential in the keychain under service
+// name "Claude Code-credentials"; the legacy `~/.claude/.credentials.json`
+// file path is kept only as a safety net.  We never write to the keychain.
+const KEYCHAIN_TIMEOUT_MS = 15_000;
+const KEYCHAIN_MAX_STDOUT_BYTES = 1_048_576;
+const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
+
 const INGEST_URL =
   process.env.USAGE_MONITOR_INGEST_URL ||
   "https://usage.jays.services/api/ingest/usage";
@@ -101,6 +109,69 @@ async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
+    return null;
+  }
+}
+
+/**
+ * Read Claude Code's OAuth credential payload from the macOS keychain
+ * entry of service name "Claude Code-credentials".  Modern Claude Code
+ * stores its OAuth refresh/access pair under that service; the payload
+ * mirrors the legacy `~/.claude/.credentials.json` shape so downstream
+ * callers can treat it identically.  Returns the parsed object or null
+ * when the keychain is unavailable, the entry is missing, or the payload
+ * is not valid JSON.  Never returns or logs the token value.
+ *
+ * This is read-only: we never write, refresh, store or modify the
+ * token.  Refreshing here would race Claude Code's own refresh and could
+ * invalidate the CLI's token.  Claude Code refreshes on next use.
+ */
+async function readClaudeCredentialsFromKeychain({ execFileImpl = execFileAsync } = {}) {
+  // `security` is a macOS-only binary; on any other host we silently
+  // skip so the caller can fall back to the legacy file path.
+  if (process.platform !== "darwin") return null;
+  let stdout = "";
+  try {
+    const result = await execFileImpl(
+      "security",
+      ["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
+      {
+        timeout: KEYCHAIN_TIMEOUT_MS,
+        maxBuffer: KEYCHAIN_MAX_STDOUT_BYTES,
+        encoding: "utf8",
+      },
+    );
+    stdout = String(result?.stdout ?? "");
+  } catch (error) {
+    // execFile's timeout kills the child with SIGTERM; its rejection has
+    // code=null, signal=SIGTERM, killed=true (not ETIMEDOUT).
+    if (
+      error &&
+      typeof error === "object" &&
+      error.killed === true &&
+      error.signal === "SIGTERM"
+    ) {
+      log(
+        `claude: macOS keychain lookup for "${CLAUDE_KEYCHAIN_SERVICE}" timed out; falling back to legacy ~/.claude/.credentials.json.  First access from this process / LaunchAgent can block on a keychain ACL prompt; grant "Always Allow" for the collecting process so subsequent reads succeed.`,
+      );
+      return null;
+    }
+    // Any non-zero exit (entry missing, ACL denied, interactive prompt
+    // refused, etc.) is the same operator-visible problem.  Never include
+    // the child stderr: it can carry account-identifying detail.
+    log(
+      `claude: macOS keychain lookup for "${CLAUDE_KEYCHAIN_SERVICE}" failed; falling back to legacy ~/.claude/.credentials.json.  First access from this process / LaunchAgent can block on a keychain ACL prompt; grant "Always Allow" for the collecting process so subsequent reads succeed.`,
+    );
+    return null;
+  }
+  const trimmed = stdout.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    log(
+      `claude: macOS keychain entry "${CLAUDE_KEYCHAIN_SERVICE}" returned non-JSON content; falling back to legacy ~/.claude/.credentials.json.  The CLI may have stored a non-standard payload.`,
+    );
     return null;
   }
 }
@@ -291,8 +362,17 @@ const PROVIDERS = {
     defaultSource: hostOf(CLAUDE_USAGE_URL),
     parse: (payload, context) => parseClaudeUsage(payload, context),
     async fetch() {
-      const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
-      const credentials = await readJson(path);
+      // Modern Claude Code stores its OAuth credential in the macOS
+      // keychain under service "Claude Code-credentials"; the legacy
+      // ~/.claude/.credentials.json path is honored only as a fallback
+      // for older CLI releases that still write the file.  Read-only:
+      // we never refresh or modify it here (would race Claude Code's own
+      // refresh and could invalidate the CLI's token).
+      const credentials =
+        (await readClaudeCredentialsFromKeychain()) ??
+        (await readJson(
+          join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json"),
+        ));
       const oauth = asRecord(asRecord(credentials).claudeAiOauth);
       const token = resolveCredentialField(oauth, ["accessToken", "access_token"]);
       if (!token) return { skipped: "no Claude Code OAuth credential found" };
