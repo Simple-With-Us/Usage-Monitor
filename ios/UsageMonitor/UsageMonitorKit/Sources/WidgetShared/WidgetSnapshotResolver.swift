@@ -137,12 +137,17 @@ public struct WidgetSnapshotResolver {
     /// said the same thing. When the app group itself is unavailable, no amount
     /// of tapping will ever help, so say that instead of repeating a dead end.
     ///
-    /// Answered directly from `containerURL`: the full readDetailed() path
-    /// JSON-decodes both payloads (up to 1 MiB each) plus legacy-cleanup file
-    /// I/O, which is wasted work inside WidgetKit's memory/CPU budget on
-    /// exactly the path the widget takes most often (the empty state).
+    /// Answered from the **live** `AppGroup.containerURL` on every call rather
+    /// than the value captured when `shared` was constructed. The container
+    /// lookup is cheap (Foundation caches the security application group
+    /// resolution), and a transient nil at extension load used to latch
+    /// `isAppGroupUnavailable == true` for the lifetime of the widget process,
+    /// permanently claiming "Reinstall the app" after the group became
+    /// reachable again. `SharedStore`'s captured URL is intentionally left
+    /// alone: that is the file path used for reads/writes, and changing it would
+    /// silently desync the writer from the reader.
     public var isAppGroupUnavailable: Bool {
-        containerURL == nil
+        AppGroup.containerURL == nil
     }
 
     // MARK: - Local payload

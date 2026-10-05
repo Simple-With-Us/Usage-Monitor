@@ -124,7 +124,10 @@ private struct MediumQuotaWidget: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                ForEach(quota.windows) { window in
+                // The hero column already renders the most-urgent window; the
+                // medium layout shows the rest alongside it. The small widget
+                // is hero-only and the large widget shows the full list.
+                ForEach(Array(quota.windows.dropFirst())) { window in
                     QuotaRow(window: window, redacted: redacted, showsCaption: false)
                 }
                 Spacer(minLength: 0)

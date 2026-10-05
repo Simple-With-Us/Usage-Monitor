@@ -438,9 +438,14 @@ struct WidgetUnavailableContent: Equatable, Sendable {
     /// and the widget says the same thing again. When the shared container is
     /// unavailable, no amount of tapping will ever populate the widget, so say
     /// that instead of sending the owner back into the same loop.
-    init(title: String, message: String, deepLink: URL?) {
+    init(
+        title: String,
+        message: String,
+        deepLink: URL?,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) {
         self.title = title
-        self.message = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+        self.message = appGroupUnavailable
             ? "Widget storage is unavailable on this install. Reinstall the app to restore it."
             : message
         self.deepLink = deepLink
@@ -525,7 +530,9 @@ enum WidgetTopicPresentation {
         llmProviderId: String?,
         serverFocus: WidgetServerFocus,
         maxMeters: Int = 3,
-        sortOrder: WidgetSortOrder = .utilisation
+        sortOrder: WidgetSortOrder = .utilisation,
+        providersSort: WidgetSortOrder = .spend,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         switch topic {
         case .budget:
@@ -538,45 +545,69 @@ enum WidgetTopicPresentation {
                 )
             )
         case .llmQuotas:
-            return llmContent(from: snapshot, providerId: llmProviderId)
+            return llmContent(
+                from: snapshot,
+                providerId: llmProviderId,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .quotas:
-            return quotaContent(from: snapshot, maxMeters: maxMeters)
+            return quotaContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                sortOrder: sortOrder,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .servers:
-            return serverContent(from: snapshot, focus: serverFocus)
+            return serverContent(
+                from: snapshot,
+                focus: serverFocus,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .mac:
-            return macContent(from: snapshot)
+            return macContent(
+                from: snapshot,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .alerts:
-            return alertsContent(from: snapshot)
+            return alertsContent(
+                from: snapshot,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .providers:
-            // Providers is a spend ranking by definition; the intent's
-            // sortOrder defaults to .utilisation (indistinguishable from an
-            // explicit pick), so only re-rank when the owner explicitly
-            // opted into utilisation — otherwise every default-configured
-            // widget inverts from "top spenders" to "closest to budget".
+            // Providers is a spend ranking by definition; the shared sortOrder
+            // defaults to .utilisation (which would have been indistinguishable
+            // from an explicit "Closest to Budget" pick), so Providers gets its
+            // own parameter that defaults to .spend. An explicit Closest to
+            // Budget pick on the intent survives via `providersSort`.
             return providersContent(
                 from: snapshot,
                 maxMeters: max(maxMeters, 6),
-                sortOrder: sortOrder == .utilisation ? .spend : sortOrder
+                sortOrder: providersSort,
+                appGroupUnavailable: appGroupUnavailable
             )
         case .projects:
             return projectsContent(
                 from: snapshot,
                 maxMeters: maxMeters,
-                sortOrder: sortOrder
+                sortOrder: sortOrder,
+                appGroupUnavailable: appGroupUnavailable
             )
         }
     }
 
     static func quotaContent(
         from snapshot: WidgetSnapshot,
-        maxMeters: Int
+        maxMeters: Int,
+        sortOrder: WidgetSortOrder = .utilisation,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard let section = snapshot.quotas else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Quotas",
                     message: "Open the app to load plan quotas.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -585,14 +616,31 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "Quotas",
                     message: "No quota windows reported yet.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
+        }
+        let windows: [WidgetSnapshot.QuotaSection.Window]
+        switch sortOrder {
+        case .utilisation:
+            // Most urgent first: lowest remaining fraction wins; the medium
+            // hero relies on `windows.first` being the worst window.
+            windows = section.windows.sorted { lhs, rhs in
+                let l = lhs.remainingFraction ?? 1
+                let r = rhs.remainingFraction ?? 1
+                if l != r { return l < r }
+                return lhs.providerLabel.localizedCaseInsensitiveCompare(rhs.providerLabel) == .orderedAscending
+            }
+        case .spend:
+            windows = section.windows.sorted { lhs, rhs in
+                lhs.providerLabel.localizedCaseInsensitiveCompare(rhs.providerLabel) == .orderedAscending
+            }
         }
         return .quota(
             WidgetQuotaContent(
                 generatedAt: section.generatedAt,
-                windows: Array(section.windows.prefix(maxMeters)),
+                windows: Array(windows.prefix(maxMeters)),
                 deepLink: URL(string: "usageclientmonitor://dashboard")
             )
         )
@@ -601,14 +649,16 @@ enum WidgetTopicPresentation {
     static func projectsContent(
         from snapshot: WidgetSnapshot,
         maxMeters: Int,
-        sortOrder: WidgetSortOrder = .utilisation
+        sortOrder: WidgetSortOrder = .utilisation,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard !snapshot.projects.isEmpty else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Projects",
                     message: "Open the app to load project budgets.",
-                    deepLink: URL(string: "usageclientmonitor://projects")
+                    deepLink: URL(string: "usageclientmonitor://projects"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -629,14 +679,16 @@ enum WidgetTopicPresentation {
 
     static func llmContent(
         from snapshot: WidgetSnapshot,
-        providerId: String?
+        providerId: String?,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard let section = snapshot.llm else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "Open the app to load LLM quotas.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -645,7 +697,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "No LLM activity in the latest window.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -657,7 +710,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "LLM Quotas",
                         message: "That provider is not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://dashboard")
+                        deepLink: URL(string: "usageclientmonitor://dashboard"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -669,7 +723,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "No LLM activity in the latest window.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -686,7 +741,8 @@ enum WidgetTopicPresentation {
 
     static func serverContent(
         from snapshot: WidgetSnapshot,
-        focus: WidgetServerFocus
+        focus: WidgetServerFocus,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         let section = snapshot.servers
         switch focus {
@@ -696,7 +752,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Servers",
                         message: "Open the app to load server status.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -717,7 +774,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Host",
                         message: "Host metrics are not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -737,7 +795,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Servers",
                         message: "That app is not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -941,23 +1000,45 @@ enum WidgetTopicPresentation {
         return "gauge.with.dots.needle.50percent"
     }
 
-    /// `"5h"` / `"7d"` / `"resets in 2h"` caption under a quota row.
+    /// `"5h"` / `"7d"` / `"Resets in 2 hr"` caption under a quota row.
+    ///
+    /// The reset window is always a *future* target, so the duration is
+    /// computed directly against `now` rather than fed through the past-tense
+    /// ``WidgetPresentation/relativeAge(since:asOf:)`` helper — `relativeAge`
+    /// clamps to zero for any future date and would have read "Resets in just
+    /// now" for a positive countdown and "Resets in 3 hr ago" for an elapsed
+    /// reset. An already-elapsed reset returns `nil` so the row never claims
+    /// the window is about to refresh.
     static func quotaWindowCaption(_ window: WidgetSnapshot.QuotaSection.Window, asOf now: Date = Date()) -> String? {
         if let reset = window.resetAt {
-            let relative = WidgetPresentation.relativeAge(since: reset, asOf: now)
-            return relative.isEmpty ? "Resets soon" : "Resets in \(relative)"
+            let seconds = reset.timeIntervalSince(now)
+            guard seconds > 0 else { return nil }
+            if seconds < 3600 {
+                let mins = max(1, Int((seconds / 60).rounded()))
+                return "Resets in \(mins) min"
+            }
+            if seconds < 36 * 3600 {
+                let hours = max(1, Int((seconds / 3600).rounded()))
+                return "Resets in \(hours) hr"
+            }
+            let days = max(1, Int((seconds / 86_400).rounded()))
+            return "Resets in \(days) days"
         }
         guard let cadence = window.window, !cadence.isEmpty else { return nil }
         return cadence
     }
 
-    static func macContent(from snapshot: WidgetSnapshot) -> WidgetTopicContent {
+    static func macContent(
+        from snapshot: WidgetSnapshot,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
         guard let section = snapshot.mac else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Mac",
                     message: "Open the app to load Mac stats.",
-                    deepLink: URL(string: "usageclientmonitor://computers")
+                    deepLink: URL(string: "usageclientmonitor://computers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -966,7 +1047,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "Mac",
                     message: "The Mac has not reported yet.",
-                    deepLink: URL(string: "usageclientmonitor://computers")
+                    deepLink: URL(string: "usageclientmonitor://computers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -978,13 +1060,17 @@ enum WidgetTopicPresentation {
         )
     }
 
-    static func alertsContent(from snapshot: WidgetSnapshot) -> WidgetTopicContent {
+    static func alertsContent(
+        from snapshot: WidgetSnapshot,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
         guard let section = snapshot.alerts else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Alerts",
                     message: "Open the app to load alerts.",
-                    deepLink: URL(string: "usageclientmonitor://alerts")
+                    deepLink: URL(string: "usageclientmonitor://alerts"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -999,14 +1085,16 @@ enum WidgetTopicPresentation {
     static func providersContent(
         from snapshot: WidgetSnapshot,
         maxMeters: Int = 6,
-        sortOrder: WidgetSortOrder = .spend
+        sortOrder: WidgetSortOrder = .spend,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         if snapshot.month.isEmpty {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Providers",
                     message: "Open the app to load providers.",
-                    deepLink: URL(string: "usageclientmonitor://providers")
+                    deepLink: URL(string: "usageclientmonitor://providers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -1020,7 +1108,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "Providers",
                     message: "No provider spend in the latest cache.",
-                    deepLink: URL(string: "usageclientmonitor://providers")
+                    deepLink: URL(string: "usageclientmonitor://providers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }

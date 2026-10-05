@@ -17,7 +17,7 @@ struct MacGlanceWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(
             kind: kind,
-            intent: SelectMacIntent.self,
+            intent: SelectMacAlertsIntent.self,
             provider: DedicatedTopicProvider(topic: .mac)
         ) { entry in
             UsageMonitorWidgetView(entry: entry)
@@ -37,7 +37,7 @@ struct AlertsGlanceWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(
             kind: kind,
-            intent: SelectMacIntent.self,
+            intent: SelectMacAlertsIntent.self,
             provider: DedicatedTopicProvider(topic: .alerts)
         ) { entry in
             DedicatedAlertsWidgetView(entry: entry)
@@ -59,8 +59,8 @@ struct QuotasGlanceWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(
             kind: kind,
-            intent: SelectMacIntent.self,
-            provider: DedicatedTopicProvider(topic: .quotas)
+            intent: SelectQuotasIntent.self,
+            provider: QuotasTopicProvider()
         ) { entry in
             UsageMonitorWidgetView(entry: entry)
                 .containerBackground(Theme.Colors.background, for: .widget)
@@ -73,7 +73,7 @@ struct QuotasGlanceWidget: Widget {
 }
 
 struct DedicatedTopicProvider: AppIntentTimelineProvider {
-    typealias Intent = SelectMacIntent
+    typealias Intent = SelectMacAlertsIntent
     let topic: WidgetTopic
 
     init(topic: WidgetTopic) {
@@ -84,14 +84,14 @@ struct DedicatedTopicProvider: AppIntentTimelineProvider {
         entry(snapshot: .placeholder, configuration: nil)
     }
 
-    func snapshot(for configuration: SelectMacIntent, in context: Context) async -> BudgetEntry {
+    func snapshot(for configuration: SelectMacAlertsIntent, in context: Context) async -> BudgetEntry {
         let snapshot = context.isPreview
             ? WidgetSnapshot.placeholder
             : (WidgetSnapshotResolver.shared.read() ?? .empty)
         return entry(snapshot: snapshot, configuration: configuration)
     }
 
-    func timeline(for configuration: SelectMacIntent, in context: Context) async -> Timeline<BudgetEntry> {
+    func timeline(for configuration: SelectMacAlertsIntent, in context: Context) async -> Timeline<BudgetEntry> {
         let snapshot = WidgetSnapshotResolver.shared.read() ?? .empty
         let next = Calendar.current.date(byAdding: .minute, value: 30, to: Date())
             ?? Date().addingTimeInterval(1800)
@@ -101,13 +101,59 @@ struct DedicatedTopicProvider: AppIntentTimelineProvider {
         )
     }
 
-    private func entry(snapshot: WidgetSnapshot, configuration: SelectMacIntent?) -> BudgetEntry {
+    private func entry(snapshot: WidgetSnapshot, configuration: SelectMacAlertsIntent?) -> BudgetEntry {
         BudgetEntry(
             date: Date(),
             snapshot: snapshot,
             content: WidgetTopicPresentation.topicContent(
                 from: snapshot,
                 topic: topic,
+                budgetFocus: .overall,
+                llmProviderId: nil,
+                serverFocus: .service,
+                maxMeters: configuration?.maxMeters ?? 4
+            )
+        )
+    }
+}
+
+/// Dedicated-tile timeline provider for the Quotas widget, whose intent exposes
+/// a Sort parameter that ``DedicatedTopicProvider`` does not (it is bound to
+/// ``SelectMacAlertsIntent``).  Reusing the Mac+Alerts provider would silently
+/// drop `sortOrder` (the picker would render and the entries would still rank
+/// by the previous implementation's hard-coded utilisation), so this is a
+/// separate type whose `Intent` matches the widget's configuration intent.
+struct QuotasTopicProvider: AppIntentTimelineProvider {
+    typealias Intent = SelectQuotasIntent
+
+    func placeholder(in context: Context) -> BudgetEntry {
+        entry(snapshot: .placeholder, configuration: nil)
+    }
+
+    func snapshot(for configuration: SelectQuotasIntent, in context: Context) async -> BudgetEntry {
+        let snapshot = context.isPreview
+            ? WidgetSnapshot.placeholder
+            : (WidgetSnapshotResolver.shared.read() ?? .empty)
+        return entry(snapshot: snapshot, configuration: configuration)
+    }
+
+    func timeline(for configuration: SelectQuotasIntent, in context: Context) async -> Timeline<BudgetEntry> {
+        let snapshot = WidgetSnapshotResolver.shared.read() ?? .empty
+        let next = Calendar.current.date(byAdding: .minute, value: 30, to: Date())
+            ?? Date().addingTimeInterval(1800)
+        return Timeline(
+            entries: [entry(snapshot: snapshot, configuration: configuration)],
+            policy: .after(next)
+        )
+    }
+
+    private func entry(snapshot: WidgetSnapshot, configuration: SelectQuotasIntent?) -> BudgetEntry {
+        BudgetEntry(
+            date: Date(),
+            snapshot: snapshot,
+            content: WidgetTopicPresentation.topicContent(
+                from: snapshot,
+                topic: .quotas,
                 budgetFocus: .overall,
                 llmProviderId: nil,
                 serverFocus: .service,

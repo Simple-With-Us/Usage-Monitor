@@ -273,10 +273,20 @@ struct SelectBudgetIntent: WidgetConfigurationIntent {
     @Parameter(title: "Rows", default: .standard)
     var rows: WidgetRowCount
 
-    /// Ranking for provider / project lists.  Applies to Budget, Providers,
-    /// Projects, and Quotas.
+    /// Ranking for budget / projects / quota lists.  Applies to Budget,
+    /// Projects, and Quotas.  Defaults to `.utilisation` (Closest to Budget)
+    /// — matching the budget/projects default — and is NOT used for Providers
+    /// (see `providersSort` below).
     @Parameter(title: "Sort", default: .utilisation)
     var sortOrder: WidgetSortOrder
+
+    /// Ranking for the Providers topic.  Providers lists top spenders by
+    /// default, so this defaults to `.spend` and is independent of
+    /// `sortOrder`.  An explicit "Closest to Budget" pick here is preserved
+    /// — the two defaults are not indistinguishable the way they would be if
+    /// Providers reused `sortOrder`.
+    @Parameter(title: "Providers Sort", default: .spend)
+    var providersSort: WidgetSortOrder
 
     /// Resolved budget focus for timeline providers (existing widgets).
     var focus: WidgetBudgetFocus {
@@ -296,12 +306,27 @@ struct SelectBudgetIntent: WidgetConfigurationIntent {
 
 // MARK: - Dedicated-tile configuration
 
-/// Configuration for the single-purpose tiles (Mac, Alerts, Quotas).  Those
-/// widgets have no topic picker because there is nothing to switch between,
-/// but row count and sort still change what a medium or large tile can show, so
-/// they get the same options rather than being hard-coded.
-struct SelectMacIntent: WidgetConfigurationIntent {
+/// Configuration for the Mac + Alerts single-purpose tiles.  Those widgets
+/// have no ranking dimension (CPU/alert lists are not sortable), so they only
+/// expose row count — no Sort control that does nothing.
+struct SelectMacAlertsIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Tile Options"
+    static var description = IntentDescription(
+        "Choose how many rows this tile shows."
+    )
+
+    @Parameter(title: "Rows", default: .standard)
+    var rows: WidgetRowCount
+
+    var maxMeters: Int { rows.maxMeters }
+}
+
+/// Configuration for the Quotas single-purpose tile.  Window order is a real
+/// choice — most-urgent-first (utilisation) or alphabetical — so it gets its own
+/// intent with a working Sort parameter rather than reusing the budget intent's
+/// parameter set.
+struct SelectQuotasIntent: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource = "Quotas Options"
     static var description = IntentDescription(
         "Choose how many rows this tile shows and how to rank them."
     )

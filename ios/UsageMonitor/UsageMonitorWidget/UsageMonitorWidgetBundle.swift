@@ -68,7 +68,8 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
             llmProviderId: configuration.llmProvider?.id,
             serverFocus: configuration.resolvedServerFocus,
             maxMeters: configuration.maxMeters,
-            sortOrder: configuration.sort
+            sortOrder: configuration.sort,
+            providersSort: configuration.providersSort
         )
     }
 
@@ -79,7 +80,8 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
         llmProviderId: String?,
         serverFocus: WidgetServerFocus,
         maxMeters: Int = 3,
-        sortOrder: WidgetSortOrder = .utilisation
+        sortOrder: WidgetSortOrder = .utilisation,
+        providersSort: WidgetSortOrder = .spend
     ) -> BudgetEntry {
         BudgetEntry(
             date: Date(),
@@ -91,7 +93,8 @@ struct BudgetTimelineProvider: AppIntentTimelineProvider {
                 llmProviderId: llmProviderId,
                 serverFocus: serverFocus,
                 maxMeters: maxMeters,
-                sortOrder: sortOrder
+                sortOrder: sortOrder,
+                providersSort: providersSort
             )
         )
     }

@@ -127,6 +127,38 @@ final class WidgetPresentationTests: XCTestCase {
         )
     }
 
+    // MARK: - Unavailable message determinism
+
+    /// `WidgetUnavailableContent` used to overwrite the caller's message with
+    /// `WidgetSnapshotResolver.shared.isAppGroupUnavailable` on every init.
+    /// That made the type non-deterministic — and the widget unit-test bundle
+    /// is unhosted, so the shared resolver's app-group container is always
+    /// nil there, latching the "Reinstall the app" message for every test.
+    /// Tests can now force the condition via the explicit `appGroupUnavailable`
+    /// parameter.
+    func testUnavailableContentUsesCallerMessageWhenAppGroupIsAvailable() {
+        let content = WidgetUnavailableContent(
+            title: "Quotas",
+            message: "Open the app to load plan quotas.",
+            deepLink: URL(string: "usageclientmonitor://dashboard"),
+            appGroupUnavailable: false
+        )
+        XCTAssertEqual(content.message, "Open the app to load plan quotas.")
+    }
+
+    func testUnavailableContentSubstitutesReinstallMessageWhenAppGroupIsUnavailable() {
+        let content = WidgetUnavailableContent(
+            title: "Quotas",
+            message: "Open the app to load plan quotas.",
+            deepLink: URL(string: "usageclientmonitor://dashboard"),
+            appGroupUnavailable: true
+        )
+        XCTAssertEqual(
+            content.message,
+            "Widget storage is unavailable on this install. Reinstall the app to restore it."
+        )
+    }
+
     // MARK: - Focus selection (overall vs project)
 
     func testContentOverallUsesAccountTotalsAndProviderMeters() {
@@ -226,7 +258,11 @@ final class WidgetTopicPresentationTests: XCTestCase {
     }
 
     func testLlmMissingSectionIsUnavailableNotZero() {
-        let content = WidgetTopicPresentation.llmContent(from: .empty, providerId: nil)
+        let content = WidgetTopicPresentation.llmContent(
+            from: .empty,
+            providerId: nil,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -237,7 +273,8 @@ final class WidgetTopicPresentationTests: XCTestCase {
     func testLlmUnknownProviderIsUnavailable() {
         let content = WidgetTopicPresentation.llmContent(
             from: .placeholder,
-            providerId: "does-not-exist"
+            providerId: "does-not-exist",
+            appGroupUnavailable: false
         )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
@@ -278,7 +315,11 @@ final class WidgetTopicPresentationTests: XCTestCase {
                 status: "live"
             )
         )
-        let content = WidgetTopicPresentation.serverContent(from: snapshot, focus: .host)
+        let content = WidgetTopicPresentation.serverContent(
+            from: snapshot,
+            focus: .host,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable host")
         }
@@ -288,7 +329,8 @@ final class WidgetTopicPresentationTests: XCTestCase {
     func testServerMissingAppIsUnavailable() {
         let content = WidgetTopicPresentation.serverContent(
             from: .placeholder,
-            focus: .app(id: "missing")
+            focus: .app(id: "missing"),
+            appGroupUnavailable: false
         )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable app")
@@ -338,7 +380,10 @@ final class WidgetTopicPresentationTests: XCTestCase {
     }
 
     func testMacMissingSectionIsUnavailableNotZero() {
-        let content = WidgetTopicPresentation.macContent(from: .empty)
+        let content = WidgetTopicPresentation.macContent(
+            from: .empty,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -355,7 +400,10 @@ final class WidgetTopicPresentationTests: XCTestCase {
             status: "offline",
             reported: false
         )
-        let content = WidgetTopicPresentation.macContent(from: snapshot)
+        let content = WidgetTopicPresentation.macContent(
+            from: snapshot,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -389,7 +437,10 @@ final class WidgetTopicPresentationTests: XCTestCase {
     }
 
     func testAlertsMissingSectionIsUnavailable() {
-        let content = WidgetTopicPresentation.alertsContent(from: .empty)
+        let content = WidgetTopicPresentation.alertsContent(
+            from: .empty,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -430,7 +481,10 @@ final class WidgetTopicPresentationTests: XCTestCase {
     }
 
     func testProvidersMissingMonthIsUnavailable() {
-        let content = WidgetTopicPresentation.providersContent(from: .empty)
+        let content = WidgetTopicPresentation.providersContent(
+            from: .empty,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -474,11 +528,41 @@ final class WidgetTopicPresentationTests: XCTestCase {
         XCTAssertEqual(providers.meters.map(\.name), ["Rich", "Cheap"])
     }
 
+    /// The Providers topic's previous bug discarded an explicit "Closest to
+    /// Budget" pick because `.utilisation` was indistinguishable from the
+    /// shared intent default.  Providers now reads `providersSort`, which the
+    /// intent defaults to `.spend`, so an explicit `.utilisation` (Closest to
+    /// Budget) pick must survive.
+    func testTopicContentProvidersHonoursExplicitUtilisation() {
+        var snapshot = WidgetSnapshot.empty
+        snapshot.month = "2026-08"
+        snapshot.generatedAt = Date(timeIntervalSince1970: 1_720_000_000)
+        snapshot.spenders = [
+            WidgetSnapshot.Meter(id: "cheap", name: "Cheap", spentUsd: 45, budgetUsd: 50, percentUsed: 0.9, status: "warning", projectedEomUsd: nil),
+            WidgetSnapshot.Meter(id: "rich", name: "Rich", spentUsd: 200, budgetUsd: 1000, percentUsed: 0.2, status: "ok", projectedEomUsd: nil),
+        ]
+        let content = WidgetTopicPresentation.topicContent(
+            from: snapshot,
+            topic: .providers,
+            budgetFocus: .overall,
+            llmProviderId: nil,
+            serverFocus: .service,
+            providersSort: .utilisation
+        )
+        guard case .providers(let providers) = content else {
+            return XCTFail("expected providers content")
+        }
+        XCTAssertEqual(providers.meters.map(\.name), ["Cheap", "Rich"])
+    }
+
     func testProvidersEmptySpendIsUnavailableNotZero() {
         var snapshot = WidgetSnapshot.empty
         snapshot.month = "2026-08"
         snapshot.generatedAt = Date(timeIntervalSince1970: 1_720_000_000)
-        let content = WidgetTopicPresentation.providersContent(from: snapshot)
+        let content = WidgetTopicPresentation.providersContent(
+            from: snapshot,
+            appGroupUnavailable: false
+        )
         guard case .unavailable(let unavailable) = content else {
             return XCTFail("expected unavailable")
         }
@@ -556,6 +640,30 @@ final class WidgetTopicPresentationTests: XCTestCase {
         XCTAssertEqual(quota.windows.count, 2)
     }
 
+    /// Quotas' sort picker used to be a no-op because `topicContent` never
+    /// threaded `sortOrder` into `quotaContent`.  Most-urgent-first is the
+    /// default; verify it places the lowest remaining fraction first so the
+    /// medium hero's `windows.first` is always the worst window.
+    func testQuotaContentUtilisationSortsMostUrgentFirst() {
+        let urgent = quotaWindow(id: "urgent", provider: "urgent", remaining: 0.1)
+        let healthy = quotaWindow(id: "healthy", provider: "healthy", remaining: 0.9)
+        let snapshot = snapshotWithQuotas([healthy, urgent])
+        let content = WidgetTopicPresentation.quotaContent(from: snapshot, maxMeters: 5, sortOrder: .utilisation)
+        guard case .quota(let quota) = content else { return XCTFail("expected quota") }
+        XCTAssertEqual(quota.windows.map(\.id), ["urgent", "healthy"])
+    }
+
+    /// Quotas' name sort orders alphabetically, the same option Edit Widget
+    /// exposes on the Quotas tile.
+    func testQuotaContentSpendSortUsesAlphabeticalOrder() {
+        let zebra = quotaWindow(id: "zebra", provider: "Zebra")
+        let alpha = quotaWindow(id: "alpha", provider: "Alpha")
+        let snapshot = snapshotWithQuotas([zebra, alpha])
+        let content = WidgetTopicPresentation.quotaContent(from: snapshot, maxMeters: 5, sortOrder: .spend)
+        guard case .quota(let quota) = content else { return XCTFail("expected quota") }
+        XCTAssertEqual(quota.windows.map(\.id), ["alpha", "zebra"])
+    }
+
     /// A window the server described but gave no number must read "Unknown",
     /// never a fabricated 0% — that is the whole point of the section.
     func testQuotaRemainingCaptionNeverInventsAPercent() {
@@ -589,13 +697,63 @@ final class WidgetTopicPresentationTests: XCTestCase {
         XCTAssertEqual(WidgetTopicPresentation.quotaFractionUsed(quotaWindow(remaining: nil)), 0, accuracy: 0.0001)
     }
 
+    /// `quotaWindowCaption` used to feed the future `resetAt` through the
+    /// past-tense `relativeAge` helper.  `relativeAge` clamps to zero for any
+    /// future date and returns "just now", so the row read "Resets in just
+    /// now" for a positive countdown.  The fix formats the forward interval
+    /// against `now` directly.
+    func testQuotaWindowCaptionFormatsFutureReset() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let reset = now.addingTimeInterval(45 * 60)
+        var window = quotaWindow()
+        window.resetAt = reset
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaWindowCaption(window, asOf: now),
+            "Resets in 45 min"
+        )
+    }
+
+    /// An already-elapsed reset must not claim a countdown or quote a past
+    /// "ago" phrase; it returns nil so the row simply has no reset caption.
+    func testQuotaWindowCaptionReturnsNilForElapsedReset() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        var window = quotaWindow()
+        window.resetAt = now.addingTimeInterval(-3 * 60 * 60)
+        XCTAssertNil(WidgetTopicPresentation.quotaWindowCaption(window, asOf: now))
+    }
+
+    /// "Resets in 1 min" must never round down to zero on a tiny-but-positive
+    /// interval; the previous "just now" output was unreachable for a true
+    /// future reset because `relativeAge` returned "" only at exact equality.
+    func testQuotaWindowCaptionNeverRoundsDownToZero() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        var window = quotaWindow()
+        window.resetAt = now.addingTimeInterval(10)
+        XCTAssertEqual(
+            WidgetTopicPresentation.quotaWindowCaption(window, asOf: now),
+            "Resets in 1 min"
+        )
+    }
+
+    /// No `resetAt`: fall back to the cadence string the server attached
+    /// (e.g. "5h" / "7d"), or nil if the server omitted that too.
+    func testQuotaWindowCaptionFallsBackToCadence() {
+        var window = quotaWindow()
+        window.resetAt = nil
+        window.window = "5h"
+        XCTAssertEqual(WidgetTopicPresentation.quotaWindowCaption(window), "5h")
+        window.window = nil
+        XCTAssertNil(WidgetTopicPresentation.quotaWindowCaption(window))
+    }
+
     func testQuotaTopicIsUnavailableWithoutCache() {
         let content = WidgetTopicPresentation.topicContent(
             from: .empty,
             topic: .quotas,
             budgetFocus: .overall,
             llmProviderId: nil,
-            serverFocus: .service
+            serverFocus: .service,
+            appGroupUnavailable: false
         )
         guard case .unavailable = content else { return XCTFail("expected unavailable") }
     }
@@ -620,7 +778,8 @@ final class WidgetTopicPresentationTests: XCTestCase {
             topic: .projects,
             budgetFocus: .overall,
             llmProviderId: nil,
-            serverFocus: .service
+            serverFocus: .service,
+            appGroupUnavailable: false
         )
         guard case .unavailable = content else { return XCTFail("expected unavailable") }
     }

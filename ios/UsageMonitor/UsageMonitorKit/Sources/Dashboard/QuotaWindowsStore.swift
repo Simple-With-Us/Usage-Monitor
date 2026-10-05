@@ -44,8 +44,16 @@ public final class QuotaWindowsStore {
             state = .loaded(response)
             // Mirror into the app group so the Quotas widget topic has data.
             // Previously this response only ever reached the in-app card, so a
-            // widget on this data had nothing to read.
-            WidgetSnapshotStore.updateQuotas(response)
+            // widget on this data had nothing to read.  SharedStore.update
+            // does a synchronous read + JSON decode + encode + atomic write +
+            // hardenFile; running that on the main actor every bootstrap,
+            // pull-to-refresh, and loadIfNeeded stalls UI for the duration.
+            // The snapshot is decoupled from any main-actor state at this
+            // point, so hop the write off the actor.
+            let mirror = response
+            Task.detached(priority: .utility) {
+                WidgetSnapshotStore.updateQuotas(mirror)
+            }
         } catch let error as APIError {
             handle(error)
         } catch {
