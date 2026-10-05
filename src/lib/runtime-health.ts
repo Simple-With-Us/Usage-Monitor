@@ -186,6 +186,16 @@ export function recordSchedulerGate(enabled: boolean): void {
   state.schedulerGateEnabled = enabled;
 }
 
+/**
+ * The gate value this process actually booted with, or null when
+ * instrumentation.register() has not run yet.  The admin surface must
+ * report this for the boot-applied USAGE_SCHEDULER_ENABLED knob instead
+ * of the live cache value.
+ */
+export function getAppliedSchedulerGate(): boolean | null {
+  return state.schedulerGateEnabled;
+}
+
 /** Test-only: clear the recorded boot gate between register() runs. */
 export function resetSchedulerGateForTests(): void {
   state.schedulerGateEnabled = null;

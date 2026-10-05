@@ -5,6 +5,7 @@ import {
   appSettings,
   resolveInfisicalEnvironment,
 } from "@/lib/app-settings";
+import { getAppliedSchedulerGate } from "@/lib/runtime-health";
 import { InfisicalWriteError } from "@jaywedgeworth22/congress-trading-shared";
 
 export const runtime = "nodejs";
@@ -30,11 +31,23 @@ function forbidden() {
 
 export async function GET(request: NextRequest) {
   if (!isAdmin(request)) return forbidden();
+  // USAGE_SCHEDULER_ENABLED is boot-applied (see recordSchedulerGate): the
+  // admin surface must show the value this process actually booted with
+  // alongside the live value, or a post-boot flip looks applied before the
+  // restart that applies it.
+  const appliedGate = getAppliedSchedulerGate();
+  const settings = appSettings.getAllMeta().map((meta) => {
+    if (meta.key !== "USAGE_SCHEDULER_ENABLED" || appliedGate === null) {
+      return meta;
+    }
+    const appliedValue = String(appliedGate);
+    return { ...meta, appliedValue, restartRequired: appliedValue !== meta.value };
+  });
   return NextResponse.json({
     ok: true,
     mode: appSettings.isInfisicalMode ? "infisical" : "env",
     environment: resolveInfisicalEnvironment(),
-    settings: appSettings.getAllMeta(),
+    settings,
   });
 }
 

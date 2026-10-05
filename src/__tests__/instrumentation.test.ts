@@ -37,13 +37,32 @@ vi.mock("@/lib/datadog-server", () => ({
 }));
 
 import { isUsageSchedulerEnabled, register } from "@/instrumentation";
-import { resetSchedulerGateForTests } from "@/lib/runtime-health";
+import {
+  isSchedulerEnabled,
+  resetSchedulerGateForTests,
+} from "@/lib/runtime-health";
+
+function clearInfisicalCredEnv() {
+  for (const name of [
+    "INFISICAL_CLIENT_ID",
+    "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_AUTOMATION_CLIENT_ID",
+    "INFISICAL_AUTOMATION_CLIENT_SECRET",
+  ]) {
+    delete process.env[name];
+  }
+}
 
 describe("usage scheduler instrumentation", () => {
   beforeEach(() => {
     // The boot gate is recorded module-global state; each register() run in
     // this file must evaluate its own stubbed env, not the previous test's.
     resetSchedulerGateForTests();
+    // init() resolves credentials from the ambient env when register() is
+    // called without explicit creds: an exported credential in the shell
+    // would flip the service into Infisical mode and take the gate off the
+    // stubbed process.env.  Same hazard the app-settings suite guards.
+    clearInfisicalCredEnv();
     mocks.startUsagePollingScheduler.mockReset();
     mocks.applySqliteNativeMemoryPragmas.mockClear();
     mocks.computeBudgetStatus.mockClear();
@@ -106,6 +125,20 @@ describe("usage scheduler instrumentation", () => {
     expect(warning).toHaveBeenCalledWith(
       "[usage-scheduler] disabled by USAGE_SCHEDULER_ENABLED=false"
     );
+  });
+
+  it("pins the boot gate: a post-boot knob flip does not change the recorded answer", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "nodejs");
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+
+    await register();
+    expect(isSchedulerEnabled()).toBe(false);
+
+    // Operator flips the knob post-boot; the recorded boot decision stands,
+    // so /api/ready keeps agreeing with what the process actually did.
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "true");
+    expect(isSchedulerEnabled()).toBe(false);
+    expect(mocks.startUsagePollingScheduler).not.toHaveBeenCalled();
   });
 
   it("does not start the Node scheduler or touch SQLite in non-Node runtimes", async () => {
