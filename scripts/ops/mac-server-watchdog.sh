@@ -81,7 +81,16 @@ _cpu_from_top() {
           # (" 7.31% user"), so strip the number from the field that matched
           # the label.  Taking $(i+1) instead reads the NEXT value (sys for
           # user, idle for sys) and reports sys+idle = 100 - user.
+          # Some top builds append per-core sections (e.g. "CPU0: 9.00% user,
+          # 9.00% sys, ...") to the same "CPU usage" line.  Reset u/s per
+          # matching line and break on /CPU[0-9]+:?/ so a trailing per-core
+          # field cannot overwrite the machine-wide values.  The "CPU usage"
+          # header does not match the digit-required pattern, so it never
+          # triggers the break; the optional ":?" covers both "CPU0" (after
+          # the FS ate the trailing colon) and a literal "CPU0:" form.
+          u = ""; s = ""
           for (i = 1; i <= NF; i++) {
+            if ($i ~ /CPU[0-9]+:?/) break
             if ($i ~ /user/) { gsub(/[^0-9.]/, "", $i); u = $i }
             if ($i ~ /sys/)  { gsub(/[^0-9.]/, "", $i); s = $i }
           }
