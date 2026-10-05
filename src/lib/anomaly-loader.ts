@@ -308,7 +308,8 @@ export async function loadSpendAnomaliesByProviderId(
   // Push channel: attach cost anomalies for providers that only (or also)
   // report via ExternalUsageEvent. Skip when snapshot already produced a cost
   // anomaly for that provider id so we do not double-notify. Do not prefilter
-  // on "two positive days" — zero-baseline first-spike is a valid detector path.
+  // on "two positive days" — cold zero/near-zero baselines are suppressed in
+  // detectAnomaly via minPositiveBaselineDays (integration day-one B2 traffic).
   for (const [providerId, daily] of pushDailyByProviderId) {
     const series: SpendPoint[] = [];
     const priorDays = priorWindow.byProviderId.get(providerId);
