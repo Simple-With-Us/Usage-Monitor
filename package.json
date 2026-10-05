@@ -79,9 +79,9 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.0",
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@eslint/eslintrc": "^3.3.7",
+    "@playwright/test": "^1.62.0",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.3",
