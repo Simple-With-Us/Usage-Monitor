@@ -551,10 +551,13 @@ export class AppSettingsService {
       throw new Error(`"${key}" is not a writable app setting (see INFISICAL.md)`);
     }
     const normalized = normalizeForWrite(def, value);
+    // Write under the canonical def key (from the allowlisted def object),
+    // never the raw caller-supplied string, so the property name written is
+    // always one of the known setting keys.
     if (this.infisicalMode && this.client) {
-      await this.client.set(key, normalized); // throws InfisicalWriteError on failure; cache untouched
+      await this.client.set(def.key, normalized); // throws InfisicalWriteError on failure; cache untouched
     } else {
-      process.env[key] = normalized;
+      process.env[def.key] = normalized;
     }
     return normalized;
   }
