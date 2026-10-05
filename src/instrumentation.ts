@@ -124,9 +124,16 @@ export async function register() {
   // (Infisical cache in production, process.env in env-fallback mode) and
   // resolved through isSchedulerEnabled() — the same single source of truth
   // /api/ready uses — so the two can never disagree about whether the
-  // scheduler should be running.
-  const { isSchedulerEnabled } = await import("@/lib/runtime-health");
-  if (!isSchedulerEnabled()) {
+  // scheduler should be running.  The evaluated gate is recorded: the
+  // scheduler start decision happens exactly once at boot while the knob
+  // itself is live-refreshable, so readiness must answer with the boot
+  // value, not the live one (see recordSchedulerGate).
+  const { isSchedulerEnabled, recordSchedulerGate } = await import(
+    "@/lib/runtime-health"
+  );
+  const schedulerEnabled = isSchedulerEnabled();
+  recordSchedulerGate(schedulerEnabled);
+  if (!schedulerEnabled) {
     console.warn(
       "[usage-scheduler] disabled by USAGE_SCHEDULER_ENABLED=false"
     );

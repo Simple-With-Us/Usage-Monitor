@@ -334,13 +334,47 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
 
     expect(appSettings.isInfisicalMode).toBe(true);
     process.env.ADAPTER_PROVIDER_TIMEOUT_MS = "45000";
+    process.env.USAGE_SCHEDULER_ENABLED = "yes";
     try {
       // In the cache: wins.  Absent from the cache: env fallback, not undefined.
       expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
       expect(appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS")).toBe("45000");
-      expect(appSettings.getBool("USAGE_SCHEDULER_ENABLED", true)).toBe(true);
+      // Exercises the env-fallback branch of getBool with a non-default
+      // fallback: "yes" is a true spelling, so this is true even though the
+      // declared fallback is false.
+      expect(appSettings.getBool("USAGE_SCHEDULER_ENABLED", false)).toBe(true);
     } finally {
       delete process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+      delete process.env.USAGE_SCHEDULER_ENABLED;
+    }
+  });
+
+  it("getWithSource() treats an empty Infisical value as absent (env fallback wins)", async () => {
+    const { fetchImpl } = makeMockFetch({
+      rawSecrets: [
+        { secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: "" },
+      ],
+    });
+    await appSettings.init({
+      clientId: "id",
+      clientSecret: "secret",
+      environment: "dev",
+      refreshIntervalMs: 0,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(appSettings.isInfisicalMode).toBe(true);
+    process.env.ADAPTER_HTTP_TIMEOUT_MS = "45000";
+    try {
+      // get() and getWithSource() must agree: the empty cached value is
+      // skipped and the deploy-time env value is what is actually in effect.
+      expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("45000");
+      expect(appSettings.getWithSource("ADAPTER_HTTP_TIMEOUT_MS")).toEqual({
+        value: "45000",
+        source: "env",
+      });
+    } finally {
+      delete process.env.ADAPTER_HTTP_TIMEOUT_MS;
     }
   });
 });

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { readAlertDeliveryConfig } from "@/lib/alert-delivery";
 import { apnsConfigured, loadApnsConfig } from "@/lib/apns";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
@@ -8,6 +9,18 @@ import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Trust boundary: validate the untrusted body with a strict Zod schema
+// (unknown fields rejected) instead of destructuring raw JSON.  All fields
+// are optional; present fields are still type-checked before any write.
+const SettingsUpdateSchema = z
+  .object({
+    emailEnabled: z.boolean().optional(),
+    minSeverity: z.enum(["info", "warning", "critical"]).optional(),
+    pushoverUserKey: z.string().optional(),
+    pushoverApiToken: z.string().optional(),
+  })
+  .strict();
 
 function isDashboardSession(request: NextRequest): boolean {
   return verifySessionToken(request.cookies.get(SESSION_COOKIE_NAME)?.value);
@@ -62,7 +75,11 @@ export async function PUT(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { emailEnabled, minSeverity, pushoverUserKey, pushoverApiToken } = body;
+    const parsed = SettingsUpdateSchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    }
+    const { emailEnabled, minSeverity, pushoverUserKey, pushoverApiToken } = parsed.data;
 
     if (typeof emailEnabled === "boolean") {
       // Write-through to Infisical (the SOT) for non-secret knobs: Infisical
@@ -79,17 +96,27 @@ export async function PUT(request: NextRequest) {
         await appSettings.set("ALERT_DISABLE_EMAIL", emailEnabled ? "false" : "true");
       } catch (error) {
         // Best-effort rollback so the pair never diverges after a partial write.
-        if (previousEnabled !== undefined) {
-          await appSettings.set("ALERT_EMAIL_ENABLED", previousEnabled).catch(() => {});
-        }
-        if (previousDisable !== undefined) {
-          await appSettings.set("ALERT_DISABLE_EMAIL", previousDisable).catch(() => {});
+        // A failed rollback is logged LOUDLY, never swallowed: when the same
+        // outage breaks the compensating write, the pair IS diverged and the
+        // operator must know.
+        for (const [key, previous] of [
+          ["ALERT_EMAIL_ENABLED", previousEnabled],
+          ["ALERT_DISABLE_EMAIL", previousDisable],
+        ] as const) {
+          if (previous !== undefined) {
+            await appSettings.set(key, previous).catch((rollbackError: unknown) =>
+              console.error(
+                `[app-settings] rollback of ${key} failed after partial write:`,
+                rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+              )
+            );
+          }
         }
         throw error;
       }
     }
 
-    if (["info", "warning", "critical"].includes(minSeverity)) {
+    if (minSeverity !== undefined) {
       await appSettings.set("ALERT_MIN_SEVERITY", minSeverity);
     }
 

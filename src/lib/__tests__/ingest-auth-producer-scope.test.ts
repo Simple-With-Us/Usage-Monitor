@@ -56,6 +56,29 @@ describe("resolveUsageIngestCredential producer scoping", () => {
     expect(cred).toBeNull();
   });
 
+  // The knob's value vocabulary is true/false/1/0/yes/no/on/off (see
+  // parseBool in app-settings.ts): every "true" spelling must deny the
+  // unscoped path, every "false" spelling must allow it.  Reverting the
+  // getBool read to a strict === "true" must fail this suite.
+  it.each(["1", "yes", "on", "TRUE", "Yes"])(
+    "denies legacy USAGE_INGEST_TOKEN when USAGE_INGEST_REQUIRE_SCOPED_TOKENS is %s",
+    (spelling) => {
+      vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", spelling);
+      const cred = resolveUsageIngestCredential(req(legacyToken));
+      expect(cred).toBeNull();
+    }
+  );
+
+  it.each(["0", "no", "off", "FALSE"])(
+    "allows legacy USAGE_INGEST_TOKEN when USAGE_INGEST_REQUIRE_SCOPED_TOKENS is %s",
+    (spelling) => {
+      vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", spelling);
+      const cred = resolveUsageIngestCredential(req(legacyToken));
+      expect(cred).not.toBeNull();
+      expect(cred?.credentialId).toBe("unscoped");
+    }
+  );
+
   it("safely handles malformed USAGE_INGEST_PRODUCER_TOKENS entries", () => {
     vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "nocolon, :emptyproducer, emptytoken:");
     const cred = resolveUsageIngestCredential(req(legacyToken));

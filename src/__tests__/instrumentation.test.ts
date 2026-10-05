@@ -37,9 +37,13 @@ vi.mock("@/lib/datadog-server", () => ({
 }));
 
 import { isUsageSchedulerEnabled, register } from "@/instrumentation";
+import { resetSchedulerGateForTests } from "@/lib/runtime-health";
 
 describe("usage scheduler instrumentation", () => {
   beforeEach(() => {
+    // The boot gate is recorded module-global state; each register() run in
+    // this file must evaluate its own stubbed env, not the previous test's.
+    resetSchedulerGateForTests();
     mocks.startUsagePollingScheduler.mockReset();
     mocks.applySqliteNativeMemoryPragmas.mockClear();
     mocks.computeBudgetStatus.mockClear();

@@ -501,7 +501,10 @@ export class AppSettingsService {
   getWithSource(key: string): { value: string | undefined; source: SettingsSource } {
     if (this.infisicalMode && this.client) {
       const value = this.client.get(key);
-      if (value !== undefined) return { value, source: "infisical" };
+      // Same empty-string rule as get(): an empty Infisical value is treated
+      // as absent so the env fallback applies, and the admin surface must
+      // report the value that is actually in effect.
+      if (value != null && value !== "") return { value, source: "infisical" };
     }
     const raw = process.env[key];
     if (raw != null && raw !== "") return { value: raw, source: "env" };
