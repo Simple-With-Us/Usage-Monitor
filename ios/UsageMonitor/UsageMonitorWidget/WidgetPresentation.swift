@@ -446,7 +446,7 @@ struct WidgetUnavailableContent: Equatable, Sendable {
     ) {
         self.title = title
         self.message = appGroupUnavailable
-            ? "Widget storage is unavailable on this install. Reinstall the app to restore it."
+            ? "Widget storage is unavailable on this install.  Reinstall the app to restore it."
             : message
         self.deepLink = deepLink
     }
@@ -566,11 +566,13 @@ enum WidgetTopicPresentation {
         case .mac:
             return macContent(
                 from: snapshot,
+                maxMeters: maxMeters,
                 appGroupUnavailable: appGroupUnavailable
             )
         case .alerts:
             return alertsContent(
                 from: snapshot,
+                maxMeters: maxMeters,
                 appGroupUnavailable: appGroupUnavailable
             )
         case .providers:
@@ -624,9 +626,13 @@ enum WidgetTopicPresentation {
         let windows: [WidgetSnapshot.QuotaSection.Window]
         switch sortOrder {
         case .utilisation:
-            // Most urgent first: lowest remaining fraction wins; the medium
+            // Most urgent first: `isExhausted` wins outright (a server-flagged
+            // exhausted window with no number must not be hidden behind a
+            // healthy 100%-remaining one), then lowest remaining fraction, then
+            // a label tiebreak so equal rows keep a stable order. The medium
             // hero relies on `windows.first` being the worst window.
             windows = section.windows.sorted { lhs, rhs in
+                if lhs.isExhausted != rhs.isExhausted { return lhs.isExhausted }
                 let l = lhs.remainingFraction ?? 1
                 let r = rhs.remainingFraction ?? 1
                 if l != r { return l < r }
@@ -1030,6 +1036,7 @@ enum WidgetTopicPresentation {
 
     static func macContent(
         from snapshot: WidgetSnapshot,
+        maxMeters: Int = 8,
         appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard let section = snapshot.mac else {
@@ -1052,9 +1059,21 @@ enum WidgetTopicPresentation {
                 )
             )
         }
+        // `maxMeters` caps the process rows in the Large family. The Mac
+        // section's three live percents (CPU/Memory/Disk) are fixed, so the
+        // cap only narrows `processes`. Keep the original `section` intact
+        // for the hero copy and trim just the list.
+        let trimmed: WidgetSnapshot.MacSection
+        if maxMeters > 0 && section.processes.count > maxMeters {
+            var copy = section
+            copy.processes = Array(section.processes.prefix(maxMeters))
+            trimmed = copy
+        } else {
+            trimmed = section
+        }
         return .mac(
             WidgetMacContent(
-                section: section,
+                section: trimmed,
                 deepLink: URL(string: "usageclientmonitor://computers")
             )
         )
@@ -1062,6 +1081,7 @@ enum WidgetTopicPresentation {
 
     static func alertsContent(
         from snapshot: WidgetSnapshot,
+        maxMeters: Int = 8,
         appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard let section = snapshot.alerts else {
@@ -1074,9 +1094,20 @@ enum WidgetTopicPresentation {
                 )
             )
         }
+        // `maxMeters` caps the open-alert rows so the Rows picker the owner
+        // asked for actually changes what is rendered, rather than silently
+        // no-oping on this tile.
+        let trimmed: WidgetSnapshot.AlertsSection
+        if maxMeters > 0 && section.items.count > maxMeters {
+            var copy = section
+            copy.items = Array(section.items.prefix(maxMeters))
+            trimmed = copy
+        } else {
+            trimmed = section
+        }
         return .alerts(
             WidgetAlertsContent(
-                section: section,
+                section: trimmed,
                 deepLink: URL(string: "usageclientmonitor://alerts")
             )
         )

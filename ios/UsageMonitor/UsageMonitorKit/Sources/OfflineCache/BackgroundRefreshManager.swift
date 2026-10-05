@@ -126,14 +126,16 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
                 }
                 await alertNotifier(items)
             }
-            // After the alert path has started, await the quota task and
-            // mirror it into the widget snapshot store, then force one
-            // reload so the home-screen widget sees every section —
-            // including quotas — in a single timeline.
+            // Fire the forced widget reload *before* awaiting the quota task
+            // so a slow or hung quota response cannot gate the timeline
+            // refresh — `BGAppRefreshTask` calls `setTaskCompleted(success:)`
+            // with whatever `performRefresh` returns, so the whole background
+            // budget cycle must return promptly even when the quota endpoint
+            // is slow. The quota mirror still lands on success afterwards.
+            reloadWidgets()
             if let quotas = await quotaTask.value {
                 WidgetSnapshotStore.updateQuotas(quotas)
             }
-            reloadWidgets()
             return true
         } catch {
             return false
@@ -144,7 +146,7 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
     /// section in place so a 401 or timeout cannot stamp empty tiles as live.
     ///
     /// Quota fetching lives in `performRefresh` and is awaited *after* the
-    /// alert notifier has fired, so a slow `/api/quota-windows` response
+    /// forced widget reload has fired, so a slow subscription-quota response
     /// cannot gate the Lock Screen alert or the final forced widget reload.
     private func refreshSecondaryWidgetSections(
         using client: APIClient

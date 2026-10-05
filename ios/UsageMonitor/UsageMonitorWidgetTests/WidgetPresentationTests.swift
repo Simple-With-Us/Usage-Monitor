@@ -155,7 +155,7 @@ final class WidgetPresentationTests: XCTestCase {
         )
         XCTAssertEqual(
             content.message,
-            "Widget storage is unavailable on this install. Reinstall the app to restore it."
+            "Widget storage is unavailable on this install.  Reinstall the app to restore it."
         )
     }
 

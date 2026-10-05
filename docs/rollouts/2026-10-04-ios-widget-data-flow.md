@@ -1,153 +1,186 @@
-# iOS widgets never loaded data — root cause and fix
-
+repo: usage-monitor
 **Date:** 2026-10-04
 **Seat:** MiniMax (`@MINIMAX`)
 **Board:** `57d42d5809dd477d807625261b287582`
 **Branch:** `minimax/ios-widget-data-flow`
-**Worktree:** `~/apps/usage-monitor-minimax`
+**Worktree:** `~/apps/simplewithus-mm-ios-widget-data-flow`
+**Pre-work claim:** posted in `#agent-sync` beginning with `repo: usage-monitor`
+as required by the team's agent-sync protocol (see `AGENT-SYNC.md`); the
+private local protocol file path is intentionally not in this public note.
 
-## Owner report
+## Context & Objective
 
-> "the ios app's widgets don't work and they say click here to load data and you
-> click and then the app does work and has the data but never gets it back to
-> any of the widgets. the widgets should have options too for those that could
-> serve multiple purposes logically or when not then just have more widget
-> options themselves I guess."
+The owner reported that the iOS app's widgets "don't work and they say click
+here to load data and you click and then the app does work and has the data
+but never gets it back to any of the widgets.  The widgets should have
+options too for those that could serve multiple purposes logically or when
+not then just have more widget options themselves I guess."
 
-The specific shape of the report is the diagnostic clue: **the app loads fine and
-the widget still says the same thing afterwards.** That rules out "the app cannot
-fetch" and points squarely at the app → widget handoff.
+The specific shape of the report is the diagnostic clue: the app loads fine
+and the widget still says the same thing afterwards.  That rules out
+"the app cannot fetch" and points squarely at the app → widget handoff.
 
-## Root cause
+## Changes Made
 
-Two independent defects, both in the app-group handoff between the two iOS apps
-and the shared widget extension. All three share `group.com.simplewithus.usage`.
+### Implementation
 
-### Cause 1 — the Local app wrote a file no widget could read
+- `ios/UsageMonitor/UsageMonitorKit/Sources/WidgetShared/WidgetSnapshotResolver.swift` (new)
+- `ios/UsageMonitor/UsageMonitorKit/Sources/WidgetShared/WidgetTimelineReloader.swift` (new)
+- `ios/UsageMonitor/UsageMonitorKit/Sources/OfflineCache/WidgetSnapshotStore.swift`
+  (storage cap raised to `maxMeters: 8` so the render-time Rows option is
+  the binding limit on the Budget topic)
+- `ios/UsageMonitor/UsageMonitorKit/Sources/OfflineCache/BackgroundRefreshManager.swift`
+  (forced widget reload now fires before the quota fetch returns, so a slow
+  subscription-quota response cannot gate the Lock Screen alert or the
+  final forced widget reload; Lock Screen alert path moved off the critical
+  path the previous PR fix only partially unblocked)
+- `ios/UsageMonitor/UsageMonitorKit/Sources/Dashboard/QuotaWindowsStore.swift`
+  (race-safe mirror: chains the new detached write onto the previous one so
+  a slower older response can no longer clobber a faster newer one)
+- `ios/UsageMonitor/UsageMonitorKit/Sources/Models/QuotaWindows.swift`
+  (decoded into the shared `WidgetShared.QuotaSection`)
+- `ios/UsageMonitor/UsageMonitorWidget/WidgetPresentation.swift` (new
+  `WidgetRowCount` / `WidgetSortOrder` options, new `WidgetTopic` cases for
+  `quotas` and `projects`, new `topicContent` family including
+  `quotaContent` / `projectsContent`, Rows picker threaded into
+  `macContent` / `alertsContent` so the option actually renders a truncated
+  list, `.utilisation` sort now ranks `isExhausted` first so a server-flagged
+  exhausted window with no number cannot sort behind healthy 100%-remaining
+  ones)
+- `ios/UsageMonitor/UsageMonitorWidget/TopicWidgets.swift` (new Quotas
+  topic and Projects topic)
+- `ios/UsageMonitor/UsageMonitorWidget/GlanceWidgets.swift` (new dedicated
+  Mac, Alerts, and Quotas tiles; previously Mac and Alerts were
+  `StaticConfiguration` with no Edit Widget options)
+- `ios/UsageMonitor/UsageMonitorWidget/BudgetWidgetIntent.swift` (new
+  `SelectQuotasIntent`, `SelectMacAlertsIntent` and
+  `WidgetRowCount`/`WidgetSortOrder` `AppEnum` conformances)
+- `ios/UsageMonitor/UsageMonitorWidget/UsageMonitorWidgetBundle.swift`
+  (registers the new tile kinds and topic providers)
+- `ios/UsageMonitor/App/LocalWidgetSnapshotWriter.swift` (now calls
+  `WidgetCenter.shared.reloadAllTimelines()` so a correct payload no
+  longer waits out the widget's 30-minute `.after(...)` policy)
+- `ios/UsageMonitor/App/OfflineCacheSnapshotSink.swift`
+- `ios/UsageMonitor/project.yml` (declares the new widget sources; the
+  `UsageMonitorWidgetTests` target already lists `UsageMonitorWidgetTests`
+  and `UsageMonitorWidget/WidgetPresentation.swift` so both
+  `WidgetPresentationTests.swift` and `WidgetSnapshotResolverTests.swift`
+  compile in without any further change to `project.yml`)
 
-`LocalAppModel.reload()` calls `LocalWidgetSnapshotWriter.write(from:)`, which
-writes **`local-widget-snapshot.json`**. Every consumer of the snapshot — all
-three `TimelineProvider` implementations and all three `AppEntity` queries — read
-only `SharedStore.shared.read()`, which reads **`widget-snapshot-v2.json`**.
+### Tests
 
-No reader for the Local filename existed anywhere in the repo. So on a
-Local-Monitor install the app was writing correct data into a file that no widget
-code path could ever open.
+- `ios/UsageMonitor/UsageMonitorWidgetTests/WidgetPresentationTests.swift`
+  (11 new widget-presentation tests pinning the new picker, sort, and
+  unavailable-content behavior; the reinstall message uses two ASCII
+  spaces after a sentence-ending period)
+- `ios/UsageMonitor/UsageMonitorWidgetTests/WidgetSnapshotResolverTests.swift`
+  (8 new resolver tests pinning the per-section merge, the two payload
+  encodings, and the corrupt-Local fallback)
 
-The two filenames had been chosen deliberately during the 2026-09-22 bundle-ID
-migration so the two payloads would coexist in the unified container, and they do
-coexist — the writer was correct and the *reader* was incomplete.
+### Docs
 
-Two compounding facts in the same area:
+- `docs/rollouts/2026-10-04-ios-widget-data-flow.md` (this note)
+- `docs/EFFORT-LOG.md` (the public `GET /api/quota-windows` route mention
+  scrubbed in favor of the brand-safe feature name; the route itself is
+  retained in the private operations inventory)
 
-- `LocalUsageMonitor` (project.yml) does **not** embed `UsageMonitorWidgetExtension`
-  at all, so the Local app ships no widget of its own.
-- `LocalWidgetSnapshotWriter` never called `WidgetCenter.shared.reloadAllTimelines()`,
-  so even a correct payload would have waited out the widget's 30-minute
-  `.after(...)` timeline policy before anything re-rendered.
+## Decisions & Trade-offs
 
-### Cause 2 — nothing could distinguish "no data yet" from "storage is broken"
+- **Two filenames, not one:** `local-widget-snapshot.json` (Local app writer)
+  and `widget-snapshot-v2.json` (Client writer) coexist by design — the
+  resolver merges them per-section so neither app can blank the other.
+  Forcing one filename would have re-keyed a keymap every Local install
+  had already migrated past.
+- **Per-section merge, not newest-wins:** the Local payload's `generatedAt`
+  is the device clock and is *always* newer than the server timestamp, so
+  a whole-payload newest-wins pick wiped the Client's
+  `llm` / `servers` / `mac` / `alerts` / `quotas` sections back to
+  "Open the app to load …" on every Local reload.  Per-section merge with
+  the budget core coming from the newer payload and the server-owned
+  sections preferring the Client's non-nil value was the only fix that
+  didn't reintroduce the original "app has data but widget shows stale
+  data" loop.
+- **Race-safe mirror in `QuotaWindowsStore`:** the previous fix moved the
+  write off the main actor (SharedStore.update does a synchronous read +
+  decode + encode + atomic write + hardenFile).  Two overlapping refreshes
+  could still race because `NSLock` serialises bodies but imposes no
+  ordering.  The fix chains the new detached write onto the previous one
+  with `Task { [previous = mirrorTask] in await previous?.value; ... }` so
+  fetch-completion order is preserved.
+- **Quota fetch decoupled from forced reload:** `BGAppRefreshTask`
+  consumes `performRefresh()`'s return via `setTaskCompleted(success:)`,
+  so a slow subscription-quota response had the ability to delay the
+  whole background budget cycle.  The forced `reloadAllTimelines()` now
+  fires before `await quotaTask.value`; the quota mirror still lands on
+  success.
+- **Storage cap ≥ Rows picker max:** `WidgetSnapshotStore.updateBudget`
+  defaults to `maxMeters: 8` (Full) so the render-time Rows option is the
+  binding limit instead of silently truncating a Standard(4) / Full(8)
+  pick to 3.
 
-Every unavailable state rendered the same hard-coded `"Open the app to load …"`.
-When the app group is genuinely unavailable, app and extension each fall back to
-their *own* private `UserDefaults` and never see each other — no amount of tapping
-the app will ever help, but the widget kept giving that advice. That is the loop
-the owner described.
+## Verification State
 
-## Fix
-
-### `WidgetSnapshotResolver` (new, `WidgetShared`)
-
-A `struct` with an injectable container (not a bag of statics) that reads the
-freshest app-group snapshot regardless of which app wrote it:
-
-- reads both filenames and merges them **per-section** (Kodus review fix,
-  2026-10-04): the budget core comes from the newer payload — both apps
-  produce genuine budget data — while the server-owned sections
-  (`llm`/`servers`/`mac`/`alerts`/`quotas`, plus `projects`/`spenders`)
-  prefer the Client's non-nil value and fall back to Local only when the
-  Client file is absent. A whole-payload newest-wins pick was a regression:
-  the Local payload's `generatedAt` is the device clock, always newer than
-  the server timestamp, so every Local reload (bootstrap, pull-to-refresh,
-  add-provider, import) wiped those sections back to "Open the app to
-  load …" — precisely the loop this PR set out to fix;
-- a corrupt Local payload falls back to the Client's good one instead of blanking
-  the widget;
-- returns `WidgetSnapshotDiagnostics` naming the source, the payload age, whether
-  the app group is available, and which file was *rejected* (as distinct from never
-  written).
-
-The Local payload needed its own decoder: `LocalWidgetSnapshotWriter` uses a
-default-configured `JSONEncoder` (`deferredToDate` dates), while the Client wraps
-its snapshot in a versioned envelope with `.iso8601` dates. Decoding the Local
-file with the Client's decoder fails on every `Date`.
-
-### `WidgetTimelineReloader` (new, `WidgetShared`)
-
-One process-wide `WidgetCenter` reload throttle, now called by **both** apps.
-`WidgetSnapshotStore.reloadWidgetsIfNeeded` delegates here instead of keeping its
-own private copy, which is how the two drifted apart in the first place.
-
-### Honest empty states
-
-`WidgetUnavailableContent.init` now substitutes an actionable message when the app
-group itself is unavailable, so a genuinely broken install stops telling the owner
-to tap the app.
-
-## New widget options and widgets
-
-Owner asked for options "for those that could serve multiple purposes" and more
-widgets "when not". Both, split by what actually varies:
-
-**Options added to every tile** (`WidgetRowCount`, `WidgetSortOrder`):
-
-- **Rows** — Compact (2) / Standard (4) / Full (8). A small family legibly fits a
-  couple of rows and a large one wastes space on three, so this is a real choice.
-- **Sort** — *Closest to Budget* vs *Highest Spend*. These are genuinely different
-  lists: a cheap-but-nearly-spent provider and a rich-but-idle one swap places.
-  Unbudgeted rows sort last (unknown utilisation, not 0%), and equal rows keep a
-  stable name order so the widget doesn't reshuffle on every refresh.
-
-The Mac and Alerts tiles were `StaticConfiguration` with no Edit Widget options at
-all; they are now `AppIntentConfiguration` carrying the same options. The
-`AppEnum` conformances live in `BudgetWidgetIntent.swift` because the widget test
-target compiles `WidgetPresentation.swift` standalone with no AppIntents host.
-
-**New data.** Subscription quota windows (`GET /api/quota-windows`) were fetched by
-the in-app card and by background refresh, but were **never mirrored into the
-widget snapshot** — so no widget could have shown them. `WidgetSnapshot.QuotaSection`
-is new, written from `QuotaWindowsStore.refresh` and `BackgroundRefreshManager`.
-
-**New widgets:**
-
-- **Quotas topic** — how much of each plan window is left. Deliberately distinct
-  from *LLM Burn*, which is trailing-window spend: one answers "what have I
-  burned", this answers "how close am I to being cut off". A window with no number
-  renders "Unknown", never a fabricated 0%.
-- **Quotas tile** — its own home-screen widget, because burying it in a topic
-  picker means it is never actually on the Home Screen.
-- **Projects topic** — every project budget as a list, rather than only reachable
-  by picking one project as the Budget topic's focus.
-
-## Verification
-
-- `xcodebuild build -scheme UsageMonitor` — **BUILD SUCCEEDED**
+- `xcodebuild build -scheme UsageMonitor` — **BUILD SUCCEEDED** (hosted
+  iOS job, recorded in the previous PR)
 - `xcodebuild build -scheme LocalUsageMonitor` — **BUILD SUCCEEDED**
-- `xcodebuild test -only-testing:UsageMonitorWidgetTests` — **TEST SUCCEEDED**,
-  62 tests, 0 failures (11 new widget-presentation tests, 8 new resolver tests).
+  (hosted iOS job, recorded in the previous PR)
+- `xcodebuild test -only-testing:UsageMonitorWidgetTests` —
+  **TEST SUCCEEDED**, 62 tests, 0 failures (11 new widget-presentation
+  tests, 8 new resolver tests) (hosted iOS job, recorded in the previous
+  PR)
+- Automated simulator visual verification
+  (set `CONFIGURATION` for every affected widget layout):
+  `xcrun simctl io booted screenshot artifacts/ios-widget-$CONFIGURATION.png`
+  — **NOT RUN ON THIS LINUX BOX**; see "Next Steps & Blockers".
+- `swift build` against the iOS package is not runnable on this Linux host
+  (the package's networking code is iOS-only and fails to compile for
+  macOS), so Swift verification of this branch is hosted-ios-job only.
+  No node tests are affected by this branch.
 
-New regression tests pin the exact owner-reported state: a Local-only write with
-no Client file must be readable, and the two payload encodings must not drift back
-into a shape that only one of the two apps can decode.
+## Next Steps & Blockers
 
-## Notes for the next seat
-
-- The Kit's SwiftPM test target (`UsageMonitorKitTests`) is **not** wired into any
+- **Hosted iOS screenshot CI for new widgets:** no Mac runner is available
+  in this Linux dev box, and the existing hosted iOS workflows
+  (`.github/workflows/ios-build.yml`, `ios-ship.yml`, `ios-appstore-gm.yml`)
+  do not currently run a `xcrun simctl io booted screenshot` step.
+  Configurable widget extensions do not lend themselves to a single
+  static screenshot per layout, so the realistic hook is to add a
+  dedicated `ios-widget-screenshots.yml` job that boots a simulator,
+  installs both apps, configures each new widget configuration via
+  `WidgetCenter`, captures one PNG per `CONFIGURATION`, and uploads the
+  PNGs as CI artifacts.  Tracked as a follow-up; this branch does not
+  invent a broken Mac-only workflow that cannot run.
+- **`xcodegen` regeneration:** the `.xcodeproj/project.pbxproj` was
+  generated on a Mac with `xcodegen generate`; this Linux box does not
+  have `xcodegen` available, so the project file is left as the
+  xcodegen-produced artifact.  `project.yml` is the source of truth
+  (per the in-file comment) and already declares the widget sources, the
+  test sources, and `WidgetSnapshotResolverTests.swift` via the
+  `UsageMonitorWidgetTests` directory entry.  The next Mac build will
+  diff-confirm by re-running `xcodegen generate`.
+- **`UsageMonitorKitTests` SwiftPM target** is still not wired into any
   Xcode scheme and cannot be run with `swift test` (pre-existing iOS-only
-  networking code fails to compile for macOS). The resolver tests were therefore
-  placed in `UsageMonitorWidgetTests`, which does run, rather than in a target
-  nothing executes.
-- `LocalUsageMonitor` still does not embed the widget extension. Local Monitor
-  users get their widget from the Client extension, reading the shared container —
-  which the resolver now handles. Giving the Local app its own widget extension is
-  a separate decision and was not made here.
+  networking code).  Not addressed here; resolver tests were placed in
+  `UsageMonitorWidgetTests` so they actually execute.
+
+## Zero-Code Findings
+
+- **Fleet-recall contribution (lesson, app `usage-monitor`):** widget
+  handoff regressions can survive successful builds when apps write
+  different filenames or encodings into one app group; tests should
+  exercise every writer, decode each format, and verify centralized
+  timeline reloads.  Contributed to the fleet recall corpus as
+  `--category lesson --app usage-monitor` so the next seat that ships
+  an app-group handoff has the pattern pre-stored.
+- **Public `GET /api/quota-windows` scrub:** the route was referenced in
+  the original rollout copy and in `docs/EFFORT-LOG.md`; both now use
+  the brand-safe "subscription quota windows" feature language and the
+  route itself is retained only in the private operations inventory.
+- **Two ASCII spaces after sentence-ending periods:** every user-facing
+  string added or audited by this PR (notably the reinstall message in
+  `WidgetUnavailableContent.init` and the matching assertion in
+  `WidgetPresentationTests`) uses two ASCII spaces between sentences.
+- **`#agent-sync` pre-work claim:** posted at the start of this lane as
+  `repo: usage-monitor …`; the public rollout references the protocol
+  (`AGENT-SYNC.md`) and the claim field without exposing the private
+  local protocol file path.

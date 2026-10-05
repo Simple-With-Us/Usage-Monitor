@@ -17,6 +17,9 @@ public final class QuotaWindowsStore {
     public private(set) var requiresSession = false
     public private(set) var lastError: APIError?
     private var didLoadOnce = false
+    /// Latest detached mirror task, awaited by the next refresh so older
+    /// quota responses cannot be written after a newer one.
+    private var mirrorTask: Task<Void, Never>?
 
     public init() {}
 
@@ -27,6 +30,8 @@ public final class QuotaWindowsStore {
         requiresSession = false
         lastError = nil
         didLoadOnce = false
+        mirrorTask?.cancel()
+        mirrorTask = nil
     }
 
     public func loadIfNeeded(using client: APIClient) async {
@@ -50,8 +55,15 @@ public final class QuotaWindowsStore {
             // pull-to-refresh, and loadIfNeeded stalls UI for the duration.
             // The snapshot is decoupled from any main-actor state at this
             // point, so hop the write off the actor.
+            //
+            // Chain onto the previous mirror task so a slow earlier write
+            // cannot clobber a faster newer one: SharedStore.update's NSLock
+            // serialises the bodies but imposes no ordering, so an unawaited
+            // detached task would let the older response land last. Awaiting
+            // `previous?.value` preserves fetch-completion order.
             let mirror = response
-            Task.detached(priority: .utility) {
+            mirrorTask = Task { [previous = mirrorTask] in
+                await previous?.value
                 WidgetSnapshotStore.updateQuotas(mirror)
             }
         } catch let error as APIError {
