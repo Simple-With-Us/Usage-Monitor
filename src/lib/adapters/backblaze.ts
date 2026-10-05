@@ -37,6 +37,13 @@ const DEFAULT_FREE_STORAGE_GB = 10;
 const DEFAULT_MAX_FILES_PER_BUCKET = 50_000;
 const LIST_PAGE_SIZE = 1_000;
 const MAX_PAGES_PER_BUCKET = 100;
+/** Litestream replica bucket for this app — exclude from inventory by default. */
+const USAGE_MONITOR_BACKUP_BUCKET = "api-usage-monitor";
+
+function shouldInventoryBucket(bucketName: string, config?: Record<string, unknown>): boolean {
+  if (config?.includeUsageMonitorBackupBucket === true) return true;
+  return bucketName.toLowerCase() !== USAGE_MONITOR_BACKUP_BUCKET;
+}
 
 function invalidResponse(message: string): never {
   throw new AdapterError(`Backblaze B2: ${message}`, { code: "INVALID_RESPONSE" });
@@ -370,6 +377,7 @@ export async function fetchUsage(
 
   const inventories: BucketInventory[] = [];
   for (const bucket of buckets) {
+    if (!shouldInventoryBucket(bucket.bucketName, config)) continue;
     inventories.push(
       await inventoryBucket(
         auth.apiUrl,
