@@ -57,6 +57,7 @@
     "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs",
     "test:cf-token-map": "bash scripts/test-cf-token-map.sh",
     "test:replica-status-probe": "bash scripts/test-replica-status-probe.sh",
+    "test:audit-ci": "node scripts/test-audit-ci.mjs",
     "test:sentry-ci-report": "python3 scripts/test-sentry-ci-report.py",
     "verify": "npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run build"
   },
@@ -88,6 +89,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
+    "audit-ci": "^7.1.0",
     "autoprefixer": "^10.6.1",
     "browserslist": "^4.29.3",
     "dotenv": "^18.0.5",
