@@ -59,20 +59,23 @@ ARCH="$(uname -m 2>/dev/null || echo "arm64")"
 #
 # Correct method: read the kernel's own CPU tick counters and take 1 - idle/total.
 # Two sources, both from the same counters, differing only in window:
-#   top    = ~1-minute decaying average, i.e. what Activity Monitor's top bar
-#            shows.  This is the primary, because a human comparing this card
-#            against Activity Monitor or HogHunter is comparing against this.
-#   iostat = 1-second instantaneous window, far spikier.  Kept as the fallback
-#            for hosts where `top` is unavailable or restricted.
-# On a noisy host the two can disagree by 20+ points honestly (one is a 1s
-# window, the other a 1m average), so prefer the stable one rather than the
+#   top    = ~5-second window per run (the second sample; the first has no
+#            measured interval behind it, so the script keeps the LAST line).
+#            Steadier than iostat's 1-second window.  This is NOT a 1-minute
+#            decaying average and is NOT what Activity Monitor's top bar shows;
+#            a single 1s spike at 90%+ would otherwise flip the whole
+#            heartbeat to "degraded".
+#   iostat = 1-second instantaneous window, the spikiest of the two.  Kept as
+#            the fallback for hosts where `top` is unavailable or restricted.
+# On a noisy host the two can still disagree by 20+ points honestly (one is a
+# 5s window, the other a 1s window), so prefer the stable one rather than the
 # larger sample count.
 CPU_USAGE=""
 _cpu_from_top() {
   # `top -l 2` prints a CPU line per sample.  The FIRST sample has no measured
   # interval behind it (top has just started), so keep the LAST one rather than
   # exiting on the first match.
-  top -l 2 -n 0 2>/dev/null \
+  top -l 2 -s 5 -n 0 2>/dev/null \
     | awk -F'[:,]' '/CPU usage/ && /user/ {
           # macOS prints each value and its label in the SAME field
           # (" 7.31% user"), so strip the number from the field that matched
@@ -104,8 +107,14 @@ _cpu_from_iostat() {
 # Under `set -euo pipefail` a failing command substitution aborts the whole
 # script, so neutralize each probe's status inside the substitution: a failed
 # probe must fall through to the next fallback, not skip the heartbeat POST.
+# If both probes fail, warn on stderr so a broken/Restricted/locale-only
+# `top` doesn't masquerade as an idle Mac in the launchd log; still post 0%
+# so the heartbeat (and the online check) keep flowing.
 CPU_USAGE="$(_cpu_from_top || true)"
-[ -z "$CPU_USAGE" ] && CPU_USAGE="$(_cpu_from_iostat || true)"
+if [ -z "$CPU_USAGE" ]; then
+  CPU_USAGE="$(_cpu_from_iostat || true)"
+  [ -n "$CPU_USAGE" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: top and iostat CPU probes both failed; reporting 0% for this heartbeat" >&2
+fi
 [ -z "$CPU_USAGE" ] && CPU_USAGE=0
 CPU_USAGE="$(printf '%.1f' "$CPU_USAGE" 2>/dev/null || echo 0)"
 
