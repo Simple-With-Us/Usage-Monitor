@@ -122,6 +122,15 @@ struct UsageMonitorApp: App {
             Task {
                 await activateCurrentAccountScope()
             }
+            if phase == .active {
+                // Ensure secondary widget data (LLM, Mac, Servers) loads even if the user
+                // doesn't navigate to those specific tabs.  Screenshot capture must stay on
+                // fixtures: a live refresh would stamp real spend into the app-group cache
+                // and the widget snapshot that ASC reads.
+                if !ScreenshotDemo.isEnabled {
+                    Task { await BackgroundRefreshManager.shared.performRefresh() }
+                }
+            }
             // Queue the next background budget refresh when leaving foreground.
             if phase == .background, PlatformRuntime.supportsBackgroundAppRefresh {
                 BackgroundRefreshManager.shared.schedule()
