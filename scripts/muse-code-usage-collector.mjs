@@ -391,8 +391,14 @@ async function main() {
   }
 
   if (DRY_RUN) {
-    log("--dry-run set; not posting. Payload would be:");
-    console.log(JSON.stringify({ schemaVersion: 2, producerId: PRODUCER_ID, events: result.events }, null, 2));
+    // Dry-run logs a per-window summary only — never the full event payload.
+    log("--dry-run set; not posting. Windows that would be sent:");
+    for (const event of result.events) {
+      const remaining = event.credits == null ? "not reported" : `${event.credits}%`;
+      log(
+        `  - ${event.label}: ${remaining} remaining (resets ${event.metadata.resetAt ?? "unknown"})`,
+      );
+    }
     process.exit(0);
   }
 
