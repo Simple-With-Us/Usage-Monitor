@@ -196,6 +196,11 @@ export function quotaReadingsFromMuseCode(payload, { observedAt = new Date() } =
 
   const observedIso = observedAt.toISOString();
   const readings = [];
+  // Pass the payload's own tier marker through (kody re-review): the guard
+  // above rejects only strict `false`, so a missing field must NOT be
+  // recorded as `true` in metadata.  `undefined` drops out on JSON
+  // serialization, which is the honest representation of "unknown".
+  const subsActive = payload.is_subs_active;
 
   const window = subsUsage.window;
   if (window && typeof window === "object") {
@@ -219,13 +224,13 @@ export function quotaReadingsFromMuseCode(payload, { observedAt = new Date() } =
         remainingUnknown: false,
         isExhausted: remaining === 0,
         // Owner scope note (2026-10-05): the only tier signal the reversed
-        // /muse-code/key payload exposes is is_subs_active.  At this point
-        // it is always true (the false branch short-circuits above), but we
-        // still pass it through metadataExtras so buildQuotaEvent surfaces
-        // it as the canonical tier marker on every event.  planType stays
-        // null: the payload does not name a tier.  No bonus-credits field
-        // exists on the payload, so we do not invent one.
-        metadataExtras: { is_subs_active: true },
+        // /muse-code/key payload exposes is is_subs_active.  We pass the
+        // payload's own value through metadataExtras so buildQuotaEvent
+        // surfaces it as the canonical tier marker on every event; a missing
+        // field stays missing rather than being recorded as true.
+        // planType stays null: the payload does not name a tier.  No
+        // bonus-credits field exists on the payload, so we do not invent one.
+        metadataExtras: { is_subs_active: subsActive },
       });
     }
   }
@@ -247,7 +252,7 @@ export function quotaReadingsFromMuseCode(payload, { observedAt = new Date() } =
         modelId: null,
         remainingUnknown: false,
         isExhausted: remaining === 0,
-        metadataExtras: { is_subs_active: true },
+        metadataExtras: { is_subs_active: subsActive },
       });
     }
   }

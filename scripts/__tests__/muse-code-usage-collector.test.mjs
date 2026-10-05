@@ -63,6 +63,23 @@ describe("quotaReadingsFromMuseCode", () => {
     expect(readings).toEqual([]);
   });
 
+  it("passes the payload's own is_subs_active through instead of hardcoding true", () => {
+    const payload = goodPayload();
+    delete payload.is_subs_active;
+    const readings = quotaReadingsFromMuseCode(payload, { observedAt: OBSERVED });
+    expect(readings.length).toBeGreaterThan(0);
+    for (const reading of readings) {
+      expect("is_subs_active" in (reading.metadataExtras ?? {})).toBe(true);
+      expect(reading.metadataExtras.is_subs_active).toBeUndefined();
+    }
+    const withTrue = quotaReadingsFromMuseCode(goodPayload({ is_subs_active: true }), {
+      observedAt: OBSERVED,
+    });
+    for (const reading of withTrue) {
+      expect(reading.metadataExtras.is_subs_active).toBe(true);
+    }
+  });
+
   it("skips cleanly when subs_usage is missing entirely (no throw, no events)", () => {
     const readings = quotaReadingsFromMuseCode({ is_subs_active: true }, { observedAt: OBSERVED });
     expect(readings).toEqual([]);
