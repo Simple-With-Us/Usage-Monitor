@@ -1,0 +1,10 @@
+{
+  "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
+  // 2026-10-05 — GHSA-vfj7-8cjw-p6xm (braces stack exhaustion).  No patched braces
+  // release on npm (latest 3.0.3).  Every lockfile path is dev-only: tailwindcss 3.4.x
+  // (chokidar → micromatch → braces) and eslint-config-next → @next/eslint-plugin-next
+  // (fast-glob → micromatch → braces).  Do not clear with a breaking tailwindcss 4 bump.
+  // Re-review when braces publishes a fix or Next drops fast-glob from the ESLint plugin.
+  "high": true,
+  "allowlist": ["GHSA-vfj7-8cjw-p6xm"]
+}
