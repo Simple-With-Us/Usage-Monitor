@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readAlertDeliveryConfig } from "@/lib/alert-delivery";
 import { apnsConfigured, loadApnsConfig } from "@/lib/apns";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
+import { appSettings } from "@/lib/app-settings";
 import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth";
 import { prisma } from "@/lib/prisma";
 
@@ -64,12 +65,16 @@ export async function PUT(request: NextRequest) {
     const { emailEnabled, minSeverity, pushoverUserKey, pushoverApiToken } = body;
 
     if (typeof emailEnabled === "boolean") {
-      process.env.ALERT_EMAIL_ENABLED = emailEnabled ? "true" : "false";
-      process.env.ALERT_DISABLE_EMAIL = emailEnabled ? "false" : "true";
+      // Write-through to Infisical (the SOT) for non-secret knobs: Infisical
+      // FIRST, then the local cache.  A failed Infisical write fails the save
+      // so the cache and Infisical never diverge silently.  In env-fallback
+      // mode (local dev, no creds) set() writes process.env.
+      await appSettings.set("ALERT_EMAIL_ENABLED", emailEnabled ? "true" : "false");
+      await appSettings.set("ALERT_DISABLE_EMAIL", emailEnabled ? "false" : "true");
     }
 
     if (["info", "warning", "critical"].includes(minSeverity)) {
-      process.env.ALERT_MIN_SEVERITY = minSeverity;
+      await appSettings.set("ALERT_MIN_SEVERITY", minSeverity);
     }
 
     if (typeof pushoverUserKey === "string" && pushoverUserKey.trim()) {

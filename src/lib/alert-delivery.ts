@@ -15,6 +15,7 @@ import { computeBudgetStatus, computeProjectBudgetStatus } from "@/lib/budget-st
 import { providerPollSnapshotExpected } from "@/lib/anthropic-credentials";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { resolveAnomalyConfig } from "@/lib/anomaly-detection";
+import { appSettings } from "@/lib/app-settings";
 import { loadSpendAnomaliesByProjectId } from "@/lib/anomaly-loader";
 import { loadSubscriptionInsightAlerts } from "@/lib/subscription-insights";
 import {
@@ -277,7 +278,9 @@ export function suppressEmailWhenPushoverConfigured(
     : channels;
 }
 
-export function readAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env): AlertDeliveryConfig {
+export function readAlertDeliveryConfig(
+  env: NodeJS.ProcessEnv = appSettings.settingsEnv()
+): AlertDeliveryConfig {
   const channels: AlertDeliveryChannel[] = [];
   const slackUrl = env.ALERT_SLACK_WEBHOOK_URL?.trim();
   const webhookUrl = env.ALERT_WEBHOOK_URL?.trim();
@@ -2495,7 +2498,7 @@ export async function deliverProviderAlerts(options: {
             anomaliesByProjectId,
             unassignedSpentUsd: projectStatus.summary.unassignedSpentUsd,
             unassignedSpentFloorUsd: boundedNonNegativeNumber(
-              process.env.ALERT_UNASSIGNED_SPEND_FLOOR_USD,
+              appSettings.get("ALERT_UNASSIGNED_SPEND_FLOOR_USD"),
               DEFAULT_UNASSIGNED_SPEND_FLOOR_USD,
               MAX_UNASSIGNED_SPEND_FLOOR_USD
             ),

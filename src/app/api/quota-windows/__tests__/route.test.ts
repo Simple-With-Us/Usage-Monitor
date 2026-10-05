@@ -78,4 +78,65 @@ describe("GET /api/quota-windows", () => {
     expect(response.status).toBe(200);
     expect(mocks.findMany).toHaveBeenCalledOnce();
   });
+
+  it("merges the PROVIDER_MANIFEST_JSON knob into providerGroups (additive)", async () => {
+    process.env.USAGE_READ_TOKEN = READ_TOKEN;
+    process.env.PROVIDER_MANIFEST_JSON = JSON.stringify({
+      version: "1",
+      providers: [
+        {
+          key: "anthropic",
+          label: "Claude (Renamed)",
+          sortOrder: 5,
+          iconHint: "anthropic-v2",
+          aliases: ["claude-suite"],
+          expected: true,
+          terms: { defaultWindowLabel: "5h" },
+        },
+        {
+          key: "muse",
+          label: "Muse",
+          sortOrder: 100,
+          iconHint: "muse",
+          expected: true,
+          terms: { defaultWindowLabel: "monthly" },
+        },
+      ],
+    });
+    mocks.findMany.mockResolvedValue([
+      {
+        provider: "claude-suite",
+        label: "suite window",
+        credits: 50,
+        limit: 100,
+        occurredAt: new Date("2026-09-04T04:20:02.182Z"),
+        metadata: { bucketId: "claude-suite:5h" },
+      },
+    ]);
+    try {
+      const response = await GET(request({ authorization: `Bearer ${READ_TOKEN}` }));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      // Alias normalization is visible on windows[].providerKey ...
+      expect(body.windows[0].providerKey).toBe("anthropic");
+      expect(body.windows[0].providerLabel).toBe("Claude (Renamed)");
+      // ... and providerGroups carry the manifest display fields.
+      const anthropic = body.providerGroups.find(
+        (g: { provider: string }) => g.provider === "anthropic"
+      );
+      expect(anthropic.sortOrder).toBe(5);
+      expect(anthropic.iconHint).toBe("anthropic-v2");
+      expect(anthropic.terms).toEqual({ defaultWindowLabel: "5h" });
+      expect(anthropic.windows).toHaveLength(1);
+      // A brand-new manifest provider appears with an empty row.
+      const muse = body.providerGroups.find(
+        (g: { provider: string }) => g.provider === "muse"
+      );
+      expect(muse.providerLabel).toBe("Muse");
+      expect(muse.expected).toBe(true);
+      expect(muse.windows).toEqual([]);
+    } finally {
+      delete process.env.PROVIDER_MANIFEST_JSON;
+    }
+  });
 });

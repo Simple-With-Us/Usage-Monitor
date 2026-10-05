@@ -487,6 +487,34 @@ required whenever `LITESTREAM_REQUIRED=true` or `NODE_ENV=production` — a bare
 `npm start` then fails `/api/ready?strict=1` — unless explicitly opted out with
 `STARTUP_WRAPPER_REQUIRED=false` (throwaway containers only, never a SQLite writer).
 
+## Infisical sole source of truth (2026-10-03, owner directive)
+
+**Infisical is the sole source of truth** — secrets, env vars, and tunable
+settings knobs.  The contract lives in `INFISICAL.md` (repo root); read it
+before touching any app-level setting.  The short version:
+
+- **Tunable knobs** (adapter timeouts, ingest emergency switches, alert
+  routing knobs, readiness thresholds, the settings refresh interval — the
+  17 keys in `APP_SETTING_DEFS`) live in the Infisical `usage-monitor`
+  project and are loaded at startup into an in-memory cache by
+  `src/lib/app-settings.ts` (built on the fleet-shared
+  `createInfisicalSettings`).  Read them through `appSettings` — never add a
+  new direct `process.env` read for a key in `APP_SETTING_DEFS`.  Runtime
+  reads are memory-only; background refresh is every 5 minutes (+ SIGHUP +
+  `POST /api/settings/runtime`); admin saves are write-through (Infisical
+  first, then cache; a failed Infisical write fails the save).
+- **Secrets and service config** stay in `process.env`, populated from the
+  SAME Infisical project by the existing Infisical→Coolify env sync (the
+  deployment path).  Do not duplicate the sync; do not break it.
+- **Per-user settings** stay in SQLite and never go in Infisical.
+- Admin surfaces (`GET`/`PUT`/`POST /api/settings/runtime`, `PUT
+  /api/settings`) are dashboard-session-gated (403 otherwise); the dashboard
+  session IS the admin role here.
+- No secret values in code, logs, PR bodies, or chat — names and metadata
+  only.  No per-request Infisical fetches anywhere in the request/tick path.
+- iOS/macOS do not hold Infisical credentials: the backend owns the
+  Infisical read and serves settings-derived state over the API.
+
 ## Verify
 
 ```bash

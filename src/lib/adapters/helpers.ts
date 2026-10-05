@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import https from "node:https";
 import net from "node:net";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { appSettings } from "@/lib/app-settings";
 
 /**
  * Generic, adapter-agnostic signal that totalCost is known-incomplete for a
@@ -218,7 +219,7 @@ const MAX_RETRIES = 2;
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
 function resolveDefaultTimeoutMs(): number {
-  const raw = process.env.ADAPTER_HTTP_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_HTTP_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TIMEOUT_MS;

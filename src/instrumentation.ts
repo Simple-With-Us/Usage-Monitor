@@ -5,6 +5,25 @@ export function isUsageSchedulerEnabled(
 }
 
 export async function register() {
+  // Infisical sole-source-of-truth: load app-level tunable knobs into the
+  // in-memory settings cache before anything else boots.  Non-fatal: with no
+  // universal-auth credentials (local dev, CI, build) it stays in env-fallback
+  // mode; a failed Infisical load degrades loudly to the deploy-time env sync.
+  // The import is dynamic (not a top-level static import) so the shared
+  // package never enters the edge-runtime (middleware) bundle.
+  // See INFISICAL.md and src/lib/app-settings.ts.
+  let settingsGet: ((key: string) => string | undefined) | undefined;
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { appSettings } = await import("@/lib/app-settings");
+    await appSettings.init();
+    // On-demand refresh for operators: `kill -HUP <pid>` re-reads Infisical.
+    // The background timer (default 5 min) handles the steady state.
+    process.on("SIGHUP", () => {
+      void appSettings.refresh();
+    });
+    settingsGet = (key: string) => appSettings.get(key);
+  }
+
   // Datadog APM + log injection.  Fail closed on missing/partial keys in
   // production runtime (not during `next build`).  Sentry stays DSN-gated
   // and is not replaced.
@@ -92,7 +111,14 @@ export async function register() {
   // this box. Reducing that per-compute footprint (so warming is safe again)
   // is tracked as a follow-up. See @/lib/budget-status.
 
-  if (!isUsageSchedulerEnabled()) {
+  // USAGE_SCHEDULER_ENABLED is a tunable knob owned by the settings service
+  // (Infisical cache in production, process.env in env-fallback mode); the
+  // process.env fallback covers a key absent from the Infisical cache.
+  if (
+    !isUsageSchedulerEnabled(
+      settingsGet?.("USAGE_SCHEDULER_ENABLED") ?? process.env.USAGE_SCHEDULER_ENABLED
+    )
+  ) {
     console.warn(
       "[usage-scheduler] disabled by USAGE_SCHEDULER_ENABLED=false"
     );
