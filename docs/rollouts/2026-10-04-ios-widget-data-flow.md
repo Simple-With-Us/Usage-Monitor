@@ -80,9 +80,9 @@ and the widget still says the same thing afterwards.  That rules out
 ### Docs
 
 - `docs/rollouts/2026-10-04-ios-widget-data-flow.md` (this note)
-- `docs/EFFORT-LOG.md` (the public `GET /api/quota-windows` route mention
-  scrubbed in favor of the brand-safe feature name; the route itself is
-  retained in the private operations inventory)
+- `docs/EFFORT-LOG.md` (public copy scrubbed to brand-safe subscription
+  quota-windows feature language; internal routing details stay in the
+  private operations inventory)
 
 ## Decisions & Trade-offs
 
@@ -165,17 +165,18 @@ and the widget still says the same thing afterwards.  That rules out
 
 ## Zero-Code Findings
 
-- **Fleet-recall contribution (lesson, app `usage-monitor`):** widget
-  handoff regressions can survive successful builds when apps write
-  different filenames or encodings into one app group; tests should
-  exercise every writer, decode each format, and verify centralized
-  timeline reloads.  Contributed to the fleet recall corpus as
-  `--category lesson --app usage-monitor` so the next seat that ships
-  an app-group handoff has the pattern pre-stored.
-- **Public `GET /api/quota-windows` scrub:** the route was referenced in
-  the original rollout copy and in `docs/EFFORT-LOG.md`; both now use
-  the brand-safe "subscription quota windows" feature language and the
-  route itself is retained only in the private operations inventory.
+- **Fleet-recall lesson (app `usage-monitor`):** searched the corpus
+  before re-deriving; the reusable lesson is already stored
+  (`contrib/MINIMAX/2026-10-04/126d3acf`): widget handoff regressions can
+  survive successful builds when apps write different filenames or
+  encodings into one app group, so tests should exercise every writer,
+  decode each format, and verify centralized timeline reloads.  No
+  duplicate contribution was added.
+- **Public routing scrub:** the original rollout copy and
+  `docs/EFFORT-LOG.md` exposed an internal subscription-quota routing
+  path; both now use the brand-safe "subscription quota windows"
+  feature language, and internal routing details stay only in the
+  private operations inventory.
 - **Two ASCII spaces after sentence-ending periods:** every user-facing
   string added or audited by this PR (notably the reinstall message in
   `WidgetUnavailableContent.init` and the matching assertion in
