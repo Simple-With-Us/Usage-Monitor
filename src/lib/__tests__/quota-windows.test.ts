@@ -213,12 +213,39 @@ describe("projectQuotaWindows", () => {
     expect(result.windows[0]?.machine).toBe("Unattributed Mac");
   });
 
-  it("drops an unattributed window when an attributed reading of the same series exists", () => {
+  it("drops an unattributed window when a fresher attributed reading of the same series exists", () => {
     const result = projectQuotaWindows([
       {
         provider: "google-antigravity",
         label: "Third-Party Models",
         credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: {
+          bucketId: "third-party",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "third-party" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.producerInstanceId).toBe("macbook");
+  });
+
+  it("keeps a fresher unattributed window over a stale attributed reading of the same series", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 20,
         limit: 100,
         occurredAt: "2026-10-03T12:00:00.000Z",
         metadata: {
@@ -236,8 +263,66 @@ describe("projectQuotaWindows", () => {
       },
     ]);
 
-    expect(result.windows).toHaveLength(1);
-    expect(result.windows[0]?.producerInstanceId).toBe("macbook");
+    expect(result.windows).toHaveLength(2);
+    const unattributed = result.windows.find((window) => window.producerInstanceId === undefined);
+    expect(unattributed?.remainingPercent).toBe(80);
+    expect(unattributed?.occurredAt).toBe("2026-10-03T12:05:00.000Z");
+  });
+
+  it("does not drop an unattributed window from another provider that shares a series string", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 50,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: {
+          bucketId: "shared-series",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: { bucketId: "shared-series" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+  });
+
+  it("re-keys an attributed window when its id collides with a legacy bucket id", () => {
+    const collidingLegacyId = JSON.stringify(["producer", "machine", "bucket"]);
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "legacy window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-10-03T11:00:00.000Z",
+        metadata: { bucketId: collidingLegacyId },
+      },
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    expect(new Set(result.windows.map((window) => window.id))).toEqual(
+      new Set([
+        collidingLegacyId,
+        JSON.stringify(["producer", "machine", "bucket", 0]),
+      ]),
+    );
   });
 
   it("builds skipModelTypes from the freshest reading per series, not every machine's", () => {

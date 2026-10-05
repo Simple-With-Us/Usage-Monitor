@@ -285,7 +285,7 @@ export function projectQuotaWindows(
     // attributed events live in a per-producer namespace.
     const dedupeKey = producerInstanceId
       ? JSON.stringify(["producer", producerInstanceId, series])
-      : series;
+      : JSON.stringify(["legacy", series]);
     if (latest.has(dedupeKey)) continue;
 
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
@@ -332,36 +332,44 @@ export function projectQuotaWindows(
   }
 
   const projected = [...latest.values()];
-  // Prefer attributed readings: an unattributed window whose series is also
-  // reported by a producer-attributed window is a duplicate view of the same
-  // bucket (unattributed collectors omit the producer id), so drop it and
-  // keep only the attributed one.
-  const claimedByProducer = new Set(
-    projected
-      .filter(({ window }) => window.producerInstanceId)
-      .map(({ series }) => series),
-  );
-  const attributed = projected.filter(
-    ({ window, series }) =>
-      window.producerInstanceId !== undefined ||
-      !claimedByProducer.has(series),
-  );
-  // Legacy IDs are intentionally unchanged, including arbitrary bucket IDs.
-  // Reserve them before assigning machine IDs so a legacy bucket that happens
-  // to equal a serialized tuple cannot collide with a producer-attributed row.
-  const usedIds = new Set(
-    attributed
-      .filter(({ window }) => !window.producerInstanceId)
-      .map(({ window }) => window.id),
-  );
-  const windows = attributed.map(({ window }) => {
-    if (!window.producerInstanceId) return window;
-    // The id was already assigned in the fixed "producer" namespace above;
-    // record it so a later legacy row could not silently reuse it.  No
-    // suffix scan: the id must never change shape between responses.
-    usedIds.add(window.id);
-    return window;
+  // Freshest attributed reading per (providerKey, series) — an unattributed
+  // window is only a duplicate view of a bucket that a producer has since
+  // reported MORE recently; a fresher unattributed reading still wins.
+  const claimedByProducer = new Map<string, string>();
+  for (const { series, window } of projected) {
+    if (!window.producerInstanceId) continue;
+    const key = `${window.providerKey}:${series}`;
+    const held = claimedByProducer.get(key);
+    if (held === undefined || held < window.occurredAt) {
+      claimedByProducer.set(key, window.occurredAt);
+    }
+  }
+  const attributed = projected.filter(({ window, series }) => {
+    if (window.producerInstanceId !== undefined) return true;
+    const claimedAt = claimedByProducer.get(`${window.providerKey}:${series}`);
+    return claimedAt === undefined || claimedAt <= window.occurredAt;
   });
+  // Legacy IDs stay unchanged.  Reserve them first; re-key attributed rows
+  // only when a legacy bucket id collides with the producer namespace tuple.
+  const usedIds = new Set<string>();
+  const windows: QuotaWindow[] = [];
+  for (const { window, series } of attributed) {
+    if (!window.producerInstanceId) {
+      windows.push(window);
+      usedIds.add(window.id);
+      continue;
+    }
+    let id = window.id;
+    if (usedIds.has(id)) {
+      let suffix = 0;
+      while (usedIds.has(id)) {
+        id = JSON.stringify(["producer", window.producerInstanceId, series, suffix]);
+        suffix += 1;
+      }
+    }
+    usedIds.add(id);
+    windows.push(id === window.id ? window : { ...window, id });
+  }
   // skipModelTypes drives fleet-wide Antigravity instance routing: build it
   // from the single freshest reading per series across producers, so one
   // machine's stale exhausted reading cannot reroute the whole fleet while
