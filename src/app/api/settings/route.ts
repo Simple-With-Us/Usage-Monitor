@@ -107,7 +107,7 @@ export async function PUT(request: NextRequest) {
             await appSettings.set(key, previous).catch((rollbackError: unknown) =>
               console.error(
                 `[app-settings] rollback of ${key} failed after partial write:`,
-                rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+                rollbackError instanceof Error ? rollbackError.message : "UnknownError"
               )
             );
           }
