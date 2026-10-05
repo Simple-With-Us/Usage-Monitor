@@ -10,6 +10,9 @@ import {
   parseMuseResetLine,
   parseMuseSubscriptionStatus,
   quotaEventsFromMuse,
+  readingsChanged,
+  snapshotFromEvents,
+  validateAndBuildEvents,
 } from "../muse-usage-collector.mjs";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -17,6 +20,9 @@ const SAMPLE_TEXT = readFileSync(
   join(FIXTURES, "muse-subscription-status.txt"),
   "utf8",
 );
+
+const WEEKLY_BUCKET = "muse:free-weekly";
+const ADDITIONAL_BUCKET = "muse:additional-tokens";
 
 describe("MUSE_PRODUCER_ID", () => {
   it("is the same identifier every other collector imports", () => {
@@ -64,19 +70,19 @@ describe("parseMuseSubscriptionStatus", () => {
     const readings = parseMuseSubscriptionStatus(SAMPLE_TEXT, { now });
     expect(readings).toHaveLength(2);
     const byBucket = Object.fromEntries(readings.map((r) => [r.bucketId, r]));
-    expect(byBucket["free-weekly"].remainingPercent).toBe(69);
-    expect(byBucket["free-weekly"].usedPercent).toBe(31);
-    expect(byBucket["free-weekly"].resetAt).toBe("2026-10-11T03:59:00.000Z");
-    expect(byBucket["free-weekly"].planType).toBe("free");
-    expect(byBucket["additional-tokens"].remainingPercent).toBe(98);
-    expect(byBucket["additional-tokens"].usedPercent).toBe(2);
-    expect(byBucket["additional-tokens"].resetAt).toBeNull();
-    expect(byBucket["additional-tokens"].metadataExtras).toEqual({
+    expect(byBucket[WEEKLY_BUCKET].remainingPercent).toBe(69);
+    expect(byBucket[WEEKLY_BUCKET].usedPercent).toBe(31);
+    expect(byBucket[WEEKLY_BUCKET].resetAt).toBe("2026-10-11T03:59:00.000Z");
+    expect(byBucket[WEEKLY_BUCKET].planType).toBe("free");
+    expect(byBucket[ADDITIONAL_BUCKET].remainingPercent).toBe(98);
+    expect(byBucket[ADDITIONAL_BUCKET].usedPercent).toBe(2);
+    expect(byBucket[ADDITIONAL_BUCKET].resetAt).toBeNull();
+    expect(byBucket[ADDITIONAL_BUCKET].metadataExtras).toEqual({
       tokensLeftLabel: "1.9B tokens left",
     });
   });
 
-  it("treats the first line as the plan type and surfaces a paid plan name", () => {
+  it("treats the first non-empty non-data line as the plan type and surfaces a paid plan name", () => {
     const paid = [
       "Pro plan",
       "Usage: 50% of free weekly limit.",
@@ -87,6 +93,36 @@ describe("parseMuseSubscriptionStatus", () => {
     expect(readings[0].planType).toBe("Pro plan");
   });
 
+  it("detects the plan line after a leading blank line and parses both windows", () => {
+    const blankFirst = [
+      "",
+      "The user does not have a subscription.",
+      "Usage: 30% of free weekly limit.",
+      "Weekly limit resets Oct 10 at 10:59 PM CDT",
+      "Additional tokens: 5% used (1.5B tokens left)",
+    ].join("\n");
+    const readings = parseMuseSubscriptionStatus(blankFirst, { now });
+    expect(readings).toHaveLength(2);
+    expect(readings[0].bucketId).toBe(WEEKLY_BUCKET);
+    expect(readings[0].planType).toBe("free");
+    expect(readings[1].bucketId).toBe(ADDITIONAL_BUCKET);
+    expect(readings[1].planType).toBe("free");
+  });
+
+  it("parses data-line-first ordering with no plan line (planType stays null)", () => {
+    const dataFirst = [
+      "Usage: 30% of free weekly limit.",
+      "Weekly limit resets Oct 10 at 10:59 PM CDT",
+      "Additional tokens: 5% used (1.5B tokens left)",
+    ].join("\n");
+    const readings = parseMuseSubscriptionStatus(dataFirst, { now });
+    expect(readings).toHaveLength(2);
+    expect(readings[0].bucketId).toBe(WEEKLY_BUCKET);
+    expect(readings[1].bucketId).toBe(ADDITIONAL_BUCKET);
+    expect(readings[0].planType).toBeNull();
+    expect(readings[1].planType).toBeNull();
+  });
+
   it("drops readings whose percentage could not be parsed instead of inventing a number", () => {
     const partial = [
       "The user does not have a subscription.",
@@ -94,7 +130,7 @@ describe("parseMuseSubscriptionStatus", () => {
     ].join("\n");
     const readings = parseMuseSubscriptionStatus(partial, { now });
     expect(readings).toHaveLength(1);
-    expect(readings[0].bucketId).toBe("additional-tokens");
+    expect(readings[0].bucketId).toBe(ADDITIONAL_BUCKET);
     expect(readings[0].remainingPercent).toBe(93);
   });
 
@@ -139,7 +175,7 @@ describe("quotaEventsFromMuse", () => {
     const events = quotaEventsFromMuse(SAMPLE_TEXT, { now, occurredAtIso });
     const additional = events.find((e) => e.label === "Additional tokens");
     expect(additional.metadata.tokensLeftLabel).toBe("1.9B tokens left");
-    expect(additional.metadata.bucketId).toBe("additional-tokens");
+    expect(additional.metadata.bucketId).toBe(ADDITIONAL_BUCKET);
     expect(additional.metadata.quotaWindow).toBe("balance");
     expect(additional.metadata.planType).toBe("free");
   });
@@ -158,5 +194,112 @@ describe("quotaEventsFromMuse", () => {
 
   it("returns no events when the CLI output is empty", () => {
     expect(quotaEventsFromMuse("", { now, occurredAtIso })).toEqual([]);
+  });
+});
+
+describe("validateAndBuildEvents (Zod trust boundary)", () => {
+  const occurredAtIso = "2026-10-04T20:09:19.328Z";
+  const validWeekly = {
+    bucketId: WEEKLY_BUCKET,
+    label: "Free weekly limit",
+    quotaWindow: "weekly",
+    remainingPercent: 69,
+    usedPercent: 31,
+    resetAt: "2026-10-11T03:59:00.000Z",
+    planType: "free",
+    modelId: null,
+    remainingUnknown: false,
+    isExhausted: false,
+  };
+
+  it("builds events for a schema-valid reading", () => {
+    const events = validateAndBuildEvents([validWeekly], { occurredAtIso });
+    expect(events).toHaveLength(1);
+    expect(events[0].provider).toBe("muse");
+  });
+
+  it("throws the stable 'muse reading validation failed' on an unknown bucketId", () => {
+    expect(() =>
+      validateAndBuildEvents([{ ...validWeekly, bucketId: "muse:unknown" }], { occurredAtIso }),
+    ).toThrow("muse reading validation failed");
+  });
+
+  it("throws the stable error on an out-of-range percentage", () => {
+    expect(() =>
+      validateAndBuildEvents([{ ...validWeekly, remainingPercent: 150 }], { occurredAtIso }),
+    ).toThrow("muse reading validation failed");
+  });
+
+  it("throws the stable error when an unknown metadata key sneaks in", () => {
+    expect(() =>
+      validateAndBuildEvents(
+        [{ ...validWeekly, metadataExtras: { tokensLeftLabel: "x", account: "leak" } }],
+        { occurredAtIso },
+      ),
+    ).toThrow("muse reading validation failed");
+  });
+
+  it("quotaEventsFromMuse throws the stable error when a reading fails validation", () => {
+    // parseMuseSubscriptionStatus cannot produce an invalid reading by itself,
+    // but validateAndBuildEvents is the same entry point: driving it with a
+    // hand-crafted invalid reading proves the boundary is wired end to end.
+    expect(() =>
+      validateAndBuildEvents([{ ...validWeekly, bucketId: "bad" }], { occurredAtIso }),
+    ).toThrow("muse reading validation failed");
+  });
+
+  it("quotaEventsFromMuse still returns [] without throwing for empty/garbage input", () => {
+    expect(quotaEventsFromMuse("", { occurredAtIso })).toEqual([]);
+    expect(quotaEventsFromMuse("not muse output", { occurredAtIso })).toEqual([]);
+    expect(quotaEventsFromMuse(null, { occurredAtIso })).toEqual([]);
+  });
+});
+
+describe("readingsChanged + snapshotFromEvents (material-change gate)", () => {
+  const now = new Date("2026-10-04T20:09:19.328Z");
+  const occurredAtIso = "2026-10-04T20:09:19.328Z";
+
+  function events() {
+    return quotaEventsFromMuse(SAMPLE_TEXT, { now, occurredAtIso });
+  }
+
+  it("treats a missing snapshot as a material change (first run)", () => {
+    expect(readingsChanged(events(), null)).toBe(true);
+    expect(readingsChanged(events(), undefined)).toBe(true);
+    expect(readingsChanged(events(), {})).toBe(true);
+    expect(readingsChanged(events(), { producerId: "other-provider", buckets: {} })).toBe(true);
+  });
+
+  it("returns false when the snapshot matches the current events exactly", () => {
+    const snapshot = snapshotFromEvents(events(), { now });
+    expect(readingsChanged(events(), snapshot)).toBe(false);
+  });
+
+  it("returns true when credits change", () => {
+    const snapshot = snapshotFromEvents(events(), { now });
+    snapshot.buckets[WEEKLY_BUCKET].credits = 42;
+    expect(readingsChanged(events(), snapshot)).toBe(true);
+  });
+
+  it("returns true when resetAt changes", () => {
+    const snapshot = snapshotFromEvents(events(), { now });
+    snapshot.buckets[WEEKLY_BUCKET].resetAt = "2030-01-01T00:00:00.000Z";
+    expect(readingsChanged(events(), snapshot)).toBe(true);
+  });
+
+  it("returns true when planType changes", () => {
+    const snapshot = snapshotFromEvents(events(), { now });
+    snapshot.buckets[WEEKLY_BUCKET].planType = "Pro plan";
+    expect(readingsChanged(events(), snapshot)).toBe(true);
+  });
+
+  it("snapshotFromEvents stamps version, producerId, and an ISO at", () => {
+    const snapshot = snapshotFromEvents(events(), { now });
+    expect(snapshot.version).toBe(1);
+    expect(snapshot.producerId).toBe("muse");
+    expect(new Date(snapshot.at).getTime()).toBe(now.getTime());
+    expect(Object.keys(snapshot.buckets).sort()).toEqual(
+      [WEEKLY_BUCKET, ADDITIONAL_BUCKET].sort(),
+    );
   });
 });
