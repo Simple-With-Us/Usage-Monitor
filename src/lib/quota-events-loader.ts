@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import * as Sentry from "@sentry/nextjs";
 
 import { prisma } from "@/lib/prisma";
 import type { QuotaEventLike } from "@/lib/quota-windows";
@@ -73,7 +74,16 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
     `);
     if (!Array.isArray(rows)) return [];
     return rows;
-  } catch {
+  } catch (err) {
+    console.error(
+      "[quota-events-loader] window query failed; falling back to bounded findMany",
+      err,
+    );
+    try {
+      Sentry.captureException(err);
+    } catch {
+      /* Sentry not initialized in this env; never let observability break the fallback */
+    }
     return prisma.externalUsageEvent.findMany({
       where: { metricType: "quota", occurredAt: { gte: since } },
       orderBy: { occurredAt: "desc" },
