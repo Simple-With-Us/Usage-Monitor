@@ -104,7 +104,7 @@ describe("sentryBeforeSend", () => {
       "https://usage.jays.services/api/bills.ics?token=[REDACTED]"
     );
     expect(typed.transaction).toBe("/api/bills.ics?token=[REDACTED]");
-    expect(typed.extra.urlWithMultipleParams).toBe("/api/x?safe=true&token=[REDACTED]&page=1");
+    expect(typed.extra.urlWithMultipleParams).toBe("/api/x?safe=[REDACTED]&token=[REDACTED]&page=[REDACTED]");
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("real-calendar-token-here");
     expect(serialized).not.toContain("another-real-token");
@@ -125,7 +125,7 @@ describe("sentryBeforeSend", () => {
     expect(result).not.toBeNull();
     const typed = result as unknown as { request: { url: string; query_string: string } };
     expect(typed.request.url).toBe("https://usage.jays.services/api/bills.ics?token=[REDACTED]");
-    expect(typed.request.query_string).toBe("token=[REDACTED]&page=2");
+    expect(typed.request.query_string).toBe("token=[REDACTED]&page=[REDACTED]");
   });
 
   it("redacts common auth-shape URL params (api_key, access_token, refresh_token)", () => {

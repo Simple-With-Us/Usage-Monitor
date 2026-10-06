@@ -90,6 +90,22 @@ describe("Fail-closed redaction", () => {
       user: { email: "denied@example.test" }, request: { data: "denied-body", cookies: { session: "denied-cookie" }, headers: { custom: "denied-header" } } }, {});
     expect(result).not.toBeNull(); expect(JSON.stringify(result)).toContain("[CIRCULAR]"); expect(JSON.stringify(result)).not.toContain("denied");
   });
+  it("bounds shared-reference DAGs including serialized output", () => {
+    let shared: Record<string, unknown> = { token: "denied-token" };
+    for (let i = 0; i < 35; i++) shared = { x: shared, y: shared };
+    const result = sentryBeforeSend({ type: undefined, message: "synthetic", extra: shared }, {});
+    expect(result).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, extra: { sparse: new Array(10_000_000) } }, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, extra: { repeatedText: Array(200).fill("x".repeat(1000)) } }, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, extra: { sparse: Array.from({ length: 10 }, () => new Array(1000)) } }, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, extra: Object.fromEntries(Array.from({ length: 2500 }, (_, i) => [String(i), i])) }, {})).toBeNull();
+  });
+  it("keeps query names but removes all private query values", () => {
+    const result = sentryBeforeSend({ type: undefined, request: { url: "https://example.test/?keyword=one&author=two&monkey=three&tokenizer=four&%74oken=denied-token&apiKey=denied-key&session_token=denied-session&secretKey=denied-secret-key&key=denied-bare-key&signature=denied-signature" } }, {});
+    const encoded = JSON.stringify(result);
+    expect(encoded).toContain("keyword=[REDACTED]&author=[REDACTED]&monkey=[REDACTED]&tokenizer=[REDACTED]");
+    expect(encoded).not.toContain("denied");
+  });
   it("drops unreadable events/logs/metrics and returns a content-free span fallback", () => {
     const bad = { type: undefined, get extra(): never { throw Error("unreadable"); }, token: "denied-token" };
     expect(sentryBeforeSend(bad, {})).toBeNull(); expect(sentryBeforeSendTransaction(bad as never, {})).toBeNull();
@@ -104,6 +120,21 @@ describe("Fail-closed redaction", () => {
     guard(envelope); expect(envelope[1]).toHaveLength(1); expect(envelope[1][0][0].length).toBeUndefined(); expect(JSON.stringify(envelope)).not.toContain("denied");
     const bad = [{}, [[{ type: "event" }, { get extra(): never { throw Error("unreadable"); } }]]] as unknown as Envelope;
     guard(bad); expect(bad[1]).toEqual([]);
+  });
+  it("preserves shared typed attributes and isolates an oversized row in a normal batch", () => {
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    sentryPrivacyIntegration().setup!({ on: (_name: string, fn: typeof guard) => { guard = fn; } } as never);
+    const shared = { type: "string", value: "synthetic" };
+    const items = Array.from({ length: 100 }, () => ({ attributes: { one: shared, two: shared } }));
+    const unsafe = { get attributes(): never { throw Error("unreadable"); } };
+    const envelope = [{}, [[{ type: "log", item_count: 105, length: 123 }, { items: [...items, unsafe, null, undefined, [], "invalid"] }]]] as unknown as Envelope;
+    guard(envelope);
+    const payload = envelope[1][0][1] as { items: typeof items };
+    expect(payload.items).toHaveLength(100);
+    expect((envelope[1][0][0] as { item_count: number }).item_count).toBe(100);
+    expect(payload.items[0].attributes.two).toEqual(shared);
+    expectTypedAttributes([envelope]);
+    expect(items[0].attributes.one).toBe(shared);
   });
   it("wires all runtimes and keeps Replay off", () => {
     for (const filename of ["src/instrumentation-client.ts", "src/sentry.server.config.ts", "src/sentry.edge.config.ts"]) {

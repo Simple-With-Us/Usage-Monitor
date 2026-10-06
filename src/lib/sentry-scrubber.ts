@@ -19,29 +19,42 @@ function isSensitiveKey(key: string, path: string): boolean {
 }
 
 function scrubString(value: string): string {
-  return value.replace(/([?&]|^)([^?&=\s"']+)=([^&\s"']*)/g, (match, prefix, name) => {
-    let decoded: string;
-    try { decoded = decodeURIComponent(name.replace(/\+/g, " ")).toLowerCase(); }
-    catch { return `${prefix}${name}=[REDACTED]`; }
-    const sensitive = SENSITIVE_KEY_SUBSTRINGS.some(part => decoded.includes(part)) || /^(signature|sig|x-amz-|x-goog-)/.test(decoded);
-    return sensitive ? `${prefix}${name}=[REDACTED]` : match;
-  }).replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_.~=-]+/gi, "$1 [REDACTED]");
+  // Query values can contain search text or other private content even when
+  // the parameter name looks benign.  Keep names for diagnostics, not values.
+  return value.replace(/([?&]|^)([^?&=\s"']+)=([^&\s"']*)/g,
+    (_match, prefix, name) => `${prefix}${name}=[REDACTED]`
+  ).replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_.~=-]+/gi, "$1 [REDACTED]");
 }
 
-function scrubObject<T>(input: T, path = "", ancestors = new WeakSet<object>(), depth = 0): T {
-  if (typeof input === "string") return scrubString(input) as T;
+interface ScrubState { ancestors: WeakSet<object>; remaining: number; characters: number }
+function scrubObject<T>(input: T, path = "", state: ScrubState = { ancestors: new WeakSet(), remaining: 2000, characters: 100_000 }, depth = 0): T {
+  if (--state.remaining < 0) throw new Error("Sentry redaction budget exceeded");
+  const { ancestors } = state;
+  if (typeof input === "string") {
+    state.characters -= input.length;
+    if (state.characters < 0) throw new Error("Sentry redaction character budget exceeded");
+    return scrubString(input) as T;
+  }
   if (typeof input === "function" || typeof input === "symbol") return "[REDACTED]" as T;
   if (input === null || typeof input !== "object") return input;
   if (ancestors.has(input)) return "[CIRCULAR]" as T;
+  // Total work/output is bounded, including duplicate subtrees.  Memoized
+  // aliases alone would still expand exponentially during JSON serialization.
   if (depth > 40) return "[REDACTED]" as T;
   ancestors.add(input);
   if (Array.isArray(input)) {
-    const out = input.map((entry, i) => scrubObject(entry, `${path}[${i}]`, ancestors, depth + 1));
+    if (input.length > state.remaining) throw new Error("Sentry redaction budget exceeded");
+    const out: unknown[] = [];
+    for (let i = 0; i < input.length; i++) out.push(scrubObject(input[i], `${path}[${i}]`, state, depth + 1));
     ancestors.delete(input);
     return out as T;
   }
   const out: Record<string, unknown> = Object.create(null);
-  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+  for (const key of Object.keys(input)) {
+    if (--state.remaining < 0) throw new Error("Sentry redaction budget exceeded");
+    state.characters -= key.length;
+    if (state.characters < 0) throw new Error("Sentry redaction character budget exceeded");
+    const value = (input as Record<string, unknown>)[key];
     const childPath = path ? `${path}.${key}` : key;
     if (SDK_INTERNAL_CYCLIC_PATHS.has(childPath)) { out[key] = "[SDK_INTERNAL]"; continue; }
     if (["user", "request.data", "request.cookies", "request.headers"].includes(childPath)) continue;
@@ -49,7 +62,7 @@ function scrubObject<T>(input: T, path = "", ancestors = new WeakSet<object>(), 
       // Preserve serialized v11 attribute type/value wire structure.
       out[key] = value && typeof value === "object" && "type" in value && "value" in value
         ? { type: "string", value: "[REDACTED]" } : "[REDACTED]";
-    } else out[key] = scrubObject(value, childPath, ancestors, depth + 1);
+    } else out[key] = scrubObject(value, childPath, state, depth + 1);
   }
   ancestors.delete(input);
   return out as T;
@@ -100,7 +113,21 @@ export function sentryPrivacyIntegration(): Integration {
                 !item[1] || typeof item[1] !== "object" || item[1] instanceof Uint8Array) {
               envelope[1].splice(i, 1); continue;
             }
-            item[1] = scrubObject(item[1]);
+            // v11 batches independent telemetry rows.  Bound each row rather
+            // than dropping a normal batch merely because its total is large.
+            if (["span", "log", "trace_metric"].includes(item[0].type)) {
+              const payload = item[1] as { items?: unknown[]; [key: string]: unknown };
+              if (!Array.isArray(payload.items) || payload.items.length > 1000) throw new Error("Invalid telemetry batch");
+              const { items, ...metadata } = payload;
+              const sanitized: unknown[] = [];
+              for (const row of items) {
+                if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+                try { sanitized.push(scrubObject(row)); } catch { /* Drop only the unsafe row. */ }
+              }
+              if (sanitized.length === 0) { envelope[1].splice(i, 1); continue; }
+              item[1] = { ...scrubObject(metadata), items: sanitized } as typeof item[1];
+              if ("item_count" in item[0]) item[0].item_count = sanitized.length;
+            } else item[1] = scrubObject(item[1]);
             delete item[0].length;
           }
         } catch {
