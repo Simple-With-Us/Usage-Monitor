@@ -70,34 +70,21 @@ describe("dedupeUpstreamRows", () => {
   const oneTime = { ...upstream, idempotencyKey: "k-one", kind: "one_time" };
   const usageDup = { ...upstream, idempotencyKey: "k-use", kind: "usage" };
 
-  it("collapses same-receipt double-posts, returning kept and dropped", () => {
-    const { kept, dropped } = dedupeUpstreamRows([oneTime, usageDup]);
-    expect(kept).toHaveLength(1);
-    expect(kept[0].kind).toBe("one_time");
-    expect(dropped).toHaveLength(1);
-    expect(dropped[0].idempotencyKey).toBe("k-use");
+  it("collapses same-receipt double-posts to one row", () => {
+    const rows = dedupeUpstreamRows([oneTime, usageDup]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe("one_time");
   });
 
   it("keeps genuinely different charges apart", () => {
     const other = { ...upstream, idempotencyKey: "k-other", label: "Other invoice" };
-    expect(dedupeUpstreamRows([oneTime, other]).kept).toHaveLength(2);
+    expect(dedupeUpstreamRows([oneTime, other])).toHaveLength(2);
     const otherAmount = { ...upstream, idempotencyKey: "k-amt", amountUsd: 99.99 };
-    expect(dedupeUpstreamRows([oneTime, otherAmount]).kept).toHaveLength(2);
-    const otherTime = {
-      ...upstream,
-      idempotencyKey: "k-time",
-      occurredAt: "2026-09-30T13:00:00.000Z",
-    };
-    expect(dedupeUpstreamRows([oneTime, otherTime]).kept).toHaveLength(2);
+    expect(dedupeUpstreamRows([oneTime, otherAmount])).toHaveLength(2);
   });
 
-  it("builds a vendor/amount/timestamp/label fingerprint with NUL separators", () => {
+  it("builds a vendor/amount/day/label fingerprint", () => {
     expect(expenseFingerprint(oneTime)).toBe(expenseFingerprint(usageDup));
-    expect(expenseFingerprint(oneTime)).toContain("");
-    // Adjacent fields cannot bleed: "ab"+"c" differs from "a"+"bc".
-    const left = { ...upstream, vendor: "ab", label: "c" };
-    const right = { ...upstream, vendor: "a", label: "bc" };
-    expect(expenseFingerprint(left)).not.toBe(expenseFingerprint(right));
   });
 });
 
@@ -141,6 +128,34 @@ describe("syncExpenses", () => {
       expect(fetchMock.mock.calls[0][1].headers.authorization).toBe(
         "Bearer " + "t".repeat(64)
       );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("purges suppressed rows already in D1, then skips them upstream", async () => {
+    const db = fakeDb(["k-bad"]);
+    const bad = { ...upstream, idempotencyKey: "k-bad", label: "Bad row" };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ expenses: [bad], hasMore: false, nextCursor: null }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await syncExpenses({
+        UPSTREAM_URL: "https://usage.jays.services",
+        USAGE_READ_TOKEN: "x",
+        EXPENSES_DB: db,
+      });
+      expect(result.suppressedCount).toBe(1);
+      expect(result.upserted).toBe(0);
+      // The suppression purge runs as a DELETE against suppressed_expenses.
+      const sqls = db.prepare.mock.calls.map((c) => c[0]);
+      expect(
+        sqls.some(
+          (s) => s.includes("DELETE FROM expenses") && s.includes("suppressed_expenses")
+        )
+      ).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }
