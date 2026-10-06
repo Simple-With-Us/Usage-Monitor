@@ -56,6 +56,15 @@ function json(data, status = 200) {
   });
 }
 
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 function authorizedSync(request, env) {
   const expected = (env.USAGE_READ_TOKEN ?? "").trim();
   if (!expected) return false;
@@ -63,7 +72,7 @@ function authorizedSync(request, env) {
   const bearer = header.toLowerCase().startsWith("bearer ")
     ? header.slice(7).trim()
     : "";
-  return bearer.length > 0 && bearer === expected;
+  return bearer.length > 0 && timingSafeEqual(bearer, expected);
 }
 
 export default {

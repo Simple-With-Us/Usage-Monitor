@@ -18,6 +18,17 @@ export const dynamic = "force-dynamic";
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
+/**
+ * Parse a from/to date param.  A bare YYYY-MM-DD `to` means the end of that
+ * day (inclusive range); a full ISO timestamp is used as-is.
+ */
+function parseDayParam(value: string | null, endOfDay: boolean): Date | undefined {
+  if (value == null) return undefined;
+  const iso =
+    endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
+  return new Date(iso);
+}
+
 function hasOwnerExpenseToken(request: NextRequest): boolean {
   const expected = process.env.OWNER_EXPENSE_TOKEN?.trim() ?? "";
   if (!expected || expected.length < 32) return false;
@@ -73,8 +84,8 @@ export async function GET(request: NextRequest) {
 
   const fromParam = searchParams.get("from");
   const toParam = searchParams.get("to");
-  const from = fromParam ? new Date(fromParam) : undefined;
-  const to = toParam ? new Date(toParam) : undefined;
+  const from = parseDayParam(fromParam, false);
+  const to = parseDayParam(toParam, true);
   if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
     return NextResponse.json(
       { error: "from/to must be valid ISO dates" },

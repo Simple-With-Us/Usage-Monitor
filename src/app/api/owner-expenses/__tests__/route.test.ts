@@ -117,7 +117,12 @@ describe("GET /api/owner-expenses", () => {
     const where = mocks.findMany.mock.calls[0][0].where;
     expect(where.sourceApp).toBe("owner-recorded-expense");
     expect(where.occurredAt.gte).toEqual(new Date("2026-05-01"));
-    expect(where.occurredAt.lte).toEqual(new Date("2026-10-05"));
+    expect(where.occurredAt.lte).toEqual(new Date("2026-10-05T23:59:59.999Z"));
+  });
+
+  it("400s on an invalid to date", async () => {
+    const response = await GET(authedGet("?to=not-a-date"));
+    expect(response.status).toBe(400);
   });
 
   it("POST still 401s without a session or owner token (production-shaped)", async () => {

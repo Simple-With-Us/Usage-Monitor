@@ -13,6 +13,9 @@
 import { categorizeExpense } from "./categories.mjs";
 
 const UPSTREAM_PAGE_LIMIT = 1000;
+// D1 batch writes stay small even if the ledger grows: one prepared statement
+// per row, flushed in chunks.
+const BATCH_CHUNK_SIZE = 100;
 
 /** Map one upstream expense object to a D1 row. Pure — unit tested. */
 export function mapUpstreamExpense(expense) {
@@ -100,7 +103,10 @@ export async function syncExpenses(env) {
     const expenses = Array.isArray(data.expenses) ? data.expenses : [];
     if (expenses.length > 0) {
       const rows = expenses.map(mapUpstreamExpense);
-      await env.EXPENSES_DB.batch(buildUpsertStatements(env.EXPENSES_DB, rows, syncedAt));
+      const statements = buildUpsertStatements(env.EXPENSES_DB, rows, syncedAt);
+      for (let i = 0; i < statements.length; i += BATCH_CHUNK_SIZE) {
+        await env.EXPENSES_DB.batch(statements.slice(i, i + BATCH_CHUNK_SIZE));
+      }
       upserted += rows.length;
     }
     pages += 1;

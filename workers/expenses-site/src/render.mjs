@@ -183,8 +183,10 @@ ${rows || '      <tr><td colspan="6" class="empty">No expenses in the last 6 mon
       return cmp * sortDir;
     }).forEach(function (r) { tbody.appendChild(r); });
     var label = activeFilter === "all" ? "all categories" : activeFilter.replace(/-/g, " ");
-    summary.innerHTML = "Showing <strong>" + list.length + "</strong> expenses in " +
-      "<strong>" + label + "</strong> · total <strong>" + money(total) + "</strong>.";
+    // textContent, not innerHTML: the label derives from our own filter
+    // buttons, but there is no reason to parse HTML here at all.
+    summary.textContent = "Showing " + list.length + " expenses in " +
+      label + " · total " + money(total) + ".";
   }
 
   document.querySelectorAll(".filter").forEach(function (btn) {
