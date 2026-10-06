@@ -349,9 +349,13 @@ export function projectQuotaWindows(
     const claimedAt = claimedByProducer.get(`${window.providerKey}:${series}`);
     return claimedAt === undefined || claimedAt <= window.occurredAt;
   });
-  // Legacy IDs stay unchanged.  Reserve them first; re-key attributed rows
-  // only when a legacy bucket id collides with the producer namespace tuple.
+  // Legacy IDs stay unchanged.  Reserve them first (order-independent of the
+  // loader's occurredAt DESC feed); re-key attributed rows only when a legacy
+  // bucket id collides with the producer namespace tuple.
   const usedIds = new Set<string>();
+  for (const { window } of attributed) {
+    if (!window.producerInstanceId) usedIds.add(window.id);
+  }
   const windows: QuotaWindow[] = [];
   for (const { window, series } of attributed) {
     if (!window.producerInstanceId) {

@@ -297,32 +297,35 @@ describe("projectQuotaWindows", () => {
 
   it("re-keys an attributed window when its id collides with a legacy bucket id", () => {
     const collidingLegacyId = JSON.stringify(["producer", "machine", "bucket"]);
-    const result = projectQuotaWindows([
-      {
-        provider: "anthropic",
-        label: "legacy window",
-        credits: 40,
-        limit: 100,
-        occurredAt: "2026-10-03T11:00:00.000Z",
-        metadata: { bucketId: collidingLegacyId },
-      },
-      {
-        provider: "anthropic",
-        label: "5h window",
-        credits: 70,
-        limit: 100,
-        occurredAt: "2026-10-03T12:00:00.000Z",
-        metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
-      },
+    const legacy = {
+      provider: "anthropic",
+      label: "legacy window",
+      credits: 40,
+      limit: 100,
+      occurredAt: "2026-10-03T11:00:00.000Z",
+      metadata: { bucketId: collidingLegacyId },
+    };
+    const attributed = {
+      provider: "anthropic",
+      label: "5h window",
+      credits: 70,
+      limit: 100,
+      occurredAt: "2026-10-03T12:00:00.000Z",
+      metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
+    };
+    const expectedIds = new Set([
+      collidingLegacyId,
+      JSON.stringify(["producer", "machine", "bucket", 0]),
     ]);
 
-    expect(result.windows).toHaveLength(2);
-    expect(new Set(result.windows.map((window) => window.id))).toEqual(
-      new Set([
-        collidingLegacyId,
-        JSON.stringify(["producer", "machine", "bucket", 0]),
-      ]),
-    );
+    for (const events of [
+      [legacy, attributed],
+      [attributed, legacy],
+    ]) {
+      const result = projectQuotaWindows(events);
+      expect(result.windows).toHaveLength(2);
+      expect(new Set(result.windows.map((window) => window.id))).toEqual(expectedIds);
+    }
   });
 
   it("builds skipModelTypes from the freshest reading per series, not every machine's", () => {
