@@ -25,9 +25,12 @@ import {
   getR2WeeklyArchiveStatus,
   presentR2HistoricLayer,
   formatBackupAgeSeconds,
+  getAppliedSchedulerGate,
   getRuntimeIdentity,
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
+  isSchedulerEnabled,
+  recordSchedulerGate,
   getStartupRuntimeStatus,
   markSchedulerStarted,
   markSchedulerTickCompleted,
@@ -39,6 +42,18 @@ describe("runtime health state", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     resetRuntimeHealthForTests();
+  });
+
+  it("isSchedulerEnabled() reads live env until recordSchedulerGate pins boot value", () => {
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(false);
+
+    recordSchedulerGate(true);
+    expect(isSchedulerEnabled()).toBe(true);
+    expect(getAppliedSchedulerGate()).toBe(true);
+
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(true);
   });
 
   it("records scheduler lifecycle without exposing adapter errors", () => {

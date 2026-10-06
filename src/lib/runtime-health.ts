@@ -1368,6 +1368,7 @@ export function resetRuntimeHealthForTests(): void {
     firstProviderFetchDegradedAt: null,
     lastRun: null,
   };
+  state.schedulerGateEnabled = null;
   if (state.databaseFile?.fd != null) {
     try {
       closeSync(state.databaseFile.fd);
