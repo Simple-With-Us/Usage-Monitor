@@ -58,7 +58,11 @@ export const isPublicPath = (pathname: string) => {
     // Agents overview aggregator (live agent runs, token counts, quota burn,
     // API-equivalent cost comparison). Self-authenticates via session or USAGE_READ_TOKEN.
     "/api/agents-overview",
-    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
+    // Owner-recorded expense ledger. GET self-authenticates via dashboard
+    // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
+    // own session/OWNER_EXPENSE_TOKEN check in the route.
+    // See src/app/api/owner-expenses/route.ts.
+    "/api/owner-expenses",    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
     // budget-status / agents-overview.
     "/api/quota-windows",
     // Unlisted Apple Calendar subscribe URL; the route checks BILLS_CALENDAR_TOKEN.
