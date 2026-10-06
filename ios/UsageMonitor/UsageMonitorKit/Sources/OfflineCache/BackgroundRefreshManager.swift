@@ -127,19 +127,7 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
     /// Best-effort LLM + server + Mac cache.  Failures leave the previous
     /// section in place so a 401 or timeout cannot stamp empty tiles as live.
     private func refreshSecondaryWidgetSections(using client: APIClient) async {
-        if let burn = try? await client.llmBurn() {
-            WidgetSnapshotStore.updateLlm(burn)
-        }
-        if let health = try? await client.health() {
-            let readiness = try? await client.readiness()
-            WidgetSnapshotStore.updateServerService(health: health, readiness: readiness)
-        }
-        if let metrics = try? await client.serverMetrics() {
-            WidgetSnapshotStore.updateServerHost(metrics)
-        }
-        if let mac = try? await client.macHealth() {
-            WidgetSnapshotStore.updateMac(mac)
-        }
+        await WidgetSnapshotStore.refreshSecondarySections(using: client)
     }
 
     private func reloadWidgets() {
