@@ -13,27 +13,29 @@
  */
 import { syncExpenses } from "./sync.mjs";
 import { formatAmount, formatDate, renderDashboard } from "./render.mjs";
+import { sideForCategory } from "./categories.mjs";
 
 const SIX_MONTHS_SQL = "date('now', '-6 months')";
+// Side is derived from category (personal -> Personal, everything else ->
+// Tech), so the SQL mirrors sideForCategory without a schema change.
+const SIDE_SQL = "CASE WHEN category = 'personal' THEN 'personal' ELSE 'tech' END";
 
-async function readDashboardRows(db, category) {
-  const where =
-    category && category !== "all"
-      ? "WHERE occurred_at >= " + SIX_MONTHS_SQL + " AND category = ?"
-      : "WHERE occurred_at >= " + SIX_MONTHS_SQL;
-  const stmt =
-    category && category !== "all"
-      ? db.prepare(
-          `SELECT idempotency_key, vendor, amount_usd, occurred_at, kind,
-                  label, notes, confidence, category, calendar_sort
-           FROM expenses ${where} ORDER BY occurred_at DESC LIMIT 1000`
-        ).bind(category)
-      : db.prepare(
-          `SELECT idempotency_key, vendor, amount_usd, occurred_at, kind,
-                  label, notes, confidence, category, calendar_sort
-           FROM expenses ${where} ORDER BY occurred_at DESC LIMIT 1000`
-        );
-  const result = await stmt.all();
+async function readDashboardRows(db, filter) {
+  let where = "WHERE occurred_at >= " + SIX_MONTHS_SQL;
+  let params = [];
+  if (filter === "personal" || filter === "tech") {
+    where += " AND " + SIDE_SQL + " = ?";
+    params = [filter];
+  } else if (filter && filter !== "all") {
+    where += " AND category = ?";
+    params = [filter];
+  }
+  const stmt = db.prepare(
+    `SELECT idempotency_key, vendor, amount_usd, occurred_at, kind,
+            label, notes, confidence, category, calendar_sort
+     FROM expenses ${where} ORDER BY occurred_at DESC LIMIT 1000`
+  );
+  const result = params.length > 0 ? await stmt.bind(...params).all() : await stmt.all();
   return result.results ?? [];
 }
 
@@ -111,6 +113,7 @@ export default {
           kind: e.kind,
           label: e.label,
           category: e.category,
+          side: sideForCategory(e.category),
         })),
         asOf,
         totalCount,

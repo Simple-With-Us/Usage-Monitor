@@ -26,3 +26,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Idempotency keys that must never render on the dashboard, even though they
+-- still exist upstream.  Used for ledger rows that were posted in error
+-- (double-posted receipts, superseded gross/discount/correction rows) and
+-- later corrected at the display layer.  Sync skips these keys on every run.
+CREATE TABLE IF NOT EXISTS suppressed_expenses (
+  idempotency_key TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  suppressed_at TEXT NOT NULL
+);
