@@ -38,6 +38,10 @@ export interface QuotaWindow {
    */
   via: string | null;
   sourceApp: string | null;
+  /** Stable identity of the machine that produced this window, when supplied. */
+  producerInstanceId?: string;
+  /** Optional human-readable machine name supplied by the producer. */
+  machine?: string;
   modelId: string | null;
   modelType: string | null;
   label: string;
@@ -250,11 +254,13 @@ export function projectQuotaWindows(
 ): QuotaWindowsResponse {
   const resolved = manifest ?? resolveProviderManifest(null);
 
-  const latest = new Map<string, QuotaWindow>();
+  const latest = new Map<string, { window: QuotaWindow; series: string }>();
   for (const event of events) {
     const meta = asRecord(event.metadata);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
+    const producerInstanceId = asString(meta._producerInstanceId);
+    const machine = asString(meta.machine);
     // Display label only: stored events keep their original label, so rows
     // ingested before the rename read "Third-Party Models" too.  Normalized
     // before the series key so an old and a new reading of the same bucket
@@ -265,7 +271,22 @@ export function projectQuotaWindows(
         ? antigravityDisplayLabel(event.label)
         : event.label;
     const series = modelId ?? bucketId ?? `${event.provider}:${label ?? ""}`;
-    if (latest.has(series)) continue;
+    // Preserve historical IDs exactly when provenance is absent.  For
+    // attributed windows, encode the identity and series as a JSON tuple so
+    // delimiters inside either value cannot make two machines share a key.
+    // The tuple always starts with the reserved "producer" marker: a fixed
+    // intrinsic namespace so the id never flips forms as unrelated rows
+    // arrive in the 14-day window (React keys / client caches stay stable).
+    const id = producerInstanceId
+      ? JSON.stringify(["producer", producerInstanceId, series])
+      : series;
+    // Unattributed events keep the bare series key so an attributed reading
+    // of the same bucket can supersede them (see the post-map filter below);
+    // attributed events live in a per-producer namespace.
+    const dedupeKey = producerInstanceId
+      ? JSON.stringify(["producer", producerInstanceId, series])
+      : JSON.stringify(["legacy", series]);
+    if (latest.has(dedupeKey)) continue;
 
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
     const omitted = asBoolean(meta.remainingUnknown) || event.credits == null;
@@ -276,39 +297,98 @@ export function projectQuotaWindows(
       asBoolean(meta.isExhausted) || omitted || remainingPercent <= 0;
     const remainingUnknown = false;
     const status = quotaStatus({ remainingPercent, remainingUnknown, isExhausted });
-    latest.set(series, {
-      id: series,
-      provider: event.provider,
-      providerKey: eventCanonicalKey,
-      providerLabel: (() => {
-        const cfg = resolved.byKey.get(eventCanonicalKey);
-        return cfg?.label ?? (eventCanonicalKey || "Unknown");
-      })(),
-      via: viaFor(eventCanonicalKey, resolved),
-      sourceApp: event.service ?? null,
-      modelId,
-      modelType: modelId,
-      label: label ?? modelId ?? event.provider,
-      remainingPercent,
-      remainingUnknown,
-      isExhausted,
-      resetAt: asString(meta.resetAt),
-      window: asString(meta.quotaWindow),
-      status,
-      skip: status === "exhausted",
-      skipReason:
-        status === "exhausted"
-          ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
-          : null,
-      occurredAt: iso(event.occurredAt),
-      source: asString(meta.source),
+    latest.set(dedupeKey, {
+      series,
+      window: {
+        id,
+        provider: event.provider,
+        providerKey: eventCanonicalKey,
+        providerLabel: (() => {
+          const cfg = resolved.byKey.get(eventCanonicalKey);
+          return cfg?.label ?? (eventCanonicalKey || "Unknown");
+        })(),
+        via: viaFor(eventCanonicalKey, resolved),
+        sourceApp: event.service ?? null,
+        ...(producerInstanceId ? { producerInstanceId } : {}),
+        ...(machine ? { machine } : {}),
+        modelId,
+        modelType: modelId,
+        label: label ?? modelId ?? event.provider,
+        remainingPercent,
+        remainingUnknown,
+        isExhausted,
+        resetAt: asString(meta.resetAt),
+        window: asString(meta.quotaWindow),
+        status,
+        skip: status === "exhausted",
+        skipReason:
+          status === "exhausted"
+            ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
+            : null,
+        occurredAt: iso(event.occurredAt),
+        source: asString(meta.source),
+      },
     });
   }
 
-  const windows = [...latest.values()];
+  const projected = [...latest.values()];
+  // Freshest attributed reading per (providerKey, series) — an unattributed
+  // window is only a duplicate view of a bucket that a producer has since
+  // reported MORE recently; a fresher unattributed reading still wins.
+  const claimedByProducer = new Map<string, string>();
+  for (const { series, window } of projected) {
+    if (!window.producerInstanceId) continue;
+    const key = `${window.providerKey}:${series}`;
+    const held = claimedByProducer.get(key);
+    if (held === undefined || held < window.occurredAt) {
+      claimedByProducer.set(key, window.occurredAt);
+    }
+  }
+  const attributed = projected.filter(({ window, series }) => {
+    if (window.producerInstanceId !== undefined) return true;
+    const claimedAt = claimedByProducer.get(`${window.providerKey}:${series}`);
+    return claimedAt === undefined || claimedAt <= window.occurredAt;
+  });
+  // Legacy IDs stay unchanged.  Reserve them first (order-independent of the
+  // loader's occurredAt DESC feed); re-key attributed rows only when a legacy
+  // bucket id collides with the producer namespace tuple.
+  const usedIds = new Set<string>();
+  for (const { window } of attributed) {
+    if (!window.producerInstanceId) usedIds.add(window.id);
+  }
+  const windows: QuotaWindow[] = [];
+  for (const { window, series } of attributed) {
+    if (!window.producerInstanceId) {
+      windows.push(window);
+      usedIds.add(window.id);
+      continue;
+    }
+    let id = window.id;
+    if (usedIds.has(id)) {
+      let suffix = 0;
+      while (usedIds.has(id)) {
+        id = JSON.stringify(["producer", window.producerInstanceId, series, suffix]);
+        suffix += 1;
+      }
+    }
+    usedIds.add(id);
+    windows.push(id === window.id ? window : { ...window, id });
+  }
+  // skipModelTypes drives fleet-wide Antigravity instance routing: build it
+  // from the single freshest reading per series across producers, so one
+  // machine's stale exhausted reading cannot reroute the whole fleet while
+  // another machine still has quota.  occurredAt is a normalized ISO string,
+  // so lexicographic comparison is chronological.
+  const freshestPerSeries = new Map<string, QuotaWindow>();
+  for (const { series, window } of attributed) {
+    const held = freshestPerSeries.get(series);
+    if (!held || held.occurredAt < window.occurredAt) {
+      freshestPerSeries.set(series, window);
+    }
+  }
   const skipModelTypes: SkipModelType[] = [];
   const seenSkip = new Set<string>();
-  for (const window of windows) {
+  for (const window of freshestPerSeries.values()) {
     for (const target of skipTargetsFor(window)) {
       const key = `${target.instanceId}:${target.model}`;
       if (seenSkip.has(key)) continue;

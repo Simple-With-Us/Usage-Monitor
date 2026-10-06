@@ -2,15 +2,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
-  findMany: vi.fn(),
+  loadLatestQuotaWindowEvents: vi.fn(),
 }));
 
-vi.mock("@/lib/prisma", () => ({
-  prisma: {
-    externalUsageEvent: {
-      findMany: mocks.findMany,
-    },
-  },
+vi.mock("@/lib/quota-events-loader", () => ({
+  loadLatestQuotaWindowEvents: mocks.loadLatestQuotaWindowEvents,
 }));
 
 let GET: typeof import("../route").GET;
@@ -29,8 +25,8 @@ beforeEach(() => {
   delete process.env.USAGE_READ_TOKEN;
   delete process.env.USAGE_INGEST_TOKEN;
   delete process.env.USAGE_READ_TOKEN_ALLOW_INGEST_FALLBACK;
-  mocks.findMany.mockReset();
-  mocks.findMany.mockResolvedValue([]);
+  mocks.loadLatestQuotaWindowEvents.mockReset();
+  mocks.loadLatestQuotaWindowEvents.mockResolvedValue([]);
 });
 
 function request(headers: Record<string, string> = {}): NextRequest {
@@ -44,12 +40,12 @@ describe("GET /api/quota-windows", () => {
   it("503s when no read token is configured", async () => {
     const response = await GET(request());
     expect(response.status).toBe(503);
-    expect(mocks.findMany).not.toHaveBeenCalled();
+    expect(mocks.loadLatestQuotaWindowEvents).not.toHaveBeenCalled();
   });
 
   it("accepts the dedicated read bearer token", async () => {
     process.env.USAGE_READ_TOKEN = READ_TOKEN;
-    mocks.findMany.mockResolvedValue([
+    mocks.loadLatestQuotaWindowEvents.mockResolvedValue([
       {
         provider: "google-antigravity",
         label: "Claude Opus 4.6 (Thinking)",
@@ -76,7 +72,7 @@ describe("GET /api/quota-windows", () => {
       })
     );
     expect(response.status).toBe(200);
-    expect(mocks.findMany).toHaveBeenCalledOnce();
+    expect(mocks.loadLatestQuotaWindowEvents).toHaveBeenCalledOnce();
   });
 
   it("merges the PROVIDER_MANIFEST_JSON knob into providerGroups (additive)", async () => {
@@ -103,7 +99,7 @@ describe("GET /api/quota-windows", () => {
         },
       ],
     });
-    mocks.findMany.mockResolvedValue([
+    mocks.loadLatestQuotaWindowEvents.mockResolvedValue([
       {
         provider: "claude-suite",
         label: "suite window",

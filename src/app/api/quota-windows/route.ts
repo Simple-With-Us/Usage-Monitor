@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth";
 import { loadResolvedProviderManifest } from "@/lib/provider-manifest";
-import { prisma } from "@/lib/prisma";
+import { loadLatestQuotaWindowEvents } from "@/lib/quota-events-loader";
 import { projectQuotaWindows } from "@/lib/quota-windows";
 
 export const runtime = "nodejs";
@@ -46,23 +46,7 @@ export async function GET(request: NextRequest) {
   }
 
   const since = new Date(Date.now() - 14 * 86_400_000);
-  const events = await prisma.externalUsageEvent.findMany({
-    where: {
-      metricType: "quota",
-      occurredAt: { gte: since },
-    },
-    orderBy: { occurredAt: "desc" },
-    take: 400,
-    select: {
-      provider: true,
-      service: true,
-      label: true,
-      credits: true,
-      limit: true,
-      occurredAt: true,
-      metadata: true,
-    },
-  });
+  const events = await loadLatestQuotaWindowEvents(since);
 
   // Resolve the backend manifest fresh per request -- it is an in-memory
   // read with no network hop (see AppSettingsService.get).
