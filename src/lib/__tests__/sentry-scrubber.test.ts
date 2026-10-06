@@ -43,7 +43,7 @@ describe("sentryBeforeSend", () => {
     expect(typed.extra.authHeader).toBe("[REDACTED]");
     expect(typed.extra.benignValue).toBe("kept-as-is");
     expect(typed.tags.region).toBe("us-east-1");
-    expect(typed.request.headers.authorization).toBe("[REDACTED]");
+    expect(typed.request.headers).toBeUndefined();
   });
 
   it("preserves Sentry's dynamicSamplingContext.public_key but redacts application sessionKey", () => {

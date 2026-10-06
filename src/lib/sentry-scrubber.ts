@@ -1,189 +1,113 @@
-/**
- * Sentry event scrubber for this app's server + edge configs.
- *
- * Audit finding 2026-09-20: `src/app/api/ingest/usage/route.ts` line 463 calls
- * `logIngestFailed({ reason: error.name, route })` from a catch-all; today the
- * Sentry `beforeSend` hook is absent, so any thrown object's `.message`,
- * `.metadata`, or `.extra` field is forwarded to Sentry as-is. The catch
- * block today is safe (it only sends `error.name`) but the absence of a
- * defensive scrubber means a future regression (a thrown Error carrying
- * `{ metadata: { token: 'real-secret' } }`, say) would leak to Sentry without
- * a guard rail.
- *
- * Three-phase scrub:
- *   1. Key-name redaction — any object key whose name contains a sensitive
- *      substring is replaced with `"[REDACTED]"`. Names that look sensitive
- *      but are actually SDK internals (Sentry's `public_key` in
- *      `dynamicSamplingContext`, for example) are allow-listed.
- *   2. Value-pattern redaction — string values are scanned for URL query
- *      strings like `?token=...` and `&token=...` and replaced. The
- *      redaction applies to the parameter value, not the whole string.
- *      Bare `key=value` (no leading `?`) is also matched because Sentry's
- *      request normalizer stores `request.query_string` after slicing the
- *      leading `?`.
- *   3. SDK-internal field skip — certain cyclic metadata fields
- *      (`capturedSpanScope`, etc.) are scrubbed by identity (`===`) on the
- *      key path, not by recursion, so we never walk into Sentry's cyclic
- *      Scope objects and throw out of the catch handler (which would
- *      bypass all redaction).
- *
- * Contract: return `null` to drop the event, or the (possibly mutated) event
- * to keep it. We never throw from here.
- */
-import type {
-  ErrorEvent,
-  EventHint,
-  Log,
-  Metric,
-  TransactionEvent,
-} from "@sentry/core";
+/** Shared final redaction for browser, server and edge Sentry payloads.
+ * Unreadable payloads fail closed rather than returning unsanitized input. */
+import type { ErrorEvent, EventHint, Log, Metric, TransactionEvent, StreamedSpanJSON, Integration } from "@sentry/core";
 
-// Key-name substrings that always trigger redaction. Lowercased.
 const SENSITIVE_KEY_SUBSTRINGS = ["token", "secret", "key", "password", "passwd", "auth"];
-
-// Key-name substrings that LOOK sensitive but are SDK/protocol internals and
-// must be preserved. Each entry is matched against the lowercase key name.
-//
-// Only true SDK-owned non-secret identifiers belong here. `public_key` is
-// the DSN public key used by Sentry's dynamic-sampling context — it is a
-// NON-secret identifier required for trace correlation.
-//
-// Note: `sessionKey` was previously in this list but was removed (Codex
-// re-review P2, observed 2026-09-20): sessionKey is just a naming
-// coincidence, not an SDK-owned field, and treating it as safe globally
-// would let any caller stash a credential under that key and bypass
-// scrubbing.
-const SENSITIVE_BUT_SAFE_KEY_SUBSTRINGS = ["public_key", "publickey"];
-
-// Regex for URL query-string redaction. Matches three cases:
-//   - `?name=value` (URL with query string)
-//   - `&name=value` (subsequent params)
-//   - `^name=value` (bare query string with no `?`, as Sentry stores
-//     `request.query_string` after slicing the leading `?`)
-const URL_QUERY_REDACTION_REGEX =
-  /([?&]|^)(token|secret|password|passwd|auth|api_key|apikey|access_token|refresh_token)(=)([^&\s"']*)/gi;
-
-// Key paths to scrub by identity (replace with `[REDACTED]`) instead of
-// recursing into them. These are Sentry SDK-owned cyclic metadata fields
-// that would otherwise throw our recursion. Each entry is the dotted
-// path from the event root to the field. Match is case-sensitive.
-//
-// Sentry 10.74 ships BOTH `capturedSpanScope` AND `capturedSpanIsolationScope`
-// on sampled server transactions; both point to cyclic `Scope` objects and
-// must be skipped together (Codex re-review P1, observed 2026-09-20 on
-// commit 5c17318).
 const SDK_INTERNAL_CYCLIC_PATHS = new Set([
   "sdkProcessingMetadata.capturedSpanScope",
   "sdkProcessingMetadata.capturedSpanIsolationScope",
   "sdkProcessingMetadata.capturedSpanScopeAsString",
 ]);
 
-function isSafeKey(key: string): boolean {
+function isSensitiveKey(key: string, path: string): boolean {
+  // Preserve only SDK-owned public identifiers, never similarly named app keys.
+  if (path === "sdkProcessingMetadata.dynamicSamplingContext.public_key" || path === "envelope.trace.public_key") return false;
   const lower = key.toLowerCase();
-  return SENSITIVE_BUT_SAFE_KEY_SUBSTRINGS.some((needle) => lower.includes(needle));
-}
-
-function isSensitiveKey(key: string): boolean {
-  if (isSafeKey(key)) return false;
-  const lower = key.toLowerCase();
-  return SENSITIVE_KEY_SUBSTRINGS.some((needle) => lower.includes(needle));
-}
-
-function redactUrlQueryStrings(value: string): string {
-  return value.replace(URL_QUERY_REDACTION_REGEX, (_match, prefix, _name, eq) => {
-    return `${prefix}${_name}${eq}[REDACTED]`;
-  });
+  return SENSITIVE_KEY_SUBSTRINGS.some(part => lower.includes(part)) ||
+    /^(user[._]|(?:http[._])?(?:request|response)[._](?:body|headers|cookies)|file[._]contents?$|gen_ai[._](?:input|output|prompt|completion))/.test(lower) ||
+    ["cookie", "cookies", "email", "filecontents", "filecontent"].includes(lower);
 }
 
 function scrubString(value: string): string {
-  return redactUrlQueryStrings(value);
+  return value.replace(/([?&]|^)([^?&=\s"']+)=([^&\s"']*)/g, (match, prefix, name) => {
+    let decoded: string;
+    try { decoded = decodeURIComponent(name.replace(/\+/g, " ")).toLowerCase(); }
+    catch { return `${prefix}${name}=[REDACTED]`; }
+    const sensitive = SENSITIVE_KEY_SUBSTRINGS.some(part => decoded.includes(part)) || /^(signature|sig|x-amz-|x-goog-)/.test(decoded);
+    return sensitive ? `${prefix}${name}=[REDACTED]` : match;
+  }).replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_.~=-]+/gi, "$1 [REDACTED]");
 }
 
-function scrubObject<T>(input: T, keyPath: string = ""): T {
+function scrubObject<T>(input: T, path = "", ancestors = new WeakSet<object>(), depth = 0): T {
+  if (typeof input === "string") return scrubString(input) as T;
+  if (typeof input === "function" || typeof input === "symbol") return "[REDACTED]" as T;
   if (input === null || typeof input !== "object") return input;
+  if (ancestors.has(input)) return "[CIRCULAR]" as T;
+  if (depth > 40) return "[REDACTED]" as T;
+  ancestors.add(input);
   if (Array.isArray(input)) {
-    return input.map((entry, idx) => scrubObject(entry, `${keyPath}[${idx}]`)) as unknown as T;
+    const out = input.map((entry, i) => scrubObject(entry, `${path}[${i}]`, ancestors, depth + 1));
+    ancestors.delete(input);
+    return out as T;
   }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-    const childPath = keyPath ? `${keyPath}.${k}` : k;
-    if (SDK_INTERNAL_CYCLIC_PATHS.has(childPath)) {
-      // Skip recursion into Sentry SDK-internal cyclic metadata. Replace
-      // with a placeholder so the field survives but doesn't carry a
-      // sensitive payload up to the root.
-      out[k] = "[SDK_INTERNAL]";
-      continue;
-    }
-    if (isSensitiveKey(k)) {
-      out[k] = "[REDACTED]";
-    } else if (typeof v === "string") {
-      out[k] = scrubString(v);
-    } else {
-      out[k] = scrubObject(v, childPath);
-    }
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    const childPath = path ? `${path}.${key}` : key;
+    if (SDK_INTERNAL_CYCLIC_PATHS.has(childPath)) { out[key] = "[SDK_INTERNAL]"; continue; }
+    if (["user", "request.data", "request.cookies", "request.headers"].includes(childPath)) continue;
+    if (isSensitiveKey(key, childPath)) {
+      // Preserve serialized v11 attribute type/value wire structure.
+      out[key] = value && typeof value === "object" && "type" in value && "value" in value
+        ? { type: "string", value: "[REDACTED]" } : "[REDACTED]";
+    } else out[key] = scrubObject(value, childPath, ancestors, depth + 1);
   }
+  ancestors.delete(input);
   return out as T;
 }
 
-/**
- * `beforeSend` hook for Sentry.init()'s error path. Returns the event with
- * any sensitive object key replaced with `"[REDACTED]"`, plus URL query-
- * string parameters with sensitive names redacted. Never throws.
- */
 export function sentryBeforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
-  try {
-    if (!event || typeof event !== "object") return event;
-    return scrubObject(event);
-  } catch {
-    // Defensive: a malformed event must not break Sentry's pipeline.
-    return event;
-  }
+  try { return scrubObject(event); } catch { return null; }
 }
-
-/**
- * `beforeSendTransaction` hook for Sentry.init()'s transaction path. Same
- * scrubber contract; transaction events have a different shape but the
- * key-name redaction logic is identical.
- */
-export function sentryBeforeSendTransaction(
-  event: TransactionEvent,
-  _hint: EventHint
-): TransactionEvent | null {
-  try {
-    if (!event || typeof event !== "object") return event;
-    return scrubObject(event);
-  } catch {
-    return event;
-  }
+export function sentryBeforeSendTransaction(event: TransactionEvent, _hint: EventHint): TransactionEvent | null {
+  try { return scrubObject(event); } catch { return null; }
 }
-
-/**
- * `beforeSendLog` hook for Sentry 10.74's logger payload family. Same
- * scrubber contract; the SDK uses this hook to sanitize logs produced by
- * `Sentry.logger.*` calls (the explicit motivation for this scrubber,
- * since `logIngestFailed` in `src/lib/sentry-ops.ts` routes through
- * `Sentry.logger`). Never throws.
- */
 export function sentryBeforeSendLog(log: Log): Log | null {
-  try {
-    if (!log || typeof log !== "object") return log;
-    return scrubObject(log);
-  } catch {
-    return log;
+  try { return scrubObject(log); } catch { return null; }
+}
+export function sentryBeforeSendMetric(metric: Metric): Metric | null {
+  try { return scrubObject(metric); } catch { return null; }
+}
+
+/** v11 ignores beforeSendTransaction for streamed spans.  Returning null or
+ * throwing here sends the original span, so return a content-free fallback. */
+export function sentryBeforeSendSpan(span: StreamedSpanJSON): StreamedSpanJSON {
+  try { return scrubObject(span); } catch {
+    const safeId = (key: "trace_id" | "span_id", length: number): string => {
+      try {
+        const value = Object.getOwnPropertyDescriptor(span, key)?.value;
+        if (typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`, "i").test(value)) return value;
+      } catch { /* No arbitrary getters in fallback. */ }
+      return "0".repeat(length);
+    };
+    return { trace_id: safeId("trace_id", 32), span_id: safeId("span_id", 16),
+      name: "[REDACTED]", start_timestamp: 0, end_timestamp: 0,
+      status: "error", is_segment: false, attributes: {} };
   }
 }
 
-/**
- * `beforeSendMetric` hook for Sentry 10.74's metrics payload family.
- * Mirrors the log hook — counters and gauges that callers might label
- * with sensitive substrings pass through the same key-name / value-pattern
- * redaction. Never throws.
- */
-export function sentryBeforeSendMetric(metric: Metric): Metric | null {
-  try {
-    if (!metric || typeof metric !== "object") return metric;
-    return scrubObject(metric);
-  } catch {
-    return metric;
-  }
+/** Final boundary for scope attributes and trace headers added after hooks.
+ * Opaque attachments and recordings are outside the permitted telemetry. */
+export function sentryPrivacyIntegration(): Integration {
+  return {
+    name: "UsageMonitorPrivacy",
+    setup(client) {
+      client.on("beforeEnvelope", envelope => {
+        try {
+          envelope[0] = scrubObject(envelope[0], "envelope");
+          for (let i = envelope[1].length - 1; i >= 0; i--) {
+            const item = envelope[1][i]!;
+            if (["attachment", "replay_event", "replay_recording"].includes(item[0].type) ||
+                !item[1] || typeof item[1] !== "object" || item[1] instanceof Uint8Array) {
+              envelope[1].splice(i, 1); continue;
+            }
+            item[1] = scrubObject(item[1]);
+            delete item[0].length;
+          }
+        } catch {
+          envelope[0] = {};
+          envelope[1].splice(0);
+        }
+      });
+    },
+  };
 }

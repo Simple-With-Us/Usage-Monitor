@@ -22,3 +22,16 @@ export function nonEmptyEnv(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed ? trimmed : undefined;
 }
+
+/** Only the existing configured HTTPS Sentry intake belongs in browser CSP. */
+export function sentryConnectSrcOrigins(raw = process.env.NEXT_PUBLIC_SENTRY_DSN): string[] {
+  if (!raw?.trim()) return [];
+  try {
+    const dsn = new URL(raw.trim());
+    if (dsn.protocol !== "https:" ||
+        !/^o\d+\.ingest(?:\.[a-z]+)?\.sentry\.io$/.test(dsn.hostname) ||
+        !/^[a-f\d]+$/i.test(dsn.username) || dsn.password || dsn.port || dsn.search || dsn.hash ||
+        !/^\/\d+$/.test(dsn.pathname)) return [];
+    return [dsn.origin];
+  } catch { return []; }
+}
