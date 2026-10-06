@@ -21,6 +21,11 @@ describe("categorizeExpense", () => {
     expect(categorizeExpense("Porkbun", "domain renewal")).toBe("domains");
   });
 
+  it("matches dotted names as substrings", () => {
+    expect(categorizeExpense("Fly.io", "hosting")).toBe("cloud-hosting");
+    expect(categorizeExpense("Hover.com", "domain")).toBe("domains");
+  });
+
   it("falls back to other for unknown vendors", () => {
     expect(categorizeExpense("Allegro", "card grading")).toBe("other");
     expect(categorizeExpense("", "")).toBe("other");

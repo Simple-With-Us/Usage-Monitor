@@ -5,6 +5,10 @@
  * D1 at sync time so a future edit UI can override it without a migration.
  * Keep slugs stable: the dashboard filter bar and the JSON API both expose
  * them.
+ *
+ * A rule entry is either a RegExp (tested as-is) or a plain string (matched
+ * as a case-insensitive substring — used for dotted names like "fly.io"
+ * where regex word-boundary anchoring reads as a URL-host pattern).
  */
 
 export const CATEGORIES = {
@@ -64,8 +68,8 @@ const RULES = [
       /\bdigitalocean\b/i,
       /\blinode\b/i,
       /\bakamai\b/i,
-      /\bfly\.io\b/i,
-      /\brender\.com\b/i,
+      "fly.io",
+      "render.com",
       /\brailway\b/i,
       /\bnetlify\b/i,
       /\bvultr\b/i,
@@ -79,7 +83,7 @@ const RULES = [
       /\bporkbun\b/i,
       /\bnamecheap\b/i,
       /\bdnsimple\b/i,
-      /\bhover\.com\b/i,
+      "hover.com",
       /\bgandi\b/i,
       /\bregistrar\b/i,
       /\bdomain renewal\b/i,
@@ -121,8 +125,15 @@ const RULES = [
  */
 export function categorizeExpense(vendor, label) {
   const haystack = `${vendor ?? ""} ${label ?? ""}`;
-  for (const [slug, regexes] of RULES) {
-    if (regexes.some((re) => re.test(haystack))) return slug;
+  const lower = haystack.toLowerCase();
+  for (const [slug, rules] of RULES) {
+    if (
+      rules.some((rule) =>
+        typeof rule === "string" ? lower.includes(rule) : rule.test(haystack)
+      )
+    ) {
+      return slug;
+    }
   }
   return "other";
 }

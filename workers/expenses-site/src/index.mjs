@@ -78,7 +78,10 @@ export default {
         const result = await syncExpenses(env);
         return json({ ok: true, ...result });
       } catch (error) {
-        return json({ ok: false, error: String(error && error.message || error) }, 502);
+        // Never leak upstream/D1 error detail to the caller; it lands in the
+        // worker logs instead.
+        console.error("expenses sync failed:", error);
+        return json({ ok: false, error: "Sync failed" }, 502);
       }
     }
 
