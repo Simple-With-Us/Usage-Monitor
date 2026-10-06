@@ -1,6 +1,10 @@
 /**
  * Expense categorization for the expenses dashboard.
  *
+ * Two top-level sides: Personal and Tech.  Everything business goes under
+ * Tech, keeping the subcategories below.  Personal is empty for now — no
+ * personal transaction source is wired up yet.
+ *
  * Maps a vendor/label pair to a stable category slug.  The slug is stored in
  * D1 at sync time so a future edit UI can override it without a migration.
  * Keep slugs stable: the dashboard filter bar and the JSON API both expose
@@ -11,14 +15,30 @@
  * where regex word-boundary anchoring reads as a URL-host pattern).
  */
 
+export const SIDES = {
+  personal: "Personal",
+  tech: "Tech",
+};
+
 export const CATEGORIES = {
-  "tech-ai": "Tech / AI",
+  personal: "Personal",
+  "tech-ai": "AI",
   "cloud-hosting": "Cloud / Hosting",
   "domains": "Domains",
   "software": "Software",
   "services": "Services",
   "other": "Other",
 };
+
+/** The top-level side a category belongs to.  Everything except Personal is Tech. */
+export function sideForCategory(slug) {
+  return slug === "personal" ? "personal" : "tech";
+}
+
+/** Human label for a side slug (Title Case for headings). */
+export function sideLabel(slug) {
+  return SIDES[slug] ?? SIDES.tech;
+}
 
 // [slug, regexes] — first match wins.  Tested against vendor + label joined.
 const RULES = [

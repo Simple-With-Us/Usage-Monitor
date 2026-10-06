@@ -25,16 +25,22 @@ const rows = [
 describe("renderDashboard", () => {
   it("renders a Title Case heading and the 6-month window note", () => {
     const html = renderDashboard(rows, "2026-10-05T00:00:00Z", 42);
-    expect(html).toContain("<h1>Business Expenses</h1>");
+    expect(html).toContain("<h1>Expenses</h1>");
     expect(html).toContain("Last 6 months, rolling.");
     expect(html).toContain("Showing 2 of 42 recorded expenses.");
   });
 
-  it("shows All and Tech / AI filters prominently, plus present categories", () => {
+  it("leads the filter bar with All, Personal, Tech, then subcategories", () => {
     const html = renderDashboard(rows, "2026-10-05T00:00:00Z", 2);
     expect(html).toContain('data-filter="all"');
-    expect(html).toContain("Tech / AI");
+    expect(html).toContain('data-filter="side:personal"');
+    expect(html).toContain('data-filter="side:tech"');
+    expect(html).toContain(">Personal</button>");
+    expect(html).toContain(">Tech</button>");
+    expect(html).toContain(">AI</button>");
     expect(html).toContain("Cloud / Hosting");
+    // Rows carry their side for client-side filtering.
+    expect(html).toContain('data-side="tech"');
   });
 
   it("renders vendor, formatted amount, and category pill per row", () => {
@@ -42,7 +48,7 @@ describe("renderDashboard", () => {
     expect(html).toContain("Anthropic");
     expect(html).toContain("$213.20");
     expect(html).toContain("Sep 30, 2026");
-    expect(html).toContain("Tech / AI");
+    expect(html).toContain(">AI</span>");
   });
 
   it("escapes hostile vendor text", () => {

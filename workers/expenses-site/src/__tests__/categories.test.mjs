@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CATEGORIES, categorizeExpense, categoryLabel } from "../categories.mjs";
+import {
+  CATEGORIES,
+  SIDES,
+  categorizeExpense,
+  categoryLabel,
+  sideForCategory,
+  sideLabel,
+} from "../categories.mjs";
 
 describe("categorizeExpense", () => {
   it("maps AI vendors to tech-ai", () => {
@@ -36,8 +43,21 @@ describe("categorizeExpense", () => {
   });
 
   it("exposes stable Title Case labels", () => {
-    expect(categoryLabel("tech-ai")).toBe("Tech / AI");
+    expect(categoryLabel("tech-ai")).toBe("AI");
     expect(categoryLabel("bogus")).toBe("Other");
     expect(Object.keys(CATEGORIES)).toContain("tech-ai");
+  });
+
+  it("puts everything business under the Tech side", () => {
+    expect(sideForCategory("tech-ai")).toBe("tech");
+    expect(sideForCategory("cloud-hosting")).toBe("tech");
+    expect(sideForCategory("domains")).toBe("tech");
+    expect(sideForCategory("software")).toBe("tech");
+    expect(sideForCategory("services")).toBe("tech");
+    expect(sideForCategory("other")).toBe("tech");
+    expect(sideForCategory("personal")).toBe("personal");
+    expect(sideLabel("personal")).toBe("Personal");
+    expect(sideLabel("tech")).toBe("Tech");
+    expect(Object.keys(SIDES)).toEqual(["personal", "tech"]);
   });
 });

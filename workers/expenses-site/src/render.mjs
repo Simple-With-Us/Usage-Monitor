@@ -6,7 +6,7 @@
  * sentences.  The table body is rendered server-side from D1 rows; a small
  * inline script handles the category filter and column sorting client-side.
  */
-import { CATEGORIES, categoryLabel } from "./categories.mjs";
+import { CATEGORIES, SIDES, categoryLabel, sideForCategory, sideLabel } from "./categories.mjs";
 
 /** Escape text for HTML. */
 export function esc(value) {
@@ -45,13 +45,15 @@ export function formatAmount(usd) {
 export function renderDashboard(expenses, asOf, totalCount) {
   const present = [];
   for (const slug of Object.keys(CATEGORIES)) {
+    // "personal" is covered by the side filter, not the subcategory list.
+    if (slug === "personal") continue;
     if (slug === "other" || expenses.some((e) => e.category === slug)) {
       present.push(slug);
     }
   }
-  // "Other" last; "Tech / AI" right after "All".
+  // Subcategories after the two sides; "Other" last.
   present.sort((a, b) => {
-    const rank = (s) => (s === "tech-ai" ? 0 : s === "other" ? 99 : 50);
+    const rank = (s) => (s === "tech-ai" ? 10 : s === "other" ? 99 : 50);
     return rank(a) - rank(b);
   });
 
@@ -59,11 +61,11 @@ export function renderDashboard(expenses, asOf, totalCount) {
 
   const rows = expenses
     .map(
-      (e) => `      <tr data-category="${esc(e.category)}" data-amount="${esc(
-        e.amount_usd
-      )}" data-date="${esc(e.occurred_at)}" data-vendor="${esc(
-        e.vendor
-      ).toLowerCase()}">
+      (e) => `      <tr data-category="${esc(e.category)}" data-side="${esc(
+        sideForCategory(e.category)
+      )}" data-amount="${esc(e.amount_usd)}" data-date="${esc(
+        e.occurred_at
+      )}" data-vendor="${esc(e.vendor).toLowerCase()}">
         <td data-sort="${esc(e.occurred_at)}">${esc(formatDate(e.occurred_at))}</td>
         <td>${esc(e.vendor)}</td>
         <td>${esc(e.label || "—")}</td>
@@ -76,14 +78,26 @@ export function renderDashboard(expenses, asOf, totalCount) {
     )
     .join("\n");
 
-  const filters = ["all", ...present]
-    .map((slug) => {
-      const label = slug === "all" ? "All" : categoryLabel(slug);
-      const active = slug === "all" ? " aria-current=\"true\"" : "";
-      const cls = slug === "all" || slug === "tech-ai" ? "filter primary" : "filter";
-      return `      <button class="${cls}" data-filter="${esc(slug)}"${active}>${esc(
-        label
-      )}</button>`;
+  // Filter bar: All, then the two sides, then the subcategories present.
+  const sideFilters = Object.keys(SIDES).map((slug) => ({
+    value: "side:" + slug,
+    label: sideLabel(slug),
+    primary: true,
+  }));
+  const filters = ["all", ...sideFilters.map((f) => f.value), ...present]
+    .map((value) => {
+      const isAll = value === "all";
+      const isSide = value.startsWith("side:");
+      const label = isAll
+        ? "All"
+        : isSide
+          ? sideLabel(value.slice(5))
+          : categoryLabel(value);
+      const active = isAll ? ' aria-current="true"' : "";
+      const primary = isAll || isSide;
+      return `      <button class="filter${primary ? " primary" : ""}" data-filter="${esc(
+        value
+      )}"${active}>${esc(label)}</button>`;
     })
     .join("\n");
 
@@ -92,7 +106,7 @@ export function renderDashboard(expenses, asOf, totalCount) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Business Expenses</title>
+<title>Expenses</title>
 <style>
   :root { color-scheme: light; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -123,7 +137,7 @@ export function renderDashboard(expenses, asOf, totalCount) {
 </head>
 <body>
 <main>
-  <h1>Business Expenses</h1>
+  <h1>Expenses</h1>
   <p class="sub">Last 6 months, rolling.  The ledger keeps every expense going back; this view shows the most recent half year.  Data syncs from spend tracking every 15 minutes.</p>
   <div class="filters" role="group" aria-label="Category filter">
 ${filters}
@@ -159,7 +173,11 @@ ${rows || '      <tr><td colspan="6" class="empty">No expenses in the last 6 mon
 
   function visible() {
     return rows.filter(function (r) {
-      return activeFilter === "all" || r.getAttribute("data-category") === activeFilter;
+      if (activeFilter === "all") return true;
+      if (activeFilter.indexOf("side:") === 0) {
+        return r.getAttribute("data-side") === activeFilter.slice(5);
+      }
+      return r.getAttribute("data-category") === activeFilter;
     });
   }
 
@@ -182,7 +200,12 @@ ${rows || '      <tr><td colspan="6" class="empty">No expenses in the last 6 mon
         : va < vb ? -1 : va > vb ? 1 : 0;
       return cmp * sortDir;
     }).forEach(function (r) { tbody.appendChild(r); });
-    var label = activeFilter === "all" ? "all categories" : activeFilter.replace(/-/g, " ");
+    var label =
+      activeFilter === "all"
+        ? "all categories"
+        : activeFilter.indexOf("side:") === 0
+          ? activeFilter.slice(5)
+          : activeFilter.replace(/-/g, " ");
     // textContent, not innerHTML: the label derives from our own filter
     // buttons, but there is no reason to parse HTML here at all.
     summary.textContent = "Showing " + list.length + " expenses in " +

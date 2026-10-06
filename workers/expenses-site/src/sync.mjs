@@ -17,6 +17,63 @@ const UPSTREAM_PAGE_LIMIT = 1000;
 // per row, flushed in chunks.
 const BATCH_CHUNK_SIZE = 100;
 
+// Kind preference when one receipt was posted twice under different kinds:
+// keep the most canonical filing.  Purely a tiebreaker for display — the
+// amounts are identical, so the total is the same either way.
+const KIND_PREFERENCE = ["one_time", "prepaid", "subscription", "usage"];
+
+/**
+ * Fingerprint for "the same receipt": same vendor, amount, calendar day and
+ * label (labels carry the invoice/receipt number).  Two upstream rows sharing
+ * a fingerprint are one charge posted twice under different idempotency keys
+ * (the Sep 2026 bulk run filed several receipts under both `one_time` and
+ * `usage`).  Pure — unit tested.
+ */
+export function expenseFingerprint(expense) {
+  const day = String(expense.occurredAt ?? "").slice(0, 10);
+  return [
+    String(expense.vendor ?? "").toLowerCase(),
+    Number(expense.amountUsd).toFixed(2),
+    day,
+    String(expense.label ?? "").toLowerCase(),
+  ].join("");
+}
+
+/** Collapse same-receipt double-posts to a single row.  Pure — unit tested. */
+export function dedupeUpstreamRows(expenses) {
+  const winners = new Map();
+  const rank = (expense) => {
+    const i = KIND_PREFERENCE.indexOf(expense.kind ?? "one_time");
+    return i === -1 ? KIND_PREFERENCE.length : i;
+  };
+  for (const expense of expenses) {
+    const fp = expenseFingerprint(expense);
+    const current = winners.get(fp);
+    if (
+      !current ||
+      rank(expense) < rank(current) ||
+      (rank(expense) === rank(current) &&
+        String(expense.idempotencyKey) < String(current.idempotencyKey))
+    ) {
+      winners.set(fp, expense);
+    }
+  }
+  return [...winners.values()];
+}
+
+/**
+ * Idempotency keys the dashboard must never render, even though they still
+ * exist upstream (see suppressed_expenses in schema.sql).  Covers ledger rows
+ * posted in error — double-posted receipts and superseded gross/discount or
+ * correction rows — that were corrected at the display layer.
+ */
+export async function loadSuppressedKeys(db) {
+  const result = await db
+    .prepare("SELECT idempotency_key FROM suppressed_expenses")
+    .all();
+  return new Set((result.results ?? []).map((row) => row.idempotency_key));
+}
+
 /** Map one upstream expense object to a D1 row. Pure — unit tested. */
 export function mapUpstreamExpense(expense) {
   return {
@@ -95,14 +152,26 @@ export async function syncExpenses(env) {
     throw new Error("UPSTREAM_URL and USAGE_READ_TOKEN must be configured");
   }
   const syncedAt = new Date().toISOString();
+  const suppressed = await loadSuppressedKeys(env.EXPENSES_DB);
   let cursor = null;
   let upserted = 0;
   let pages = 0;
+  let suppressedCount = 0;
+  let dedupedCount = 0;
   for (;;) {
     const data = await fetchUpstreamPage(upstreamUrl, token, cursor);
     const expenses = Array.isArray(data.expenses) ? data.expenses : [];
     if (expenses.length > 0) {
-      const rows = expenses.map(mapUpstreamExpense);
+      const visible = expenses.filter((expense) => {
+        if (suppressed.has(expense.idempotencyKey)) {
+          suppressedCount += 1;
+          return false;
+        }
+        return true;
+      });
+      const unique = dedupeUpstreamRows(visible);
+      dedupedCount += visible.length - unique.length;
+      const rows = unique.map(mapUpstreamExpense);
       const statements = buildUpsertStatements(env.EXPENSES_DB, rows, syncedAt);
       for (let i = 0; i < statements.length; i += BATCH_CHUNK_SIZE) {
         await env.EXPENSES_DB.batch(statements.slice(i, i + BATCH_CHUNK_SIZE));
@@ -120,5 +189,5 @@ export async function syncExpenses(env) {
   )
     .bind(syncedAt)
     .run();
-  return { upserted, pages, syncedAt };
+  return { upserted, pages, syncedAt, suppressedCount, dedupedCount };
 }
