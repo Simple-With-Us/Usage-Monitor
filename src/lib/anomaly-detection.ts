@@ -26,6 +26,9 @@
  * --------------------------------
  * - Short history: fewer than `minHistoryPoints` baseline points → no anomaly
  *   (never fire on 2 data points).
+ * - Cold baseline: fewer than `minPositiveBaselineDays` with spend at/above the
+ *   metric absolute floor → no anomaly (integration day-one / zero-history B2
+ *   inventory must not CRITICAL-page on first real traffic).
  * - Zero-variance baseline (MAD == 0, e.g. a flat series): dividing by zero
  *   would make any deviation look like an infinite-sigma spike. We fall back to
  *   a scaled mean-absolute-deviation, and when the baseline is perfectly flat
@@ -64,6 +67,11 @@ export interface AnomalyConfig {
   windowDays: number;
   /** Minimum baseline points (excluding the observed point) required to fire. */
   minHistoryPoints: number;
+  /**
+   * Minimum baseline days with spend at/above `minObserved[metric]` before any
+   * anomaly can fire. Suppresses first-seen traffic off a near-zero baseline.
+   */
+  minPositiveBaselineDays: number;
   /** Modified-z threshold above which a warning-level anomaly fires. */
   sigmaThreshold: number;
   /** Modified-z threshold at/above which the anomaly escalates to critical. */
@@ -109,6 +117,7 @@ export const DEFAULT_ANOMALY_CONFIG: AnomalyConfig = {
   enabled: true,
   windowDays: 14,
   minHistoryPoints: 7,
+  minPositiveBaselineDays: 3,
   sigmaThreshold: 3.5,
   criticalSigma: 5,
   minObserved: { cost: 1, requests: 100 },
@@ -156,6 +165,15 @@ export function resolveAnomalyConfig(env: Partial<NodeJS.ProcessEnv> = process.e
     minHistoryPoints: Math.trunc(
       readNumberEnv(env, "ANOMALY_MIN_HISTORY_POINTS", DEFAULT_ANOMALY_CONFIG.minHistoryPoints, 2, 120)
     ),
+    minPositiveBaselineDays: Math.trunc(
+      readNumberEnv(
+        env,
+        "ANOMALY_MIN_POSITIVE_BASELINE_DAYS",
+        DEFAULT_ANOMALY_CONFIG.minPositiveBaselineDays,
+        1,
+        120
+      )
+    ),
     sigmaThreshold,
     criticalSigma,
     minObserved: {
@@ -194,6 +212,20 @@ function robustScale(baseline: readonly number[], center: number): { spread: num
   return { spread: 0, method: "flat-baseline-relative" };
 }
 
+/** Baseline days with economically material spend (same floor as minObserved). */
+export function countPositiveBaselineDays(
+  baseline: readonly number[],
+  metric: AnomalyMetric,
+  config: AnomalyConfig
+): number {
+  const floor = config.minObserved[metric];
+  let count = 0;
+  for (const value of baseline) {
+    if (value >= floor) count += 1;
+  }
+  return count;
+}
+
 /**
  * Core detector. `baseline` is the trailing series EXCLUDING `observed`, in
  * chronological order. Returns a structured anomaly, or null when nothing
@@ -211,6 +243,9 @@ export function detectAnomaly(
   if (!Number.isFinite(observed)) return null;
   if (baseline.length < config.minHistoryPoints) return null;
   if (observed < config.minObserved[metric]) return null;
+
+  const positiveBaselineDays = countPositiveBaselineDays(baseline, metric, config);
+  if (positiveBaselineDays < config.minPositiveBaselineDays) return null;
 
   const center = median(baseline);
   const deviation = observed - center;

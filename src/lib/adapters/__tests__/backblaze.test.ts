@@ -158,6 +158,48 @@ describe("backblaze adapter", () => {
     });
   });
 
+  it("skips the api-usage-monitor Litestream bucket by default", async () => {
+    const fetchMock = installB2Mock({
+      buckets: [
+        { bucketId: "b1", bucketName: "jays-socratic-trade-eu", bucketType: "allPrivate" },
+        { bucketId: "b2", bucketName: "api-usage-monitor", bucketType: "allPrivate" },
+      ],
+      filesByBucket: {
+        b1: [{ contentLength: 1024, action: "upload" }],
+        b2: [{ contentLength: 50 * 1024 * 1024 * 1024, action: "upload" }],
+      },
+    });
+    const result = await fetchUsage("id:secret");
+    expect(result.rawData).toMatchObject({
+      resourceCounts: { buckets: 1, fileVersions: 1 },
+    });
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("b2_list_file_versions"))).toBe(
+      true
+    );
+    const listFileBodies = fetchMock.mock.calls
+      .filter((c) => String(c[0]).includes("b2_list_file_versions"))
+      .map((c) => JSON.parse(String((c[1] as RequestInit)?.body)));
+    expect(listFileBodies.map((b) => b.bucketId)).toEqual(["b1"]);
+  });
+
+  it("can include the api-usage-monitor bucket when explicitly opted in", async () => {
+    const fetchMock = installB2Mock({
+      buckets: [
+        { bucketId: "b1", bucketName: "api-usage-monitor", bucketType: "allPrivate" },
+      ],
+      filesByBucket: {
+        b1: [{ contentLength: 1024, action: "upload" }],
+      },
+    });
+    const result = await fetchUsage("id:secret", { includeUsageMonitorBackupBucket: true });
+    expect(result.rawData).toMatchObject({
+      resourceCounts: { buckets: 1, fileVersions: 1 },
+    });
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("b2_list_file_versions"))).toBe(
+      true
+    );
+  });
+
   it("works with empty buckets (zero storage)", async () => {
     installB2Mock({
       filesByBucket: { b1: [], b2: [] },

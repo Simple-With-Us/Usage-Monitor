@@ -350,8 +350,8 @@ jobs:
         run: npm run test:replica-status-probe
 
       - name: Audit high-severity dependencies
-        # Production dependencies only.  GHSA-vfj7-8cjw-p6xm (braces <=3.0.3) has no patched release, and every path in this lockfile is a devDependency (tailwindcss 3.4.19 chokidar and eslint-config-next).  Do not clear it with a breaking tailwindcss 4 bump.  A production high still fails this step.
-        run: npm audit --omit=dev --audit-level=high
+        # Full lockfile via audit-ci; GHSA-vfj7-8cjw-p6xm is allowlisted in audit-ci.jsonc (2026-10-05).
+        run: npm run test:audit-ci
 
       - name: Production build
         run: npm run build

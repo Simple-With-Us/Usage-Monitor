@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/muse-code-usage-collector.mjs.
+
+  Reports Meta Muse Code percent REMAINING for the 5h rolling window and the
+  weekly window.  Must run on the Mac that holds the Muse Code OAuth credential
+  in the macOS keychain (service "ai.meta.dev.credentials", account "meta") —
+  the API call is the one the Meta CLI itself makes with that token, and a
+  server-side connector impersonating the CLI stays out by the same ruling that
+  keeps the subscription-quota-collector on the laptop (issue #1411).
+
+  First run: macOS will prompt to allow `security find-generic-password` for the
+  keychain item.  Choose "Always Allow" for this collector so subsequent ticks
+  do not prompt; until that grant is in place the collector logs the explicit
+  hint and exits 0 with zero events.
+
+  Replace /ABSOLUTE/PATH/TO/HOME below with the owner's home directory.
+
+  Install:
+    cp scripts/com.jays.muse-code-usage-collector.plist.example \
+       ~/Library/LaunchAgents/com.jays.muse-code-usage-collector.plist
+    # replace every /ABSOLUTE/PATH placeholder below, then:
+    launchctl bootstrap gui/$(id -u) \
+       ~/Library/LaunchAgents/com.jays.muse-code-usage-collector.plist
+    launchctl kickstart -k gui/$(id -u)/com.jays.muse-code-usage-collector
+
+  Dry run first (prints numbers, window labels and ISO dates only):
+    node scripts/muse-code-usage-collector.mjs --dry-run
+
+  StartInterval 900 = 15 minutes, matching subscription-quota-collector.
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.muse-code-usage-collector
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.muse-code-usage-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/muse-code-usage-collector.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/muse-code-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/muse-code-usage-collector.log</string>
+</dict>
+</plist>
