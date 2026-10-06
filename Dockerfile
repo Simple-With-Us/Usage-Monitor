@@ -18,6 +18,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # visible inside RUN without it.
 ARG NEXT_PUBLIC_SENTRY_DSN=""
 ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
+# Bind the compiled SDK release to the same revision exposed by runtime health.
+# Docker stages do not inherit ARG/ENV values from the later runtime stage.
+ARG SOURCE_COMMIT=""
+ARG GIT_COMMIT_SHA=""
+ENV SOURCE_COMMIT=${SOURCE_COMMIT} GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 # FETCH_LITESTREAM_REQUIRED: this image runs with replication configured, so a
 # missing binary is a broken image, not a degraded one — start-with-litestream.sh
 # fails closed and the container crash-loops. Without this the fetch only warned,
