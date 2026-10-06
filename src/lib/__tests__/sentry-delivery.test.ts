@@ -47,7 +47,7 @@ describe("Real SDK sanitized envelopes", () => {
     });
     client.init();
     client.captureException(new Error("synthetic delivery ?%74oken=denied-token"), {
-      captureContext: { extra: { password: "denied-password", list: ["?token=denied-array"], safe: "synthetic" } },
+      captureContext: { extra: { password: "denied-password", list: ["?token=denied-array"], credentials: "denied-credentials", database_url: "postgres://demo:denied-password@db/test", prompt: "denied-prompt", environment: { OTHER: "denied-env" }, email_address: "denied@example.test", customer_name: "denied-customer" }, contexts: { privateContext: { content: "denied-context" } }, tags: { customer_name: "denied-customer", outcome: "denied-private-status" } },
     });
     expect(await client.flush(2000)).toBe(true);
     const events: unknown[] = [];
@@ -55,7 +55,7 @@ describe("Real SDK sanitized envelopes", () => {
     expect(events).toHaveLength(1);
     expect(url).toContain("https://o123.ingest.us.sentry.io/api/456/envelope/");
     const serialized = JSON.stringify(envelopes);
-    expect(serialized).toContain("synthetic delivery"); expect(serialized).toContain("[REDACTED]"); expect(serialized).not.toContain("denied");
+    expect(serialized).toContain('"type":"Error"'); expect(serialized).toContain("[REDACTED]"); expect(serialized).not.toContain("denied");
     await client.close();
   });
   it("delivers a normal breadcrumb-heavy error with sixty stack frames", async () => {
@@ -66,8 +66,8 @@ describe("Real SDK sanitized envelopes", () => {
     client.captureEvent({ exception: { values: [{ type: "Error", value: "synthetic full error", stacktrace: { frames: Array.from({ length: 60 }, (_, i) => ({ filename: "synthetic.js", function: "synthetic", lineno: i + 1, colno: 1, in_app: true, module: "synthetic", abs_path: "/synthetic.js", context_line: "synthetic" })) } }] },
       breadcrumbs: Array.from({ length: 100 }, (_, i) => ({ timestamp: i, category: "console", level: "info" as const, type: "default", message: "synthetic breadcrumb", data: { operation: "synthetic", index: i, source: "synthetic" } })) });
     expect(await client.flush(2000)).toBe(true);
-    expect(JSON.stringify(envelopes)).toContain("synthetic full error");
-    expect(JSON.stringify(envelopes)).toContain("synthetic breadcrumb");
+    expect(JSON.stringify(envelopes)).toContain('"lineno":60');
+    expect(JSON.stringify(envelopes)).not.toContain("synthetic breadcrumb");
     await client.close();
   });
   it("delivers SDK-sized batches of 100 logs and 1000 metrics/spans", async () => {
@@ -76,7 +76,7 @@ describe("Real SDK sanitized envelopes", () => {
       beforeSendSpan: sentryBeforeSendSpan, beforeSendLog: sentryBeforeSendLog, beforeSendMetric: sentryBeforeSendMetric,
       transport: () => transport(envelopes) });
     for (let i = 0; i < 100; i++) logger.info("synthetic batch log", { route: "synthetic", outcome: "ok", index: i });
-    for (let i = 0; i < 1000; i++) metrics.count("synthetic.batch", 1, { attributes: { route: "synthetic", outcome: "ok", index: i } });
+    for (let i = 0; i < 1000; i++) metrics.count("scheduler.tick", 1, { attributes: { route: "synthetic", outcome: "ok", index: i } });
     startSpan({ name: "synthetic batch root" }, () => {
       for (let i = 0; i < 1000; i++) startSpan({ name: "synthetic child", attributes: { "http.request.method": "GET", "http.response.status_code": 200, "url.full": "https://example.test/path?private=denied", "synthetic.index": i } }, () => {});
     });
@@ -96,7 +96,7 @@ describe("Real SDK sanitized envelopes", () => {
     const client = new ReportClient({ dsn: DSN, integrations: [sentryPrivacyIntegration()], stackParser: defaultStackParser,
       sendClientReports: true, beforeSend: sentryBeforeSend, transport: () => transport(envelopes) });
     client.init();
-    client.captureEvent({ message: "synthetic oversized diagnostic", extra: { body: "x".repeat(1_100_000) } });
+    client.captureEvent({ message: "x".repeat(1_100_000) });
     await client.flush(2000);
     await client.sendEnvelope([{}, [[{ type: "log", item_count: 2 }, { items: [{ body: "synthetic safe row", attributes: {} }, { get body(): never { throw Error("denied-payload"); } }] }]]] as unknown as Envelope);
     client.flushReports();
@@ -119,7 +119,7 @@ describe("Real SDK sanitized envelopes", () => {
       beforeSendSpan: sentryBeforeSendSpan, transport: () => transport(envelopes) });
     startSpan({ name: "synthetic ?%74oken=denied-span", attributes: { "url.full": "https://example.test/?x-amz-signature=denied-signature", "user.email": "denied@example.test", "http.request.body": "denied-body" } }, () => {});
     expect(await client!.flush(2000)).toBe(true);
-    expect(JSON.stringify(envelopes)).toContain("synthetic");
+    expect(JSON.stringify(envelopes)).toContain('"type":"span"');
     expect(JSON.stringify(envelopes)).not.toContain("denied");
     expectTypedAttributes(envelopes);
     await client!.close();
@@ -128,13 +128,13 @@ describe("Real SDK sanitized envelopes", () => {
     const envelopes: Envelope[] = [];
     const client = initBrowser({ dsn: DSN, defaultIntegrations: [], integrations: [sentryPrivacyIntegration()], dataCollection: { userInfo: false },
       beforeSendLog: sentryBeforeSendLog, beforeSendMetric: sentryBeforeSendMetric, transport: () => transport(envelopes) });
-    getCurrentScope().setAttributes({ apiToken: "denied-scope-token" }); setUser({ email: "denied@example.test" });
-    logger.info("synthetic delivery log"); metrics.count("synthetic.delivery", 1);
+    getCurrentScope().setAttributes({ apiToken: "denied-scope-token", credentials: "denied-credentials", database_url: "postgres://demo:denied-password@db/test", prompt: "denied-prompt", environment: { OTHER: "denied-env" }, email_address: "denied@example.test", customer_name: "denied-customer", outcome: "denied-private-status" }); setUser({ email: "denied@example.test" });
+    logger.info("ingest.failed"); metrics.count("ingest.failed", 1);
     expect(await client!.flush(2000)).toBe(true);
     const serialized = JSON.stringify(envelopes);
-    expect(serialized).toContain("synthetic delivery log"); expect(serialized).toContain("synthetic.delivery"); expect(serialized).not.toContain("denied");
+    expect(serialized).toContain("ingest.failed"); expect(serialized).toContain("ingest.failed"); expect(serialized).not.toContain("denied");
     expectTypedAttributes(envelopes);
-    getCurrentScope().setAttributes({ apiToken: undefined }); setUser(null); await client!.close();
+    getCurrentScope().setAttributes({ apiToken: undefined, credentials: undefined, database_url: undefined, prompt: undefined, environment: undefined, email_address: undefined, customer_name: undefined, outcome: undefined }); setUser(null); await client!.close();
   });
 });
 
@@ -143,26 +143,26 @@ describe("Fail-closed redaction", () => {
     const extra: Record<string, unknown> = { token: "denied-token", public_key_password: "denied-password", values: ["?signature=denied-signature"] }; extra.self = extra;
     const result = sentryBeforeSend({ type: undefined, exception: { values: [{ type: "Error", value: "synthetic" }] }, extra,
       user: { email: "denied@example.test" }, request: { data: "denied-body", cookies: { session: "denied-cookie" }, headers: { custom: "denied-header" } } }, {});
-    expect(result).not.toBeNull(); expect(JSON.stringify(result)).toContain("[CIRCULAR]"); expect(JSON.stringify(result)).not.toContain("denied");
+    expect(result).not.toBeNull(); expect(result?.extra).toBeUndefined(); expect(JSON.stringify(result)).not.toContain("denied");
   });
   it("bounds shared-reference DAGs including serialized output", () => {
     let shared: Record<string, unknown> = { token: "denied-token" };
     for (let i = 0; i < 35; i++) shared = { x: shared, y: shared };
-    const result = sentryBeforeSend({ type: undefined, message: "synthetic", extra: shared }, {});
+    const result = sentryBeforeSend({ type: undefined, message: "synthetic", spans: shared } as never, {});
     expect(result).toBeNull();
-    expect(sentryBeforeSend({ type: undefined, extra: { sparse: new Array(10_000_000) } }, {})).toBeNull();
-    expect(sentryBeforeSend({ type: undefined, extra: { repeatedText: Array(2000).fill("x".repeat(1000)) } }, {})).toBeNull();
-    expect(sentryBeforeSend({ type: undefined, extra: { sparse: Array.from({ length: 100 }, () => new Array(1000)) } }, {})).toBeNull();
-    expect(sentryBeforeSend({ type: undefined, extra: Object.fromEntries(Array.from({ length: 30_000 }, (_, i) => [String(i), i])) }, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, spans: { sparse: new Array(10_000_000) } } as never, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, spans: { repeatedText: Array(2000).fill("x".repeat(1000)) } } as never, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, spans: { sparse: Array.from({ length: 100 }, () => new Array(1000)) } } as never, {})).toBeNull();
+    expect(sentryBeforeSend({ type: undefined, spans: Object.fromEntries(Array.from({ length: 30_000 }, (_, i) => [String(i), i])) } as never, {})).toBeNull();
   });
-  it("keeps query names but removes all private query values", () => {
+  it("removes all user-controlled URL path and query contents", () => {
     const result = sentryBeforeSend({ type: undefined, request: { url: "https://example.test/?keyword=one&author=two&monkey=three&tokenizer=four&%74oken=denied-token&apiKey=denied-key&session_token=denied-session&secretKey=denied-secret-key&key=denied-bare-key&signature=denied-signature" } }, {});
     const encoded = JSON.stringify(result);
-    expect(encoded).toContain("keyword=[REDACTED]&author=[REDACTED]&monkey=[REDACTED]&tokenizer=[REDACTED]");
+    expect(encoded).toContain("[REDACTED]");
     expect(encoded).not.toContain("denied");
   });
   it("drops unreadable events/logs/metrics and returns a content-free span fallback", () => {
-    const bad = { type: undefined, get extra(): never { throw Error("unreadable"); }, token: "denied-token" };
+    const bad = { type: undefined, get exception(): never { throw Error("unreadable"); }, get attributes(): never { throw Error("unreadable"); } };
     expect(sentryBeforeSend(bad, {})).toBeNull(); expect(sentryBeforeSendTransaction(bad as never, {})).toBeNull();
     expect(sentryBeforeSendLog(bad as never)).toBeNull(); expect(sentryBeforeSendMetric(bad as never)).toBeNull();
     const span = sentryBeforeSendSpan({ trace_id: "a".repeat(32), span_id: "b".repeat(16), name: "denied-name", get attributes(): never { throw Error("unreadable"); }, start_timestamp: 1, status: "ok", is_segment: true });
@@ -173,23 +173,23 @@ describe("Fail-closed redaction", () => {
     sentryPrivacyIntegration().setup!({ on: (_name: string, fn: typeof guard) => { guard = fn; } } as never);
     const envelope = [{ trace: { public_key: "public", transaction: "?%74oken=denied" } }, [[{ type: "event", length: 999 }, { type: undefined, message: "synthetic" }], [{ type: "attachment" }, new Uint8Array([1])], [{ type: "replay_recording" }, {}]]] as unknown as Envelope;
     guard(envelope); expect(envelope[1]).toHaveLength(1); expect(envelope[1][0][0].length).toBeUndefined(); expect(JSON.stringify(envelope)).not.toContain("denied");
-    const bad = [{}, [[{ type: "event" }, { get extra(): never { throw Error("unreadable"); } }]]] as unknown as Envelope;
+    const bad = [{}, [[{ type: "event" }, { get exception(): never { throw Error("unreadable"); } }]]] as unknown as Envelope;
     guard(bad); expect(bad[1]).toEqual([]);
   });
   it("preserves shared typed attributes and isolates an oversized row in a normal batch", () => {
     let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
     sentryPrivacyIntegration().setup!({ on: (_name: string, fn: typeof guard) => { guard = fn; } } as never);
-    const shared = { type: "string", value: "synthetic" };
-    const items = Array.from({ length: 100 }, () => ({ attributes: { one: shared, two: shared } }));
+    const shared = { type: "string", value: "ok" };
+    const items = Array.from({ length: 100 }, () => ({ attributes: { outcome: shared, status: shared } }));
     const unsafe = { get attributes(): never { throw Error("unreadable"); } };
     const envelope = [{}, [[{ type: "log", item_count: 105, length: 123 }, { items: [...items, unsafe, null, undefined, [], "invalid"] }]]] as unknown as Envelope;
     guard(envelope);
     const payload = envelope[1][0][1] as { items: typeof items };
     expect(payload.items).toHaveLength(100);
     expect((envelope[1][0][0] as { item_count: number }).item_count).toBe(100);
-    expect(payload.items[0].attributes.two).toEqual(shared);
+    expect(payload.items[0].attributes.status).toEqual(shared);
     expectTypedAttributes([envelope]);
-    expect(items[0].attributes.one).toBe(shared);
+    expect(items[0].attributes.outcome).toBe(shared);
   });
   it("bounds aggregate string work across rows of one envelope", () => {
     let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
@@ -204,6 +204,14 @@ describe("Fail-closed redaction", () => {
     expect(result.items.length).toBeGreaterThan(0);
     expect(result.items.length).toBeLessThan(60);
     expect((envelope[1][0][0] as { item_count: number }).item_count).toBe(result.items.length);
+  });
+  it("projects batch metadata without dropping version or privacy inference controls", () => {
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    sentryPrivacyIntegration().setup!({ on: (_name: string, fn: typeof guard) => { guard = fn; } } as never);
+    const envelope = [{}, [[{ type: "log", item_count: 1 }, { version: 2, ingest_settings: { infer_ip: "auto", infer_user_agent: "auto" }, arbitrary_metadata: "denied", items: [{ timestamp: 1, level: "info", body: "denied free-form log", arbitrary_row_field: "denied", attributes: { outcome: { type: "string", value: "ok" } } }] }]]] as unknown as Envelope;
+    guard(envelope);
+    expect(envelope[1][0][1]).toEqual({ version: 2, ingest_settings: { infer_ip: "never", infer_user_agent: "never" }, items: [{ timestamp: 1, level: "info", body: "[REDACTED]", attributes: { outcome: { type: "string", value: "ok" } } }] });
+    expect(JSON.stringify(envelope)).not.toContain("denied");
   });
   it("wires all runtimes and keeps Replay off", () => {
     for (const filename of ["src/instrumentation-client.ts", "src/sentry.server.config.ts", "src/sentry.edge.config.ts"]) {
