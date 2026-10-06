@@ -1,4 +1,5 @@
 const path = require("path");
+const { sentryBuildRelease } = require("./scripts/sentry-build-release.cjs");
 
 const isProduction = process.env.NODE_ENV === "production";
 // Content-Security-Policy is now handled in src/middleware.ts
@@ -68,6 +69,7 @@ if (process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN) {
     org: process.env.SENTRY_ORG,
     project: process.env.SENTRY_SELF_PROJECT || "usage-monitor",
     authToken: process.env.SENTRY_AUTH_TOKEN,
+  release: { name: sentryBuildRelease() },
     silent: true,
     sourcemaps: {
       disable: !process.env.SENTRY_AUTH_TOKEN,

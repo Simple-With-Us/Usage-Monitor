@@ -1,119 +1,60 @@
 name: Sentry Deploy
 
-# Additive only: after a green CI run on main, attach a production *deploy*
-# record to the release version the Next.js bundler plugin already created
-# (full git SHA == Coolify SOURCE_COMMIT). Does NOT call `releases new`.
-#
-# The deploy record also carries a "seat:<seat> pr:#<number>" tag in its
-# --name field, so it's visible in the Sentry deploy UI which fleet agent
-# shipped this deploy and via which PR. Derived by looking up the PR that
-# introduced the merge commit (this workflow runs on `workflow_run` after
-# CI on `main`, so `github.event.workflow_run.head_ref` is just "main" —
-# the ORIGINATING branch has to be recovered via the GitHub API). See
-# docs/rollouts/2026-09-24-deploy-seat-tagging.md for the portable recipe.
-#
-# Soft-fail: sentry-cli errors warn and exit 0 so this never blocks merges.
-# The seat/PR lookup is best-effort too -- a lookup failure just omits the
-# --name tag, it never fails the build.
-
+# CI is only the trigger.  The reporter independently verifies production.
 on:
+  pull_request:
+    paths:
+      - .github/workflows/sentry-deploy.yml
+      - scripts/sentry-report-deploy*
+      - scripts/sentry-build-release.cjs
+      - next.config.*
+      - Dockerfile
   workflow_run:
-    workflows:
-      - CI
+    workflows: [CI]
     types: [completed]
 
 permissions:
   contents: read
   pull-requests: read
 
+# Serialize every reporter for this environment, including runs for newer SHAs.
 concurrency:
-  group: sentry-deploy-${{ github.event.workflow_run.head_sha }}
+  group: sentry-deploy-${{ github.event_name == 'workflow_run' && 'production' || github.ref }}
   cancel-in-progress: false
 
 jobs:
+  test-reporter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: node --test scripts/sentry-report-deploy.node-test.mjs
+
   record-production-deploy:
+    needs: test-reporter
     if: >
+      github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.event == 'push'
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.id == github.repository_id
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 50
     steps:
-      - name: Derive deploying seat and PR number
-        id: pr-info
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Test deployment evidence and reporting
+        run: node --test scripts/sentry-report-deploy.node-test.mjs
+      - name: Verify live revision and record Sentry deployment
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          set +e
-          PR_JSON="$(gh api "repos/${{ github.repository }}/commits/${SHA}/pulls" --jq '.[0] // empty' 2>/dev/null)"
-          if [ -z "$PR_JSON" ]; then
-            echo "::notice::No merged PR found for ${SHA} (e.g. a direct push to main); skipping seat/PR deploy tag"
-            {
-              echo "pr_number="
-              echo "seat="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          PR_NUMBER="$(echo "$PR_JSON" | jq -r '.number // empty')"
-          HEAD_REF="$(echo "$PR_JSON" | jq -r '.head.ref // empty')"
-          if [ -z "$PR_NUMBER" ]; then
-            echo "::notice::PR lookup for ${SHA} returned no PR number; skipping seat/PR deploy tag"
-            {
-              echo "pr_number="
-              echo "seat="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Fleet convention: branch prefixes are lowercase "<seat>/<slug>"
-          # (Slack/board tags are ALL CAPS, e.g. [CLAUDE] -- that casing is
-          # not used here, since this value comes straight off the branch).
-          SEAT="unknown"
-          case "$HEAD_REF" in
-            */*) SEAT="${HEAD_REF%%/*}" ;;
-          esac
-          echo "Deploying PR #${PR_NUMBER} from branch '${HEAD_REF}' (seat=${SEAT})"
-          {
-            echo "pr_number=${PR_NUMBER}"
-            echo "seat=${SEAT}"
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Attach Sentry production deploy
-        env:
+          GH_TOKEN: ${{ github.token }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: simple-with-us
-          SENTRY_PROJECT: usage-monitor
-          VERSION: ${{ github.event.workflow_run.head_sha }}
-          PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
-          SEAT: ${{ steps.pr-info.outputs.seat }}
-        run: |
-          set +e
-          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
-            echo "::warning::SENTRY_AUTH_TOKEN missing; skipping sentry deploy record"
-            exit 0
-          fi
-          if [ -z "${VERSION:-}" ]; then
-            echo "::warning::empty VERSION; skipping sentry deploy record"
-            exit 0
-          fi
-          DEPLOY_NAME_ARGS=()
-          if [ -n "${PR_NUMBER:-}" ]; then
-            DEPLOY_NAME_ARGS=(-n "seat:${SEAT} pr:#${PR_NUMBER}")
-          fi
-          echo "Recording production deploy for release=${VERSION} project=${SENTRY_PROJECT} ${DEPLOY_NAME_ARGS[*]:-(no seat/PR tag)}"
-          # Coolify may still be uploading the release via withSentryConfig; retry briefly.
-          ok=0
-          for i in 1 2 3 4 5; do
-            npx --yes @sentry/cli@2.58.6 releases deploys "$VERSION" new -e production "${DEPLOY_NAME_ARGS[@]}"
-            if [ $? -eq 0 ]; then
-              ok=1
-              break
-            fi
-            echo "attempt ${i} failed; sleeping 30s (Coolify release upload may still be in flight)"
-            sleep 30
-          done
-          if [ "$ok" -ne 1 ]; then
-            echo "::warning::sentry-cli releases deploys failed after retries; leaving workflow green"
-          fi
-          exit 0
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/sentry-report-deploy.mjs
