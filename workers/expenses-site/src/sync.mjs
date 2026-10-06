@@ -23,25 +23,32 @@ const BATCH_CHUNK_SIZE = 100;
 const KIND_PREFERENCE = ["one_time", "prepaid", "subscription", "usage"];
 
 /**
- * Fingerprint for "the same receipt": same vendor, amount, calendar day and
+ * Fingerprint for "the same receipt": same vendor, amount, full timestamp and
  * label (labels carry the invoice/receipt number).  Two upstream rows sharing
  * a fingerprint are one charge posted twice under different idempotency keys
  * (the Sep 2026 bulk run filed several receipts under both `one_time` and
- * `usage`).  Pure — unit tested.
+ * `usage`).  Fields are joined with NUL so adjacent values cannot bleed into
+ * each other.  Pure — unit tested.
  */
 export function expenseFingerprint(expense) {
-  const day = String(expense.occurredAt ?? "").slice(0, 10);
   return [
     String(expense.vendor ?? "").toLowerCase(),
     Number(expense.amountUsd).toFixed(2),
-    day,
+    String(expense.occurredAt ?? ""),
     String(expense.label ?? "").toLowerCase(),
   ].join("");
 }
 
-/** Collapse same-receipt double-posts to a single row.  Pure — unit tested. */
+/**
+ * Collapse same-receipt double-posts.  Returns { kept, dropped }: the sync
+ * upserts `kept` and deletes `dropped` keys from D1, so a loser row mirrored
+ * before this deploy stops rendering instead of lingering next to the winner.
+ * Deterministic winner: preferred kind first, then lowest idempotency key.
+ * Pure — unit tested.
+ */
 export function dedupeUpstreamRows(expenses) {
   const winners = new Map();
+  const dropped = [];
   const rank = (expense) => {
     const i = KIND_PREFERENCE.indexOf(expense.kind ?? "one_time");
     return i === -1 ? KIND_PREFERENCE.length : i;
@@ -49,16 +56,22 @@ export function dedupeUpstreamRows(expenses) {
   for (const expense of expenses) {
     const fp = expenseFingerprint(expense);
     const current = winners.get(fp);
-    if (
-      !current ||
+    if (!current) {
+      winners.set(fp, expense);
+      continue;
+    }
+    const expenseWins =
       rank(expense) < rank(current) ||
       (rank(expense) === rank(current) &&
-        String(expense.idempotencyKey) < String(current.idempotencyKey))
-    ) {
+        String(expense.idempotencyKey) < String(current.idempotencyKey));
+    if (expenseWins) {
+      dropped.push(current);
       winners.set(fp, expense);
+    } else {
+      dropped.push(expense);
     }
   }
-  return [...winners.values()];
+  return { kept: [...winners.values()], dropped };
 }
 
 /**
@@ -170,8 +183,17 @@ export async function syncExpenses(env) {
         return true;
       });
       const unique = dedupeUpstreamRows(visible);
-      dedupedCount += visible.length - unique.length;
-      const rows = unique.map(mapUpstreamExpense);
+      dedupedCount += unique.dropped.length;
+      // Remove the losers from D1 too: a double-post mirrored before this
+      // deploy would otherwise keep rendering next to the winner.
+      for (const loser of unique.dropped) {
+        await env.EXPENSES_DB.prepare(
+          "DELETE FROM expenses WHERE idempotency_key = ?"
+        )
+          .bind(loser.idempotencyKey)
+          .run();
+      }
+      const rows = unique.kept.map(mapUpstreamExpense);
       const statements = buildUpsertStatements(env.EXPENSES_DB, rows, syncedAt);
       for (let i = 0; i < statements.length; i += BATCH_CHUNK_SIZE) {
         await env.EXPENSES_DB.batch(statements.slice(i, i + BATCH_CHUNK_SIZE));
