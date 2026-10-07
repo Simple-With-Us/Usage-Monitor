@@ -134,14 +134,14 @@ function allowedChild(path: string, key: string): boolean {
   if (/^exception\.values\[\d+\]\.mechanism\.meta$/.test(path)) return ["errno", "signal", "mach_exception"].includes(key);
   if (path === "contexts") return Object.hasOwn(CONTEXT_FIELDS, key);
   if (path.startsWith("contexts.") && path.split(".").length === 2) return (CONTEXT_FIELDS[path.slice(9)] ?? []).includes(key);
-  if (path === "tags" || path === "attributes" || path.endsWith(".attributes") || path.endsWith(".data")) return OPERATIONAL_FIELDS.has(key) || ((path === "attributes" || path.endsWith(".attributes")) && SDK_ATTRIBUTES.has(key));
+  if (path === "tags" || /^spans\[\d+\]\.tags$/.test(path) || path === "attributes" || path.endsWith(".attributes") || path.endsWith(".data")) return OPERATIONAL_FIELDS.has(key) || ((path === "attributes" || path.endsWith(".attributes")) && SDK_ATTRIBUTES.has(key));
   if (/^breadcrumbs\[\d+\]$/.test(path)) return ["timestamp", "type", "category", "level", "message", "data"].includes(key);
   if (path === "request") return ["url", "method", "query_string"].includes(key);
   if (/^exception\.values\[\d+\]$/.test(path)) return ["type", "value", "module", "stacktrace", "mechanism", "thread_id"].includes(key);
   return path === "";
 }
 function isOperationalBag(path: string): boolean {
-  return path === "tags" || path === "attributes" || path.endsWith(".attributes") || path.endsWith(".data");
+  return path === "tags" || /^spans\[\d+\]\.tags$/.test(path) || path === "attributes" || path.endsWith(".attributes") || path.endsWith(".data");
 }
 const SAFE_ROUTES = new Set(["ingest/usage", "otlp/v1/metrics", "/api/ingest/usage", "/api/otlp/v1/metrics", "/api/health", "/api/ready", "/login"]);
 const SAFE_ERROR_CLASSES = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError", "AggregateError", "DOMException", "AbortError", "TimeoutError", "PrismaClientKnownRequestError", "PrismaClientUnknownRequestError", "PrismaClientInitializationError", "PrismaClientValidationError", "PrismaClientRustPanicError"]);
@@ -345,9 +345,9 @@ export function sentryPrivacyIntegration(): Integration {
             // work budget, but isolate unsafe rows and their ancestor sets.
             if (["span", "log", "trace_metric"].includes(item[0].type)) {
               const payload = item[1] as { items?: unknown[]; [key: string]: unknown };
-              if (!Array.isArray(payload.items) || payload.items.length > 1000) throw new Error("Invalid telemetry batch");
+              if (!Array.isArray(payload.items) || payload.items.length > 1000) { reportDrop(item[0].type, Array.isArray(payload.items) ? payload.items.length : 1); envelope[1].splice(i, 1); continue; }
               const items = payload.items;
-              if (payload.version !== undefined && payload.version !== 2) throw new Error("Unsupported telemetry version");
+              if (payload.version !== undefined && payload.version !== 2) { reportDrop(item[0].type, items.length); envelope[1].splice(i, 1); continue; }
               // Preserve protocol metadata and explicit no-inference controls;
               // unknown SDK/container metadata is not copied to the wire.
               const sanitizedMetadata = {

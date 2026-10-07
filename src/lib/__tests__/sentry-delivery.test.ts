@@ -213,6 +213,20 @@ describe("Fail-closed redaction", () => {
     expect(envelope[1][0][1]).toEqual({ version: 2, ingest_settings: { infer_ip: "never", infer_user_agent: "never" }, items: [{ timestamp: 1, level: "info", body: "[REDACTED]", attributes: { outcome: { type: "string", value: "ok" } } }] });
     expect(JSON.stringify(envelope)).not.toContain("denied");
   });
+  it("isolates invalid batch containers from valid sibling errors", () => {
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    const drops: unknown[] = [];
+    sentryPrivacyIntegration().setup!({ on: (_name: string, fn: typeof guard) => { guard = fn; }, recordDroppedEvent: (...args: unknown[]) => drops.push(args) } as never);
+    const envelope = [{}, [[{ type: "event" }, { exception: { values: [{ type: "TypeError", value: "denied" }] } }], [{ type: "log" }, { items: "invalid" }], [{ type: "span" }, { version: 99, items: [{}, {}] }], [{ type: "log" }, { items: Array(1001).fill({}) }]]] as unknown as Envelope;
+    guard(envelope);
+    expect(envelope[1]).toHaveLength(1); expect(envelope[1][0][0].type).toBe("event");
+    expect(JSON.stringify(envelope)).toContain("TypeError"); expect(JSON.stringify(envelope)).not.toContain("denied");
+    expect(drops).toEqual(expect.arrayContaining([["before_send", "span", 2], ["before_send", "log_item", 1], ["before_send", "log_item", 1001]]));
+  });
+  it("preserves only approved legacy nested span tags", () => {
+    const result = sentryBeforeSendTransaction({ type: "transaction", spans: [{ tags: { outcome: "ok", region: "us-east-1", customer_name: "denied", reason: "denied free text" } }] } as never, {});
+    expect((result?.spans?.[0] as unknown as { tags: unknown })?.tags).toEqual({ outcome: "ok", region: "us-east-1", reason: "[REDACTED]" });
+  });
   it("wires all runtimes and keeps Replay off", () => {
     for (const filename of ["src/instrumentation-client.ts", "src/sentry.server.config.ts", "src/sentry.edge.config.ts"]) {
       const source = readFileSync(filename, "utf8");
