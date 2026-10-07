@@ -1,3 +1,5 @@
+// Deliberate malformed-input fixtures and partial SDK mocks cross typed boundaries
+// via as never; real SDK transport tests separately validate supported wire shapes.
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
@@ -147,7 +149,7 @@ describe("Fail-closed redaction", () => {
       user: { email: "denied@example.test" }, request: { data: "denied-body", cookies: { session: "denied-cookie" }, headers: { custom: "denied-header" } } }, {});
     expect(result).not.toBeNull(); expect(result?.extra).toBeUndefined(); expect(JSON.stringify(result)).not.toContain("denied");
   });
-  it("bounds shared-reference DAGs including serialized output", () => {
+  it("rejects malformed DAG and sparse span containers before traversal", () => {
     let shared: Record<string, unknown> = { token: "denied-token" };
     for (let i = 0; i < 35; i++) shared = { x: shared, y: shared };
     const result = sentryBeforeSend({ type: undefined, message: "synthetic", spans: shared } as never, {});
@@ -156,6 +158,11 @@ describe("Fail-closed redaction", () => {
     expect(sentryBeforeSend({ type: undefined, spans: { repeatedText: Array(2000).fill("x".repeat(1000)) } } as never, {})).toBeNull();
     expect(sentryBeforeSend({ type: undefined, spans: { sparse: Array.from({ length: 100 }, () => new Array(1000)) } } as never, {})).toBeNull();
     expect(sentryBeforeSend({ type: undefined, spans: Object.fromEntries(Array.from({ length: 30_000 }, (_, i) => [String(i), i])) } as never, {})).toBeNull();
+  });
+  it("bounds traversal of valid-shaped oversized span arrays", () => {
+    const span = { trace_id: "a".repeat(32), span_id: "b".repeat(16), start_timestamp: 1, timestamp: 2, status: "ok", op: "http.client" };
+    expect(sentryBeforeSendTransaction({ type: "transaction", spans: Array(100).fill(span) }, {})).not.toBeNull();
+    expect(sentryBeforeSendTransaction({ type: "transaction", spans: Array(30_000).fill(span) }, {})).toBeNull();
   });
   it("removes all user-controlled URL path and query contents", () => {
     const result = sentryBeforeSend({ type: undefined, request: { url: "https://example.test/?keyword=one&author=two&monkey=three&tokenizer=four&%74oken=denied-token&apiKey=denied-key&session_token=denied-session&secretKey=denied-secret-key&key=denied-bare-key&signature=denied-signature" } }, {});

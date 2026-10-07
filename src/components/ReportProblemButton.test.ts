@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openFeedbackOrMailto } from "./ReportProblemButton";
+import { triggerSentryFeedback } from "./Nav";
 
 describe("subtle Sentry support trigger", () => {
   it("wires Report a Problem on the support page and error boundary", () => {
@@ -31,6 +32,15 @@ describe("subtle Sentry support trigger", () => {
 describe("openFeedbackOrMailto", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("routes the actual Nav report action to the existing user-initiated mailto", () => {
+    const loc = { href: "https://usage.jays.services/" };
+    const open = vi.fn(() => false);
+    vi.stubGlobal("window", { openSentryFeedback: open, location: loc });
+    triggerSentryFeedback();
+    expect(open).toHaveBeenCalledOnce();
+    expect(loc.href).toBe("mailto:mail@jays.services?subject=Report%20a%20Problem");
   });
 
   it("leaves the page alone when Sentry Feedback actually opens", () => {

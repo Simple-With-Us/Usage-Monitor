@@ -1,3 +1,5 @@
+// Negative runtime fixtures intentionally use as never to exercise values the SDK
+// TypeScript interfaces forbid but arbitrary JavaScript callers can supply.
 import { describe, expect, it } from "vitest";
 import { sentryBeforeSend, sentryBeforeSendTransaction, sentryBeforeSendLog, sentryBeforeSendMetric, sentryBeforeSendSpan } from "../sentry-scrubber";
 
