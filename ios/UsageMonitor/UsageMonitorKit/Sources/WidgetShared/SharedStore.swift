@@ -51,10 +51,11 @@ public struct SharedStore {
         let envelope = SnapshotEnvelope(schemaVersion: Self.schemaVersion, snapshot: snapshot)
         guard let data = try? encoder.encode(envelope) else { return }
 
-        guard let fileURL else {
-            defaults.set(data, forKey: Self.defaultsKey)
-            return
-        }
+        // Always sync to the shared UserDefaults suite so the widget extension
+        // has a persistent, process-safe fallback even if file container access fails.
+        defaults.set(data, forKey: Self.defaultsKey)
+
+        guard let fileURL else { return }
 
         do {
             try data.write(to: fileURL, options: writingOptions)
@@ -73,28 +74,28 @@ public struct SharedStore {
 
     private func readUnlocked() -> WidgetSnapshot? {
         cleanupLegacyData()
-        guard let fileURL else {
-            guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
-            return decodeAndCleanFallback(data)
-        }
 
-        guard isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL) else {
-            try? fileManager.removeItem(at: fileURL)
-            return nil
-        }
-
-        do {
-            let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-            let envelope = try decoder.decode(SnapshotEnvelope.self, from: data)
-            guard envelope.schemaVersion == Self.schemaVersion else {
+        if let fileURL, fileManager.fileExists(atPath: fileURL.path) {
+            if isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL) {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let envelope = try decoder.decode(SnapshotEnvelope.self, from: data)
+                    if envelope.schemaVersion == Self.schemaVersion {
+                        return envelope.snapshot
+                    } else {
+                        try? fileManager.removeItem(at: fileURL)
+                    }
+                } catch {
+                    try? fileManager.removeItem(at: fileURL)
+                }
+            } else {
                 try? fileManager.removeItem(at: fileURL)
-                return nil
             }
-            return envelope.snapshot
-        } catch {
-            try? fileManager.removeItem(at: fileURL)
-            return nil
         }
+
+        // Fallback to shared UserDefaults suite when file is missing, unreadable, or invalid
+        guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
+        return decodeAndCleanFallback(data)
     }
 
     /// Synchronous identity boundary used before a host/auth setter returns.

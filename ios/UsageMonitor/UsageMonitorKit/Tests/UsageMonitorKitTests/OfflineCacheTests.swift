@@ -275,22 +275,31 @@ final class OfflineCacheTests: XCTestCase {
         store.write(.placeholder)
         let fileURL = try XCTUnwrap(store.snapshotFileURL)
 
+        // Corrupt file falls back to defaults and cleans up corrupt file
+        try Data("not-json".utf8).write(to: fileURL)
+        XCTAssertEqual(store.read(), .placeholder)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+
+        // When defaults is also cleared, corrupt file read yields nil
+        defaults.removeObject(forKey: "widget-snapshot-v2")
         try Data("not-json".utf8).write(to: fileURL)
         XCTAssertNil(store.read())
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
 
+        // Oversized file falls back to defaults and removes file
         store.write(.placeholder)
         try Data(count: 2 * 1_024 * 1_024).write(to: fileURL)
-        XCTAssertNil(store.read())
+        XCTAssertEqual(store.read(), .placeholder)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
     func testWidgetStoreRejectsObsoleteSchema() throws {
         let dir = tempDirectory()
         defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-schema")
         let store = SharedStore(
             containerURL: dir,
-            defaults: isolatedDefaults("widget-schema")
+            defaults: defaults
         )
         store.write(.placeholder)
         let fileURL = try XCTUnwrap(store.snapshotFileURL)
@@ -300,8 +309,13 @@ final class OfflineCacheTests: XCTestCase {
         json["schemaVersion"] = 1
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
 
-        XCTAssertNil(store.read())
+        // Obsolete file schema falls back to defaults and deletes obsolete file
+        XCTAssertEqual(store.read(), .placeholder)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+
+        // When defaults is also cleared, returns nil
+        defaults.removeObject(forKey: "widget-snapshot-v2")
+        XCTAssertNil(store.read())
     }
 
     func testWidgetStoreUsesPrivatePermissionsAndNoBackup() throws {
@@ -592,6 +606,9 @@ final class OfflineCacheTests: XCTestCase {
         XCTAssertNil(missing.cpuUsagePct)
         XCTAssertEqual(missing.status, "offline")
         XCTAssertTrue(missing.flags.contains("Heartbeat stale — Mac looks offline."))
+
+        let sampleSection = WidgetSnapshotBuilder.macSection(from: .sample)
+        XCTAssertEqual(sampleSection.arch, "Apple M5")
     }
 }
 

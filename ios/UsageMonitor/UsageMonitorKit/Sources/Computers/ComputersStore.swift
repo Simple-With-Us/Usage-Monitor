@@ -49,6 +49,7 @@ final class ComputersStore {
             state = .loaded(health)
             lastError = nil
             WidgetSnapshotStore.updateMac(health)
+            WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
         } catch let error as APIError {
             handle(error)
         } catch {
