@@ -7,7 +7,7 @@ export const DEFAULT_FLEET_POLICY = {
   hardLimitMicros: 1_500_000,
 };
 const boundedInt = z.number().int().min(0).max(1_000_000_000);
-const priceSchema = z.object({
+export const pricingSchema = z.object({
   model: z.string().regex(/^[a-zA-Z0-9._/-]{1,100}$/),
   // USD micro-units per million tokens, including all reasoning output.
   inputMicrosPerMillion: boundedInt.positive(),
@@ -15,7 +15,10 @@ const priceSchema = z.object({
   outputMicrosPerMillion: boundedInt.positive(),
   maxInputTokens: z.number().int().min(1).max(1_000_000),
   maxOutputTokens: z.number().int().min(1).max(100_000),
-  source: z.string().url().max(500).refine((v) => new URL(v).protocol === "https:"),
+  source: z.string().url().max(500).refine((v) => {
+    try { const url = new URL(v); return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash; }
+    catch { return false; }
+  }),
   verifiedAt: z.string().datetime(),
   validUntil: z.string().datetime(),
 }).strict().refine((v) => Date.parse(v.validUntil) > Date.parse(v.verifiedAt)
@@ -24,10 +27,10 @@ const priceSchema = z.object({
 export const policySchema = z.object({
   softLimitMicros: boundedInt.positive().max(DEFAULT_FLEET_POLICY.softLimitMicros).default(DEFAULT_FLEET_POLICY.softLimitMicros),
   hardLimitMicros: boundedInt.positive().max(DEFAULT_FLEET_POLICY.hardLimitMicros).default(DEFAULT_FLEET_POLICY.hardLimitMicros),
-  deepseek: priceSchema,
-  minimax: priceSchema,
+  deepseek: pricingSchema,
+  minimax: pricingSchema,
 }).strict().refine((v) => v.softLimitMicros <= v.hardLimitMicros);
-export type Pricing = z.infer<typeof priceSchema>;
+export type Pricing = z.infer<typeof pricingSchema>;
 export type FleetPolicy = z.infer<typeof policySchema>;
 export type Provider = "deepseek" | "minimax";
 export const requestSchema = z.object({

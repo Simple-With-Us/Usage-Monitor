@@ -1,3 +1,4 @@
+import "server-only";
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -19,6 +20,7 @@ const commandSchema = z.discriminatedUnion("action", [
 ]);
 
 type Env = Record<string, string | undefined>;
+export type BudgetHttpLedger = Pick<FleetBudgetLedger, "reserve" | "dispatch" | "cancel" | "reconcile" | "status">;
 function clientIdentity(request: NextRequest, env: Env): string | null {
   const raw = env.FLEET_BUDGET_CLIENT_TOKENS;
   if (!raw || raw.length > 40_000) return null;
@@ -42,11 +44,13 @@ function failure(code: string, status: number) {
 }
 
 /** Injected dependencies keep the contract testable without credentials or a network. */
-export function budgetHandlers(ledger: FleetBudgetLedger, env: () => Env = () => process.env) {
+export function budgetHandlers(ledger: BudgetHttpLedger, env: () => Env = () => process.env) {
   function authenticate(request: NextRequest): string | NextResponse {
     if (env().FLEET_BUDGET_ENABLED !== "true") return failure("disabled", 503);
     const client = clientIdentity(request, env());
-    // Dedicated identities only: no dashboard session, legacy ingest token,
+    // These are trusted gateway/settlement identities, not ordinary ingest
+    // producers, users or model inputs.  They can intentionally fail closed
+    // for the fleet when reporting a real overrun.  Dedicated identities only: no dashboard session, legacy ingest token,
     // read token, request-supplied identity, or per-repository ledger key.
     return client ?? failure("unauthorized", 401);
   }

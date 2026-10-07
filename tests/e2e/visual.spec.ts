@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { BUDGET_VIEW } from '../../src/lib/fleet-budget/__tests__/view-fixture';
 import { test, expect, type Page, type Route } from '@playwright/test';
 
 // Committed determinism stylesheet (DejaVu font pinning).  Applied AFTER
@@ -34,6 +35,8 @@ const DETERMINISM_CSS = path.resolve(__dirname, 'visual-determinism.css');
 // Playwright config wires to the test server's DASHBOARD_PASSWORD.
 
 const FROZEN_NOW_ISO = '2026-09-27T20:00:00.000Z';
+
+const BUDGET_VISUAL = { ...BUDGET_VIEW, generatedAt: FROZEN_NOW_ISO, snapshot: { ...BUDGET_VIEW.snapshot, day: FROZEN_NOW_ISO.slice(0, 10) } };
 
 const stableShot = {
   animations: 'disabled',
@@ -120,6 +123,17 @@ async function stubApi(page: Page): Promise<void> {
       await json(route, []);
       return;
     }
+    if (req.url().includes('/api/fleet-budget-status')) {
+      await json(route, { ...BUDGET_VISUAL, snapshot: { ...BUDGET_VISUAL.snapshot,
+        day: FROZEN_NOW_ISO.slice(0, 10), configured: false,
+        settledPolicyMicros: '0', reservedPolicyMicros: '0', softLimitMicros: null, hardLimitMicros: null,
+        providerCosts: BUDGET_VISUAL.snapshot.providerCosts.map((row) => ({ ...row,
+          settledCalls: 0, outstandingCalls: 0, outstandingMaximumCostMicros: '0',
+          estimatedCalls: 0, knownEstimatedCostMicros: null, providerReportedCalls: 0, knownProviderReportedCostMicros: null,
+        })),
+      } });
+      return;
+    }
     if (req.url().includes('/api/budget-status')) {
       await json(route, { providers: [] });
       return;
@@ -204,6 +218,41 @@ test.describe('visual: providers page', () => {
     await page.waitForLoadState('networkidle');
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('providers.png', { ...stableShot, fullPage: true });
+  });
+});
+
+test.describe('fleet budget monitoring', () => {
+  test('blocked budget and unknown MiniMax costs stay honest on mobile', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await settle(page);
+    await page.route('**/api/fleet-budget-status', (route) => json(route, {
+      ...BUDGET_VISUAL, enabled: true, admissionEnabled: false,
+      snapshot: { ...BUDGET_VISUAL.snapshot, blocked: true },
+    }));
+    await login(page);
+    await page.goto('/money');
+    await pinFonts(page);
+    await expect(page.getByText('DeepSeek Blocked', { exact: true })).toBeVisible();
+    const card = page.getByRole('region', { name: 'Fleet Daily Budget' });
+    await expect(card.getByText('Unknown', { exact: true })).toHaveCount(2);
+    await expect(card).toHaveScreenshot('fleet-budget-mobile.png', stableShot);
+  });
+  test('refresh failure clears figures and Retry Budget restores them', async ({ page }) => {
+    await settle(page);
+    let calls = 0;
+    await page.route('**/api/fleet-budget-status', (route) => ++calls === 2
+      ? json(route, { error: 'synthetic unavailable' }, 503) : json(route, BUDGET_VISUAL));
+    await login(page);
+    await page.goto('/money');
+    await pinFonts(page);
+    const card = page.getByRole('region', { name: 'Fleet Daily Budget' });
+    await expect(card.getByText('$1.50', { exact: true })).toBeVisible();
+    await card.getByRole('button', { name: 'Refresh Budget' }).click();
+    await expect(card.getByRole('alert')).toBeVisible();
+    await expect(card.getByText('$1.50', { exact: true })).toHaveCount(0);
+    await card.getByRole('button', { name: 'Retry Budget' }).click();
+    await expect(card.getByText('$1.50', { exact: true })).toBeVisible();
+    await expect(card).toHaveScreenshot('fleet-budget-desktop.png', stableShot);
   });
 });
 

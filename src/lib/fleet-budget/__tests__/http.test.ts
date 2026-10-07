@@ -1,13 +1,29 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { budgetHandlers } from "../http";
-import { FleetBudgetError, type FleetBudgetLedger } from "../ledger";
+import { budgetHandlers, type BudgetHttpLedger } from "../http";
+import { FleetBudgetError } from "../ledger";
 import { POLICY } from "./fixture";
+
+vi.mock("server-only", () => ({}));
 
 const TOKEN = "synthetic-test-only-budget-client-value";
 let env: Record<string, string | undefined>;
-const methods = { reserve: vi.fn(), dispatch: vi.fn(), cancel: vi.fn(), reconcile: vi.fn(), status: vi.fn() };
-const handlers = budgetHandlers(methods as unknown as FleetBudgetLedger, () => env);
+const methods = {
+  reserve: vi.fn<BudgetHttpLedger["reserve"]>(), dispatch: vi.fn<BudgetHttpLedger["dispatch"]>(),
+  cancel: vi.fn<BudgetHttpLedger["cancel"]>(), reconcile: vi.fn<BudgetHttpLedger["reconcile"]>(), status: vi.fn<BudgetHttpLedger["status"]>(),
+} satisfies BudgetHttpLedger;
+const handlers = budgetHandlers(methods, () => env);
+const RESERVED: Awaited<ReturnType<BudgetHttpLedger["reserve"]>> = {
+  reservationId: "synthetic-id", requestId: "one", day: "2026-10-06", provider: "deepseek", model: "synthetic",
+  reason: "below_soft_limit", status: "reserved", maximumCostMicros: "1000", reservedPolicyMicros: "1000",
+  estimatedCostMicros: null, providerReportedCostMicros: null, costBasis: "server_priced_producer_usage",
+  providerReportedCostVerified: false, dispatchBefore: "2026-10-06T20:01:00Z",
+};
+const STATUS: Awaited<ReturnType<BudgetHttpLedger["status"]>> = {
+  day: "2026-10-06", timeZone: "America/Chicago", configured: false, settledPolicyMicros: "0", reservedPolicyMicros: "0",
+  estimatedDeepSeekMicros: "0", estimatedMiniMaxMicros: "0", softLimitMicros: null, hardLimitMicros: null,
+  blocked: false, globalBlockedAt: null, estimatesAreCash: false, providerCosts: [],
+};
 function request(body: unknown, token = TOKEN) {
   return new NextRequest("http://localhost/api/ingest/fleet-budget", {
     method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body),
@@ -20,11 +36,11 @@ beforeEach(() => {
     FLEET_BUDGET_POLICY_JSON: JSON.stringify(POLICY),
     FLEET_BUDGET_CLIENT_TOKENS: JSON.stringify([{ id: "repo-a", token: TOKEN }]),
   };
-  methods.reserve.mockResolvedValue({ status: "reserved", provider: "deepseek" });
-  methods.dispatch.mockResolvedValue({ status: "dispatched", dispatchAllowed: true });
-  methods.cancel.mockResolvedValue({ status: "cancelled" });
-  methods.reconcile.mockResolvedValue({ status: "settled" });
-  methods.status.mockResolvedValue({ settledPolicyMicros: "0" });
+  methods.reserve.mockResolvedValue(RESERVED);
+  methods.dispatch.mockResolvedValue({ ...RESERVED, status: "dispatched", dispatchAllowed: true });
+  methods.cancel.mockResolvedValue({ ...RESERVED, status: "cancelled" });
+  methods.reconcile.mockResolvedValue({ ...RESERVED, status: "settled" });
+  methods.status.mockResolvedValue(STATUS);
 });
 
 describe("default-disabled dedicated fleet budget API", () => {
@@ -93,6 +109,6 @@ describe("default-disabled dedicated fleet budget API", () => {
     const response = await handlers.GET(request(reserve));
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-api-version")).toBe("1");
-    expect(await response.json()).toEqual({ ok: true, settledPolicyMicros: "0" });
+    expect(await response.json()).toEqual({ ok: true, ...STATUS });
   });
 });

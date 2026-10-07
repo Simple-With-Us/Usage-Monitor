@@ -1,7 +1,7 @@
 import type { PrismaClient, Prisma, FleetBudgetReservation } from "@prisma/client";
 import {
-  dayKey, nextDayStart, digest, policySchema, priceFresh, requestSchema, upperBound, usageCost, usageSchema,
-  type FleetPolicy, type Pricing, type Provider, type ReservationInput, type Usage,
+  dayKey, nextDayStart, digest, policySchema, pricingSchema, priceFresh, requestSchema, upperBound, usageCost, usageSchema,
+  type FleetPolicy, type Provider, type ReservationInput, type Usage,
 } from "./policy";
 
 export class FleetBudgetError extends Error {
@@ -43,7 +43,11 @@ export class FleetBudgetLedger {
   constructor(private readonly db: PrismaClient) {}
 
   private async write<T>(day: string, policy: FleetPolicy | null, work: (tx: Tx) => Promise<T>): Promise<T> {
+    const started = performance.now();
     for (let attempt = 0; ; attempt++) {
+      const remaining = Math.floor(15_000 - (performance.now() - started));
+      if (remaining <= 0) throw new FleetBudgetError("ledger_unavailable");
+      const maxWait = Math.min(1_000, Math.max(1, Math.floor(remaining / 3)));
       try {
         return await this.db.$transaction(async (tx) => {
           // The FIRST statement acquires SQLite's database write lock.  Never
@@ -61,9 +65,10 @@ export class FleetBudgetLedger {
             if (locked !== 1) throw new FleetBudgetError("not_found");
           }
           return work(tx);
-        }, { maxWait: 5_000, timeout: 10_000 });
+        }, { maxWait, timeout: Math.min(4_000, Math.max(1, remaining - maxWait)) });
       } catch (error) {
-        if (!isBusy(error) || attempt >= 19) throw error;
+        if (!isBusy(error)) throw error;
+        if (attempt >= 19 || performance.now() - started >= 15_000) throw new FleetBudgetError("ledger_unavailable");
         await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 5));
       }
     }
@@ -181,7 +186,18 @@ export class FleetBudgetLedger {
       if (usage === null) {
         return reservationView(await tx.fleetBudgetReservation.update({ where: { id: row.id }, data: { status: "uncertain" } }));
       }
-      const price = JSON.parse(row.pricingJson) as Pricing;
+      let decoded: unknown;
+      try { decoded = JSON.parse(row.pricingJson); } catch { throw new FleetBudgetError("ledger_unavailable"); }
+      const savedPrice = pricingSchema.safeParse(decoded);
+      if (!savedPrice.success) throw new FleetBudgetError("ledger_unavailable");
+      const price = savedPrice.data;
+      if ((row.provider !== "deepseek" && row.provider !== "minimax") || price.model !== row.model
+        || row.maxInputTokens < 1 || row.maxOutputTokens < 1
+        || row.maxInputTokens > price.maxInputTokens || row.maxOutputTokens > price.maxOutputTokens
+        || upperBound(price, { requestId: row.requestId, maxInputTokens: row.maxInputTokens, maxOutputTokens: row.maxOutputTokens, route: "primary" }) !== row.maximumCostMicros
+        || row.reservedPolicyMicros !== (row.provider === "deepseek" ? row.maximumCostMicros : ZERO)) {
+        throw new FleetBudgetError("ledger_unavailable");
+      }
       const estimate = usageCost(price, usage);
       // Policy accounting is conservative if a trusted provider reports a
       // larger amount.  Preserve both figures with their provenance intact.

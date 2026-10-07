@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import prismaModule from "@prisma/client";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FleetBudgetLedger } from "../ledger";
 import { input, NOW, POLICY } from "./fixture";
 
@@ -21,8 +21,8 @@ beforeAll(async () => {
   clients = Array.from({ length: 19 }, () => new PrismaClient({ datasources: { db: { url } } }));
   // WAL matches the production SQLite setup; short busy waits let independent
   // engines yield instead of blocking the test process for five seconds each.
-  await clients[0].$queryRawUnsafe("PRAGMA journal_mode=WAL");
-  await Promise.all(clients.map((client) => client.$queryRawUnsafe("PRAGMA busy_timeout=50")));
+  await clients[0].$queryRaw`PRAGMA journal_mode=WAL`;
+  await Promise.all(clients.map((client) => client.$queryRaw`PRAGMA busy_timeout=50`));
   ledger = new FleetBudgetLedger(clients[0]);
 });
 beforeEach(async () => {
@@ -197,10 +197,27 @@ describe("durable fleet budget admission", () => {
     expect((await ledger.status(NOW)).reservedPolicyMicros).toBe("400000");
     await expect(ledger.dispatch("a", "late-commit", NOW)).rejects.toMatchObject({ code: "not_dispatchable" });
   });
+  it("bounds contention retries with one monotonic total deadline", async () => {
+    const transaction = vi.spyOn(clients[0], "$transaction").mockRejectedValue({ code: "P1008", message: "synthetic timeout" });
+    const clock = vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValueOnce(8_000).mockReturnValue(16_000);
+    try {
+      await expect(ledger.reserve("a", input("busy"), POLICY, NOW)).rejects.toMatchObject({ code: "ledger_unavailable" });
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(transaction.mock.calls[0][1]).toEqual({ maxWait: 1_000, timeout: 4_000 });
+    } finally { clock.mockRestore(); transaction.mockRestore(); }
+  });
+  it("rejects corrupted stored pricing without releasing liability", async () => {
+    const row = await ledger.reserve("a", input("bad-price"), POLICY, NOW);
+    await ledger.dispatch("a", "bad-price", NOW);
+    await clients[0].fleetBudgetReservation.update({ where: { id: row.reservationId }, data: { pricingJson: "{}" } });
+    await expect(ledger.reconcile("a", "bad-price", usage, NOW)).rejects.toMatchObject({ code: "ledger_unavailable" });
+    expect((await ledger.status(NOW)).reservedPolicyMicros).toBe("200000");
+    expect((await clients[0].fleetBudgetReservation.findUniqueOrThrow({ where: { id: row.reservationId } })).status).toBe("dispatched");
+  });
   it("rolls back all counters when the durable reservation insert fails", async () => {
-    await clients[0].$executeRawUnsafe('CREATE TRIGGER reject_budget_test BEFORE INSERT ON "FleetBudgetReservation" BEGIN SELECT RAISE(ABORT, \'synthetic failure\'); END');
+    await clients[0].$executeRaw`CREATE TRIGGER reject_budget_test BEFORE INSERT ON "FleetBudgetReservation" BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`;
     try { await expect(ledger.reserve("a", input("one"), POLICY, NOW)).rejects.toThrow(); }
-    finally { await clients[0].$executeRawUnsafe('DROP TRIGGER reject_budget_test'); }
+    finally { await clients[0].$executeRaw`DROP TRIGGER reject_budget_test`; }
     expect((await ledger.status(NOW)).reservedPolicyMicros).toBe("0");
     expect(await clients[0].fleetBudgetReservation.count()).toBe(0);
   });
