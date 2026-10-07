@@ -1,5 +1,6 @@
 /** Shared final redaction for browser, server and edge Sentry payloads.
  * Unreadable payloads fail closed rather than returning unsanitized input. */
+import { sentryCronMonitorConfig, SENTRY_CRON_MONITOR_SLUG } from "./sentry-ops";
 import { envelopeItemTypeToDataCategory } from "@sentry/core";
 import type { ErrorEvent, EventHint, Log, Metric, TransactionEvent, StreamedSpanJSON, Integration } from "@sentry/core";
 
@@ -95,11 +96,12 @@ function projectAuxiliary(input: unknown, type: string): unknown {
     return { timestamp: typeof row.timestamp === "number" && Number.isFinite(row.timestamp) ? row.timestamp : 0, discarded_events };
   }
   if (type === "check_in") {
-    if (row.monitor_slug !== "usage-monitor-scheduler" || !["in_progress", "ok", "error"].includes(String(row.status)) || typeof row.check_in_id !== "string" || !/^[a-f0-9-]{32,36}$/i.test(row.check_in_id)) throw new Error("Invalid check-in");
+    if (row.monitor_slug !== SENTRY_CRON_MONITOR_SLUG || !["in_progress", "ok", "error"].includes(String(row.status)) || typeof row.check_in_id !== "string" || !/^[a-f0-9-]{32,36}$/i.test(row.check_in_id)) throw new Error("Invalid check-in");
+    const { schedule, checkinMargin, maxRuntime, timezone } = sentryCronMonitorConfig();
     return { check_in_id: row.check_in_id, monitor_slug: row.monitor_slug, status: row.status,
       ...(typeof row.duration === "number" && Number.isFinite(row.duration) ? { duration: row.duration } : {}),
       ...(row.environment === "production" || row.environment === "development" ? { environment: row.environment } : {}),
-      monitor_config: { schedule: { type: "interval", value: 15, unit: "minute" }, checkin_margin: 5, max_runtime: 10, timezone: "UTC" } };
+      monitor_config: { schedule, checkin_margin: checkinMargin, max_runtime: maxRuntime, timezone } };
   }
   throw new Error("Unsupported telemetry envelope type");
 }
