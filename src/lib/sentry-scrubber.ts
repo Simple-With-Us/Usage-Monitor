@@ -79,6 +79,30 @@ function projectWireRow<T>(input: T, type: string): T {
   }
   return result as T;
 }
+function projectAuxiliary(input: unknown, type: string): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid operational payload");
+  const row = input as Record<string, unknown>;
+  if (type === "client_report") {
+    if (!Array.isArray(row.discarded_events) || row.discarded_events.length > 1000) throw new Error("Invalid client report");
+    const discarded_events = row.discarded_events.map(entry => {
+      if (!entry || typeof entry !== "object") throw new Error("Invalid discard row");
+      const { reason, category, quantity } = entry;
+      if (!["before_send", "event_processor", "sample_rate", "network_error", "queue_overflow", "ratelimit_backoff", "internal_sdk_error", "send_error", "callback_error", "buffer_overflow", "ignored", "invalid", "no_parent_span"].includes(reason) ||
+          !["error", "transaction", "span", "log_item", "log_byte", "metric", "monitor", "session", "attachment", "profile", "replay", "security", "internal", "feedback", "default", "unknown"].includes(category) ||
+          typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 0) throw new Error("Invalid discard count");
+      return { reason, category, quantity };
+    });
+    return { timestamp: typeof row.timestamp === "number" && Number.isFinite(row.timestamp) ? row.timestamp : 0, discarded_events };
+  }
+  if (type === "check_in") {
+    if (row.monitor_slug !== "usage-monitor-scheduler" || !["in_progress", "ok", "error"].includes(String(row.status)) || typeof row.check_in_id !== "string" || !/^[a-f0-9-]{32,36}$/i.test(row.check_in_id)) throw new Error("Invalid check-in");
+    return { check_in_id: row.check_in_id, monitor_slug: row.monitor_slug, status: row.status,
+      ...(typeof row.duration === "number" && Number.isFinite(row.duration) ? { duration: row.duration } : {}),
+      ...(row.environment === "production" || row.environment === "development" ? { environment: row.environment } : {}),
+      monitor_config: { schedule: { type: "interval", value: 15, unit: "minute" }, checkin_margin: 5, max_runtime: 10, timezone: "UTC" } };
+  }
+  throw new Error("Unsupported telemetry envelope type");
+}
 function projectEvent<T>(event: T): T {
   const result = projectFields(event, EVENT_FIELDS) as Record<string, unknown>;
   if (!result || typeof result !== "object") return result as T;
@@ -159,7 +183,7 @@ function safeBagValue(key: string, value: unknown): unknown {
     else if (key === "region" && /^(?:us|eu|ap|sa|ca|me|af)-(?:east|west|north|south|central|northeast|southeast)-?\d$/.test(raw)) clean = raw;
     else if (key === "url" || key === "url.full") {
       clean = "[REDACTED]"; // Hosts and paths can identify end-user resources too.
-    } else if (SDK_ATTRIBUTES.has(key) && key !== "sentry.segment.name" && /^[A-Za-z0-9_.@:/-]{1,160}$/.test(raw)) clean = scrubString(raw);
+    } else if (SDK_ATTRIBUTES.has(key) && key !== "sentry.segment.name" && key !== "http.route" && /^[A-Za-z0-9_.@:/-]{1,160}$/.test(raw)) clean = scrubString(raw);
   } else if (key === "sentry.sdk.integrations" && Array.isArray(raw) && raw.length <= 200 && raw.every(v => typeof v === "string" && /^[A-Za-z0-9_]{1,80}$/.test(v))) clean = raw;
   return typed ? { type: typeof clean === "number" ? (Number.isInteger(clean) ? "integer" : "double") : typeof clean === "boolean" ? "boolean" : Array.isArray(clean) ? "array" : "string", value: clean } : clean;
 }
@@ -334,13 +358,16 @@ export function sentryPrivacyIntegration(): Integration {
           const state: ScrubState = { ancestors: new WeakSet(), budget: { remaining: 250_000, characters: 6_000_000 } };
           if (envelope[1].length > 1000) throw new Error("Invalid envelope item count");
           envelope[0] = scrubObject(envelope[0], "envelope", state);
+          // Process errors first within the shared finite envelope budget.
+          envelope[1].sort((a, b) => Number(a[0].type === "event") - Number(b[0].type === "event"));
           for (let i = envelope[1].length - 1; i >= 0; i--) {
             const item = envelope[1][i]!;
-            if (["attachment", "replay_event", "replay_recording"].includes(item[0].type) ||
+            if (!["event", "transaction", "span", "log", "trace_metric", "check_in", "client_report"].includes(item[0].type) ||
                 !item[1] || typeof item[1] !== "object" || item[1] instanceof Uint8Array) {
               reportDrop(item[0].type);
               envelope[1].splice(i, 1); continue;
             }
+            try {
             // v11 batches independent telemetry rows.  Share one envelope-wide
             // work budget, but isolate unsafe rows and their ancestor sets.
             if (["span", "log", "trace_metric"].includes(item[0].type)) {
@@ -362,8 +389,9 @@ export function sentryPrivacyIntegration(): Integration {
               if (sanitized.length === 0) { envelope[1].splice(i, 1); continue; }
               item[1] = { ...sanitizedMetadata, items: sanitized } as typeof item[1];
               if ("item_count" in item[0]) item[0].item_count = sanitized.length;
-            } else item[1] = scrubObject(item[0].type === "event" || item[0].type === "transaction" ? projectEvent(item[1]) : item[1], "", state);
+            } else item[1] = scrubObject(item[0].type === "event" || item[0].type === "transaction" ? projectEvent(item[1]) : projectAuxiliary(item[1], item[0].type), "", { ancestors: new WeakSet(), budget: state.budget }) as typeof item[1];
             delete item[0].length;
+            } catch { reportDrop(item[0].type); envelope[1].splice(i, 1); }
           }
         } catch {
           for (const [header, payload] of envelope[1]) {

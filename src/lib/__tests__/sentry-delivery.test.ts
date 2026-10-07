@@ -99,6 +99,7 @@ describe("Real SDK sanitized envelopes", () => {
     client.captureEvent({ message: "x".repeat(1_100_000) });
     await client.flush(2000);
     await client.sendEnvelope([{}, [[{ type: "log", item_count: 2 }, { items: [{ body: "synthetic safe row", attributes: {} }, { get body(): never { throw Error("denied-payload"); } }] }]]] as unknown as Envelope);
+    client.recordDroppedEvent("ignored", "error", 1);
     client.flushReports();
     await client.flush(2000);
     const outcomes: unknown[] = [];
@@ -108,6 +109,7 @@ describe("Real SDK sanitized envelopes", () => {
     expect(outcomes).toEqual(expect.arrayContaining([
       { reason: "before_send", category: "error", quantity: 1 },
       { reason: "before_send", category: "log_item", quantity: 1 },
+      { reason: "ignored", category: "error", quantity: 1 },
     ]));
     expect(JSON.stringify(envelopes)).not.toContain("denied-payload");
     expect(JSON.stringify(envelopes)).not.toContain("synthetic oversized diagnostic");
@@ -226,6 +228,24 @@ describe("Fail-closed redaction", () => {
   it("preserves only approved legacy nested span tags", () => {
     const result = sentryBeforeSendTransaction({ type: "transaction", spans: [{ tags: { outcome: "ok", region: "us-east-1", customer_name: "denied", reason: "denied free text" } }] } as never, {});
     expect((result?.spans?.[0] as unknown as { tags: unknown })?.tags).toEqual({ outcome: "ok", region: "us-east-1", reason: "[REDACTED]" });
+  });
+  it("drops feedback/unknown envelopes and permits only fixed operational check-ins", () => {
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    sentryPrivacyIntegration().setup!({ on: (_: string, fn: typeof guard) => { guard = fn; } } as never);
+    const e = [{}, [[{ type: "user_report" }, { comments: "denied prose" }], [{ type: "future_custom" }, { payload: "denied" }], [{ type: "check_in" }, { check_in_id: "a".repeat(32), monitor_slug: "usage-monitor-scheduler", status: "ok", environment: "production", private: "denied" }]]] as unknown as Envelope;
+    guard(e); expect(e[1]).toHaveLength(1); expect(e[1][0][0].type).toBe("check_in"); expect(JSON.stringify(e)).not.toContain("denied");
+  });
+  it("preserves error siblings when a telemetry batch exhausts the shared budget", () => {
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    sentryPrivacyIntegration().setup!({ on: (_: string, fn: typeof guard) => { guard = fn; } } as never);
+    for (const reverse of [false, true]) {
+      const items = [[{ type: "event" }, { exception: { values: [{ type: "TypeError", value: "denied" }] } }], [{ type: "log" }, { items: Array(1000).fill({ body: "x".repeat(100_000), attributes: {} }) }]];
+      const e = [{}, reverse ? items.reverse() : items] as unknown as Envelope;
+      guard(e); expect(e[1].some(i => i[0].type === "event")).toBe(true); expect(JSON.stringify(e)).toContain("TypeError"); expect(JSON.stringify(e).length).toBeLessThan(6_100_000);
+    }
+  });
+  it("does not allow private http routes through SDK attribute fallback", () => {
+    expect(sentryBeforeSendLog({ message: "ingest.failed", attributes: { "http.route": "/customers/denied", route: "/customers/denied" } } as never)?.attributes).toEqual({ "http.route": "[REDACTED]", route: "[REDACTED]" });
   });
   it("wires all runtimes and keeps Replay off", () => {
     for (const filename of ["src/instrumentation-client.ts", "src/sentry.server.config.ts", "src/sentry.edge.config.ts"]) {
