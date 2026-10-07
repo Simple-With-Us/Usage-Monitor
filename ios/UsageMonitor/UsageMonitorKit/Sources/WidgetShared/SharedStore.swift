@@ -76,29 +76,24 @@ public struct SharedStore {
         cleanupLegacyData()
 
         if let fileURL, fileManager.fileExists(atPath: fileURL.path) {
-            guard isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL) else {
-                try? fileManager.removeItem(at: fileURL)
-                defaults.removeObject(forKey: Self.defaultsKey)
-                return nil
-            }
-
-            do {
-                let data = try Data(contentsOf: fileURL)
-                let envelope = try decoder.decode(SnapshotEnvelope.self, from: data)
-                guard envelope.schemaVersion == Self.schemaVersion else {
+            if isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL) {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let envelope = try decoder.decode(SnapshotEnvelope.self, from: data)
+                    if envelope.schemaVersion == Self.schemaVersion {
+                        return envelope.snapshot
+                    } else {
+                        try? fileManager.removeItem(at: fileURL)
+                    }
+                } catch {
                     try? fileManager.removeItem(at: fileURL)
-                    defaults.removeObject(forKey: Self.defaultsKey)
-                    return nil
                 }
-                return envelope.snapshot
-            } catch {
+            } else {
                 try? fileManager.removeItem(at: fileURL)
-                defaults.removeObject(forKey: Self.defaultsKey)
-                return nil
             }
         }
 
-        // Fallback to shared UserDefaults suite when file is missing or unconfigured
+        // Fallback to shared UserDefaults suite when file is missing, unreadable, or invalid
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
         return decodeAndCleanFallback(data)
     }

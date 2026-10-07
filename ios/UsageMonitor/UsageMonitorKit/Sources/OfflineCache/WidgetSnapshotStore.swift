@@ -61,30 +61,52 @@ public enum WidgetSnapshotStore {
         reloadWidgetsIfNeeded()
     }
 
+    private static var inFlightRefreshTask: Task<Void, Never>?
+    private static let refreshLock = NSLock()
+
     /// Best-effort pre-fetch of LLM, Server, and Mac data so all home-screen widgets
     /// load real stats even if the user hasn't manually opened every tab.
     public static func refreshSecondarySections(using client: APIClient) async {
-        async let llmTask: Void = {
-            if let burn = try? await client.llmBurn() {
-                updateLlm(burn)
-            }
-        }()
-        async let serverTask: Void = {
-            if let health = try? await client.health() {
-                let readiness = try? await client.readiness()
-                updateServerService(health: health, readiness: readiness)
-            }
-            if let metrics = try? await client.serverMetrics() {
-                updateServerHost(metrics)
-            }
-        }()
-        async let macTask: Void = {
-            if let mac = try? await client.macHealth() {
-                updateMac(mac)
-            }
-        }()
-        _ = await (llmTask, serverTask, macTask)
-        reloadWidgetsIfNeeded(force: true)
+        refreshLock.lock()
+        if let existing = inFlightRefreshTask {
+            refreshLock.unlock()
+            await existing.value
+            return
+        }
+
+        let task = Task {
+            async let llmTask: Void = {
+                if let burn = try? await client.llmBurn() {
+                    updateLlm(burn)
+                }
+            }()
+            async let serverTask: Void = {
+                if let health = try? await client.health() {
+                    let readiness = try? await client.readiness()
+                    updateServerService(health: health, readiness: readiness)
+                }
+                if let metrics = try? await client.serverMetrics() {
+                    updateServerHost(metrics)
+                }
+            }()
+            async let macTask: Void = {
+                if let mac = try? await client.macHealth() {
+                    updateMac(mac)
+                }
+            }()
+            _ = await (llmTask, serverTask, macTask)
+            reloadWidgetsIfNeeded(force: true)
+        }
+        inFlightRefreshTask = task
+        refreshLock.unlock()
+
+        await task.value
+
+        refreshLock.lock()
+        if inFlightRefreshTask == task {
+            inFlightRefreshTask = nil
+        }
+        refreshLock.unlock()
     }
 
     public static func reloadWidgetsIfNeeded(force: Bool = false, now: Date = Date()) {
