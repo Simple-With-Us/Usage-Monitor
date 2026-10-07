@@ -129,6 +129,32 @@ describe("Real SDK sanitized envelopes", () => {
     expectTypedAttributes(envelopes);
     await client!.close();
   });
+  it("never transports the SDK-serialized fallback marker and preserves safe siblings", async () => {
+    const envelopes: Envelope[] = [];
+    let rejectedId = "";
+    const client = initBrowser({ dsn: DSN, defaultIntegrations: [], integrations: [sentryPrivacyIntegration()], tracesSampleRate: 1,
+      beforeSend: sentryBeforeSend,
+      beforeSendSpan: span => {
+        if (span.name === "force-fallback") {
+          rejectedId = span.span_id;
+          return sentryBeforeSendSpan({ ...span, get attributes(): never { throw Error("denied"); } });
+        }
+        return sentryBeforeSendSpan(span);
+      }, transport: () => transport(envelopes) });
+    if (!client) throw Error("Expected browser client");
+    const drops = vi.spyOn(client, "recordDroppedEvent");
+    startSpan({ name: "force-fallback" }, () => {});
+    startSpan({ name: "safe sibling" }, () => {});
+    client.captureEvent({ exception: { values: [{ type: "TypeError", value: "denied" }] } });
+    await client.flush(2000);
+    const output = JSON.stringify(envelopes);
+    expect(output).not.toContain(rejectedId);
+    expect(output).not.toContain("usage_monitor.redaction_failed");
+    expect(output).not.toContain("denied");
+    expect(output).toContain('"type":"span"'); expect(output).toContain("TypeError");
+    expect(drops.mock.calls.filter(call => call[0] === "before_send" && call[1] === "span")).toEqual([["before_send", "span", 1]]);
+    await client.close();
+  });
   it("redacts scope attributes added after log and metric hooks", async () => {
     const envelopes: Envelope[] = [];
     const client = initBrowser({ dsn: DSN, defaultIntegrations: [], integrations: [sentryPrivacyIntegration()], dataCollection: { userInfo: false },
@@ -176,7 +202,16 @@ describe("Fail-closed redaction", () => {
     expect(sentryBeforeSend(bad, {})).toBeNull(); expect(sentryBeforeSendTransaction(bad as never, {})).toBeNull();
     expect(sentryBeforeSendLog(bad as never)).toBeNull(); expect(sentryBeforeSendMetric(bad as never)).toBeNull();
     const span = sentryBeforeSendSpan({ trace_id: "a".repeat(32), span_id: "b".repeat(16), name: "denied-name", get attributes(): never { throw Error("unreadable"); }, start_timestamp: 1, status: "ok", is_segment: true });
-    expect(span.trace_id).toBe("a".repeat(32)); expect(span.attributes).toEqual({}); expect(JSON.stringify(span)).not.toContain("denied");
+    expect(span.trace_id).toBe("a".repeat(32)); expect(span.attributes).toEqual({ "usage_monitor.redaction_failed": true }); expect(JSON.stringify(span)).not.toContain("denied");
+  });
+  it("drops marked fallback spans instead of inventing application errors", () => {
+    const fallback = sentryBeforeSendSpan({ trace_id: "a".repeat(32), span_id: "b".repeat(16), name: "denied", start_timestamp: 1, status: "ok", is_segment: false, get attributes(): never { throw Error("denied"); } });
+    expect(fallback.status).toBe("ok");
+    let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };
+    const drops: unknown[] = [];
+    sentryPrivacyIntegration().setup!({ on: (_: string, fn: typeof guard) => { guard = fn; }, recordDroppedEvent: (...args: unknown[]) => drops.push(args) } as never);
+    const e = [{}, [[{ type: "span" }, { items: [{ ...fallback, attributes: { "usage_monitor.redaction_failed": { type: "boolean", value: true } } }] }]]] as unknown as Envelope;
+    guard(e); expect(e[1]).toEqual([]); expect(drops).toEqual([["before_send", "span", 1]]);
   });
   it("drops opaque payloads and unreadable envelopes at the final boundary", () => {
     let guard: (envelope: Envelope) => void = () => { throw Error("not installed"); };

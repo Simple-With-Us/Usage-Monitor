@@ -4,6 +4,7 @@ import { sentryCronMonitorConfig, SENTRY_CRON_MONITOR_SLUG } from "./sentry-ops"
 import { envelopeItemTypeToDataCategory } from "@sentry/core";
 import type { ErrorEvent, EventHint, Log, Metric, TransactionEvent, StreamedSpanJSON, Integration } from "@sentry/core";
 
+const REDACTION_FAILED = "usage_monitor.redaction_failed";
 const SENSITIVE_KEY_SUBSTRINGS = ["token", "secret", "key", "password", "passwd", "auth", "credential", "prompt", "email", "customer", "database_url", "databaseurl"];
 const SDK_INTERNAL_CYCLIC_PATHS = new Set([
   "sdkProcessingMetadata.capturedSpanScope",
@@ -335,9 +336,11 @@ export function sentryBeforeSendSpan(span: StreamedSpanJSON): StreamedSpanJSON {
       } catch { /* No arbitrary getters in fallback. */ }
       return "0".repeat(length);
     };
+    let status: "ok" | "error" = "ok";
+    try { if (Object.getOwnPropertyDescriptor(span, "status")?.value === "error") status = "error"; } catch { /* Drop marker makes the status non-observable. */ }
     return { trace_id: safeId("trace_id", 32), span_id: safeId("span_id", 16),
       name: "[REDACTED]", start_timestamp: 0, end_timestamp: 0,
-      status: "error", is_segment: false, attributes: {} };
+      status, is_segment: false, attributes: { [REDACTION_FAILED]: true } };
   }
 }
 
@@ -386,7 +389,15 @@ export function sentryPrivacyIntegration(): Integration {
               const sanitized: unknown[] = [];
               for (const row of items) {
                 if (!row || typeof row !== "object" || Array.isArray(row)) { reportDrop(item[0].type); continue; }
-                try { sanitized.push(scrubObject(projectWireRow(row, item[0].type), "", { serialized: true, ancestors: new WeakSet(), budget: state.budget })); } catch { reportDrop(item[0].type); }
+                try {
+                  // beforeSendSpan cannot drop in v11: its safe fallback is
+                  // marked, then discarded here without inventing an error.
+                  if (item[0].type === "span") {
+                    const attrs = (row as { attributes?: Record<string, unknown> }).attributes;
+                    const marker = attrs?.[REDACTION_FAILED];
+                    if (marker === true || marker && typeof marker === "object" && "value" in marker && marker.value === true) { reportDrop(item[0].type); continue; }
+                  }
+                  sanitized.push(scrubObject(projectWireRow(row, item[0].type), "", { serialized: true, ancestors: new WeakSet(), budget: state.budget })); } catch { reportDrop(item[0].type); }
               }
               if (sanitized.length === 0) { envelope[1].splice(i, 1); continue; }
               item[1] = { ...sanitizedMetadata, items: sanitized } as typeof item[1];
