@@ -65,7 +65,11 @@ if (dsn) {
     beforeSendSpan: sentryBeforeSendSpan,
     replaysSessionSampleRate: 0,
     replaysOnErrorSampleRate: 0,
-    integrations: [sentryPrivacyIntegration()],
+    // Session summaries are intentionally excluded; avoid collecting them.
+    integrations: defaults => [
+      ...defaults.filter(integration => integration.name !== "BrowserSession"),
+      sentryPrivacyIntegration(),
+    ],
   });
 }
 

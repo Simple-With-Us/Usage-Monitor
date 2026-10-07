@@ -44,10 +44,8 @@ if (dsn) {
       databaseQueryData: false,
       graphQL: { document: false, variables: false },
     },
-    profileSessionSampleRate: parseTracesSampleRate(
-      process.env.SENTRY_PROFILE_SESSION_SAMPLE_RATE ?? "1"
-    ),
-    profileLifecycle: "trace",
+    // Profiles are outside the permitted final-envelope policy.
+    profileSessionSampleRate: 0,
     // Audit 2026-09-20: any object key whose name contains a sensitive
     // substring (token/secret/key/password/passwd/auth) is replaced with
     // "[REDACTED]" before the event is sent. Defensive guard against

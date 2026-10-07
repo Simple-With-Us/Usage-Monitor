@@ -28,7 +28,8 @@ describe("Sentry configured-origin CSP", () => {
   it("adds only its origin, without DSN key or project", () => {
     vi.stubEnv("NEXT_PUBLIC_SENTRY_DSN", DSN);
     expect(sentryConnectSrcOrigins()).toEqual(["https://o123.ingest.us.sentry.io"]);
-    const csp = middleware(new NextRequest("https://example.test/login")).headers.get("Content-Security-Policy")!;
+    const csp = middleware(new NextRequest("https://example.test/login")).headers.get("Content-Security-Policy");
+    if (!csp) throw new Error("Expected Content-Security-Policy header");
     expect(csp).toContain("connect-src 'self' https://o123.ingest.us.sentry.io");
     expect(csp).not.toContain("0123456789abcdef");
     expect(csp).not.toContain("/456");
@@ -255,6 +256,7 @@ describe("Fail-closed redaction", () => {
     expect(sentryBeforeSendLog({ message: "ingest.failed", attributes: { "http.route": "/customers/denied", route: "/customers/denied" } } as never)?.attributes).toEqual({ "http.route": "[REDACTED]", route: "[REDACTED]" });
   });
   it("wires all runtimes and keeps Replay off", () => {
+    expect(readFileSync("src/sentry.server.config.ts", "utf8")).toContain("profileSessionSampleRate: 0");
     for (const filename of ["src/instrumentation-client.ts", "src/sentry.server.config.ts", "src/sentry.edge.config.ts"]) {
       const source = readFileSync(filename, "utf8");
       for (const name of ["beforeSend", "beforeSendTransaction", "beforeSendLog", "beforeSendMetric", "beforeSendSpan"]) expect(source).toContain(`${name}:`);

@@ -35,7 +35,7 @@ describe("openFeedbackOrMailto", () => {
   });
 
   it("routes the actual Nav report action to the existing user-initiated mailto", () => {
-    const loc = { href: "https://usage.jays.services/" };
+    const loc = { href: "https://dashboard.example.test/" };
     const open = vi.fn(() => false);
     vi.stubGlobal("window", { openSentryFeedback: open, location: loc });
     triggerSentryFeedback();
@@ -45,16 +45,16 @@ describe("openFeedbackOrMailto", () => {
 
   it("leaves the page alone when Sentry Feedback actually opens", () => {
     const open = vi.fn(() => true);
-    const loc = { href: "https://usage.jays.services/support" };
+    const loc = { href: "https://dashboard.example.test/support" };
     vi.stubGlobal("window", { openSentryFeedback: open, location: loc });
     openFeedbackOrMailto();
     expect(open).toHaveBeenCalledOnce();
-    expect(loc.href).toBe("https://usage.jays.services/support");
+    expect(loc.href).toBe("https://dashboard.example.test/support");
   });
 
   it("falls back to mailto when the helper reports Feedback is dark", () => {
     const open = vi.fn(() => false);
-    const loc = { href: "https://usage.jays.services/support" };
+    const loc = { href: "https://dashboard.example.test/support" };
     vi.stubGlobal("window", { openSentryFeedback: open, location: loc });
     openFeedbackOrMailto();
     expect(open).toHaveBeenCalledOnce();
@@ -64,7 +64,7 @@ describe("openFeedbackOrMailto", () => {
   });
 
   it("falls back to mailto when the helper is missing", () => {
-    const loc = { href: "https://usage.jays.services/support" };
+    const loc = { href: "https://dashboard.example.test/support" };
     vi.stubGlobal("window", { location: loc });
     openFeedbackOrMailto();
     expect(loc.href).toBe(
