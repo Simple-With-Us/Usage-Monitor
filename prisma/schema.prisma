@@ -775,3 +775,57 @@ model AppSetting {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// Fleet policy accounting is separate from monthly cash/usage analytics.
+// Integer micro-USD values avoid floating-point admission races.  No provider
+// credential, source text, prompt, or response body belongs in these tables.
+model FleetBudgetDay {
+  id                    String @id
+  policyDigest          String
+  softLimitMicros        BigInt
+  hardLimitMicros        BigInt
+  settledPolicyMicros   BigInt @default(0)
+  reservedPolicyMicros  BigInt @default(0)
+  estimatedDeepSeekMicros BigInt @default(0)
+  estimatedMiniMaxMicros BigInt @default(0)
+  blocked               Boolean @default(false)
+  revision              Int @default(0)
+  reservations          FleetBudgetReservation[]
+}
+
+model FleetBudgetReservation {
+  id                    String @id
+  clientId              String
+  requestId             String
+  requestDigest         String
+  dayId                 String
+  day                   FleetBudgetDay @relation(fields: [dayId], references: [id], onDelete: Restrict)
+  provider              String
+  model                 String
+  routingReason         String
+  pricingJson           String
+  maxInputTokens        Int
+  maxOutputTokens       Int
+  reservedPolicyMicros  BigInt
+  maximumCostMicros     BigInt
+  estimatedCostMicros   BigInt?
+  providerReportedCostMicros BigInt?
+  status                String @default("reserved")
+  settlementDigest      String?
+  createdAt             DateTime
+  dispatchBefore        DateTime
+  dispatchedAt          DateTime?
+  settledAt             DateTime?
+
+  @@unique([clientId, requestId])
+  @@index([dayId, status])
+}
+
+// A broken DeepSeek cost bound is not healed by a new calendar day.  This
+// durable latch has no API reset; rearming requires operator investigation.
+model FleetBudgetGuard {
+  id        String @id
+  blocked   Boolean @default(false)
+  blockedAt DateTime?
+  revision  Int @default(0)
+}
