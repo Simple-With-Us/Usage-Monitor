@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { budgetViewSchema, formatBudgetMicros, type FleetBudgetView } from "@/lib/fleet-budget/view";
 
-const SENTENCE_GAP = "\u00a0 ";
+const SENTENCE_GAP = "  ";
 
 export default function FleetBudgetCard() {
   const [data, setData] = useState<FleetBudgetView | null>(null);
@@ -46,7 +46,7 @@ export default function FleetBudgetCard() {
   const snapshot = data?.snapshot;
   const state = snapshot?.blocked ? "DeepSeek Blocked" : !data?.enabled ? "Not Activated" : !data.admissionEnabled ? "Admission Paused" : "Admission Enabled";
   return (
-    <section aria-labelledby="fleet-budget-heading" aria-busy={loading} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
+    <section aria-labelledby="fleet-budget-heading" aria-busy={loading} className="whitespace-pre-wrap rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="fleet-budget-heading" className="text-lg font-semibold text-gray-900 dark:text-gray-100">Fleet Daily Budget</h2>
         <button type="button" disabled={loading} onClick={() => void reload()} className="min-h-11 rounded-lg border border-gray-300 px-3 text-sm font-medium disabled:opacity-50 dark:border-gray-600">

@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { dayKey, nextDayStart, policySchema, upperBound, usageCost } from "../policy";
+import { dayKey, nextDayStart, policySchema, requestSchema, upperBound, usageCost } from "../policy";
 import { input, POLICY } from "./fixture";
 
 describe("fleet policy units and Chicago days", () => {
+  it("admits a full binary-million context bound without raising dollar ceilings", () => {
+    for (const maxInputTokens of [1_000_000, 1_048_576]) {
+      expect(requestSchema.safeParse(input("context", { maxInputTokens })).success).toBe(true);
+      expect(policySchema.safeParse({ ...POLICY, deepseek: { ...POLICY.deepseek, maxInputTokens } }).success).toBe(true);
+    }
+    expect(requestSchema.safeParse(input("too-large", { maxInputTokens: 1_048_577 })).success).toBe(false);
+    expect(policySchema.safeParse({ ...POLICY, deepseek: { ...POLICY.deepseek, maxInputTokens: 1_048_577 } }).success).toBe(false);
+  });
   it("uses Chicago midnight across standard time and daylight time", () => {
     expect(dayKey(new Date("2026-01-02T05:59:59Z"))).toBe("2026-01-01");
     expect(dayKey(new Date("2026-01-02T06:00:00Z"))).toBe("2026-01-02");

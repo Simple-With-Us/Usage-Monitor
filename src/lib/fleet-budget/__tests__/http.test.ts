@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { budgetHandlers, type BudgetHttpLedger } from "../http";
 import { FleetBudgetError } from "../ledger";
 import { POLICY } from "./fixture";
+import { createRateLimiter } from "@/lib/rate-limit";
 
 vi.mock("server-only", () => ({}));
 
@@ -12,7 +13,8 @@ const methods = {
   reserve: vi.fn<BudgetHttpLedger["reserve"]>(), dispatch: vi.fn<BudgetHttpLedger["dispatch"]>(),
   cancel: vi.fn<BudgetHttpLedger["cancel"]>(), reconcile: vi.fn<BudgetHttpLedger["reconcile"]>(), status: vi.fn<BudgetHttpLedger["status"]>(),
 } satisfies BudgetHttpLedger;
-const handlers = budgetHandlers(methods, () => env);
+const limits = { unauthenticated: createRateLimiter(1_000, 10), identity: createRateLimiter(1_000, 10) };
+const handlers = budgetHandlers(methods, () => env, limits);
 const RESERVED: Awaited<ReturnType<BudgetHttpLedger["reserve"]>> = {
   reservationId: "synthetic-id", requestId: "one", day: "2026-10-06", provider: "deepseek", model: "synthetic",
   reason: "below_soft_limit", status: "reserved", maximumCostMicros: "1000", reservedPolicyMicros: "1000",
@@ -32,6 +34,9 @@ function request(body: unknown, token = TOKEN) {
 const reserve = { action: "reserve", requestId: "one", maxInputTokens: 100, maxOutputTokens: 10 };
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-06T20:00:00Z"));
+  limits.unauthenticated.reset(); limits.identity.reset();
   env = { FLEET_BUDGET_ENABLED: "true", FLEET_BUDGET_ADMISSION_ENABLED: "true",
     FLEET_BUDGET_POLICY_JSON: JSON.stringify(POLICY),
     FLEET_BUDGET_CLIENT_TOKENS: JSON.stringify([{ id: "repo-a", token: TOKEN }]),
@@ -42,8 +47,35 @@ beforeEach(() => {
   methods.reconcile.mockResolvedValue({ ...RESERVED, status: "settled" });
   methods.status.mockResolvedValue(STATUS);
 });
+afterEach(() => vi.useRealTimers());
 
 describe("default-disabled dedicated fleet budget API", () => {
+  it("bounds bad-token authentication work before reading credentials or bodies", async () => {
+    for (let i = 0; i < 10; i++) expect((await handlers.POST(request(reserve, `invalid-${i}`))).status).toBe(401);
+    let credentialReads = 0;
+    Object.defineProperty(env, "FLEET_BUDGET_CLIENT_TOKENS", { get: () => { credentialReads++; return "invalid"; } });
+    const response = await handlers.POST(request(reserve));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toEqual({ ok: false, error: { code: "rate_limited" }, dispatchAllowed: false });
+    expect(credentialReads).toBe(0);
+    expect(methods.reserve).not.toHaveBeenCalled();
+  });
+  it("shares identity limits across methods without sharing authenticated clients' buckets", async () => {
+    const secondToken = `${TOKEN}-second`;
+    env.FLEET_BUDGET_CLIENT_TOKENS = JSON.stringify([{ id: "repo-a", token: TOKEN }, { id: "repo-b", token: secondToken }]);
+    for (let i = 0; i < 10; i++) expect((await handlers.GET(request(reserve))).status).toBe(200);
+    for (const action of ["reserve", "dispatch", "cancel", "reconcile"]) {
+      expect((await handlers.POST(request({ ...reserve, action }))).status).toBe(429);
+    }
+    expect(methods.reserve).not.toHaveBeenCalled();
+    expect(methods.dispatch).not.toHaveBeenCalled();
+    expect(methods.cancel).not.toHaveBeenCalled();
+    expect(methods.reconcile).not.toHaveBeenCalled();
+    expect((await handlers.GET(request(reserve, secondToken))).status).toBe(200);
+    vi.setSystemTime(new Date("2026-10-06T20:00:01Z"));
+    expect((await handlers.POST(request({ action: "reconcile", requestId: "one", usage: null }))).status).toBe(200);
+  });
   it("is default off and performs no ledger operations", async () => {
     env = {};
     const response = await handlers.POST(request(reserve));

@@ -6,6 +6,7 @@ import prismaModule from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FleetBudgetLedger } from "../ledger";
 import { input, NOW, POLICY } from "./fixture";
+import { budgetViewSchema } from "../view";
 
 const { PrismaClient } = prismaModule;
 let dir: string;
@@ -37,6 +38,12 @@ afterAll(async () => {
 const usage = { inputTokens: 50_000, cachedInputTokens: 10_000, outputTokens: 10_000 };
 
 describe("durable fleet budget admission", () => {
+  it("keeps real empty and populated status snapshots within the strict UI contract", async () => {
+    const view = async () => ({ ok: true, generatedAt: NOW.toISOString(), enabled: false, admissionEnabled: false, snapshot: await ledger.status(NOW) });
+    expect(budgetViewSchema.safeParse(await view()).success).toBe(true);
+    await ledger.reserve("client", input("status-contract"), POLICY, NOW);
+    expect(budgetViewSchema.safeParse(await view()).success).toBe(true);
+  });
   it("shares liability across 19 concurrent callers and independent database clients", async () => {
     // Fill the soft allowance, then contend for the shared fallback headroom.
     const policy = POLICY;

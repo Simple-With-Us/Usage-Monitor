@@ -7,13 +7,18 @@ export const DEFAULT_FLEET_POLICY = {
   hardLimitMicros: 1_500_000,
 };
 const boundedInt = z.number().int().min(0).max(1_000_000_000);
+// Permits a conservative full-context reservation without rounding "1M" down.
+// DeepSeek Flash's documented input+output context is 1,048,576 tokens:
+// https://api-docs.deepseek.com/api/list-models/ (verified 2026-10-07).
+// This is a schema ceiling, not active provider configuration or pricing.
+const maxReservationInputTokens = 1_048_576;
 export const pricingSchema = z.object({
   model: z.string().regex(/^[a-zA-Z0-9._/-]{1,100}$/),
   // USD micro-units per million tokens, including all reasoning output.
   inputMicrosPerMillion: boundedInt.positive(),
   cachedInputMicrosPerMillion: boundedInt,
   outputMicrosPerMillion: boundedInt.positive(),
-  maxInputTokens: z.number().int().min(1).max(1_000_000),
+  maxInputTokens: z.number().int().min(1).max(maxReservationInputTokens),
   maxOutputTokens: z.number().int().min(1).max(100_000),
   source: z.string().url().max(500).refine((v) => {
     try { const url = new URL(v); return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash; }
@@ -35,7 +40,7 @@ export type FleetPolicy = z.infer<typeof policySchema>;
 export type Provider = "deepseek" | "minimax";
 export const requestSchema = z.object({
   requestId: z.string().regex(/^[a-zA-Z0-9._:-]{1,160}$/),
-  maxInputTokens: z.number().int().min(1).max(1_000_000),
+  maxInputTokens: z.number().int().min(1).max(maxReservationInputTokens),
   maxOutputTokens: z.number().int().min(1).max(100_000),
   route: z.enum(["primary", "fallback"]).default("primary"),
 }).strict();

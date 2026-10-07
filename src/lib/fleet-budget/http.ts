@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { readBoundedJsonBody, RequestBodyTooLargeError } from "@/lib/bounded-request-body";
+import { getLoginBackstopKey, getNamedRateLimiter, type RateLimiter } from "@/lib/rate-limit";
 import { FleetBudgetError, type FleetBudgetLedger } from "./ledger";
 import { policySchema, requestSchema, usageSchema } from "./policy";
 
@@ -21,6 +22,11 @@ const commandSchema = z.discriminatedUnion("action", [
 
 type Env = Record<string, string | undefined>;
 export type BudgetHttpLedger = Pick<FleetBudgetLedger, "reserve" | "dispatch" | "cancel" | "reconcile" | "status">;
+type BudgetRateLimits = { unauthenticated: RateLimiter; identity: RateLimiter };
+const defaultRateLimits: BudgetRateLimits = {
+  unauthenticated: getNamedRateLimiter("fleet-budget-unauthenticated", 1_000, 10),
+  identity: getNamedRateLimiter("fleet-budget-identity", 1_000, 10),
+};
 function clientIdentity(request: NextRequest, env: Env): string | null {
   const raw = env.FLEET_BUDGET_CLIENT_TOKENS;
   if (!raw || raw.length > 40_000) return null;
@@ -44,15 +50,30 @@ function failure(code: string, status: number) {
 }
 
 /** Injected dependencies keep the contract testable without credentials or a network. */
-export function budgetHandlers(ledger: BudgetHttpLedger, env: () => Env = () => process.env) {
+export function budgetHandlers(ledger: BudgetHttpLedger, env: () => Env = () => process.env, limits: BudgetRateLimits = defaultRateLimits) {
+  function rateLimited() {
+    const response = failure("rate_limited", 429);
+    response.headers.set("retry-after", "1");
+    return response;
+  }
   function authenticate(request: NextRequest): string | NextResponse {
     if (env().FLEET_BUDGET_ENABLED !== "true") return failure("disabled", 503);
+    // Bound invalid-token work before parsing the credential map.  Successful
+    // requests use stable server-owned identity, not shared proxy egress or a
+    // caller-supplied key.  This is process-local load shedding, not the cap.
+    const source = getLoginBackstopKey(request);
+    if (!limits.unauthenticated.isAllowed(source)) return rateLimited();
     const client = clientIdentity(request, env());
+    if (!client) {
+      limits.unauthenticated.recordAttempt(source);
+      return failure("unauthorized", 401);
+    }
+    if (!limits.identity.check(`fleet-client:${client}`)) return rateLimited();
     // These are trusted gateway/settlement identities, not ordinary ingest
     // producers, users or model inputs.  They can intentionally fail closed
     // for the fleet when reporting a real overrun.  Dedicated identities only: no dashboard session, legacy ingest token,
     // read token, request-supplied identity, or per-repository ledger key.
-    return client ?? failure("unauthorized", 401);
+    return client;
   }
   return {
     async GET(request: NextRequest) {

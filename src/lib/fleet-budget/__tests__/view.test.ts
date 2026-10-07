@@ -17,4 +17,10 @@ describe("budget display contract", () => {
     expect(budgetViewSchema.safeParse({ ...BUDGET_VIEW, snapshot: { ...snapshot, providerCosts: [snapshot.providerCosts[0], snapshot.providerCosts[0]] } }).success).toBe(false);
     expect(budgetViewSchema.safeParse({ ...BUDGET_VIEW, snapshot: { ...snapshot, reservedPolicyMicros: "-1" } }).success).toBe(false);
   });
+  it("rejects unexpected fields at every response boundary", () => {
+    const snapshot = BUDGET_VIEW.snapshot;
+    expect(budgetViewSchema.safeParse({ ...BUDGET_VIEW, extra: true }).success).toBe(false);
+    expect(budgetViewSchema.safeParse({ ...BUDGET_VIEW, snapshot: { ...snapshot, extra: true } }).success).toBe(false);
+    expect(budgetViewSchema.safeParse({ ...BUDGET_VIEW, snapshot: { ...snapshot, providerCosts: [{ ...snapshot.providerCosts[0], extra: true }, snapshot.providerCosts[1]] } }).success).toBe(false);
+  });
 });

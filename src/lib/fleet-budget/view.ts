@@ -8,7 +8,7 @@ const providerCost = z.object({
   estimatedCalls: count, knownEstimatedCostMicros: micros.nullable(),
   providerReportedCalls: count, knownProviderReportedCostMicros: micros.nullable(),
   providerReportedCostVerified: z.literal(false),
-}).refine((row) => row.policyWeight === (row.provider === "deepseek" ? 1 : 0)
+}).strict().refine((row) => row.policyWeight === (row.provider === "deepseek" ? 1 : 0)
   && row.estimatedCalls <= row.settledCalls && row.providerReportedCalls <= row.settledCalls
   && (row.estimatedCalls === 0) === (row.knownEstimatedCostMicros === null)
   && (row.providerReportedCalls === 0) === (row.knownProviderReportedCostMicros === null));
@@ -17,11 +17,12 @@ export const budgetViewSchema = z.object({
   snapshot: z.object({
     day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), timeZone: z.literal("America/Chicago"),
     configured: z.boolean(), settledPolicyMicros: micros, reservedPolicyMicros: micros,
+    estimatedDeepSeekMicros: micros, estimatedMiniMaxMicros: micros,
     softLimitMicros: micros.nullable(), hardLimitMicros: micros.nullable(),
-    blocked: z.boolean(), estimatesAreCash: z.literal(false),
+    blocked: z.boolean(), globalBlockedAt: z.string().datetime().nullable(), estimatesAreCash: z.literal(false),
     providerCosts: z.array(providerCost).length(2).refine((rows) => new Set(rows.map((r) => r.provider)).size === 2),
-  }),
-});
+  }).strict(),
+}).strict();
 export type FleetBudgetView = z.infer<typeof budgetViewSchema>;
 
 export function formatBudgetMicros(value: string | null): string {

@@ -235,7 +235,9 @@ test.describe('fleet budget monitoring', () => {
     await expect(page.getByText('DeepSeek Blocked', { exact: true })).toBeVisible();
     const card = page.getByRole('region', { name: 'Fleet Daily Budget' });
     await expect(card.getByText('Unknown', { exact: true })).toHaveCount(2);
-    await expect(card).toHaveScreenshot('fleet-budget-mobile.png', stableShot);
+    // Capture the page from its normal position: an oversized element-only
+    // screenshot scrolls the card title beneath the app's sticky mobile header.
+    await expect(page).toHaveScreenshot('fleet-budget-mobile.png', { ...stableShot, fullPage: true });
   });
   test('refresh failure clears figures and Retry Budget restores them', async ({ page }) => {
     await settle(page);
