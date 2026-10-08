@@ -98,7 +98,7 @@
     "jsdom": "^30.1.1",
     "postcss": "^8.5.18",
     "prisma": "^6.0.0",
-    "tailwindcss": "^3.4.19",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
     "wrangler": "4.147.0"
