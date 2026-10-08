@@ -42,7 +42,7 @@ services:
       - internal
 
   caddy:
-    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     pull_policy: never
     environment:
       # Interpolated from the compose project env (the synced tmpfs env file in
