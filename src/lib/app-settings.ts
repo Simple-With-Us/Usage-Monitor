@@ -40,19 +40,40 @@
 //                   knob keys resolve through this service, everything else
 //                   passes through to process.env unchanged.
 //
-// Edge-safety: this module has no import-time side effects and no node:
-// imports, so importing it from edge-runtime code (middleware) is safe.
-// init() is only ever called from instrumentation.ts on the nodejs runtime.
+// NOT server-only (deliberately — see Kody finding evaluated below): this
+// module's read methods (get/getBool/has/...) are value-imported by
+// src/lib/provider-manifest.ts, which is reachable from the "use client"
+// FleetQuotaMatrixCard (via quota-windows.ts -> AgentsDashboard.tsx). A
+// top-level `import "server-only"` here — or anywhere in its import graph,
+// including behind a *dynamic* `import()` — fails the production build with
+// "'server-only' cannot be imported from a Client Component module", because
+// Next's Turbopack RSC boundary check walks dynamic imports too (confirmed
+// against this exact file via `npm run build`; a dynamic-import split, the
+// pattern instrumentation.ts uses for the edge-runtime bundle, does NOT dodge
+// this specific check the way it dodges the edge/nodejs runtime split).
+// init() — the only call site that reads the actual Infisical client secret,
+// via resolveCredentials() below — is invoked exclusively from
+// instrumentation.ts (Node server startup), never from client-reachable code.
+// That is the real security boundary; the sentinel package cannot be layered
+// on top of it without breaking the build. See INFISICAL.md.
 
 import {
   createInfisicalSettings,
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
 
-/** Infisical project for this app (jays-services org).  See INFISICAL.md. */
-export const APP_INFISICAL_PROJECT_ID = "86e35e51-91bc-4dfd-a045-4484726b9c40";
-
 const DEFAULT_REFRESH_MS = 300_000; // 5 minutes, per the canonical pattern.
+
+/** Infisical `usage-monitor` project id — from env only (see INFISICAL.md). */
+export function resolveInfisicalProjectId(
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  const id =
+    env.INFISICAL_UM_PROJECT_ID?.trim() ||
+    env.INFISICAL_PROJECT_ID?.trim() ||
+    env.INFISICAL_APP_PROJECT_ID?.trim();
+  return id || undefined;
+}
 
 export type AppSettingType = "string" | "int" | "float" | "bool";
 
@@ -381,6 +402,7 @@ export class AppSettingsService {
     const envCreds = resolveCredentials();
     const clientId = options.clientId ?? envCreds.clientId;
     const clientSecret = options.clientSecret ?? envCreds.clientSecret;
+    const projectId = resolveInfisicalProjectId();
     if (!clientId || !clientSecret) {
       console.warn(
         "[app-settings] No Infisical universal-auth credentials " +
@@ -390,13 +412,21 @@ export class AppSettingsService {
       );
       return;
     }
+    if (!projectId) {
+      console.warn(
+        "[app-settings] No Infisical project id " +
+          "(INFISICAL_UM_PROJECT_ID, INFISICAL_PROJECT_ID, or INFISICAL_APP_PROJECT_ID); " +
+          "running in env-fallback mode. See INFISICAL.md and the private operations inventory."
+      );
+      return;
+    }
     const environment = options.environment ?? resolveInfisicalEnvironment();
     const refreshIntervalMs =
       options.refreshIntervalMs ??
       this.readRefreshIntervalMsFromEnv() ??
       DEFAULT_REFRESH_MS;
     const client = createInfisicalSettings({
-      projectId: APP_INFISICAL_PROJECT_ID,
+      projectId,
       environment,
       refreshIntervalMs,
       infisicalUrl: options.infisicalUrl,
@@ -414,8 +444,8 @@ export class AppSettingsService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(
-        `[app-settings] Infisical load failed for project ${APP_INFISICAL_PROJECT_ID} ` +
-          `environment "${environment}": ${message}. Continuing in env-fallback mode; ` +
+        `[app-settings] Infisical load failed for usage-monitor project ` +
+          `(environment "${environment}"): ${message}. Continuing in env-fallback mode; ` +
           `the deploy-time env sync already carries Infisical values. See INFISICAL.md.`
       );
       try {
@@ -428,7 +458,7 @@ export class AppSettingsService {
     this.client = client;
     this.infisicalMode = true;
     console.info(
-      `[app-settings] Loaded settings from Infisical (project ${APP_INFISICAL_PROJECT_ID}, ` +
+      `[app-settings] Loaded settings from Infisical (usage-monitor project, ` +
         `environment "${environment}", refresh every ${refreshIntervalMs} ms).`
     );
   }
@@ -443,10 +473,17 @@ export class AppSettingsService {
     return this.infisicalMode;
   }
 
-  /** Raw string read.  Memory-only in Infisical mode; process.env in env mode. */
+  /**
+   * Raw string read.  Infisical cache first when in Infisical mode, then
+   * process.env (a knob that exists only in the deploy-time env — the
+   * env-sync path INFISICAL.md documents, or a key never created in the
+   * Infisical project — must not read as undefined while getWithSource and
+   * the settingsEnv() proxy both see it).  Never hits the network.
+   */
   get(key: string): string | undefined {
     if (this.infisicalMode && this.client) {
-      return this.client.get(key);
+      const cached = this.client.get(key);
+      if (cached != null && cached !== "") return cached;
     }
     const raw = process.env[key];
     return raw == null || raw === "" ? undefined : raw;
@@ -457,15 +494,17 @@ export class AppSettingsService {
     return this.get(key) !== undefined;
   }
 
-  /** Snapshot of all knob values. Memory-only in Infisical mode. */
+  /**
+   * Snapshot of the declared non-secret knob values.  The Infisical load
+   * caches EVERY secret for the project, so this must iterate APP_SETTING_KEYS
+   * and read only those — returning the raw client cache here would expose
+   * credentials to any caller of this method.
+   */
   getAll(): Record<string, string> {
-    if (this.infisicalMode && this.client) {
-      return this.client.getAll();
-    }
     const out: Record<string, string> = {};
     for (const key of APP_SETTING_KEYS) {
-      const value = process.env[key];
-      if (value != null && value !== "") out[key] = value;
+      const value = this.get(key);
+      if (value !== undefined) out[key] = value;
     }
     return out;
   }
@@ -492,7 +531,10 @@ export class AppSettingsService {
   getWithSource(key: string): { value: string | undefined; source: SettingsSource } {
     if (this.infisicalMode && this.client) {
       const value = this.client.get(key);
-      if (value !== undefined) return { value, source: "infisical" };
+      // Same empty-string rule as get(): an empty Infisical value is treated
+      // as absent so the env fallback applies, and the admin surface must
+      // report the value that is actually in effect.
+      if (value != null && value !== "") return { value, source: "infisical" };
     }
     const raw = process.env[key];
     if (raw != null && raw !== "") return { value: raw, source: "env" };

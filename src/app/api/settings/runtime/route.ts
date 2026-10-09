@@ -4,6 +4,8 @@ import {
   appSettings,
   resolveInfisicalEnvironment,
 } from "@/lib/app-settings";
+import { RuntimeSettingUpdateSchema } from "@/lib/runtime-settings-schema";
+import { getAppliedSchedulerGate } from "@/lib/runtime-health";
 import { InfisicalWriteError } from "@jaywedgeworth22/congress-trading-shared";
 
 export const runtime = "nodejs";
@@ -29,11 +31,23 @@ function forbidden() {
 
 export async function GET(request: NextRequest) {
   if (!isAdmin(request)) return forbidden();
+  // USAGE_SCHEDULER_ENABLED is boot-applied (see recordSchedulerGate): the
+  // admin surface must show the value this process actually booted with
+  // alongside the live value, or a post-boot flip looks applied before the
+  // restart that applies it.
+  const appliedGate = getAppliedSchedulerGate();
+  const settings = appSettings.getAllMeta().map((meta) => {
+    if (meta.key !== "USAGE_SCHEDULER_ENABLED" || appliedGate === null) {
+      return meta;
+    }
+    const appliedValue = String(appliedGate);
+    return { ...meta, appliedValue, restartRequired: appliedValue !== meta.value };
+  });
   return NextResponse.json({
     ok: true,
     mode: appSettings.isInfisicalMode ? "infisical" : "env",
     environment: resolveInfisicalEnvironment(),
-    settings: appSettings.getAllMeta(),
+    settings,
   });
 }
 
@@ -46,22 +60,22 @@ export async function PUT(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const { key, value } = (body ?? {}) as { key?: unknown; value?: unknown };
-  if (typeof key !== "string" || !key.trim()) {
-    return NextResponse.json({ error: "key is required" }, { status: 400 });
-  }
-  if (typeof value !== "string") {
+  // Trust boundary: validate the untrusted body with a strict Zod schema
+  // (unknown fields rejected) instead of a type assertion.
+  const parsed = RuntimeSettingUpdateSchema.safeParse(body ?? {});
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: "value must be a string" },
+      { error: "Invalid request body" },
       { status: 400 }
     );
   }
+  const { key, value } = parsed.data;
 
   try {
-    const normalized = await appSettings.set(key.trim(), value);
+    const normalized = await appSettings.set(key, value);
     return NextResponse.json({
       ok: true,
-      key: key.trim(),
+      key,
       value: normalized,
       mode: appSettings.isInfisicalMode ? "infisical" : "env",
     });

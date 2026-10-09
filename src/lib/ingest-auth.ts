@@ -55,7 +55,10 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
   }
 
   const expected = process.env.USAGE_INGEST_TOKEN?.trim();
-  const requireScoped = appSettings.get("USAGE_INGEST_REQUIRE_SCOPED_TOKENS") === "true";
+  // Canonical bool parsing (true/1/yes/on are all "true" per the knob
+  // schema): a strict === "true" would silently ignore USAGE_INGEST_REQUIRE_SCOPED_TOKENS=1
+  // and leave the unscoped ingest path open.
+  const requireScoped = appSettings.getBool("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", false);
   if (expected && !requireScoped && safeEqual(actual, expected)) {
     return {
       credentialId: "unscoped",

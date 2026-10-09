@@ -10,8 +10,9 @@ Usage-Monitor-specific application of it.
 
 ## Project
 
-- Infisical project: `usage-monitor`, ID `86e35e51-91bc-4dfd-a045-4484726b9c40`
-  (jays-services org), environments `dev` / `staging` / `prod`, secret path `/`.
+- Infisical project: `usage-monitor`, environments `dev` / `staging` / `prod`,
+  secret path `/`.  Deployment-specific project identifiers are maintained
+  in the private operations inventory, not committed here.
 - The shared fleet automation machine identity holds Admin on this project.
   The server authenticates with universal-auth as that identity
   (`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET`, falling back to the
@@ -38,7 +39,7 @@ Two delivery paths, one source of truth:
    | `INGEST_COST_DERIVATION_ENABLED` | bool | `false` | Derived-cost estimates on unpriced ingest events (metadata only) |
    | `USAGE_INGEST_REQUIRE_SCOPED_TOKENS` | bool | `false` | Deny unscoped `USAGE_INGEST_TOKEN` ingest |
    | `USAGE_READ_TOKEN_ALLOW_INGEST_FALLBACK` | bool | `false` | Break-glass read-route fallback in production |
-   | `USAGE_SCHEDULER_ENABLED` | bool | `true` | Emergency switch for the 15-min poll scheduler |
+   | `USAGE_SCHEDULER_ENABLED` | bool | `true` | Emergency switch for the 15-min poll scheduler (boot-applied; a change takes effect on restart) |
    | `ALERT_MIN_SEVERITY` | enum | `warning` | Minimum delivered alert severity (`info`/`warning`/`critical`) |
    | `ALERT_EMAIL_ENABLED` | bool | `true` | Master enable for the email alert channel |
    | `ALERT_DISABLE_EMAIL` | bool | `false` | Hard-disable email alert delivery |
@@ -51,7 +52,11 @@ Two delivery paths, one source of truth:
 
    `INFISICAL_SETTINGS_REFRESH_MS` seeds the refresh timer at boot, so a
    change to it takes effect on the next restart — everything else is live
-   within one refresh interval (default 5 minutes) with no redeploy.
+   within one refresh interval (default 5 minutes) with no redeploy, with
+   one exception: `USAGE_SCHEDULER_ENABLED` is evaluated once at boot (the
+   evaluated gate is recorded and `/api/ready` answers with that boot value),
+   so flipping it takes effect on the next restart.  Readiness never
+   disagrees with the running process about whether the scheduler is up.
 
 2. **Secrets and service config — deploy-time env sync.**  The
    Infisical→Coolify env sync remains the deployment path: the same
@@ -90,7 +95,9 @@ add a test.
   in the app's own SQLite store.  They are explicitly out of scope and are
   never written to Infisical.
 - **Local dev overrides.**  Documented in `.env.example`; never commit real
-  values.  Copy it to `.env` for local development.
+  values.  Run local development through the Infisical-backed launcher
+  (`node scripts/infisical-run.mjs -- npm run dev`); do not create or load
+  a local dotenv file.
 - **Build-time constants** that never change at runtime.
 
 ## Runtime contract
