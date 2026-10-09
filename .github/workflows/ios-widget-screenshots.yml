@@ -42,7 +42,7 @@ jobs:
 
       - name: Upload widget screenshot artifacts
         if: always()
-        uses: actions/upload-artifact@ea165ac8baa65d1f436bb7dcf544c3e3ae79f09b # v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-widget-screenshots
           path: artifacts/ios-widget-screenshots/*.png

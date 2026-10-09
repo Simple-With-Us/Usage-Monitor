@@ -92,9 +92,8 @@ jobs:
 
       - name: Test UsageMonitorWidgetTests on iOS Simulator
         run: |
-          UDID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); \
-            [(print(dev[\"udid\"]), sys.exit(0)) for rt in d.get(\"devices\",{}) for dev in d[\"devices\"][rt] \
-             if dev.get(\"isAvailable\") is not False and dev.get(\"name\",\"\").startswith(\"iPhone\")]; sys.exit(1)')"
+          UDID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for group in data["devices"].values() for d in group if d.get("isAvailable") is not False and d.get("name","").startswith("iPhone")]; print(devices[0]["udid"] if devices else "")')"
+          test -n "$UDID"
           xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || xcrun simctl boot "$UDID"
           xcodebuild test \
             -project ios/UsageMonitor/UsageMonitor.xcodeproj \
