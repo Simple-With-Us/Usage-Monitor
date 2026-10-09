@@ -1,5 +1,3 @@
-import "server-only";
-
 // =============================================================================
 // app-settings — Infisical sole-source-of-truth for app-level tunable knobs
 // =============================================================================
@@ -42,8 +40,22 @@ import "server-only";
 //                   knob keys resolve through this service, everything else
 //                   passes through to process.env unchanged.
 //
-// Server-only: resolves Infisical credentials and caches every project secret.
-// init() is only ever called from instrumentation.ts on the nodejs runtime.
+// NOT server-only (deliberately — see Kody finding evaluated below): this
+// module's read methods (get/getBool/has/...) are value-imported by
+// src/lib/provider-manifest.ts, which is reachable from the "use client"
+// FleetQuotaMatrixCard (via quota-windows.ts -> AgentsDashboard.tsx). A
+// top-level `import "server-only"` here — or anywhere in its import graph,
+// including behind a *dynamic* `import()` — fails the production build with
+// "'server-only' cannot be imported from a Client Component module", because
+// Next's Turbopack RSC boundary check walks dynamic imports too (confirmed
+// against this exact file via `npm run build`; a dynamic-import split, the
+// pattern instrumentation.ts uses for the edge-runtime bundle, does NOT dodge
+// this specific check the way it dodges the edge/nodejs runtime split).
+// init() — the only call site that reads the actual Infisical client secret,
+// via resolveCredentials() below — is invoked exclusively from
+// instrumentation.ts (Node server startup), never from client-reachable code.
+// That is the real security boundary; the sentinel package cannot be layered
+// on top of it without breaking the build. See INFISICAL.md.
 
 import {
   createInfisicalSettings,
