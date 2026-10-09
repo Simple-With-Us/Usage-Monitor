@@ -270,6 +270,26 @@ describe("S5: push-channel baseline crosses the month boundary via daily rollups
     );
   });
 
+  it("does not page on push-channel day-one spend with a zero prior-month baseline", async () => {
+    const provider = await createProvider("backblaze");
+    for (let day = 20; day <= 31; day += 1) {
+      await addRollup({
+        day: `2026-07-${String(day).padStart(2, "0")}`,
+        provider: "backblaze",
+        totalCostUsd: 0.01,
+      });
+    }
+    await addExternalEvent({ provider: "backblaze", costUsd: 2, occurredAt: "2026-08-01T10:00:00.000Z" });
+    await addExternalEvent({ provider: "backblaze", costUsd: 95, occurredAt: "2026-08-02T10:00:00.000Z" });
+
+    const results = await loadSpendAnomaliesByProviderId(
+      new Date("2026-08-03T12:00:00.000Z"),
+      CONFIG,
+      [{ id: provider.id, name: provider.name }]
+    );
+    expect(results.get(provider.id) ?? []).toHaveLength(0);
+  });
+
   it("still cannot alert early in the month without prior-month rollup history", async () => {
     const provider = await createProvider("Anthropic");
     await addExternalEvent({ provider: "Anthropic", costUsd: 10, occurredAt: "2026-08-01T10:00:00.000Z" });

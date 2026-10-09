@@ -20,6 +20,10 @@ __pycache__/
 
 # Cursor IDE metadata (not source)
 .cursor/
+# Cursor cloud agent environment (must be committed so Builds pick it up).
+!.cursor/
+!.cursor/environment.json
+!.cursor/infisical.env
 .wrangler/
 
 # Downloaded by scripts/fetch-litestream.sh at build time - never committed.

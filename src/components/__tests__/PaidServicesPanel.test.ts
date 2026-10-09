@@ -62,7 +62,7 @@ describe("PaidServicesPanel", () => {
       })
     );
 
-    expect(html).toContain("Paid services, plans &amp; quotas");
+    expect(html).toContain("Paid Services, Plans &amp; Quotas");
     expect(html).toContain("Cloudflare Workers");
     expect(html).toContain("Workers Paid");
     expect(html).toContain("Verified + tracked");

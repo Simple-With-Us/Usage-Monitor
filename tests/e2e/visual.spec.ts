@@ -165,7 +165,7 @@ test.describe('visual: login page', () => {
     await settle(page);
     await page.goto('/login');
     await pinFonts(page);
-    await expect(page.getByRole('heading', { name: 'Log in', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Log In', exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot('login.png', { ...stableShot, fullPage: true });
   });
 
@@ -174,7 +174,7 @@ test.describe('visual: login page', () => {
     await page.goto('/login');
     await pinFonts(page);
     await page.getByLabel(/password/i).fill('definitely-wrong-password');
-    await page.getByRole('button', { name: 'Log in', exact: true }).click();
+    await page.getByRole('button', { name: 'Log In', exact: true }).click();
     await expect(page.getByRole('alert')).toBeVisible();
     await expect(page).toHaveScreenshot('login-error.png', { ...stableShot, fullPage: true });
   });
@@ -231,4 +231,27 @@ test.describe('visual: settings page', () => {
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('settings.png', { ...stableShot, fullPage: true });
   });
+});
+
+
+test('visual: quota provenance distinguishes conflicting readings', async ({ page }) => {
+  await settle(page);
+  await page.route('**/api/agents-overview?*', route => json(route, {}, 503));
+  await page.route('**/api/quota-windows', route => json(route, {
+    windows: [
+      { id: 'first', provider: 'anthropic', label: '5h window', remainingPercent: 83,
+        status: 'available', source: 'Provider API', collector: 'CodeCaps', sourceApp: 'claude-code', machine: 'Office Mac',
+        occurredAt: '2026-09-27T19:50:00.000Z', resetAt: '2026-09-27T23:00:00.000Z' },
+      { id: 'second', provider: 'anthropic', label: '5h window', remainingPercent: 98,
+        status: 'available', source: 'Local Collector', machine: 'Laptop',
+        occurredAt: '2026-09-27T19:30:00.000Z', resetAt: '2026-09-27T23:00:00.000Z' },
+    ],
+  }));
+  await login(page);
+  await page.goto('/agents');
+  await pinFonts(page);
+  await expect(page.getByText(/Source: Provider API/)).toBeVisible();
+  await expect(page.getByText(/Source: Local Collector/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: '5h Window', exact: true })).toHaveCount(2);
+  await expect(page).toHaveScreenshot('quota-provenance.png', { ...stableShot, fullPage: true });
 });

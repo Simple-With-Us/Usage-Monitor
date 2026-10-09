@@ -105,6 +105,8 @@ interface DatabaseFileBaseline {
 
 interface RuntimeHealthState {
   scheduler: SchedulerRuntimeStatus;
+  /** USAGE_SCHEDULER_ENABLED as evaluated once at boot (see recordSchedulerGate). */
+  schedulerGateEnabled: boolean | null;
   databaseFile: DatabaseFileBaseline | null;
   databaseFileCache: { status: DatabaseFileStatus; expiresAtMs: number } | null;
 }
@@ -128,6 +130,7 @@ const state =
       firstProviderFetchDegradedAt: null,
       lastRun: null,
     },
+    schedulerGateEnabled: null,
     databaseFile: null,
     databaseFileCache: null,
   });
@@ -148,6 +151,54 @@ function normalizeSchedulerRunSummary(
 
 export function markSchedulerStarted(at = new Date()): void {
   state.scheduler.startedAt ??= at.toISOString();
+}
+
+/**
+ * Single source of truth for the USAGE_SCHEDULER_ENABLED knob, resolved
+ * through the settings service (Infisical cache in production, process.env
+ * in env-fallback mode).  instrumentation.ts's scheduler gate and
+ * /api/ready's readiness computation must both use this — never a direct
+ * process.env read — or the two disagree whenever the knob lives only in
+ * Infisical (scheduler disabled at boot while /api/ready still requires
+ * it, or a second poller on a standby host while readiness reports green).
+ *
+ * Boot-vs-live: the scheduler start decision is made exactly once in
+ * instrumentation.register(), which is never re-run, while the underlying
+ * knob is live-refreshable (5-min Infisical refresh).  register() records
+ * the evaluated gate via recordSchedulerGate(); afterwards this returns the
+ * recorded boot value so /api/ready agrees with what the process actually
+ * did.  Otherwise an operator flipping the knob from false to true post-boot
+ * would make readiness report not_ready (and ?strict=1 return 503) forever —
+ * a restart loop with no way out short of a redeploy.
+ */
+export function isSchedulerEnabled(): boolean {
+  if (state.schedulerGateEnabled !== null) return state.schedulerGateEnabled;
+  return (
+    appSettings.get("USAGE_SCHEDULER_ENABLED")?.trim().toLowerCase() !== "false"
+  );
+}
+
+/**
+ * Record the scheduler gate as evaluated at boot.  Called once from
+ * instrumentation.register() right where the start decision is made.
+ */
+export function recordSchedulerGate(enabled: boolean): void {
+  state.schedulerGateEnabled = enabled;
+}
+
+/**
+ * The gate value this process actually booted with, or null when
+ * instrumentation.register() has not run yet.  The admin surface must
+ * report this for the boot-applied USAGE_SCHEDULER_ENABLED knob instead
+ * of the live cache value.
+ */
+export function getAppliedSchedulerGate(): boolean | null {
+  return state.schedulerGateEnabled;
+}
+
+/** Test-only: clear the recorded boot gate between register() runs. */
+export function resetSchedulerGateForTests(): void {
+  state.schedulerGateEnabled = null;
 }
 
 export function markSchedulerTickStarted(at = new Date()): void {
@@ -1317,6 +1368,7 @@ export function resetRuntimeHealthForTests(): void {
     firstProviderFetchDegradedAt: null,
     lastRun: null,
   };
+  state.schedulerGateEnabled = null;
   if (state.databaseFile?.fd != null) {
     try {
       closeSync(state.databaseFile.fd);

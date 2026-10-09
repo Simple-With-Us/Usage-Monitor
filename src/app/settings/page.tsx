@@ -474,7 +474,7 @@ function SettingsPageContent() {
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             }`}
           >
-            Paid services
+            Paid Services
           </Link>
           <Link
             href="/settings?tab=projects"
@@ -580,23 +580,23 @@ function SettingsPageContent() {
           <div className="space-y-6">
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-800 dark:bg-blue-900/30">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
-                How data gets here
+                How Data Gets Here
               </h2>
               <div className="grid gap-4 text-sm text-blue-800 dark:text-blue-200 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic account sync</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic Account Sync</p>
                   <p className="text-xs opacity-90">Read-only provider adapters fetch authoritative usage, billing, plan, and quota fields whenever the provider exposes them.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed telemetry</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed Telemetry</p>
                   <p className="text-xs opacity-90">Apps send metered usage and cost when a provider has no suitable account API or when project-level detail is needed.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">OTLP metrics</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">OTLP Metrics</p>
                   <p className="text-xs opacity-90">Claude Code and other OTLP exporters push usage metrics over standard OTLP/HTTP; they land alongside pushed telemetry as Anthropic (Claude Code) cost.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual plan tracking</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual Plan Tracking</p>
                   <p className="text-xs opacity-90">Dashboard-only subscriptions stay explicit instead of being inferred from API traffic, balances, or portfolio assets.</p>
                 </div>
               </div>
@@ -634,7 +634,7 @@ function SettingsPageContent() {
           <div className="space-y-8">
             <div className="space-y-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked recurring costs</h2>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked Recurring Costs</h2>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Edit dashboard-only subscriptions or link them to an automatically discovered provider record. Linked records render once and charge once.
                 </p>

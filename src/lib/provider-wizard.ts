@@ -11,7 +11,7 @@ export interface WizardStepDef {
 export const PROVIDER_WIZARD_STEPS: readonly WizardStepDef[] = [
   { id: "type", index: 1, label: "Type", shortLabel: "Type" },
   { id: "credentials", index: 2, label: "Credentials", shortLabel: "Creds" },
-  { id: "budget", index: 3, label: "Budget & plan", shortLabel: "Budget" },
+  { id: "budget", index: 3, label: "Budget & Plan", shortLabel: "Budget" },
   { id: "review", index: 4, label: "Review", shortLabel: "Review" },
 ] as const;
 export const PROVIDER_WIZARD_STEP_COUNT = PROVIDER_WIZARD_STEPS.length;

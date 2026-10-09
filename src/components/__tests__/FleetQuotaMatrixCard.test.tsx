@@ -78,6 +78,7 @@ const mixedPayload = {
           skipReason: null,
           occurredAt: "2026-09-12T00:00:00.000Z",
           source: "api.anthropic.com",
+          machine: "Jay’s MacBook Pro",
         },
         {
           id: "anthropic-7d",
@@ -257,6 +258,92 @@ describe("buildProviderGroups", () => {
 });
 
 describe("QuotaWindowCard rendering", () => {
+  it("keeps source and collection time visible for separate same-label readings", () => {
+    const groups = buildProviderGroups({
+      providerGroups: [{
+        provider: "anthropic",
+        providerLabel: "Claude",
+        windows: [
+          {
+            id: "claude-local",
+            label: "5h window",
+            remainingPercent: 70,
+            occurredAt: "2026-09-12T00:00:00.000Z",
+            source: "api.anthropic.com/local",
+          },
+          {
+            id: "claude-work",
+            label: "5h window",
+            remainingPercent: 42,
+            occurredAt: "2026-09-12T00:05:00.000Z",
+            source: "api.anthropic.com/work",
+            collector: "subscription-quota-collector",
+            sourceApp: "claude-code",
+          },
+        ],
+      }],
+    });
+    const anthropic = groups.find((group) => group.provider === "anthropic")!;
+    const html = anthropic.windows
+      .map((win) => renderToStaticMarkup(createElement(QuotaWindowCard, { win, nowMs: NOW_MS })))
+      .join("\n");
+
+    expect(anthropic.windows).toHaveLength(2);
+    expect(html.match(/5h Window/g)).toHaveLength(2);
+    expect(html).toContain("Source: api.anthropic.com/local");
+    expect(html).toContain("Source: api.anthropic.com/work");
+    expect(html).toContain("Collector: subscription-quota-collector");
+    expect(html).toContain("Service: claude-code");
+    expect(html).toContain(
+      new Date("2026-09-12T00:00:00.000Z").toLocaleString("en-US", { hour12: true }),
+    );
+    expect(html).toContain(
+      new Date("2026-09-12T00:05:00.000Z").toLocaleString("en-US", { hour12: true }),
+    );
+  });
+
+  it("title-cases known quota headings while preserving custom model labels", () => {
+    const labels = ["weekly window", "5-hour window", "weekly", "included plan", "Claude Opus 4.1"];
+    const html = labels.map((label, index) => renderToStaticMarkup(createElement(QuotaWindowCard, {
+      win: {
+        id: `heading-${index}`,
+        label,
+        window: null,
+        remainingPercent: 60,
+        remainingUnknown: false,
+        status: "available",
+        resetAt: null,
+        via: null,
+      },
+      nowMs: NOW_MS,
+    }))).join("\n");
+
+    expect(html).toContain("Weekly Window");
+    expect(html).toContain("5-Hour Window");
+    expect(html).toContain(">Weekly<");
+    expect(html).toContain("Included Plan");
+    expect(html).toContain("Claude Opus 4.1");
+  });
+
+  it("keeps the quota period visible when the label is a model name", () => {
+    const html = renderToStaticMarkup(createElement(QuotaWindowCard, {
+      win: {
+        id: "model-window",
+        label: "Claude Opus 4.1",
+        window: "5h",
+        remainingPercent: 50,
+        remainingUnknown: false,
+        status: "available",
+        resetAt: null,
+        via: null,
+      },
+      nowMs: NOW_MS,
+    }));
+
+    expect(html).toContain("Claude Opus 4.1");
+    expect(html).toContain("5h Window");
+  });
+
   it("renders the anthropic 5h and 7d windows' percentages without a via Antigravity caption", () => {
     const groups = buildProviderGroups(mixedPayload);
     const anthropic = groups.find((g) => g.provider === "anthropic")!;
@@ -266,6 +353,11 @@ describe("QuotaWindowCard rendering", () => {
 
     expect(html).toContain("62.5% remaining");
     expect(html).toContain("18.0% remaining");
+    expect(html).toContain("5h Window");
+    expect(html).toContain("7d Window");
+    expect(html).toContain("Source: api.anthropic.com");
+    expect(html).toContain("Machine: Jay’s MacBook Pro");
+    expect(html).toContain("Reported:");
     expect(html).not.toContain("via Antigravity");
   });
 
@@ -280,6 +372,28 @@ describe("QuotaWindowCard rendering", () => {
     expect(html).toContain("Third-Party Models");
     expect(html).not.toContain("Claude and GPT models");
     expect(html).toContain("40.0% remaining");
+    expect(html).toContain("Source: Unknown");
+    expect(html).toContain("Reported:");
+  });
+
+  it("shows Unknown for a missing source and invalid collection time", () => {
+    const html = renderToStaticMarkup(createElement(QuotaWindowCard, {
+      win: {
+        id: "missing-provenance",
+        label: "Included Plan",
+        window: null,
+        remainingPercent: 55,
+        remainingUnknown: false,
+        status: "available",
+        resetAt: null,
+        via: null,
+        occurredAt: "not-a-date",
+      },
+      nowMs: NOW_MS,
+    }));
+
+    expect(html).toContain("Source: Unknown");
+    expect(html).toContain("Reported: Unknown");
   });
 });
 
@@ -399,11 +513,13 @@ describe("buildProviderGroups fallbacks", () => {
     expect(groups.find((g) => g.provider === "acme")?.windows[0]?.status).toBe("unknown");
   });
 
-  it("tolerates a non-object payload and still returns all six expected groups", () => {
+  it("tolerates a non-object payload and still returns every expected group", () => {
     expect(buildProviderGroups(null).map((g) => g.provider)).toEqual(
       defaultProviderGroups().map((g) => g.provider),
     );
-    expect(buildProviderGroups([]).map((g) => g.providerLabel)).toEqual([...EXPECTED_LABELS, "Grok Bot"]);
+    expect(buildProviderGroups([]).map((g) => g.providerLabel)).toEqual(
+      defaultProviderGroups().map((g) => g.providerLabel),
+    );
   });
 });
 

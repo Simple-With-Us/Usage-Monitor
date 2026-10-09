@@ -1,5 +1,10 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
+import {
+  getAppliedSchedulerGate,
+  recordSchedulerGate,
+  resetSchedulerGateForTests,
+} from "@/lib/runtime-health";
 
 let GET: typeof import("../route").GET;
 let PUT: typeof import("../route").PUT;
@@ -7,12 +12,28 @@ let POST: typeof import("../route").POST;
 let createSessionToken: typeof import("@/lib/auth").createSessionToken;
 let SESSION_COOKIE_NAME: typeof import("@/lib/auth").SESSION_COOKIE_NAME;
 
+function clearInfisicalCredEnv() {
+  for (const name of [
+    "INFISICAL_CLIENT_ID",
+    "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_AUTOMATION_CLIENT_ID",
+    "INFISICAL_AUTOMATION_CLIENT_SECRET",
+  ]) {
+    delete process.env[name];
+  }
+}
+
 beforeAll(async () => {
-process.env.SESSION_SECRET = "test-session-secret-value-32-chars!!";
+  process.env.SESSION_SECRET = "test-session-secret-value-32-chars!!";
   ({ GET, PUT, POST } = await import("../route"));
   ({ createSessionToken, SESSION_COOKIE_NAME } = await import("@/lib/auth"));
-  // No Infisical creds in CI: the settings service stays in env-fallback mode.
+});
+
+beforeEach(async () => {
+  clearInfisicalCredEnv();
+  resetSchedulerGateForTests();
   const { appSettings } = await import("@/lib/app-settings");
+  appSettings._resetForTests();
   await appSettings.init();
 });
 
@@ -59,6 +80,19 @@ describe("GET /api/settings/runtime", () => {
     expect(severity.type).toBe("string");
     expect(severity.defaultValue).toBe("warning");
     expect(typeof severity.value).toBe("string");
+  });
+
+  it("annotates USAGE_SCHEDULER_ENABLED with the boot-applied gate", async () => {
+    recordSchedulerGate(false);
+    const response = await GET(request("GET", sessionHeaders()));
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    const scheduler = data.settings.find(
+      (s: { key: string }) => s.key === "USAGE_SCHEDULER_ENABLED"
+    );
+    expect(scheduler.appliedValue).toBe("false");
+    expect(scheduler.restartRequired).toBe(scheduler.value !== "false");
+    expect(getAppliedSchedulerGate()).toBe(false);
   });
 });
 

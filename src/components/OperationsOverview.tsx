@@ -540,7 +540,7 @@ export function R2FleetCard({ data }: { data: R2FleetSummary | null }) {
             <Cloud className="h-4 w-4" />
           </span>
           <div>
-            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 free tier (fleet)</h3>
+            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 Free Tier (Fleet)</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Could not load R2 metrics for Usage Monitor / Socratic / Congress.</p>
           </div>
         </div>
@@ -560,7 +560,7 @@ export function R2FleetCard({ data }: { data: R2FleetSummary | null }) {
             <Cloud className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 free tier (fleet)</h3>
+            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 Free Tier (Fleet)</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Three Cloudflare accounts · 10 GiB / 1M Class A / 10M Class B each · alert at {data.thresholdPct}%
               {data.localBackup.autoDisabled ? " · this host paused Litestream writes" : ""}
@@ -623,7 +623,7 @@ export function SocraticInfrastructureCard({ data }: { data: SocraticInfrastruct
         <div className="flex min-w-0 items-start gap-3">
           <span className="rounded-lg bg-violet-50 p-2 text-violet-600 dark:bg-violet-950/40 dark:text-violet-300" aria-hidden="true"><Server className="h-4 w-4" /></span>
           <div className="min-w-0">
-            <h3 id="socratic-infrastructure-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Socratic Trade infrastructure</h3>
+            <h3 id="socratic-infrastructure-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Socratic Trade Infrastructure</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Database {data.database} · {scheduler} · {uptime}
               {data.recentRestart ? " · recent restart" : ""}

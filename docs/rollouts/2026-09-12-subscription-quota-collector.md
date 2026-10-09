@@ -42,7 +42,7 @@ impersonated and no GPL code is vendored.
 
 | Provider | Credential read | Endpoint |
 |---|---|---|
-| Claude | `~/.claude/.credentials.json` → `claudeAiOauth` | `GET https://api.anthropic.com/api/oauth/usage` |
+| Claude | `CLAUDE_CODE_OAUTH_CREDENTIALS_JSON` (Zod-validated env JSON), else legacy `~/.claude/.credentials.json` → `claudeAiOauth`.  Modern macOS Keychain is **not** read inside the collector — inject with `scripts/claude-code-oauth-credentials-from-keychain.sh` or `export CLAUDE_CODE_OAUTH_CREDENTIALS_JSON="$(security find-generic-password -s 'Claude Code-credentials' -w)"` in a launchd wrapper. | `GET https://api.anthropic.com/api/oauth/usage` |
 | Codex | `~/.codex/auth.json` → `tokens` | `GET https://chatgpt.com/backend-api/wham/usage` |
 | Grok | `~/.grok/auth.json` (nested `https://auth.x.ai::<id>.key`, not a flat `access_token`) | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (`config.creditUsagePercent` is percent USED) |
 | MiniMax | `~/.mmx/config.json` | `GET https://api.minimax.io/v1/api/openplatform/coding_plan/remains` (falls back to `api.minimaxi.com`) |
@@ -73,6 +73,8 @@ The collector never prints, logs or posts a credential.  The only
 credential-derived value it emits is the plan name, e.g. `max_20x`, which is not
 a secret.  Raw HTTP response bodies are never printed under any flag, because
 they can carry account identifiers.
+
+Scripts load Claude OAuth material only from `process.env` (`CLAUDE_CODE_OAUTH_CREDENTIALS_JSON`) or the legacy credentials file — never from a Keychain subprocess inside `subscription-quota-collector.mjs`.  `scripts/lib/claude-code-oauth-credentials.mjs` validates injected JSON with Zod at the parse boundary and logs only a generic schema failure.
 
 ## How to install
 

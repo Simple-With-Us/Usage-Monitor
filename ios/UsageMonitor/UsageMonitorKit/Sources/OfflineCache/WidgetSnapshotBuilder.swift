@@ -225,7 +225,7 @@ public enum WidgetSnapshotBuilder {
             reported: mac != nil,
             hostname: mac?.hostname,
             osVersion: mac?.osVersion,
-            arch: mac?.arch,
+            arch: mac?.chipName ?? mac?.arch,
             cpuUsagePct: mac?.cpuUsagePct,
             memoryUsagePct: mac?.memoryUsagePct,
             diskUsagePct: mac?.diskUsagePct,

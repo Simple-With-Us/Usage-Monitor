@@ -148,22 +148,8 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
     /// Quota fetching lives in `performRefresh` and is awaited *after* the
     /// forced widget reload has fired, so a slow subscription-quota response
     /// cannot gate the Lock Screen alert or the final forced widget reload.
-    private func refreshSecondaryWidgetSections(
-        using client: APIClient
-    ) async {
-        if let burn = try? await client.llmBurn() {
-            WidgetSnapshotStore.updateLlm(burn)
-        }
-        if let health = try? await client.health() {
-            let readiness = try? await client.readiness()
-            WidgetSnapshotStore.updateServerService(health: health, readiness: readiness)
-        }
-        if let metrics = try? await client.serverMetrics() {
-            WidgetSnapshotStore.updateServerHost(metrics)
-        }
-        if let mac = try? await client.macHealth() {
-            WidgetSnapshotStore.updateMac(mac)
-        }
+    private func refreshSecondaryWidgetSections(using client: APIClient) async {
+        await WidgetSnapshotStore.refreshSecondarySections(using: client)
     }
 
     private func reloadWidgets() {

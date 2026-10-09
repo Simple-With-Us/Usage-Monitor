@@ -85,7 +85,7 @@ describe("SpendBurnChart smoke", () => {
         generatedAt: "2026-08-04T12:00:00.000Z",
       })
     );
-    expect(html).toContain("Month pace");
+    expect(html).toContain("Month Pace");
     expect(html).toContain("Linear estimate");
     expect(html).toContain("Day 4 of 31");
   });
