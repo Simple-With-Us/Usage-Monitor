@@ -292,7 +292,12 @@ describe("QuotaWindowCard rendering", () => {
     expect(html).toContain("Source: api.anthropic.com/local");
     expect(html).toContain("Source: api.anthropic.com/work");
     expect(html).toContain("Collector: subscription-quota-collector");
-    expect(html).toContain("Reported:");
+    expect(html).toContain(
+      new Date("2026-09-12T00:00:00.000Z").toLocaleString("en-US", { hour12: true }),
+    );
+    expect(html).toContain(
+      new Date("2026-09-12T00:05:00.000Z").toLocaleString("en-US", { hour12: true }),
+    );
   });
 
   it("title-cases known quota headings while preserving custom model labels", () => {
@@ -316,6 +321,25 @@ describe("QuotaWindowCard rendering", () => {
     expect(html).toContain(">Weekly<");
     expect(html).toContain("Included Plan");
     expect(html).toContain("Claude Opus 4.1");
+  });
+
+  it("keeps the quota period visible when the label is a model name", () => {
+    const html = renderToStaticMarkup(createElement(QuotaWindowCard, {
+      win: {
+        id: "model-window",
+        label: "Claude Opus 4.1",
+        window: "5h",
+        remainingPercent: 50,
+        remainingUnknown: false,
+        status: "available",
+        resetAt: null,
+        via: null,
+      },
+      nowMs: NOW_MS,
+    }));
+
+    expect(html).toContain("Claude Opus 4.1");
+    expect(html).toContain("5h Window");
   });
 
   it("renders the anthropic 5h and 7d windows' percentages without a via Antigravity caption", () => {
