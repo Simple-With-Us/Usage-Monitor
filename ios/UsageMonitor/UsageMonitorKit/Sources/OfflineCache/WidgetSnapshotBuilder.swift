@@ -83,6 +83,69 @@ public enum WidgetSnapshotBuilder {
         )
     }
 
+    /// Project the server's quota windows into the compact widget section.
+    ///
+    /// `remainingFraction` stays `nil` when the server sent no number so the
+    /// widget can say "unknown" rather than render a fabricated 0%. Exhausted
+    /// and near-cap are carried as explicit booleans because those are the two
+    /// states worth alarming on.
+    public static func quotaSection(
+        from response: QuotaWindowsResponse,
+        now: Date = Date(),
+        maxWindows: Int = 8
+    ) -> WidgetSnapshot.QuotaSection {
+        let sorted = response.windows.sorted { (lhs: QuotaWindow, rhs: QuotaWindow) in
+            // Most-urgent first: exhausted, then lowest *known* remaining,
+            // then a soonest reset, then a stable name order.  A window with
+            // no number is unknown, not urgent, so it sinks below every
+            // known window — otherwise an absent value (displayRemainingPercent
+            // fabricates 0) outranks a real one and the tile headlines
+            // "Unknown".  The exhaustion key matches the emitted flag below
+            // (isExhausted || status == .exhausted), not just isExhausted.
+            let lExhausted = lhs.isExhausted || lhs.status == .exhausted
+            let rExhausted = rhs.isExhausted || rhs.status == .exhausted
+            if lExhausted != rExhausted { return lExhausted }
+            let lKnown = lhs.remainingPercent != nil && !lhs.remainingUnknown
+            let rKnown = rhs.remainingPercent != nil && !rhs.remainingUnknown
+            if lKnown != rKnown { return lKnown }
+            if lKnown {
+                let lr = lhs.displayRemainingPercent
+                let rr = rhs.displayRemainingPercent
+                if lr != rr { return lr < rr }
+            }
+            let lReset = lhs.resetAtDate ?? .distantFuture
+            let rReset = rhs.resetAtDate ?? .distantFuture
+            if lReset != rReset { return lReset < rReset }
+            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+        }
+        let windows = sorted
+            .prefix(maxWindows)
+            .map { window in
+                let fraction: Double?
+                if let percent = window.remainingPercent, !window.remainingUnknown {
+                    fraction = max(0, min(1, percent / 100))
+                } else {
+                    fraction = nil
+                }
+                return WidgetSnapshot.QuotaSection.Window(
+                    id: window.id,
+                    providerId: window.provider,
+                    providerLabel: window.providerLabel ?? window.provider.capitalized,
+                    label: window.label,
+                    remainingFraction: fraction,
+                    isExhausted: window.isExhausted || window.status == .exhausted,
+                    isNearCap: window.status == .nearCap,
+                    resetAt: window.resetAtDate,
+                    window: window.window,
+                    via: window.via
+                )
+            }
+        return WidgetSnapshot.QuotaSection(
+            generatedAt: response.generatedAtDate ?? now,
+            windows: Array(windows)
+        )
+    }
+
     /// Highest month-to-date spend, including providers with no budget.
     /// Zero-spend rows stay out so the tile cannot show a fake $0 ranking.
     public static func spenders(

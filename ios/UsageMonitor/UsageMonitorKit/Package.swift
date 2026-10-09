@@ -53,7 +53,7 @@ let package = Package(
         // ---- Features (one target each, one owner each) -----------------
         .target(
             name: "Dashboard",
-            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "OfflineCache", "ProjectBudgets"]
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "OfflineCache", "ProjectBudgets", "WidgetShared"]
         ),
         .target(
             name: "Providers",

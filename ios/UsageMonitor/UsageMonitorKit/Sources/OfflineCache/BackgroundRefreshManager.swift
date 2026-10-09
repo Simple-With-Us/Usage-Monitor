@@ -100,12 +100,20 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
             let response = try await client.budgetStatus()
             BudgetDiskCache(directory: cacheDirectory).save(response)
             WidgetSnapshotStore.updateBudget(response)
+            // Start the quota fetch in the background; it must not block
+            // the LLM / server / Mac mirrors, the Lock Screen alert, or the
+            // final forced widget reload. We await it after the alert
+            // notifier has fired so the quota mirror still lands on success.
+            let quotaTask = Task { [client] in
+                try? await client.fetchQuotaWindows()
+            }
+            // LLM / server / Mac mirrors only — quota handling lives below.
             await refreshSecondaryWidgetSections(using: client)
-            reloadWidgets()
             // The whole point of a background budget monitor: turn a freshly
             // fetched over/near-budget alert into a Lock Screen notification
             // while the app is closed. The notifier dedupes across runs and
-            // honours the user's toggle/severity — see `AlertNotifier`.
+            // honours the user's toggle/severity — see `AlertNotifier`. The
+            // alert must not wait on the quota task.
             if let alertNotifier {
                 let items = response.providers.flatMap { provider in
                     provider.alerts.map {
@@ -118,14 +126,28 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
                 }
                 await alertNotifier(items)
             }
+            // Fire the forced widget reload *before* awaiting the quota task
+            // so a slow or hung quota response cannot gate the timeline
+            // refresh — `BGAppRefreshTask` calls `setTaskCompleted(success:)`
+            // with whatever `performRefresh` returns, so the whole background
+            // budget cycle must return promptly even when the quota endpoint
+            // is slow. The quota mirror still lands on success afterwards.
+            reloadWidgets()
+            if let quotas = await quotaTask.value {
+                WidgetSnapshotStore.updateQuotas(quotas)
+            }
             return true
         } catch {
             return false
         }
     }
 
-    /// Best-effort LLM + server + Mac cache.  Failures leave the previous
+    /// Best-effort LLM + server + Mac cache. Failures leave the previous
     /// section in place so a 401 or timeout cannot stamp empty tiles as live.
+    ///
+    /// Quota fetching lives in `performRefresh` and is awaited *after* the
+    /// forced widget reload has fired, so a slow subscription-quota response
+    /// cannot gate the Lock Screen alert or the final forced widget reload.
     private func refreshSecondaryWidgetSections(using client: APIClient) async {
         await WidgetSnapshotStore.refreshSecondarySections(using: client)
     }

@@ -51,6 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Regenerate Xcode project from project.yml
+        working-directory: ios/UsageMonitor
+        run: xcodegen generate
+
       - name: Assert stable Xcode (never beta)
         run: |
           echo "DEVELOPER_DIR=${DEVELOPER_DIR}"
@@ -82,3 +89,17 @@ jobs:
               COMPILER_INDEX_STORE_ENABLE=NO
           }
           build || { sleep 20; build; }
+
+      - name: Test UsageMonitorWidgetTests on iOS Simulator
+        run: |
+          UDID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for group in data["devices"].values() for d in group if d.get("isAvailable") is not False and d.get("name","").startswith("iPhone")]; print(devices[0]["udid"] if devices else "")')"
+          test -n "$UDID"
+          xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || xcrun simctl boot "$UDID"
+          xcodebuild test \
+            -project ios/UsageMonitor/UsageMonitor.xcodeproj \
+            -scheme UsageMonitor \
+            -destination "platform=iOS Simulator,id=$UDID" \
+            -derivedDataPath "${RUNNER_TEMP}/um-ios-tests-${GITHUB_RUN_ID}" \
+            -only-testing:UsageMonitorWidgetTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
