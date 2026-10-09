@@ -349,6 +349,75 @@ final class OfflineCacheTests: XCTestCase {
         XCTAssertNil(store.read())
     }
 
+    func testWidgetStorePrefersNewerDefaultsWhenBudgetTimestampDidNotChange() throws {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-newer-defaults")
+        let fileStore = SharedStore(containerURL: dir, defaults: defaults)
+        let defaultsOnlyStore = SharedStore(containerURL: nil, defaults: defaults)
+        var budget = WidgetSnapshot.placeholder
+        budget.mac = nil
+        let mac = WidgetSnapshot.MacSection(
+            generatedAt: Date(timeIntervalSince1970: 1_760_000_000),
+            ok: true,
+            status: "online",
+            reported: true,
+            hostname: "test-mac"
+        )
+
+        fileStore.write(budget)
+        defaultsOnlyStore.update { $0 = $0.replacingMac(mac) }
+        let latestDefault = try XCTUnwrap(defaults.data(forKey: "widget-snapshot-v2"))
+        let latestEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: latestDefault) as? [String: Any]
+        )
+        XCTAssertNotNil(latestEnvelope["revision"])
+
+        // A budget refresh preserves the Mac section from the newest stored
+        // copy even though the budget generatedAt is unchanged.
+        fileStore.update { $0 = budget.mergingPreservedSections(from: $0) }
+
+        XCTAssertEqual(fileStore.read()?.generatedAt, budget.generatedAt)
+        XCTAssertEqual(fileStore.read()?.mac, mac)
+    }
+
+    func testWidgetStorePrefersNewerFileOverOlderDefaults() throws {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-newer-file")
+        let defaultsOnlyStore = SharedStore(containerURL: nil, defaults: defaults)
+        let fileStore = SharedStore(containerURL: dir, defaults: defaults)
+        var budget = WidgetSnapshot.placeholder
+        budget.mac = nil
+        let mac = WidgetSnapshot.MacSection(
+            generatedAt: Date(timeIntervalSince1970: 1_760_000_000),
+            ok: true,
+            status: "online",
+            reported: true,
+            hostname: "new-file-mac"
+        )
+
+        defaultsOnlyStore.write(budget)
+        let olderDefaults = try XCTUnwrap(defaults.data(forKey: "widget-snapshot-v2"))
+        let newerFileSnapshot = budget.replacingMac(mac)
+        fileStore.write(newerFileSnapshot)
+        defaults.set(olderDefaults, forKey: "widget-snapshot-v2")
+
+        XCTAssertEqual(fileStore.read(), newerFileSnapshot)
+    }
+
+    func testWidgetStoreUsesValidFileWhenDefaultsCopyIsInvalid() {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-invalid-defaults")
+        let store = SharedStore(containerURL: dir, defaults: defaults)
+        store.write(.placeholder)
+        defaults.set(Data("not-json".utf8), forKey: "widget-snapshot-v2")
+
+        XCTAssertEqual(store.read(), .placeholder)
+        XCTAssertNil(defaults.data(forKey: "widget-snapshot-v2"))
+    }
+
     func testWidgetStoreClearRemovesProtectedAndLegacyData() throws {
         let dir = tempDirectory()
         defer { remove(dir) }
