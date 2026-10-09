@@ -1,0 +1,49 @@
+name: iOS widget screenshots
+
+on:
+  pull_request:
+    paths:
+      - 'ios/UsageMonitor/UsageMonitorWidget/**'
+      - 'ios/UsageMonitor/UsageMonitorWidgetTests/**'
+      - 'ios/UsageMonitor/project.yml'
+      - 'scripts/ios-widget-screenshots.sh'
+      - '.github/workflows/ios-widget-screenshots.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-widget-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: Widget PNG capture (simulator)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Regenerate Xcode project from project.yml
+        working-directory: ios/UsageMonitor
+        run: xcodegen generate
+
+      - name: Capture widget configurations
+        run: bash scripts/ios-widget-screenshots.sh
+
+      - name: Upload widget screenshot artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165ac8baa65d1f436bb7dcf544c3e3ae79f09b # v4
+        with:
+          name: ios-widget-screenshots
+          path: artifacts/ios-widget-screenshots/*.png
+          if-no-files-found: error

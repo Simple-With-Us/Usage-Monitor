@@ -215,6 +215,11 @@ targets:
     sources:
       - path: UsageMonitorWidgetTests
       - path: UsageMonitorWidget/WidgetPresentation.swift
+      - path: UsageMonitorWidget/WidgetTimeline.swift
+      - path: UsageMonitorWidget/WidgetScreenViews.swift
+      - path: UsageMonitorWidget/TopicWidgets.swift
+      - path: UsageMonitorWidget/GlanceWidgets.swift
+      - path: UsageMonitorWidget/BudgetWidgetIntent.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.widgettests

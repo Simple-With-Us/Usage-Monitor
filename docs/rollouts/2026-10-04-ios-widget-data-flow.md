@@ -3,7 +3,8 @@ repo: usage-monitor
 **Seat:** MiniMax (`@MINIMAX`)
 **Board:** `57d42d5809dd477d807625261b287582`
 **Branch:** `minimax/ios-widget-data-flow`
-**Worktree:** `~/apps/simplewithus-mm-ios-widget-data-flow`
+**Worktree:** `~/apps/simplewithus-mm-ios-widget-data-flow` (Mac lane); Cursor Cloud
+agents use `/workspace` on branch `minimax/ios-widget-data-flow`
 **Pre-work claim:** posted in `#agent-sync` beginning with `repo: usage-monitor`
 as required by the team's agent-sync protocol (see `AGENT-SYNC.md`); the
 private local protocol file path is intentionally not in this public note.
@@ -39,6 +40,11 @@ and the widget still says the same thing afterwards.  That rules out
   a slower older response can no longer clobber a faster newer one)
 - `ios/UsageMonitor/UsageMonitorKit/Sources/Models/QuotaWindows.swift`
   (decoded into the shared `WidgetShared.QuotaSection`)
+- `ios/UsageMonitor/UsageMonitorWidget/WidgetTimeline.swift` (`BudgetEntry` +
+  timeline provider split out of the bundle entry so unit tests can compile
+  widget UI without `@main`)
+- `ios/UsageMonitor/UsageMonitorWidget/WidgetScreenViews.swift` (root +
+  budget/LLM/server chrome split out for the same reason)
 - `ios/UsageMonitor/UsageMonitorWidget/WidgetPresentation.swift` (new
   `WidgetRowCount` / `WidgetSortOrder` options, new `WidgetTopic` cases for
   `quotas` and `projects`, new `topicContent` family including
@@ -76,6 +82,13 @@ and the widget still says the same thing afterwards.  That rules out
 - `ios/UsageMonitor/UsageMonitorWidgetTests/WidgetSnapshotResolverTests.swift`
   (8 new resolver tests pinning the per-section merge, the two payload
   encodings, and the corrupt-Local fallback)
+- `ios/UsageMonitor/UsageMonitorWidgetTests/WidgetVisualCaptureTests.swift`
+  (simulator-hosted PNG capture for every topic × widget family; driven by
+  `scripts/ios-widget-screenshots.sh`)
+- `scripts/ios-widget-screenshots.sh`
+- `.github/workflows/ios-widget-screenshots.yml`
+- `.github/workflows/ios-build.yml` (XcodeGen regen + `UsageMonitorWidgetTests`
+  on every iOS PR)
 
 ### Docs
 
@@ -128,10 +141,12 @@ and the widget still says the same thing afterwards.  That rules out
   **TEST SUCCEEDED**, 62 tests, 0 failures (11 new widget-presentation
   tests, 8 new resolver tests) (hosted iOS job, recorded in the previous
   PR)
-- Automated simulator visual verification
-  (set `CONFIGURATION` for every affected widget layout):
-  `xcrun simctl io booted screenshot artifacts/ios-widget-$CONFIGURATION.png`
-  — **NOT RUN ON THIS LINUX BOX**; see "Next Steps & Blockers".
+- `bash scripts/ios-widget-screenshots.sh` (hosted `macos-latest`,
+  `.github/workflows/ios-widget-screenshots.yml`) — writes
+  `artifacts/ios-widget-screenshots/<topic>-<family>.png` via
+  `WidgetVisualCaptureTests` and adds `simulator-booted.png` via
+  `xcrun simctl io <udid> screenshot` — **pending first green CI run on this
+  PR** (cannot execute on Linux).
 - `swift build` against the iOS package is not runnable on this Linux host
   (the package's networking code is iOS-only and fails to compile for
   macOS), so Swift verification of this branch is hosted-ios-job only.
@@ -139,25 +154,12 @@ and the widget still says the same thing afterwards.  That rules out
 
 ## Next Steps & Blockers
 
-- **Hosted iOS screenshot CI for new widgets:** no Mac runner is available
-  in this Linux dev box, and the existing hosted iOS workflows
-  (`.github/workflows/ios-build.yml`, `ios-ship.yml`, `ios-appstore-gm.yml`)
-  do not currently run a `xcrun simctl io booted screenshot` step.
-  Configurable widget extensions do not lend themselves to a single
-  static screenshot per layout, so the realistic hook is to add a
-  dedicated `ios-widget-screenshots.yml` job that boots a simulator,
-  installs both apps, configures each new widget configuration via
-  `WidgetCenter`, captures one PNG per `CONFIGURATION`, and uploads the
-  PNGs as CI artifacts.  Tracked as a follow-up; this branch does not
-  invent a broken Mac-only workflow that cannot run.
-- **`xcodegen` regeneration:** the `.xcodeproj/project.pbxproj` was
-  generated on a Mac with `xcodegen generate`; this Linux box does not
-  have `xcodegen` available, so the project file is left as the
-  xcodegen-produced artifact.  `project.yml` is the source of truth
-  (per the in-file comment) and already declares the widget sources, the
-  test sources, and `WidgetSnapshotResolverTests.swift` via the
-  `UsageMonitorWidgetTests` directory entry.  The next Mac build will
-  diff-confirm by re-running `xcodegen generate`.
+- **First green `ios-widget-screenshots` + extended `ios-build` test job:** both
+  workflows now run `xcodegen generate` before `xcodebuild`.  Merge is blocked
+  until the PR shows green on those jobs (this cloud seat cannot run them).
+- **`xcodegen` regeneration:** `project.yml` is the sole source of truth; CI
+  regenerates `UsageMonitor.xcodeproj` on every iOS workflow run.  Do not hand-
+  edit `project.pbxproj`.
 - **`UsageMonitorKitTests` SwiftPM target** is still not wired into any
   Xcode scheme and cannot be run with `swift test` (pre-existing iOS-only
   networking code).  Not addressed here; resolver tests were placed in
