@@ -52,7 +52,7 @@ export default function SupportPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Which app do I have?
+          Which App Do I Have?
         </h2>
         <ul className="list-disc space-y-2 pl-5">
           <li>
@@ -70,7 +70,7 @@ export default function SupportPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Common fixes
+          Common Fixes
         </h2>
         <ul className="list-disc space-y-2 pl-5">
           <li>

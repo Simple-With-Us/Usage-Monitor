@@ -232,3 +232,26 @@ test.describe('visual: settings page', () => {
     await expect(page).toHaveScreenshot('settings.png', { ...stableShot, fullPage: true });
   });
 });
+
+
+test('visual: quota provenance distinguishes conflicting readings', async ({ page }) => {
+  await settle(page);
+  await page.route('**/api/agents-overview?*', route => json(route, {}, 503));
+  await page.route('**/api/quota-windows', route => json(route, {
+    windows: [
+      { id: 'first', provider: 'anthropic', label: '5h window', remainingPercent: 83,
+        status: 'available', source: 'Provider API', sourceApp: 'CodeCaps', machine: 'Office Mac',
+        occurredAt: '2026-09-27T19:50:00.000Z', resetAt: '2026-09-27T23:00:00.000Z' },
+      { id: 'second', provider: 'anthropic', label: '5h window', remainingPercent: 98,
+        status: 'available', source: 'Local Collector', machine: 'Laptop',
+        occurredAt: '2026-09-27T19:30:00.000Z', resetAt: '2026-09-27T23:00:00.000Z' },
+    ],
+  }));
+  await login(page);
+  await page.goto('/agents');
+  await pinFonts(page);
+  await expect(page.getByText(/Source: Provider API/)).toBeVisible();
+  await expect(page.getByText(/Source: Local Collector/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: '5h Window', exact: true })).toHaveCount(2);
+  await expect(page).toHaveScreenshot('quota-provenance.png', { ...stableShot, fullPage: true });
+});

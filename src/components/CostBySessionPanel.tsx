@@ -103,7 +103,7 @@ export default function CostBySessionPanel() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Cost by session</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Cost by Session</h1>
         <p className="mt-2 max-w-3xl text-sm text-gray-600 dark:text-gray-300">
           Sums tokens and API-equivalent cost across one or more Claude Code session ids -- the
           same ids THE BOARD records on a finding via <code>board claim/status/comment --session</code>.
