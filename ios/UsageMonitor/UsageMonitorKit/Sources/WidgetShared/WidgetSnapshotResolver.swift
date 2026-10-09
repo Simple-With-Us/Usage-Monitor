@@ -147,7 +147,7 @@ public struct WidgetSnapshotResolver {
     /// alone: that is the file path used for reads/writes, and changing it would
     /// silently desync the writer from the reader.
     public var isAppGroupUnavailable: Bool {
-        AppGroup.containerURL == nil
+        containerURL == nil || AppGroup.containerURL == nil
     }
 
     // MARK: - Local payload
