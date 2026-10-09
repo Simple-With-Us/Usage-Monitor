@@ -16,21 +16,7 @@ fi
 mkdir -p "$OUT"
 
 pick_simulator() {
-  xcrun simctl list devices available -j | python3 - <<'PY'
-import json, sys
-data = json.load(sys.stdin)
-for runtime, devices in data.get("devices", {}).items():
-    if "iOS" not in runtime:
-        continue
-    for d in devices:
-        name = d.get("name", "")
-        if d.get("isAvailable") is False:
-            continue
-        if name.startswith("iPhone"):
-            print(d["udid"])
-            sys.exit(0)
-sys.exit(1)
-PY
+  xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for group in data.get("devices",{}).values() for d in group if d.get("isAvailable") is not False and d.get("name","").startswith("iPhone")]; print(devices[0]["udid"] if devices else "")'
 }
 
 UDID="${IOS_SIMULATOR_UDID:-$(pick_simulator)}"
