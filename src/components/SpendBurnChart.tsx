@@ -267,7 +267,7 @@ export default function SpendBurnChart({
     >
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Month pace</h3>
+          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Month Pace</h3>
           <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
             Linear estimate — not daily history · Day {pace.currentDay} of {pace.daysInMonth}
           </p>

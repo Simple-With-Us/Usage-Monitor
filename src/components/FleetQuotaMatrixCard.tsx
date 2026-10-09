@@ -30,6 +30,11 @@ export interface NormalizedWindow {
   status: QuotaWindowStatus;
   resetAt: string | null;
   via: string | null;
+  collector?: string | null;
+  source?: string | null;
+  sourceApp?: string | null;
+  machine?: string | null;
+  occurredAt?: string | null;
 }
 
 export interface NormalizedGroup {
@@ -85,6 +90,13 @@ function normalizeStatus(value: unknown, remainingUnknown: boolean): QuotaWindow
   return remainingUnknown ? "unknown" : "available";
 }
 
+function quotaWindowHeading(window: string): string {
+  const value = window.trim().toLowerCase();
+  if (value === "5h" || value === "7d") return `${value} Window`;
+  if (value === "5-hour") return "5-Hour Window";
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)} Window`;
+}
+
 function normalizeWindow(
   raw: unknown,
   fallbackVia: string | null,
@@ -107,6 +119,11 @@ function normalizeWindow(
     status: normalizeStatus(rec.status, remainingUnknown),
     resetAt: asString(rec.resetAt),
     via,
+    collector: asString(rec.collector),
+    source: asString(rec.source),
+    sourceApp: asString(rec.sourceApp),
+    machine: asString(rec.machine),
+    occurredAt: asString(rec.occurredAt),
   };
 }
 
@@ -274,6 +291,20 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
   const percent = win.remainingUnknown ? null : win.remainingPercent;
   const tone = quotaTone(win.status, percent);
   const countdown = formatCountdown(win.resetAt, nowMs);
+  const reportedAt = win.occurredAt && Number.isFinite(new Date(win.occurredAt).getTime())
+    ? new Date(win.occurredAt).toLocaleString("en-US", { hour12: true })
+    : "Unknown";
+  const source = win.source ?? "Unknown";
+  const windowHeading = win.label
+    .replace(/\b5-hour window\b/i, "5-Hour Window")
+    .replace(/\b(5h|7d|weekly|monthly) window\b/i, (_match, period: string) => {
+      const normalized = period.toLowerCase();
+      return `${normalized === "weekly" || normalized === "monthly" ? normalized[0].toUpperCase() + normalized.slice(1) : normalized} Window`;
+    })
+    .replace(/^weekly$/i, "Weekly")
+    .replace(/^included plan$/i, "Included Plan");
+  const collector = win.collector && win.collector !== win.source ? win.collector : null;
+  const service = win.sourceApp && win.sourceApp !== win.source ? win.sourceApp : null;
 
   return (
     <div className="p-4 rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 flex flex-col justify-between">
@@ -281,13 +312,15 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
         <div className="flex items-start justify-between gap-2">
           <div>
             <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100 leading-tight">
-              {win.label}
+              {windowHeading}
             </h4>
             <p className="text-[11px] text-gray-500 dark:text-gray-400">
-              {win.window ? <span className="uppercase font-medium">{win.window}</span> : null}
+              {win.window && !/\bwindow$/i.test(windowHeading) ? (
+                <span className="font-medium">{quotaWindowHeading(win.window)}</span>
+              ) : null}
               {win.via === "antigravity" ? (
                 <span className="text-gray-500 dark:text-gray-400">
-                  {win.window ? " · " : ""}via Antigravity
+                  {win.window && !/\bwindow$/i.test(windowHeading) ? " · " : ""}via Antigravity
                 </span>
               ) : null}
             </p>
@@ -314,6 +347,9 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
             />
           </div>
         </div>
+        <p className="mt-2 break-all text-[10px] text-gray-500 dark:text-gray-400">
+          Source: {source}{collector ? ` · Collector: ${collector}` : ""}{service ? ` · Service: ${service}` : ""}{win.machine ? ` · Machine: ${win.machine}` : ""} · Reported: {reportedAt}
+        </p>
       </div>
     </div>
   );

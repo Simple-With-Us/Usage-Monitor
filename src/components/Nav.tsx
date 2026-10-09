@@ -30,8 +30,8 @@ const PRIMARY_LINKS: NavLink[] = [
 ];
 
 const SECONDARY_LINKS: NavLink[] = [
-  { href: "/attribution", label: "Keys & apps" },
-  { href: "/cost-by-session", label: "Cost by session" },
+  { href: "/attribution", label: "Keys & Apps" },
+  { href: "/cost-by-session", label: "Cost by Session" },
 ];
 
 function isLinkActive(pathname: string, href: string): boolean {
@@ -382,7 +382,7 @@ export default function Nav() {
                 disabled={logoutPending}
                 className="shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
-                {logoutPending ? "…" : "Log out"}
+                {logoutPending ? "…" : "Log Out"}
               </button>
             </div>
 
@@ -518,7 +518,7 @@ export default function Nav() {
                 disabled={logoutPending}
                 className="block min-h-11 w-full rounded-lg px-3 py-2.5 text-left text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
-                {logoutPending ? "Logging out…" : "Log out"}
+                {logoutPending ? "Logging out…" : "Log Out"}
               </button>
               {logoutError && (
                 <p role="alert" className="px-3 py-1 text-xs text-red-600 dark:text-red-300">

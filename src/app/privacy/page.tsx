@@ -78,10 +78,10 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Data we process
+          Data We Process
         </h2>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Local Monitor (on-device)
+          Usage Local Monitor (On-Device)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -105,7 +105,7 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Client Monitor (server client)
+          Usage Client Monitor (Server Client)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -122,7 +122,7 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Web dashboard (if you use a hosted instance)
+          Web Dashboard (If You Use a Hosted Instance)
         </h3>
         <p>
           A password-protected dashboard may store provider credentials and
@@ -135,7 +135,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Third parties you choose
+          Third Parties You Choose
         </h2>
         <p>
           When you add a provider (for example OpenRouter, OpenAI, Anthropic,
@@ -148,7 +148,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Tracking, ads, analytics
+          Tracking, Ads, Analytics
         </h2>
         <p>
           The iOS apps do not include advertising identifiers for ads, do not
@@ -160,7 +160,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Retention and deletion
+          Retention and Deletion
         </h2>
         <ul className="list-disc space-y-1 pl-5">
           <li>

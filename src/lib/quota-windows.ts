@@ -11,6 +11,7 @@ export type QuotaWindowStatus = "available" | "near_cap" | "exhausted" | "unknow
 export interface QuotaEventLike {
   provider: string;
   service?: string | null;
+  sourceApp?: string | null;
   label?: string | null;
   credits?: number | null;
   limit?: number | null;
@@ -37,6 +38,8 @@ export interface QuotaWindow {
    * Models", see antigravityDisplayLabel); that is NOT the user's Claude plan.
    */
   via: string | null;
+  /** Collector application that submitted this quota event, when available. */
+  collector?: string | null;
   sourceApp: string | null;
   /** Stable identity of the machine that produced this window, when supplied. */
   producerInstanceId?: string;
@@ -308,6 +311,7 @@ export function projectQuotaWindows(
           return cfg?.label ?? (eventCanonicalKey || "Unknown");
         })(),
         via: viaFor(eventCanonicalKey, resolved),
+        collector: event.sourceApp ?? null,
         sourceApp: event.service ?? null,
         ...(producerInstanceId ? { producerInstanceId } : {}),
         ...(machine ? { machine } : {}),
