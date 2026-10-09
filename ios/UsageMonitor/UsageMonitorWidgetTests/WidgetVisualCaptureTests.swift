@@ -29,8 +29,7 @@ final class WidgetVisualCaptureTests: XCTestCase {
         let cases = Self.allCaptureCases(snapshot: snapshot)
         for capture in cases {
             let entry = BudgetEntry(date: .now, snapshot: snapshot, content: capture.content)
-            let view = UsageMonitorWidgetView(entry: entry)
-                .environment(\.widgetFamily, capture.family)
+            let view = UsageMonitorWidgetView(entry: entry, familyOverride: capture.family)
                 .padding(8)
                 .background(Theme.Colors.background)
 

@@ -6,8 +6,19 @@ import DesignSystem
 // MARK: - Root view (topic + family)
 
 struct UsageMonitorWidgetView: View {
-    @Environment(\.widgetFamily) private var family
     let entry: BudgetEntry
+    /// Visual-capture tests pass an explicit family because `\.widgetFamily` is read-only off-widget.
+    var familyOverride: WidgetFamily?
+    @Environment(\.widgetFamily) private var environmentFamily
+
+    init(entry: BudgetEntry, familyOverride: WidgetFamily? = nil) {
+        self.entry = entry
+        self.familyOverride = familyOverride
+    }
+
+    private var family: WidgetFamily {
+        familyOverride ?? environmentFamily
+    }
 
     var body: some View {
         switch entry.content {
