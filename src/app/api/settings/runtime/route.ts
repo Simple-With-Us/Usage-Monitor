@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import {
   appSettings,
   resolveInfisicalEnvironment,
 } from "@/lib/app-settings";
+import { RuntimeSettingUpdateSchema } from "@/lib/runtime-settings-schema";
 import { getAppliedSchedulerGate } from "@/lib/runtime-health";
 import { InfisicalWriteError } from "@jaywedgeworth22/congress-trading-shared";
 
@@ -62,13 +62,7 @@ export async function PUT(request: NextRequest) {
   }
   // Trust boundary: validate the untrusted body with a strict Zod schema
   // (unknown fields rejected) instead of a type assertion.
-  const parsed = z
-    .object({
-      key: z.string().trim().min(1),
-      value: z.string(),
-    })
-    .strict()
-    .safeParse(body ?? {});
+  const parsed = RuntimeSettingUpdateSchema.safeParse(body ?? {});
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Invalid request body" },

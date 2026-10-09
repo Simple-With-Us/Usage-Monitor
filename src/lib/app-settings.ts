@@ -1,3 +1,5 @@
+import "server-only";
+
 // =============================================================================
 // app-settings — Infisical sole-source-of-truth for app-level tunable knobs
 // =============================================================================
@@ -40,8 +42,7 @@
 //                   knob keys resolve through this service, everything else
 //                   passes through to process.env unchanged.
 //
-// Edge-safety: this module has no import-time side effects and no node:
-// imports, so importing it from edge-runtime code (middleware) is safe.
+// Server-only: resolves Infisical credentials and caches every project secret.
 // init() is only ever called from instrumentation.ts on the nodejs runtime.
 
 import {
@@ -49,10 +50,18 @@ import {
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
 
-/** Infisical project for this app (jays-services org).  See INFISICAL.md. */
-export const APP_INFISICAL_PROJECT_ID = "86e35e51-91bc-4dfd-a045-4484726b9c40";
-
 const DEFAULT_REFRESH_MS = 300_000; // 5 minutes, per the canonical pattern.
+
+/** Infisical `usage-monitor` project id — from env only (see INFISICAL.md). */
+export function resolveInfisicalProjectId(
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  const id =
+    env.INFISICAL_UM_PROJECT_ID?.trim() ||
+    env.INFISICAL_PROJECT_ID?.trim() ||
+    env.INFISICAL_APP_PROJECT_ID?.trim();
+  return id || undefined;
+}
 
 export type AppSettingType = "string" | "int" | "float" | "bool";
 
@@ -381,6 +390,7 @@ export class AppSettingsService {
     const envCreds = resolveCredentials();
     const clientId = options.clientId ?? envCreds.clientId;
     const clientSecret = options.clientSecret ?? envCreds.clientSecret;
+    const projectId = resolveInfisicalProjectId();
     if (!clientId || !clientSecret) {
       console.warn(
         "[app-settings] No Infisical universal-auth credentials " +
@@ -390,13 +400,21 @@ export class AppSettingsService {
       );
       return;
     }
+    if (!projectId) {
+      console.warn(
+        "[app-settings] No Infisical project id " +
+          "(INFISICAL_UM_PROJECT_ID, INFISICAL_PROJECT_ID, or INFISICAL_APP_PROJECT_ID); " +
+          "running in env-fallback mode. See INFISICAL.md and the private operations inventory."
+      );
+      return;
+    }
     const environment = options.environment ?? resolveInfisicalEnvironment();
     const refreshIntervalMs =
       options.refreshIntervalMs ??
       this.readRefreshIntervalMsFromEnv() ??
       DEFAULT_REFRESH_MS;
     const client = createInfisicalSettings({
-      projectId: APP_INFISICAL_PROJECT_ID,
+      projectId,
       environment,
       refreshIntervalMs,
       infisicalUrl: options.infisicalUrl,
@@ -414,8 +432,8 @@ export class AppSettingsService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(
-        `[app-settings] Infisical load failed for project ${APP_INFISICAL_PROJECT_ID} ` +
-          `environment "${environment}": ${message}. Continuing in env-fallback mode; ` +
+        `[app-settings] Infisical load failed for usage-monitor project ` +
+          `(environment "${environment}"): ${message}. Continuing in env-fallback mode; ` +
           `the deploy-time env sync already carries Infisical values. See INFISICAL.md.`
       );
       try {
@@ -428,7 +446,7 @@ export class AppSettingsService {
     this.client = client;
     this.infisicalMode = true;
     console.info(
-      `[app-settings] Loaded settings from Infisical (project ${APP_INFISICAL_PROJECT_ID}, ` +
+      `[app-settings] Loaded settings from Infisical (usage-monitor project, ` +
         `environment "${environment}", refresh every ${refreshIntervalMs} ms).`
     );
   }

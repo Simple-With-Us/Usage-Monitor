@@ -67,6 +67,34 @@ function makeMockFetch(overrides?: {
   return { fetchImpl, calls };
 }
 
+function testInfisicalClientId(): string {
+  const value = process.env.TEST_INFISICAL_CLIENT_ID?.trim();
+  if (!value) {
+    throw new Error("TEST_INFISICAL_CLIENT_ID must be set (see vitest.setup.ts)");
+  }
+  return value;
+}
+
+function testInfisicalClientSecret(): string {
+  const value = process.env.TEST_INFISICAL_CLIENT_SECRET?.trim();
+  if (!value) {
+    throw new Error(
+      "TEST_INFISICAL_CLIENT_SECRET must be set (see vitest.setup.ts)"
+    );
+  }
+  return value;
+}
+
+function infisicalInitBase(fetchImpl: typeof fetch) {
+  return {
+    clientId: testInfisicalClientId(),
+    clientSecret: testInfisicalClientSecret(),
+    environment: "dev" as const,
+    refreshIntervalMs: 0,
+    fetchImpl: fetchImpl as typeof fetch,
+  };
+}
+
 function clearInfisicalCredEnv() {
   for (const name of [
     "INFISICAL_CLIENT_ID",
@@ -86,13 +114,7 @@ beforeEach(() => {
 describe("app-settings (Infisical SOT tunable knobs)", () => {
   it("init loads the full secret set into the in-memory cache", async () => {
     const { fetchImpl, calls } = makeMockFetch();
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     expect(appSettings.isInfisicalMode).toBe(true);
     expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
@@ -106,13 +128,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
 
   it("runtime reads make zero network calls after init", async () => {
     const { fetchImpl, calls } = makeMockFetch();
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
     const baseline = calls.length;
     expect(baseline).toBeGreaterThan(0);
 
@@ -141,13 +157,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
         }
       },
     });
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     const normalized = await appSettings.set("ADAPTER_HTTP_TIMEOUT_MS", "20000");
     expect(normalized).toBe("20000");
@@ -157,13 +167,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
 
   it("failed write-through rejects and leaves the cache untouched", async () => {
     const { fetchImpl, calls } = makeMockFetch({ patchStatus: 500 });
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     await expect(
       appSettings.set("ADAPTER_HTTP_TIMEOUT_MS", "20000")
@@ -183,10 +187,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
     }) as typeof fetch;
 
     await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
+      ...infisicalInitBase(flakyFetch),
       fetchImpl: flakyFetch,
     });
     expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
@@ -196,6 +197,28 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
     // Last-known-good cache is untouched.
     expect(appSettings.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
     expect(appSettings.isInfisicalMode).toBe(true);
+  });
+
+  it("init without a project id stays in env-fallback mode with zero network calls", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("network must not be touched without a project id");
+    });
+    const savedProjectId = process.env.INFISICAL_UM_PROJECT_ID;
+    delete process.env.INFISICAL_UM_PROJECT_ID;
+    delete process.env.INFISICAL_PROJECT_ID;
+    delete process.env.INFISICAL_APP_PROJECT_ID;
+    process.env.INFISICAL_CLIENT_ID = testInfisicalClientId();
+    process.env.INFISICAL_CLIENT_SECRET = testInfisicalClientSecret();
+
+    await appSettings.init({ fetchImpl: fetchImpl as typeof fetch });
+    expect(appSettings.isInfisicalMode).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    delete process.env.INFISICAL_CLIENT_ID;
+    delete process.env.INFISICAL_CLIENT_SECRET;
+    if (savedProjectId !== undefined) {
+      process.env.INFISICAL_UM_PROJECT_ID = savedProjectId;
+    }
   });
 
   it("init without credentials stays in env-fallback mode with zero network calls", async () => {
@@ -219,10 +242,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
     process.env.ALERT_MIN_SEVERITY = "info";
 
     await appSettings.init({
-      clientId: "id",
-      clientSecret: "bad-secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
+      ...infisicalInitBase(fetchImpl as typeof fetch),
       fetchImpl: fetchImpl as typeof fetch,
     });
 
@@ -300,13 +320,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
         { secretKey: "DATABASE_URL", secretValue: "file:not-real.db" },
       ],
     });
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     expect(appSettings.isInfisicalMode).toBe(true);
     const all = appSettings.getAll();
@@ -324,13 +338,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
         { secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: "10000" },
       ],
     });
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     expect(appSettings.isInfisicalMode).toBe(true);
     process.env.ADAPTER_PROVIDER_TIMEOUT_MS = "45000";
@@ -355,13 +363,7 @@ describe("app-settings (Infisical SOT tunable knobs)", () => {
         { secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: "" },
       ],
     });
-    await appSettings.init({
-      clientId: "id",
-      clientSecret: "secret",
-      environment: "dev",
-      refreshIntervalMs: 0,
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+    await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));
 
     expect(appSettings.isInfisicalMode).toBe(true);
     process.env.ADAPTER_HTTP_TIMEOUT_MS = "45000";

@@ -1,26 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { readAlertDeliveryConfig } from "@/lib/alert-delivery";
 import { apnsConfigured, loadApnsConfig } from "@/lib/apns";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { appSettings } from "@/lib/app-settings";
 import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth";
 import { prisma } from "@/lib/prisma";
+import { SettingsUpdateSchema } from "@/lib/settings-update-schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// Trust boundary: validate the untrusted body with a strict Zod schema
-// (unknown fields rejected) instead of destructuring raw JSON.  All fields
-// are optional; present fields are still type-checked before any write.
-const SettingsUpdateSchema = z
-  .object({
-    emailEnabled: z.boolean().optional(),
-    minSeverity: z.enum(["info", "warning", "critical"]).optional(),
-    pushoverUserKey: z.string().optional(),
-    pushoverApiToken: z.string().optional(),
-  })
-  .strict();
 
 function isDashboardSession(request: NextRequest): boolean {
   return verifySessionToken(request.cookies.get(SESSION_COOKIE_NAME)?.value);
