@@ -277,7 +277,8 @@ describe("QuotaWindowCard rendering", () => {
             remainingPercent: 42,
             occurredAt: "2026-09-12T00:05:00.000Z",
             source: "api.anthropic.com/work",
-            sourceApp: "subscription-quota-collector",
+            collector: "subscription-quota-collector",
+            sourceApp: "claude-code",
           },
         ],
       }],
@@ -292,6 +293,7 @@ describe("QuotaWindowCard rendering", () => {
     expect(html).toContain("Source: api.anthropic.com/local");
     expect(html).toContain("Source: api.anthropic.com/work");
     expect(html).toContain("Collector: subscription-quota-collector");
+    expect(html).toContain("Service: claude-code");
     expect(html).toContain(
       new Date("2026-09-12T00:00:00.000Z").toLocaleString("en-US", { hour12: true }),
     );

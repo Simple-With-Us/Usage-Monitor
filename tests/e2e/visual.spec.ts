@@ -240,7 +240,7 @@ test('visual: quota provenance distinguishes conflicting readings', async ({ pag
   await page.route('**/api/quota-windows', route => json(route, {
     windows: [
       { id: 'first', provider: 'anthropic', label: '5h window', remainingPercent: 83,
-        status: 'available', source: 'Provider API', sourceApp: 'CodeCaps', machine: 'Office Mac',
+        status: 'available', source: 'Provider API', collector: 'CodeCaps', sourceApp: 'claude-code', machine: 'Office Mac',
         occurredAt: '2026-09-27T19:50:00.000Z', resetAt: '2026-09-27T23:00:00.000Z' },
       { id: 'second', provider: 'anthropic', label: '5h window', remainingPercent: 98,
         status: 'available', source: 'Local Collector', machine: 'Laptop',

@@ -46,6 +46,27 @@ describe("quotaStatus", () => {
 });
 
 describe("projectQuotaWindows", () => {
+  it("keeps the submitting collector distinct from the service attribution", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        sourceApp: "subscription-quota-collector",
+        service: "claude-code",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T00:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", source: "api.anthropic.com" },
+      },
+    ]);
+
+    expect(result.windows[0]).toMatchObject({
+      collector: "subscription-quota-collector",
+      sourceApp: "claude-code",
+      source: "api.anthropic.com",
+    });
+  });
+
   it("projects per-model skip targets from antigravity-usage events", () => {
     const result = projectQuotaWindows([
       {

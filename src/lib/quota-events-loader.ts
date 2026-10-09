@@ -18,6 +18,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
       select: {
         provider: true,
         service: true,
+        sourceApp: true,
         label: true,
         credits: true,
         limit: true,
@@ -32,6 +33,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
       Array<{
         provider: string;
         service: string | null;
+        sourceApp: string | null;
         label: string | null;
         credits: number | null;
         limit: number | null;
@@ -42,6 +44,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
       SELECT
         "provider",
         "service",
+        "sourceApp",
         "label",
         "credits",
         "limit",
@@ -51,6 +54,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
         SELECT
           "provider",
           "service",
+          "sourceApp",
           "label",
           "credits",
           "limit",
@@ -91,6 +95,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
       select: {
         provider: true,
         service: true,
+        sourceApp: true,
         label: true,
         credits: true,
         limit: true,

@@ -30,6 +30,7 @@ export interface NormalizedWindow {
   status: QuotaWindowStatus;
   resetAt: string | null;
   via: string | null;
+  collector?: string | null;
   source?: string | null;
   sourceApp?: string | null;
   machine?: string | null;
@@ -118,6 +119,7 @@ function normalizeWindow(
     status: normalizeStatus(rec.status, remainingUnknown),
     resetAt: asString(rec.resetAt),
     via,
+    collector: asString(rec.collector),
     source: asString(rec.source),
     sourceApp: asString(rec.sourceApp),
     machine: asString(rec.machine),
@@ -292,7 +294,7 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
   const reportedAt = win.occurredAt && Number.isFinite(new Date(win.occurredAt).getTime())
     ? new Date(win.occurredAt).toLocaleString("en-US", { hour12: true })
     : "Unknown";
-  const source = win.source ?? win.sourceApp ?? "Unknown";
+  const source = win.source ?? "Unknown";
   const windowHeading = win.label
     .replace(/\b5-hour window\b/i, "5-Hour Window")
     .replace(/\b(5h|7d|weekly|monthly) window\b/i, (_match, period: string) => {
@@ -301,9 +303,8 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
     })
     .replace(/^weekly$/i, "Weekly")
     .replace(/^included plan$/i, "Included Plan");
-  const collector = win.source && win.sourceApp && win.sourceApp !== win.source
-    ? win.sourceApp
-    : null;
+  const collector = win.collector && win.collector !== win.source ? win.collector : null;
+  const service = win.sourceApp && win.sourceApp !== win.source ? win.sourceApp : null;
 
   return (
     <div className="p-4 rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 flex flex-col justify-between">
@@ -347,7 +348,7 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
           </div>
         </div>
         <p className="mt-2 break-all text-[10px] text-gray-500 dark:text-gray-400">
-          Source: {source}{collector ? ` · Collector: ${collector}` : ""}{win.machine ? ` · Machine: ${win.machine}` : ""} · Reported: {reportedAt}
+          Source: {source}{collector ? ` · Collector: ${collector}` : ""}{service ? ` · Service: ${service}` : ""}{win.machine ? ` · Machine: ${win.machine}` : ""} · Reported: {reportedAt}
         </p>
       </div>
     </div>
