@@ -139,7 +139,7 @@ export default function CostBySessionPanel() {
       {report ? (
         <>
           <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Totals across {report.matchedSessionIds.length} matched session(s)</h2>
+            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Totals Across {report.matchedSessionIds.length} Matched Session(s)</h2>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <Metric label="Estimated API-equivalent cost" value={money(report.totals.costUsd)} />
               <Metric label="Total tokens" value={tokens(report.totals.tokens.total)} />

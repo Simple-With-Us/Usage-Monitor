@@ -165,7 +165,7 @@ test.describe('visual: login page', () => {
     await settle(page);
     await page.goto('/login');
     await pinFonts(page);
-    await expect(page.getByRole('heading', { name: 'Log in', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Log In', exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot('login.png', { ...stableShot, fullPage: true });
   });
 
@@ -174,7 +174,7 @@ test.describe('visual: login page', () => {
     await page.goto('/login');
     await pinFonts(page);
     await page.getByLabel(/password/i).fill('definitely-wrong-password');
-    await page.getByRole('button', { name: 'Log in', exact: true }).click();
+    await page.getByRole('button', { name: 'Log In', exact: true }).click();
     await expect(page.getByRole('alert')).toBeVisible();
     await expect(page).toHaveScreenshot('login-error.png', { ...stableShot, fullPage: true });
   });

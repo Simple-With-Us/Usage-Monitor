@@ -128,7 +128,7 @@ export default function DashboardCharts({
     [groups]
   );
   const slices = isCurrentMonth ? familySlices : rangeSlices;
-  const pieTitle = isCurrentMonth ? "Projected cost breakdown" : "Spend by provider";
+  const pieTitle = isCurrentMonth ? "Projected Cost Breakdown" : "Spend by Provider";
   const pieCaption = isCurrentMonth
     ? `Exact family projections only${
         excludedIncomplete > 0 ? ` · ${excludedIncomplete} incomplete/ambiguous excluded` : ""

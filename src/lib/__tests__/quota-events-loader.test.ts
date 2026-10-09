@@ -34,6 +34,7 @@ describe("loadLatestQuotaWindowEvents", () => {
       {
         provider: "anthropic",
         service: null,
+        sourceApp: "subscription-quota-collector",
         label: "5h",
         credits: 80,
         limit: 100,
@@ -44,6 +45,7 @@ describe("loadLatestQuotaWindowEvents", () => {
 
     const rows = await loadLatestQuotaWindowEvents(since);
     expect(rows).toHaveLength(1);
+    expect(rows[0].sourceApp).toBe("subscription-quota-collector");
     expect(mocks.queryRaw).toHaveBeenCalledOnce();
     expect(mocks.findMany).not.toHaveBeenCalled();
   });

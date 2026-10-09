@@ -270,7 +270,7 @@ export default function KeyAttributionPanel() {
             </form>
 
             <form id="binding-form" onSubmit={createBinding} className="space-y-4 rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-              <h2 className="font-semibold text-gray-900 dark:text-gray-100">{replaceBindingId ? "Atomically reassign an app key reference" : "Bind an app key reference"}</h2>
+              <h2 className="font-semibold text-gray-900 dark:text-gray-100">{replaceBindingId ? "Atomically Reassign an App Key Reference" : "Bind an App Key Reference"}</h2>
               <Field label="Provider key identity">
                 <select required value={identityId} onChange={(event) => setIdentityId(event.target.value)} className={inputClass}>
                   <option value="">Select identity</option>
