@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, isCsrfSafeRequest, verifySessionToken } from "@/lib/auth";
+import { sentryConnectSrcOrigins } from "@/lib/sentry-options";
 import { datadogConnectSrcOrigins } from "@/lib/datadog-options";
 
 export const config = {
@@ -127,7 +128,7 @@ export function middleware(request: NextRequest) {
   const cspHeader = buildContentSecurityPolicy(
     nonce,
     isProduction,
-    datadogConnectSrcOrigins()
+    [...datadogConnectSrcOrigins(), ...sentryConnectSrcOrigins()]
   );
 
   const requestHeaders = new Headers(request.headers);

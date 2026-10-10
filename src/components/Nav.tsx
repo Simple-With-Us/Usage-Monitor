@@ -1,5 +1,6 @@
 "use client";
 
+import { openFeedbackOrMailto } from "@/components/ReportProblemButton";
 import {
   useState,
   useEffect,
@@ -55,16 +56,8 @@ function BrandMark({ className = "h-8 w-8" }: { className?: string }) {
   );
 }
 
-function triggerSentryFeedback() {
-  if (typeof window === "undefined") return;
-  const Sentry = (window as unknown as { Sentry?: { getFeedback?: () => { createForm?: () => Promise<{ appendToDom: () => void; open: () => void }> } } }).Sentry;
-  const feedback = Sentry?.getFeedback?.();
-  if (feedback?.createForm) {
-    void feedback.createForm().then((form) => {
-      form.appendToDom();
-      form.open();
-    }).catch(() => {});
-  }
+export function triggerSentryFeedback() {
+  openFeedbackOrMailto();
 }
 
 export default function Nav() {
