@@ -7,6 +7,7 @@ import {
   managedApiKeyFingerprint,
 } from "@/lib/crypto";
 import { geminiApiKeyFingerprint } from "@/lib/gemini-key-status";
+import { resolveProdInfisicalEnvironment } from "@/lib/infisical-environment";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { prisma } from "@/lib/prisma";
 import {
@@ -681,7 +682,10 @@ function cleanEnv(name: string): string | undefined {
 }
 
 function configuredSources(): SourceConfig[] {
-  const environment = cleanEnv("INFISICAL_ENV") ?? DEFAULT_ENVIRONMENT;
+  const environment = resolveProdInfisicalEnvironment(
+    cleanEnv("INFISICAL_ENV"),
+    "INFISICAL_ENV"
+  );
   const automationClientId = cleanEnv("INFISICAL_AUTOMATION_CLIENT_ID");
   const automationClientSecret = cleanEnv("INFISICAL_AUTOMATION_CLIENT_SECRET");
   return SOURCE_DEFINITIONS.map((definition) => ({

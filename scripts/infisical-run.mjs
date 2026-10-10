@@ -30,7 +30,17 @@ if (probe.error?.code === "ENOENT") {
   process.exit(127);
 }
 
-const envName = process.env.INFISICAL_ENV || process.env.NODE_ENV || "dev";
+// Owner directive 2026-10-10: Infisical prod is the only environment (dev and
+// staging are being retired).  The old NODE_ENV fallback produced slugs that
+// are not Infisical environments ("production", "development"), so it is gone.
+const requestedEnv = (process.env.INFISICAL_ENV || "").trim();
+if (requestedEnv && requestedEnv !== "prod") {
+  console.error(
+    `[infisical] Refusing INFISICAL_ENV="${requestedEnv}": Usage-Monitor reads Infisical prod only (dev and staging are retired).`
+  );
+  process.exit(2);
+}
+const envName = "prod";
 const secretsPath = process.env.INFISICAL_PATH || "/";
 const projectId =
   process.env.INFISICAL_PROJECT_ID ||

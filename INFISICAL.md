@@ -10,8 +10,12 @@ Usage-Monitor-specific application of it.
 
 ## Project
 
-- Infisical project: `usage-monitor`, environments `dev` / `staging` / `prod`,
-  secret path `/`.  Deployment-specific project identifiers are maintained
+- Infisical project: `usage-monitor`, environment `prod` only (owner directive
+  2026-10-10: `dev` and `staging` are being retired), secret path `/`.  Every
+  selector resolves to `prod` and refuses anything else: `resolveInfisicalEnvironment()`
+  and the provider-sync and secrets-probe `INFISICAL_ENV` override log one warning
+  and ignore a non-prod value; `scripts/infisical-run.mjs` and
+  `scripts/cursor-cloud-start.sh` exit non-zero on one.  Deployment-specific project identifiers are maintained
   in the private operations inventory, not committed here.
 - The shared fleet automation machine identity holds Admin on this project.
   The server authenticates with universal-auth as that identity
@@ -105,8 +109,8 @@ add a test.
 1. **Load at startup.**  `src/instrumentation.ts` `register()` calls
    `await appSettings.init()` on the nodejs runtime before anything else
    boots.  With universal-auth credentials present it fetches the full
-   secret set for the resolved environment (`UM_INFISICAL_ENV`, else
-   `NODE_ENV=production → prod`, else `dev`) into memory.  With no
+   secret set for the `prod` environment (a `UM_INFISICAL_ENV` override with
+   any other value is refused: warning, then ignored) into memory.  With no
    credentials (local dev, CI, `next build`) it stays in env-fallback mode
    and reads `process.env` live — zero network.  If the Infisical load
    itself fails at boot, it logs LOUDLY and stays in env-fallback mode:
