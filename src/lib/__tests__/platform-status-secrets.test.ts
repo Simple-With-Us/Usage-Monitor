@@ -156,7 +156,7 @@ describe("platform-status secrets probes", () => {
     expect(rendered).not.toContain("um-client-id");
   });
 
-  it("honours INFISICAL_ENV and flags a half-configured sibling identity", async () => {
+  it("ignores a non-prod INFISICAL_ENV and flags a half-configured sibling identity", async () => {
     vi.stubEnv("INFISICAL_UM_CLIENT_ID", "um-client-id");
     vi.stubEnv("INFISICAL_UM_CLIENT_SECRET", CLIENT_SECRET);
     vi.stubEnv("INFISICAL_ST_CLIENT_ID", "st-client-id-without-a-secret");
@@ -182,7 +182,7 @@ describe("platform-status secrets probes", () => {
         value: "1 identity",
         hint: "client id and secret must both be set",
       },
-      { label: "Environment", value: "staging" },
+      { label: "Environment", value: "prod" },
     ]);
   });
 

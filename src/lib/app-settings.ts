@@ -61,6 +61,7 @@ import {
   createInfisicalSettings,
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
+import { resolveProdInfisicalEnvironment } from "./infisical-environment";
 
 const DEFAULT_REFRESH_MS = 300_000; // 5 minutes, per the canonical pattern.
 
@@ -250,13 +251,15 @@ export function getAppSettingDef(key: string): AppSettingDef | undefined {
   return SETTING_DEF_BY_KEY.get(key);
 }
 
-/** Infisical environment slug: UM_INFISICAL_ENV wins, else NODE_ENV mapping. */
+/**
+ * Infisical environment slug.  Always `prod` (owner directive 2026-10-10: dev
+ * and staging are being retired), whatever NODE_ENV says.  A `UM_INFISICAL_ENV`
+ * override with any other value is refused: it logs one warning and is ignored.
+ */
 export function resolveInfisicalEnvironment(
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const explicit = env.UM_INFISICAL_ENV?.trim();
-  if (explicit) return explicit;
-  return env.NODE_ENV === "production" ? "prod" : "dev";
+  return resolveProdInfisicalEnvironment(env.UM_INFISICAL_ENV, "UM_INFISICAL_ENV");
 }
 
 export interface AppSettingsCredentials {

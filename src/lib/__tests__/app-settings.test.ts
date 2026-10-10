@@ -4,7 +4,9 @@ import {
   APP_SETTING_KEYS,
   AppSettingsService,
   appSettings,
+  resolveInfisicalEnvironment,
 } from "@/lib/app-settings";
+import { _resetInfisicalEnvironmentWarningsForTests } from "@/lib/infisical-environment";
 
 interface RecordedCall {
   url: string;
@@ -89,7 +91,7 @@ function infisicalInitBase(fetchImpl: typeof fetch) {
   return {
     clientId: testInfisicalClientId(),
     clientSecret: testInfisicalClientSecret(),
-    environment: "dev" as const,
+    environment: "prod" as const,
     refreshIntervalMs: 0,
     fetchImpl: fetchImpl as typeof fetch,
   };
@@ -109,6 +111,41 @@ function clearInfisicalCredEnv() {
 beforeEach(() => {
   appSettings._resetForTests();
   clearInfisicalCredEnv();
+  _resetInfisicalEnvironmentWarningsForTests();
+});
+
+describe("resolveInfisicalEnvironment (prod only)", () => {
+  it("reads prod whatever NODE_ENV says", () => {
+    expect(resolveInfisicalEnvironment({ NODE_ENV: "production" })).toBe("prod");
+    expect(resolveInfisicalEnvironment({ NODE_ENV: "development" })).toBe("prod");
+    expect(resolveInfisicalEnvironment({ NODE_ENV: "test" })).toBe("prod");
+    expect(resolveInfisicalEnvironment({ NODE_ENV: "production" })).toBe("prod");
+    expect(resolveInfisicalEnvironment({ NODE_ENV: "development", UM_INFISICAL_ENV: "prod" })).toBe("prod");
+  });
+
+  it("refuses a non-prod UM_INFISICAL_ENV: warns once, never throws", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(resolveInfisicalEnvironment({ NODE_ENV: "development", UM_INFISICAL_ENV: "dev" })).toBe("prod");
+      expect(resolveInfisicalEnvironment({ NODE_ENV: "production", UM_INFISICAL_ENV: "staging" })).toBe("prod");
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("UM_INFISICAL_ENV");
+      expect(String(warn.mock.calls[0]?.[0])).toContain("prod only");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("init asks Infisical for the prod environment when none is passed", async () => {
+    const { fetchImpl, calls } = makeMockFetch();
+    const { environment: _omitted, ...base } = infisicalInitBase(fetchImpl as typeof fetch);
+    await appSettings.init(base);
+    const loads = calls.filter((c) => /\/api\/v3\/secrets\/raw/.test(c.url));
+    expect(loads.length).toBeGreaterThan(0);
+    for (const call of loads) {
+      expect(new URL(call.url).searchParams.get("environment")).toBe("prod");
+    }
+  });
 });
 
 describe("app-settings (Infisical SOT tunable knobs)", () => {

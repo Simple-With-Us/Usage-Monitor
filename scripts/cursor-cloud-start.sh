@@ -2,7 +2,7 @@
 #
 # cursor-cloud-start.sh — runs every Cursor cloud agent boot.  When
 # INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET are set (Cursor injects at
-# boot), logs in to Infisical and exports the dev-env secrets for Usage-Monitor
+# boot), logs in to Infisical and exports the prod-env secrets for Usage-Monitor
 # into $HOME/.cursor-cloud-env/Usage-Monitor.env (mode 0600).  Also writes a
 # companion Usage-Monitor.source.sh that sources it with `set -a` so the
 # downstream app / test process picks every key up.
@@ -33,7 +33,7 @@ fi
 
 INFISICAL_DOMAIN_DEFAULT="https://app.infisical.com"
 export INFISICAL_DOMAIN="${INFISICAL_DOMAIN:-${INFISICAL_DOMAIN_DEFAULT}}"
-export INFISICAL_ENV="${INFISICAL_ENV:-dev}"
+export INFISICAL_ENV="${INFISICAL_ENV:-prod}"
 export INFISICAL_PROJECT_ID="${INFISICAL_PROJECT_ID:-86e35e51-91bc-4dfd-a045-4484726b9c40}"
 
 mkdir -p "${ENV_DIR}"
@@ -63,6 +63,15 @@ if [[ "${client_id_set}" -eq 0 || "${client_secret_set}" -eq 0 ]]; then
   log "Skipping Infisical inject (boot continues with .env.example sqlite defaults)."
   log "Local typecheck/test available via:  npm run typecheck   and   npm test"
   exit 0
+fi
+
+# ---- Prod only (owner directive 2026-10-10) ----------------------------------
+# dev and staging are being retired.  Refuse anything else rather than reading
+# it; this runs after the missing-credential exit so an uncredentialed boot
+# still continues with the sqlite defaults.
+if [[ "${INFISICAL_ENV}" != "prod" ]]; then
+  log "INFISICAL_ENV must be prod (dev and staging are retired); refusing to load."
+  exit 1
 fi
 
 # ---- Choose loader: repo helper > CLI > curl+python3 fallback ------------
@@ -97,7 +106,7 @@ import json, os, subprocess, sys, urllib.request, urllib.parse, urllib.error, sh
 
 DOMAIN = os.environ.get("INFISICAL_DOMAIN", "https://app.infisical.com")
 PROJECT_ID = os.environ["INFISICAL_PROJECT_ID"]
-ENV_NAME = os.environ.get("INFISICAL_ENV", "dev")
+ENV_NAME = os.environ.get("INFISICAL_ENV", "prod")
 SECRET_PATH = os.environ.get("INFISICAL_PATH") or "/"
 CLIENT_ID = os.environ["INFISICAL_CLIENT_ID"]
 CLIENT_SECRET = os.environ["INFISICAL_CLIENT_SECRET"]

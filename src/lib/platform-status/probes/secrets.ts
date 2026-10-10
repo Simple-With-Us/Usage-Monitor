@@ -14,6 +14,7 @@
  * client secret, or access token is ever placed on the card.
  */
 
+import { resolveProdInfisicalEnvironment } from "../../infisical-environment";
 import {
   asArray,
   asRecord,
@@ -30,7 +31,6 @@ import type { PlatformMetric, PlatformProbe, PlatformProbeResult } from "../type
 const DEFAULT_BASE_URL = "https://app.infisical.com";
 /** Same allowlist `infisical-provider-sync.infisicalBaseUrl()` enforces. */
 const ALLOWED_HOSTS = new Set(["app.infisical.com", "us.infisical.com", "eu.infisical.com"]);
-const DEFAULT_ENVIRONMENT = "prod";
 const DEFAULT_SECRET_PATH = "/";
 
 /** Fleet-wide fallback identity — set alone, it enables every scope below. */
@@ -235,7 +235,10 @@ async function probe(): Promise<PlatformProbeResult> {
     };
   }
 
-  const environment = envValue("INFISICAL_ENV") ?? DEFAULT_ENVIRONMENT;
+  const environment = resolveProdInfisicalEnvironment(
+    envValue("INFISICAL_ENV"),
+    "INFISICAL_ENV"
+  );
   const outcomes = await Promise.all(
     ready.map((scope) => readScope(baseUrl, scope, environment))
   );
