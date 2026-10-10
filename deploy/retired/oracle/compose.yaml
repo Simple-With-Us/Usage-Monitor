@@ -28,7 +28,7 @@ services:
       - internal
 
   caddy:
-    image: caddy:2.11.4-alpine
+    image: caddy:2.11.6-alpine
     environment:
       USAGE_MONITOR_HOSTNAME: ${USAGE_MONITOR_HOSTNAME:-usage.jays.services}
     ports:
