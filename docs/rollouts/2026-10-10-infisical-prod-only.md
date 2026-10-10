@@ -19,9 +19,14 @@ None.  The Dockerfile has baked `INFISICAL_ENV=prod` since #1211, `NODE_ENV=prod
 
 The Cursor Cloud boot, local `npm run dev` through `scripts/infisical-run.mjs`, and any local run with machine-identity credentials.  They now receive the prod secret set (156 keys).  Treat a Cursor cloud agent for this repo as holding production secrets.
 
-## Dev-only knobs not copied to prod
+## Update Sat Oct 10 (owner decision)
 
-Twelve keys exist only in the `dev` environment and were deliberately not copied.  Prod reads the schema defaults in `APP_SETTING_DEFS` (which is what the production container already did): `ADAPTER_HTTP_TIMEOUT_MS` (30000), `ADAPTER_PROVIDER_TIMEOUT_MS` (90000), `ALERT_DELIVERY_MAX_ATTEMPTS` (3), `ALERT_DELIVERY_TIMEOUT_MS` (10000), `ALERT_DISABLE_EMAIL` (false), `ALERT_EMAIL_ENABLED` (true), `ALERT_UNASSIGNED_SPEND_FLOOR_USD` (25), `INFISICAL_SETTINGS_REFRESH_MS` (5 minutes), `INGEST_COST_DERIVATION_ENABLED` (false), `OTLP_SYSTEM_METRICS_INGEST_ENABLED` (false), `READY_DISK_WARN_FREE_BYTES` (5 GiB), `USAGE_INGEST_REQUIRE_SCOPED_TOKENS` (false).  The owner decides later whether any should be set in prod.  Two keys, `ALERT_MIN_SEVERITY` and `PROVIDER_MANIFEST_JSON`, differ between dev and prod and prod's value was kept.
+Later on Sat Oct 10 the owner decided "ok to do all" and "if values differ defer to prod, all the rest move to prod".  That replaces the plan in the first version of this note, which was to leave the twelve dev-only knobs out of prod and let prod read the schema defaults in `APP_SETTING_DEFS`.
+
+- Copied to prod:  all 12 dev-only keys, and each was verified identical to dev afterwards.  They are `ADAPTER_HTTP_TIMEOUT_MS`, `ADAPTER_PROVIDER_TIMEOUT_MS`, `ALERT_DELIVERY_MAX_ATTEMPTS`, `ALERT_DELIVERY_TIMEOUT_MS`, `ALERT_DISABLE_EMAIL`, `ALERT_EMAIL_ENABLED`, `ALERT_UNASSIGNED_SPEND_FLOOR_USD`, `INFISICAL_SETTINGS_REFRESH_MS`, `INGEST_COST_DERIVATION_ENABLED`, `OTLP_SYSTEM_METRICS_INGEST_ENABLED`, `READY_DISK_WARN_FREE_BYTES` and `USAGE_INGEST_REQUIRE_SCOPED_TOKENS`.
+- Behavior changes to watch:  three of these can change what production does, because prod used to read the schema defaults for them.  `ALERT_EMAIL_ENABLED` is the master enable for the Resend email alert channel, `ALERT_DISABLE_EMAIL` hard-disables email alert delivery, and `USAGE_INGEST_REQUIRE_SCOPED_TOKENS` denies unscoped `USAGE_INGEST_TOKEN` ingest when true, so only per-producer scoped tokens work.  Watch alert email delivery and ingest token acceptance.
+- Value conflicts, prod's value kept:  `ALERT_MIN_SEVERITY` and `PROVIDER_MANIFEST_JSON` differ between dev and prod, and prod's value stays.
+- Environments:  the `dev` and `staging` environments of the usage-monitor Infisical project are deleted.  Prod is the only environment.
 
 ## Left alone
 
