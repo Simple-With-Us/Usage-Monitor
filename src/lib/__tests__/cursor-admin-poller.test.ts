@@ -155,7 +155,6 @@ describe("mapCursorUsageEvent", () => {
       provider: "cursor",
       service: "cursor-client",
       label: "Usage-based",
-      keyRef: "claude-4.5-sonnet",
       billingMode: "actual",
       metricType: "cost",
       unit: "token",
@@ -163,6 +162,7 @@ describe("mapCursorUsageEvent", () => {
       requests: 1,
       confidence: "actual",
     });
+    expect(mapped.keyRef).toBe(events[0].model);
     expect(mapped.occurredAt.toISOString()).toBe("2025-06-26T23:07:05.854Z");
     expect(mapped.windowStart).toBeUndefined();
     expect(mapped.metadata).toMatchObject({
@@ -340,7 +340,7 @@ describe("pollCursorAdminUsage", () => {
     });
     expect(JSON.parse(String(requests[1]?.init.body)).page).toBe(2);
     expect(store.size).toBe(3);
-    const first = [...store.values()].find((event) => event.keyRef === "claude-4.5-sonnet");
+    const first = [...store.values()].find((event) => event.keyRef === docEvents[0].model);
     expect(first?.costUsd).toBeCloseTo(21.36232 / 100);
     expect(fanout).toHaveBeenCalledTimes(1);
     const forwarded = fanout.mock.calls[0]?.[0];
