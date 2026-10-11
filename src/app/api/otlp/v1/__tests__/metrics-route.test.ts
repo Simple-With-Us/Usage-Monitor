@@ -733,7 +733,7 @@ describe("POST /api/otlp/v1/metrics rate limiting (X1) and typed 500 (X6)", () =
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({
-      error: "Unauthorized producer for OTLP metrics",
+      error: 'Credential is not authorized for sourceApp "claude-code"',
     });
   });
 
@@ -745,3 +745,118 @@ describe("POST /api/otlp/v1/metrics rate limiting (X1) and typed 500 (X6)", () =
     expect(res.status).toBe(202);
   });
 });
+
+const genAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [
+          { key: "agent.platform", value: { stringValue: "cursor-agent" } },
+          { key: "gen_ai.system", value: { stringValue: "openai" } },
+        ],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              unit: "token",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [
+                      { key: "gen_ai.token.type", value: { stringValue: "input" } },
+                      { key: "gen_ai.request.model", value: { stringValue: "gpt-5" } },
+                    ],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "88",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const overlapGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "openai-codex" } }],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [{ key: "gen_ai.token.type", value: { stringValue: "input" } }],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "10",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
+  it("persists a cursor-agent gen_ai token point", async () => {
+    const res = await POST(
+      jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(1);
+    expect(body.ignoredOverlap).toBeUndefined();
+    const rows = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "cursor-agent" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provider).toBe("openai");
+    expect(rows[0].quantity).toBe(88);
+    expect(rows[0].label).toBe("token:input");
+  });
+
+  it("skips overlap platforms by default and reports ignoredOverlap", async () => {
+    const res = await POST(
+      jsonRequest(overlapGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "openai-codex" } })
+    ).toBe(0);
+  });
+
+  it("accepts a cursor-agent scoped producer token for gen_ai rows", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "cursor-agent:tok-cursor");
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    const denied = await POST(
+      jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(denied.status).toBe(401);
+    const res = await POST(
+      jsonRequest(genAiPayload, { authorization: "Bearer tok-cursor" })
+    );
+    expect(res.status).toBe(202);
+  });
+});
+

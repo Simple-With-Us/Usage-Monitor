@@ -20,6 +20,7 @@ const prismaMock = vi.hoisted(() => {
       deleteMany: vi.fn(),
       count: vi.fn(),
     },
+    agentTurn: { updateMany: vi.fn(), deleteMany: vi.fn() },
     $executeRawUnsafe: vi.fn(),
   };
   client.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
@@ -65,6 +66,8 @@ describe("usage-retention wrapper", () => {
     // Wave I / E6 rehash runs first in retention; empty by default.
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEventTombstone.count.mockResolvedValue(0);
+    prismaMock.agentTurn.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.agentTurn.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   afterEach(() => {

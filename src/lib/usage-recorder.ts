@@ -45,6 +45,8 @@ import {
   recordSentryCronHeartbeat,
   recordSchedulerDuration,
 } from "@/lib/sentry-ops";
+import * as Sentry from "@sentry/nextjs";
+import { fanoutPollSnapshot } from "@/lib/usage-fanout";
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
 const providerAttemptTokens = new Map<string, symbol>();
 
@@ -128,6 +130,10 @@ export async function recordProviderUsage(
       });
     });
     if (usage.postPersistError) throw usage.postPersistError;
+    void fanoutPollSnapshot(provider.name, {
+      totalCost: snapshot.totalCost,
+      balance: snapshot.balance,
+    });
     return snapshot;
   } finally {
     if (providerAttemptTokens.get(provider.id) === attemptToken) {
@@ -698,13 +704,31 @@ export interface UsagePollingSchedulerTickDependencies {
 export async function runUsagePollingSchedulerTick(
   dependencies: UsagePollingSchedulerTickDependencies = {}
 ): Promise<void> {
+  // Root transaction so child fetch/maintenance spans are not dropped as
+  // no_parent_span. forceTransaction is required because the in-process
+  // scheduler is not an HTTP request and otherwise has no active span.
+  return Sentry.startSpan(
+    { name: "usage-scheduler.tick", op: "task", forceTransaction: true },
+    () => runUsagePollingSchedulerTickBody(dependencies)
+  );
+}
+
+async function runUsagePollingSchedulerTickBody(
+  dependencies: UsagePollingSchedulerTickDependencies
+): Promise<void> {
   const markTickStarted = dependencies.markTickStarted ?? markSchedulerTickStarted;
   const markTickCompleted = dependencies.markTickCompleted ?? markSchedulerTickCompleted;
   markTickStarted();
   const tickStartedAt = Date.now();
   try {
-    const result = await (dependencies.fetchProviders ?? fetchAllDueProviders)();
-    const maintenance = await (dependencies.runMaintenance ?? runUsageMaintenance)();
+    const result = await Sentry.startSpan(
+      { name: "usage-scheduler.fetch-providers", op: "task" },
+      () => (dependencies.fetchProviders ?? fetchAllDueProviders)()
+    );
+    const maintenance = await Sentry.startSpan(
+      { name: "usage-scheduler.maintenance", op: "task" },
+      () => (dependencies.runMaintenance ?? runUsageMaintenance)()
+    );
     const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a

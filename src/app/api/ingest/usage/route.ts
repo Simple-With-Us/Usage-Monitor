@@ -28,6 +28,7 @@ import {
 } from "@/lib/ingest-auth";
 import { resolveProjectIdsByName } from "@/lib/project-resolver";
 import { canonicalProjectKey } from "@/lib/provider-identity";
+import { fanoutPersistedUsage } from "@/lib/usage-fanout";
 import { canonicalProviderKey } from "@/lib/provider-identity";
 import {
   looksLikeReceiptCashEvent,
@@ -406,6 +407,15 @@ export async function POST(request: NextRequest) {
     // background refresh). Skip pure idempotent replays with zero inserts.
     if (persistResult.persisted > 0) {
       markBudgetStatusSoftStale();
+      void fanoutPersistedUsage(
+        persistResult.newEvents.map((event) => ({
+          provider: event.provider,
+          sourceApp: event.sourceApp,
+          model: event.keyRef,
+          costUsd: event.costUsd,
+        })),
+        "ingest/usage"
+      );
     }
 
     if (usageTelemetryV2) {

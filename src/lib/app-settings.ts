@@ -144,6 +144,20 @@ export const APP_SETTING_DEFS: AppSettingDef[] = [
       "Opt-in persistence of host system.* OTLP metrics (default-off: they flood ExternalUsageEvent).",
   },
   {
+    key: "OTLP_GEN_AI_ENABLED",
+    type: "bool",
+    defaultValue: "true",
+    description:
+      "Master switch for generic OTel gen_ai metric mapping on POST /api/otlp/v1/metrics.",
+  },
+  {
+    key: "OTLP_GEN_AI_ALLOW_OVERLAP",
+    type: "bool",
+    defaultValue: "false",
+    description:
+      "When true, persist gen_ai rows even for platforms that already have a local JSONL collector.",
+  },
+  {
     key: "INGEST_COST_DERIVATION_ENABLED",
     type: "bool",
     defaultValue: "false",

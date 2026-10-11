@@ -15,10 +15,27 @@ function withSentenceGaps(text: string): string {
   return text.replace(/ {2,}/g, SENTENCE_GAP);
 }
 
+type RecentAgentTurn = {
+  id: string;
+  platform: string;
+  seat: string | null;
+  repo: string | null;
+  conversationId: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  durationMs: number | null;
+  toolCount: number | null;
+  error: string | null;
+  occurredAt: string;
+};
+
 export function AgentsDashboard() {
   const [data, setData] = useState<AgentsOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
+  const [recentTurns, setRecentTurns] = useState<RecentAgentTurn[]>([]);
 
   // Fixed 30-day overview — no 5h/24h/7d/30d/All lookback strip. Agent Bar
   // parity for remaining quota lives in FleetQuotaMatrixCard (/api/quota-windows).
@@ -39,8 +56,25 @@ export function AgentsDashboard() {
       }
     };
 
+    const fetchTurns = async () => {
+      try {
+        const res = await fetch("/api/agent-turns?limit=20");
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!unmounted && Array.isArray(json.turns)) {
+          setRecentTurns(json.turns);
+        }
+      } catch {
+        // Keep the empty list so Recent Turns stays hidden (visual baselines).
+      }
+    };
+
     fetchOverview();
-    const interval = setInterval(fetchOverview, 30_000);
+    fetchTurns();
+    const interval = setInterval(() => {
+      fetchOverview();
+      fetchTurns();
+    }, 30_000);
     return () => {
       unmounted = true;
       clearInterval(interval);
@@ -375,6 +409,73 @@ export function AgentsDashboard() {
               })}
             </div>
           </div>
+
+          {/* Recent Turns — only when the traces ingest has rows. Hidden when
+              empty so Playwright visual baselines stay unchanged. */}
+          {recentTurns.length > 0 && (
+            <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+              <h2 className="text-base font-bold text-foreground mb-3">Recent Turns</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-border text-muted-foreground">
+                    <tr>
+                      <th className="pb-2 font-medium">When</th>
+                      <th className="pb-2 font-medium">Platform</th>
+                      <th className="pb-2 font-medium">Model</th>
+                      <th className="pb-2 font-medium text-right">Tokens</th>
+                      <th className="pb-2 font-medium text-right">Cost</th>
+                      <th className="pb-2 font-medium text-right">Duration</th>
+                      <th className="pb-2 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/50 font-mono">
+                    {recentTurns.map((turn) => {
+                      const tokens =
+                        (turn.inputTokens ?? 0) + (turn.outputTokens ?? 0);
+                      return (
+                        <tr key={turn.id} className="hover:bg-muted/30">
+                          <td className="py-2.5 text-muted-foreground">
+                            {new Date(turn.occurredAt).toISOString().replace("T", " ").slice(0, 19)}
+                          </td>
+                          <td className="py-2.5 text-foreground font-semibold">
+                            {turn.platform}
+                            {turn.seat ? (
+                              <span className="block text-[10px] font-normal text-muted-foreground">
+                                {turn.seat}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="py-2.5 text-foreground">{turn.model || "unknown"}</td>
+                          <td className="py-2.5 text-right text-foreground">
+                            {tokens > 0 ? formatTokens(tokens) : "—"}
+                          </td>
+                          <td className="py-2.5 text-right text-foreground">
+                            {typeof turn.costUsd === "number"
+                              ? formatCurrency(turn.costUsd)
+                              : "—"}
+                          </td>
+                          <td className="py-2.5 text-right text-muted-foreground">
+                            {typeof turn.durationMs === "number"
+                              ? `${turn.durationMs} ms`
+                              : "—"}
+                          </td>
+                          <td className="py-2.5">
+                            {turn.error ? (
+                              <span className="text-amber-700 dark:text-amber-300">
+                                {turn.error}
+                              </span>
+                            ) : (
+                              <span className="text-emerald-600 dark:text-emerald-400">ok</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Model Distribution Table */}
           {data.modelDistribution.length > 0 && (

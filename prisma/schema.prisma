@@ -461,6 +461,39 @@ model OtlpMetricState {
   @@index([updatedAt])
 }
 
+// Per-agent-turn record from OTLP traces (POST /api/otlp/v1/traces).
+// Diagnostic + per-turn analytics only: this table NEVER feeds cash budget
+// math (that stays on ExternalUsageEvent via /api/otlp/v1/metrics and the
+// v2 ingest), so a relay that sends both metrics and spans for one turn
+// cannot double count. Prompt/response text is truncated at ingest and
+// cleared by retention; see contentExpiresAt + data-retention.ts.
+model AgentTurn {
+  id             String   @id @default(uuid())
+  platform       String
+  seat           String?
+  repo           String?
+  conversationId String?
+  generationId   String?
+  model          String?
+  inputTokens    Int?
+  outputTokens   Int?
+  cacheTokens    Int?
+  costUsd        Float?
+  durationMs     Int?
+  toolCount      Int?     @default(0)
+  toolNames      Json?
+  error          String?
+  promptText     String?
+  responseText   String?
+  occurredAt     DateTime
+  contentExpiresAt DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([platform, occurredAt])
+  @@index([conversationId, occurredAt])
+  @@index([model, occurredAt])
+}
+
 model ProviderAlertNotification {
   id                               String                         @id @default(uuid())
   providerId                       String

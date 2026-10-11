@@ -59,6 +59,9 @@ export const isPublicPath = (pathname: string) => {
     // Agents overview aggregator (live agent runs, token counts, quota burn,
     // API-equivalent cost comparison). Self-authenticates via session or USAGE_READ_TOKEN.
     "/api/agents-overview",
+    // Per-turn AgentTurn listing for the Agents tab. Same dual-auth as
+    // agents-overview (session cookie or USAGE_READ_TOKEN).
+    "/api/agent-turns",
     // Owner-recorded expense ledger. GET self-authenticates via dashboard
     // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
     // own session/OWNER_EXPENSE_TOKEN check in the route.

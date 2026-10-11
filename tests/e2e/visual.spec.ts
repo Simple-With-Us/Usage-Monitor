@@ -146,6 +146,10 @@ async function stubApi(page: Page): Promise<void> {
       await json(route, emptyProjectSummary);
       return;
     }
+    if (req.url().includes('/api/agent-turns')) {
+      await json(route, { ok: true, turns: [] });
+      return;
+    }
     if (/\/api\/settings\/?$/.test(req.url())) {
       await json(route, { notifications: { emailConfigured: false, minSeverity: 'warning' } });
       return;

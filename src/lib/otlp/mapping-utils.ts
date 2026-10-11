@@ -53,6 +53,20 @@ const METADATA_ALLOWLIST = new Set([
   "tool_name",
   "decision",
   "source",
+  // Generic gen_ai mapper (gen-ai-mapper.ts): OTel gen_ai semconv + relay
+  // resource attrs. Same rule as above — attribution dimensions only, never
+  // prompt/response/tool-argument content (those ride AgentTurn, not events).
+  "agent.platform",
+  "seat",
+  "lane",
+  "repo",
+  "gen_ai.system",
+  "gen_ai.agent.name",
+  "gen_ai.request.model",
+  "gen_ai.token.type",
+  "gen_ai.operation.name",
+  "gen_ai.conversation.id",
+  "gen_ai.tool.name",
 ]);
 
 export function cleanOtlpMetadata(
