@@ -249,14 +249,25 @@ const CursorFilteredUsageEventSchema = z
 
 const CursorFilteredUsageEventsPageSchema = z
   .object({
-    usageEvents: z.array(CursorFilteredUsageEventSchema),
+    totalUsageEventsCount: z.number().finite(),
     pagination: z
       .object({
+        numPages: z.number().finite(),
+        currentPage: z.number().finite(),
+        pageSize: z.number().finite(),
         hasNextPage: z.boolean(),
+        hasPreviousPage: z.boolean(),
       })
-      .passthrough(),
+      .strict(),
+    usageEvents: z.array(CursorFilteredUsageEventSchema),
+    period: z
+      .object({
+        startDate: z.number().finite(),
+        endDate: z.number().finite(),
+      })
+      .strict(),
   })
-  .passthrough();
+  .strict();
 
 function usageSource(event: Pick<CursorFilteredUsageEvent, "cloudAgentId" | "isHeadless">): CursorUsageSource {
   if (event.cloudAgentId) return "cloud-agent";
