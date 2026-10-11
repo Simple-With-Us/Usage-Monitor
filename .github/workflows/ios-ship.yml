@@ -182,7 +182,7 @@ jobs:
           fi
           printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
-          # ASC API credentials live in the fleet secrets project under /asc
+          # ASC API credentials live in the Fleet-OPS Infisical project under /asc
           # (owner ruling 2026-10-11).  The distribution certificate stays in
           # this app's project at / -- two sources, resolved independently.
           FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
@@ -196,7 +196,7 @@ jobs:
                 2>/dev/null || true
             )"
             if [ -z "$val" ]; then
-              echo "::error::Missing $name in fleet secrets /asc (project $FLEET_ASC_PROJECT_ID)." >&2
+              echo "::error::Missing $name in Fleet-OPS /asc (project $FLEET_ASC_PROJECT_ID)." >&2
               exit 1
             fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
