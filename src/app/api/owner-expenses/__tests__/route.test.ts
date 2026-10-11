@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   findMany: vi.fn(),
   create: vi.fn(),
   deleteMany: vi.fn(),
+  bustBudgetStatusCache: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -15,6 +16,10 @@ vi.mock("@/lib/prisma", () => ({
       deleteMany: mocks.deleteMany,
     },
   },
+}));
+
+vi.mock("@/lib/budget-status", () => ({
+  bustBudgetStatusCache: mocks.bustBudgetStatusCache,
 }));
 
 let GET: typeof import("../route").GET;
@@ -39,6 +44,7 @@ beforeEach(() => {
   mocks.findMany.mockResolvedValue([]);
   mocks.deleteMany.mockReset();
   mocks.deleteMany.mockResolvedValue({ count: 0 });
+  mocks.bustBudgetStatusCache.mockReset();
 });
 
 function getRequest(
@@ -256,6 +262,18 @@ describe("DELETE /api/owner-expenses", () => {
     const where = mocks.deleteMany.mock.calls[0][0].where;
     expect(where.sourceApp).toBe("owner-recorded-expense");
     expect(where.idempotencyKey).toEqual({ in: [KEY_A, KEY_B] });
+    expect(mocks.bustBudgetStatusCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bust the budget cache when nothing was deleted", async () => {
+    mocks.findMany.mockResolvedValue([]);
+    mocks.deleteMany.mockResolvedValue({ count: 0 });
+    const response = await DELETE(deleteRequest([KEY_A]));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ requested: 1, deleted: 0, notFound: [KEY_A] });
+    expect(mocks.deleteMany).toHaveBeenCalledTimes(1);
+    expect(mocks.bustBudgetStatusCache).not.toHaveBeenCalled();
   });
 
   it("dedupes repeated keys", async () => {
