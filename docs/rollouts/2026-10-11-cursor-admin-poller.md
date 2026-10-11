@@ -60,6 +60,7 @@ Local, before the review follow-up:
 - `npx tsc --noEmit` passed.
 - `npx vitest run` on the poller, Sentry cron, gen_ai mapper, scheduler timeout, and OTLP metrics route tests passed (104 tests).
 - GitHub `CI / verify` on `5297d2a` passed, including the production build.
+- After the review follow-up, `npx eslint` on the poller, its test, and `vitest.config.ts` passed, `npx tsc --noEmit` passed, and the poller, Sentry cron, and scheduler timeout tests passed (60 tests).
 
 ## Next steps
 
