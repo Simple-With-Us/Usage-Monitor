@@ -23,6 +23,8 @@
 //   headless     when isHeadless is true (background, no cloud agent id)
 //   client       otherwise (connected editor or CLI)
 
+import "server-only";
+
 import { createHash } from "node:crypto";
 
 import type { Prisma } from "@prisma/client";

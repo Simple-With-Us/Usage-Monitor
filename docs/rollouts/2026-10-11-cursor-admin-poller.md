@@ -40,3 +40,29 @@ Included-plan events still carry Cursor's `chargedCents` (the docs' included exa
 ## Sentry
 
 New rows are summarized through the existing `fanoutPersistedUsage(..., "poll")` path.  Emails and the API key are not in that payload.  Cron monitor `usage-monitor-cursor-admin` is a 60-minute interval, 15-minute check-in margin, 5-minute max runtime, UTC.  A missing key checks in `ok` (the job ran; there was nothing to poll).  An HTTP, parse, or persist failure checks in `error`.
+
+## Changes
+
+- `src/lib/cursor-admin-poller.ts`: hourly Admin API poller.  Zod-strict page and event schemas.  `import "server-only"`.  Seeds a generic `cursor` provider when none exists.  Missing `CURSOR_ADMIN_API_KEY` warns and skips.
+- `src/lib/cursor-admin-fixtures.ts`: doc fixtures for filtered usage events and the documented 429 body.
+- `src/lib/usage-recorder.ts`: runs the poller inside the 15-minute tick, isolated so a failure cannot fail maintenance or readiness.
+- `src/lib/sentry-ops.ts`: cron monitor `usage-monitor-cursor-admin` at 60 minutes.
+- `src/lib/otlp/gen-ai-mapper.ts`: `cursor` and `cursor-agent` are overlap platforms so estimated gen_ai rows do not sit beside billed cents.
+- `src/test-shims/server-only.ts` and `vitest.config.ts`: Node test runner stand-in for the `server-only` package.
+- Tests: `src/lib/__tests__/cursor-admin-poller.test.ts`, plus scheduler, Sentry cron, gen_ai mapper, and OTLP metrics route coverage.
+- Docs and env: this note, `docs/observability/producer-coverage-matrix.md`, `AGENTS.md`, `.env.example`, `INFISICAL.md`.
+
+## Verification
+
+Local, before the review follow-up:
+
+- `npx eslint` on the touched TypeScript files passed.
+- `npx tsc --noEmit` passed.
+- `npx vitest run` on the poller, Sentry cron, gen_ai mapper, scheduler timeout, and OTLP metrics route tests passed (104 tests).
+- GitHub `CI / verify` on `5297d2a` passed, including the production build.
+
+## Next steps
+
+- Add `CURSOR_ADMIN_API_KEY` to Infisical (`usage-monitor`, env `prod`, path `/`) if it is not already there.  Until then the poller logs a warning and skips.  The scheduler keeps running.
+- After the first successful production poll, confirm a provider row named `cursor` exists and that `ExternalUsageEvent` rows with `sourceApp=cursor-admin` are the billed totals.  The seat subscription stays separate.
+- Watch the Sentry cron `usage-monitor-cursor-admin`.  A missing key is `ok`.  An upstream or parse failure is `error`.

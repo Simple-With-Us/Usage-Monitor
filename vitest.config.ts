@@ -40,6 +40,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // The poller imports `server-only` so the admin key cannot land in a
+      // client bundle.  Vitest is a Node runner; the package throws there.
+      "server-only": path.resolve(__dirname, "./src/test-shims/server-only.ts"),
     },
   },
 });

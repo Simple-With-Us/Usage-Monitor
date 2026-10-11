@@ -142,6 +142,11 @@ describe("Cursor filtered usage fixtures", () => {
   it("rejects an empty page that still claims another page", () => {
     expect(parseFilteredUsageEventsPage(pageOf([], true))).toBeNull();
   });
+
+  it("rejects a documented event that carries an unknown field", () => {
+    const [event] = CURSOR_FILTERED_USAGE_EVENTS_FIXTURE.usageEvents;
+    expect(parseCursorFilteredUsageEvent({ ...event, unexpected: true })).toBeNull();
+  });
 });
 
 describe("mapCursorUsageEvent", () => {
