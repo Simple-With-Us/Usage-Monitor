@@ -35,10 +35,13 @@ describe("fanoutPersistedUsage", () => {
       ],
       "otlp/v1/metrics"
     );
-    const names = recordFleetInfraMetric.mock.calls.map((call) => call[0]);
+    const calls = recordFleetInfraMetric.mock.calls as unknown as Array<
+      [string, number, Record<string, unknown>?]
+    >;
+    const names = calls.map((call) => call[0]);
     expect(names.filter((name) => name === "usage.persisted")).toHaveLength(2);
     expect(names).toContain("usage.persisted_total");
-    const total = recordFleetInfraMetric.mock.calls.find((call) => call[0] === "usage.persisted_total");
+    const total = calls.find((call) => call[0] === "usage.persisted_total");
     expect(total?.[1]).toBe(3);
   });
 
@@ -50,7 +53,9 @@ describe("fanoutPersistedUsage", () => {
       costUsd: 1,
     }));
     await fanoutPersistedUsage(events, "ingest/usage");
-    const groupCalls = recordFleetInfraMetric.mock.calls.filter((call) => call[0] === "usage.persisted");
+    const groupCalls = (
+      recordFleetInfraMetric.mock.calls as unknown as Array<[string, number]>
+    ).filter((call) => call[0] === "usage.persisted");
     expect(groupCalls).toHaveLength(10);
   });
 });
