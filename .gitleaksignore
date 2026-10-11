@@ -11,3 +11,10 @@
 # history.  This ignores those first-commit findings.
 8dfa68d18e63490350cb60f1464d5f3cee0aa56e:scripts/__tests__/agent-hook-otlp.test.mjs:curl-auth-header:370
 8dfa68d18e63490350cb60f1464d5f3cee0aa56e:scripts/__tests__/agent-hook-otlp.test.mjs:generic-api-key:367
+
+# False-positive: generic-api-key matched keyRef next to the documented
+# model id claude-4.5-sonnet in the Cursor admin poller test.  Not a secret.
+# A later commit reads the model from the fixture instead; these lines ignore
+# the first-commit finding that remains in this branch's history.
+7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:158
+7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:343
