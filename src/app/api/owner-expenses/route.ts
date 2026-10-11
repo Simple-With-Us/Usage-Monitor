@@ -10,6 +10,7 @@ import {
   safeEqual,
   tokenFromRequest,
 } from "@/lib/ingest-auth";
+import { bustBudgetStatusCache } from "@/lib/budget-status";
 import { prisma } from "@/lib/prisma";
 import {
   OWNER_EXPENSE_SOURCE_APP,
@@ -172,6 +173,9 @@ const OWNER_EXPENSE_KEY_RE = /^owner-recorded-expense:v1:[0-9a-f]{64}$/;
  * shape, and the delete WHERE clause is pinned to
  * sourceApp "owner-recorded-expense".
  *
+ * A delete that removes at least one row busts the budget-status caches,
+ * matching recordOwnerExpense.  A no-op delete leaves the caches alone.
+ *
  * Body: { "idempotencyKeys": ["owner-recorded-expense:v1:<64hex>", ...] }
  * Response: { requested, deleted, notFound: [...] }
  */
@@ -230,6 +234,10 @@ export async function DELETE(request: NextRequest) {
       idempotencyKey: { in: keys },
     },
   });
+
+  if (deleted.count > 0) {
+    bustBudgetStatusCache();
+  }
 
   return NextResponse.json({
     requested: keys.length,
