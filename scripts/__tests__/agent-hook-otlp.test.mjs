@@ -11,16 +11,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NOOP_REPLIES,
   buildLogRecord,
+  buildTurnRecord,
   coarseToolName,
   defaultCredentialsFilePath,
   extractFields,
+  isContentCaptureEnabled,
   isEntrypoint,
+  isTrustedOtlpEndpoint,
   isTrustedSentryEndpoint,
   main,
   noopReplyFor,
   parsePayload,
   postOtlp,
   resolveCredentials,
+  resolvePayloadFormat,
+  runSelfTest,
   scheduleBackgroundSend,
 } from "../agent-hook-otlp.mjs";
 
@@ -35,7 +40,13 @@ const ALLOWLIST_KEYS = new Set([
   "success",
   "duration_ms",
   "session.id",
+  "generation.id",
   "model",
+  "input_tokens",
+  "output_tokens",
+  "cache_tokens",
+  "cost_usd",
+  "error",
 ]);
 
 function attributeKeys(record) {
@@ -141,6 +152,125 @@ describe("isTrustedSentryEndpoint", () => {
     expect(isTrustedSentryEndpoint("https://sentry.io.evil.example.com/v1/logs")).toBe(false);
     expect(isTrustedSentryEndpoint("not a url")).toBe(false);
     expect(isTrustedSentryEndpoint("")).toBe(false);
+  });
+});
+
+describe("isTrustedOtlpEndpoint (v2 — why v1 never delivered)", () => {
+  it("still accepts sentry.io over https", () => {
+    expect(isTrustedOtlpEndpoint("https://o123.ingest.us.sentry.io/api/1/otlp/v1/logs")).toBe(true);
+  });
+
+  it("accepts Usage Monitor and loopback (the hosts v1 silently dropped)", () => {
+    expect(isTrustedOtlpEndpoint("https://usage.jays.services/api/otlp/v1/traces")).toBe(true);
+    expect(isTrustedOtlpEndpoint("http://127.0.0.1:4103/api/otlp/v1/traces")).toBe(true);
+    expect(isTrustedOtlpEndpoint("http://localhost:4103/api/otlp/v1/traces")).toBe(true);
+  });
+
+  it("accepts extra https hosts from AGENT_HOOK_OTLP_ALLOWED_HOSTS", () => {
+    const env = { AGENT_HOOK_OTLP_ALLOWED_HOSTS: "relay.example.com, other.example.net" };
+    expect(isTrustedOtlpEndpoint("https://relay.example.com/v1/traces", env)).toBe(true);
+    expect(isTrustedOtlpEndpoint("https://evil.example.com/v1/traces", env)).toBe(false);
+    expect(isTrustedOtlpEndpoint("http://relay.example.com/v1/traces", env)).toBe(false);
+  });
+
+  it("still rejects random internet hosts", () => {
+    expect(isTrustedOtlpEndpoint("https://evil.example.com/steal")).toBe(false);
+    expect(isTrustedOtlpEndpoint("https://sentry.io.evil.example.com/v1/logs")).toBe(false);
+  });
+});
+
+describe("resolvePayloadFormat", () => {
+  it("defaults to turns when the path contains /traces", () => {
+    expect(resolvePayloadFormat("https://usage.jays.services/api/otlp/v1/traces")).toBe("turns");
+    expect(resolvePayloadFormat("https://example.sentry.io/v1/logs")).toBe("logs");
+  });
+
+  it("honours an explicit AGENT_HOOK_OTLP_FORMAT override", () => {
+    expect(resolvePayloadFormat("https://usage.jays.services/api/otlp/v1/traces", {
+      AGENT_HOOK_OTLP_FORMAT: "logs",
+    })).toBe("logs");
+    expect(resolvePayloadFormat("https://example.sentry.io/v1/logs", {
+      AGENT_HOOK_OTLP_FORMAT: "turns",
+    })).toBe("turns");
+  });
+});
+
+describe("content capture and turn payload", () => {
+  it("is off by default so prompt/response stay out of the wire body", () => {
+    expect(isContentCaptureEnabled({})).toBe(false);
+    const fields = extractFields("cursor", "afterAgentResponse", {
+      conversation_id: "c-2",
+      model: "claude-sonnet-5",
+      text: "SECRET-RESPONSE",
+      prompt: "SECRET-PROMPT",
+    });
+    expect(fields.promptText).toBeUndefined();
+    expect(fields.responseText).toBeUndefined();
+  });
+
+  it("captures truncated prompt/response only when INCLUDE_CONTENT is on", () => {
+    const fields = extractFields(
+      "cursor",
+      "afterAgentResponse",
+      {
+        conversation_id: "c-2",
+        model: "claude-sonnet-5",
+        text: "y".repeat(4010),
+        prompt: "hello",
+        input_tokens: 12,
+        output_tokens: 4,
+        generation_id: "gen-1",
+      },
+      { AGENT_HOOK_OTLP_INCLUDE_CONTENT: "1" }
+    );
+    expect(fields.promptText).toBe("hello");
+    expect(fields.responseText).toHaveLength(4000);
+    expect(fields.inputTokens).toBe(12);
+    expect(fields.outputTokens).toBe(4);
+    expect(fields.generationId).toBe("gen-1");
+    const turn = buildTurnRecord("cursor", "afterAgentResponse", fields);
+    expect(turn.turns[0].promptText).toBe("hello");
+    expect(turn.turns[0].conversationId).toBe("c-2");
+  });
+
+  it("coarsens errors to hook_error and never forwards the raw stack", () => {
+    const fields = extractFields("copilot", "errorOccurred", {
+      sessionId: "cp-3",
+      error: "SECRET-stack-trace",
+    });
+    expect(fields.error).toBe("hook_error");
+    expect(JSON.stringify(fields)).not.toContain("SECRET-stack-trace");
+  });
+});
+
+describe("runSelfTest", () => {
+  it("reports configured=false without printing secrets", async () => {
+    const lines = [];
+    const report = await runSelfTest({}, { write: (line) => lines.push(line) });
+    expect(report.configured).toBe(false);
+    expect(report.ok).toBe(false);
+    expect(lines.join("")).not.toContain("Bearer");
+    expect(lines.join("")).not.toContain("sentry_key");
+  });
+
+  it("reports trusted host and format without posting by default", async () => {
+    const lines = [];
+    const post = vi.fn();
+    const report = await runSelfTest(
+      {
+        AGENT_HOOK_OTLP_ENDPOINT: "https://usage.jays.services/api/otlp/v1/traces",
+        AGENT_HOOK_OTLP_HEADER_NAME: "Authorization",
+        AGENT_HOOK_OTLP_HEADER_VALUE: "Bearer SUPER-SECRET",
+      },
+      { write: (line) => lines.push(line), postOtlp: post }
+    );
+    expect(report.configured).toBe(true);
+    expect(report.trusted).toBe(true);
+    expect(report.format).toBe("turns");
+    expect(report.host).toBe("usage.jays.services");
+    expect(report.posted).toBe(false);
+    expect(post).not.toHaveBeenCalled();
+    expect(lines.join("")).not.toContain("SUPER-SECRET");
   });
 });
 
@@ -278,13 +408,14 @@ describe("extractFields: copilot", () => {
     expect(extractFields("copilot", "sessionEnd", { reason: "user_exit" }).success).toBe(false);
   });
 
-  it("errorOccurred is always success:false and never carries the error object", () => {
+  it("errorOccurred is always success:false and coarsens the error (never the object)", () => {
     const fields = extractFields("copilot", "errorOccurred", {
       sessionId: "s-3",
       error: { message: "stack trace and everything", name: "TypeError", stack: "at foo()" },
     });
     expect(fields.success).toBe(false);
-    expect(fields).not.toHaveProperty("error");
+    expect(fields.error).toBe("hook_error");
+    expect(JSON.stringify(fields)).not.toContain("stack trace");
   });
 });
 
@@ -303,10 +434,11 @@ describe("extractFields: duration_ms passthrough", () => {
     expect(extractFields("copilot", "postToolUse", { duration_ms: "" }).durationMs).toBeUndefined();
   });
 
-  it("an unknown platform yields an otherwise-empty field set", () => {
-    expect(extractFields("unknown-platform", "whatever", { conversationId: "x" })).toEqual({
-      durationMs: undefined,
-    });
+  it("an unknown platform yields no tool/session fields", () => {
+    const fields = extractFields("unknown-platform", "whatever", { conversationId: "x" });
+    expect(fields.sessionId).toBeUndefined();
+    expect(fields.toolName).toBeUndefined();
+    expect(fields.durationMs).toBeUndefined();
   });
 });
 
@@ -528,6 +660,16 @@ describe("postOtlp", () => {
     const fetchImpl = vi.fn();
     await postOtlp({ endpoint: "https://evil.example.com/v1/logs", headerName: "h", headerValue: "v" }, {}, fetchImpl);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does call fetch for loopback (v2 self-test / local UM)", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 202 }));
+    await postOtlp(
+      { endpoint: "http://127.0.0.1:4103/api/otlp/v1/traces", headerName: "Authorization", headerValue: "Bearer x" },
+      { turns: [] },
+      fetchImpl
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -830,7 +972,7 @@ describe("agent-hook-otlp.mjs as a real subprocess", () => {
     const { code, stdout } = await run(["antigravity", "Stop"], {
       input: JSON.stringify(payload),
       env: {
-        AGENT_HOOK_OTLP_ENDPOINT: serverUrl,
+        AGENT_HOOK_OTLP_ENDPOINT: "https://evil.example.com/v1/logs",
         AGENT_HOOK_OTLP_HEADER_NAME: "x-sentry-auth",
         AGENT_HOOK_OTLP_HEADER_VALUE: "sentry sentry_key=test",
       },
@@ -838,22 +980,19 @@ describe("agent-hook-otlp.mjs as a real subprocess", () => {
     expect(code).toBe(0);
     expect(stdout).toBe(JSON.stringify({}));
 
-    // This local test server is not *.sentry.io, so isTrustedSentryEndpoint
-    // correctly refuses to send it anything -- the fixed stdout reply above
-    // is unconditional and lands regardless.  The full allowlisted wire
-    // body against a *.sentry.io-shaped endpoint is proven at the unit
-    // level (buildLogRecord's tests, and "main" -> "posts a log record end
-    // to end when credentials are present").
+    // The host-visible stdout reply is unconditional.  Loopback is now a
+    // trusted v2 target, so this test points at an untrusted internet host
+    // to prove the reply still lands when the send is dropped.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(receivedRequests).toHaveLength(0);
   });
 
-  it("never sends to a non-sentry.io endpoint even when credentials otherwise resolve cleanly", async () => {
+  it("never sends to an untrusted internet host even when credentials otherwise resolve cleanly", async () => {
     await startServer();
     const { code, stdout } = await run(["cursor", "afterFileEdit"], {
       input: JSON.stringify({ conversation_id: "conv-secret-session", model: "claude-sonnet-5" }),
       env: {
-        AGENT_HOOK_OTLP_ENDPOINT: serverUrl,
+        AGENT_HOOK_OTLP_ENDPOINT: "https://evil.example.com/v1/logs",
         AGENT_HOOK_OTLP_HEADER_NAME: "x-sentry-auth",
         AGENT_HOOK_OTLP_HEADER_VALUE: "sentry sentry_key=test",
       },
@@ -889,7 +1028,7 @@ describe("agent-hook-otlp.mjs as a real subprocess", () => {
     expect(stdout).toBe("");
   });
 
-  it("reads credentials from a chmod-600 file when env vars are absent (proven at the resolveCredentials unit level; the wire attempt here is correctly refused as non-sentry.io)", async () => {
+  it("reads credentials from a chmod-600 file and delivers to loopback (v2; v1 silently dropped this)", async () => {
     await startServer();
     tempDir = await mkdtemp(join(tmpdir(), "agent-hook-otlp-"));
     const credsPath = join(tempDir, "creds.json");
@@ -904,8 +1043,10 @@ describe("agent-hook-otlp.mjs as a real subprocess", () => {
     });
     expect(code).toBe(0);
     expect(stdout).toBe("");
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(receivedRequests).toHaveLength(0);
+    await vi.waitFor(() => expect(receivedRequests.length).toBeGreaterThan(0), { timeout: 2000 });
+    expect(receivedRequests[0].headers["x-sentry-auth"]).toBe("sentry sentry_key=fromfile");
+    expect(receivedRequests[0].body).toContain("s-file");
+    expect(receivedRequests[0].body).not.toContain("fromfile");
   });
 
   it("still runs main() when invoked through a symlink (P2 finding: import.meta.url resolves the real path)", async () => {
