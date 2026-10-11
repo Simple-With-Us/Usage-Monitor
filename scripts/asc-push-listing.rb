@@ -327,8 +327,10 @@ options[:apps] = APPS.keys if options[:apps].empty?
 
 options[:apps].each do |key|
   cfg = APPS[key] or abort "unknown app #{key}"
-  if %i[app_id version_id loc_id app_info_id app_info_loc_id].any? { |k| cfg[k].nil? }
-    abort "refusing to push #{key}: its App Store Connect record for the com.simplewithus.usage.* bundle does not exist yet (IDs are nil in APPS)"
+  missing = %i[app_id version_id loc_id app_info_id app_info_loc_id].select { |k| cfg[k].nil? }
+  unless missing.empty?
+    abort "refusing to push #{key}: still missing #{missing.join(', ')} in APPS -- " \
+          "the script does not discover these; fill them in from the App Store Connect record"
   end
   puts "=== #{key} ==="
   patch_localization(cfg)
