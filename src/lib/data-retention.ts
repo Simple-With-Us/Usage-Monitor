@@ -103,6 +103,11 @@ export interface DataRetentionTableResult {
   rollupsTouched: number;
 }
 
+export interface AgentTurnRetentionResult {
+  contentCleared: number;
+  rowsDeleted: number;
+}
+
 export interface DataRetentionResult {
   startedAt: string;
   finishedAt: string;
@@ -115,6 +120,8 @@ export interface DataRetentionResult {
   /** Tombstones are retained permanently; this is the live table size (Wave K / E14). */
   tombstoneCount: number;
   tombstonesPruned: number;
+  /** Prompt/response expiry + row purge for AgentTurn (never cash/ledger). */
+  agentTurns: AgentTurnRetentionResult;
   compacted: boolean;
   compactionError?: string;
   /** True when ANALYZE ran after prune to refresh planner stats (no exclusive rewrite). */
@@ -920,6 +927,36 @@ export async function rehashStaleExternalUsageEventDailyRollupGroupKeys(options?
   return { scanned, rewritten, merged };
 }
 
+/**
+ * AgentTurn is diagnostic-only (never cash). Two layers:
+ * 1. Null prompt/response once contentExpiresAt has passed (default 30d).
+ * 2. Delete the row once occurredAt is older than AGENT_TURN_RETENTION_DAYS
+ *    (default 90). Safe to call on every maintenance tick.
+ */
+export async function purgeAgentTurns(
+  now = new Date()
+): Promise<AgentTurnRetentionResult> {
+  const rowRetentionDays = readPositiveIntEnv(
+    ["AGENT_TURN_RETENTION_DAYS"],
+    90
+  );
+  const rowCutoff = retentionCutoff(now, rowRetentionDays);
+
+  const cleared = await prisma.agentTurn.updateMany({
+    where: {
+      contentExpiresAt: { lte: now },
+      OR: [{ promptText: { not: null } }, { responseText: { not: null } }],
+    },
+    data: { promptText: null, responseText: null },
+  });
+
+  const deleted = await prisma.agentTurn.deleteMany({
+    where: { occurredAt: { lt: rowCutoff } },
+  });
+
+  return { contentCleared: cleared.count, rowsDeleted: deleted.count };
+}
+
 export async function runDataRetentionMaintenance(now = new Date()): Promise<DataRetentionResult> {
   const startedAt = new Date();
   const snapshotRetentionDays = readPositiveIntEnv(
@@ -959,6 +996,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     getExternalEventRawCutoff(now),
     batchSize
   );
+  const agentTurns = await purgeAgentTurns(now);
 
   // Tombstones are the only durable proof that an already-rolled-up event was
   // consumed. Expiring one permits an arbitrarily late producer retry to be
@@ -1012,6 +1050,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     externalUsageEvents,
     tombstoneCount,
     tombstonesPruned,
+    agentTurns,
     compacted,
     compactionError,
     analyzed,

@@ -170,7 +170,7 @@ function allowedChild(path: string, key: string): boolean {
 function isOperationalBag(path: string): boolean {
   return path === "tags" || /^spans\[\d+\]\.tags$/.test(path) || path === "attributes" || path.endsWith(".attributes") || path.endsWith(".data");
 }
-const SAFE_ROUTES = new Set(["ingest/usage", "otlp/v1/metrics", "/api/ingest/usage", "/api/otlp/v1/metrics", "/api/health", "/api/ready", "/login"]);
+const SAFE_ROUTES = new Set(["ingest/usage", "otlp/v1/metrics", "otlp/v1/traces", "/api/ingest/usage", "/api/otlp/v1/metrics", "/api/otlp/v1/traces", "/api/health", "/api/ready", "/login"]);
 const SAFE_ERROR_CLASSES = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError", "AggregateError", "DOMException", "AbortError", "TimeoutError", "PrismaClientKnownRequestError", "PrismaClientUnknownRequestError", "PrismaClientInitializationError", "PrismaClientValidationError", "PrismaClientRustPanicError"]);
 function safeBagValue(key: string, value: unknown): unknown {
   const typed = value && typeof value === "object" && "type" in value && "value" in value;

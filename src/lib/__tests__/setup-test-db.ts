@@ -333,6 +333,29 @@ CREATE TABLE "OtlpMetricState" (
   "updatedAt" DATETIME NOT NULL
 );
 
+CREATE TABLE "AgentTurn" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "platform" TEXT NOT NULL,
+  "seat" TEXT,
+  "repo" TEXT,
+  "conversationId" TEXT,
+  "generationId" TEXT,
+  "model" TEXT,
+  "inputTokens" INTEGER,
+  "outputTokens" INTEGER,
+  "cacheTokens" INTEGER,
+  "costUsd" REAL,
+  "durationMs" INTEGER,
+  "toolCount" INTEGER DEFAULT 0,
+  "toolNames" JSONB,
+  "error" TEXT,
+  "promptText" TEXT,
+  "responseText" TEXT,
+  "occurredAt" DATETIME NOT NULL,
+  "contentExpiresAt" DATETIME,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE "ProviderAlertNotification" (
   "id" TEXT NOT NULL PRIMARY KEY,
   "providerId" TEXT NOT NULL,
@@ -455,6 +478,9 @@ CREATE INDEX "ExternalUsageEventTombstone_prunedAt_idx" ON "ExternalUsageEventTo
 CREATE UNIQUE INDEX "ProviderUsageReconciliation_providerId_periodStart_periodEnd_keyRef_key" ON "ProviderUsageReconciliation"("providerId", "periodStart", "periodEnd", "keyRef");
 CREATE INDEX "ProviderUsageReconciliation_providerId_status_idx" ON "ProviderUsageReconciliation"("providerId", "status");
 CREATE INDEX "OtlpMetricState_updatedAt_idx" ON "OtlpMetricState"("updatedAt");
+CREATE INDEX "AgentTurn_platform_occurredAt_idx" ON "AgentTurn"("platform", "occurredAt");
+CREATE INDEX "AgentTurn_conversationId_occurredAt_idx" ON "AgentTurn"("conversationId", "occurredAt");
+CREATE INDEX "AgentTurn_model_occurredAt_idx" ON "AgentTurn"("model", "occurredAt");
 CREATE UNIQUE INDEX "ProviderAlertNotification_stateKey_key" ON "ProviderAlertNotification"("stateKey");
 CREATE INDEX "ProviderAlertNotification_providerId_resolvedAt_idx" ON "ProviderAlertNotification"("providerId", "resolvedAt");
 CREATE INDEX "ProviderAlertNotification_lastSentAt_idx" ON "ProviderAlertNotification"("lastSentAt");

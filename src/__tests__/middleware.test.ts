@@ -43,6 +43,8 @@ describe("middleware matcher — /api/budget-status exclusion (regression for th
       "/api/bills.ics",
       "/api/datadog-public-config",
       "/api/quota-windows",
+      "/api/agents-overview",
+      "/api/agent-turns",
       // App Store Connect privacy/support URLs (public legal pages)
       "/privacy",
       "/privacy-policy",
