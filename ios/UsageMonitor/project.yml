@@ -69,7 +69,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: UsageMonitor
-        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios
         DEVELOPMENT_TEAM: CC8UTF7ATG
         INFOPLIST_FILE: App/Resources/Info.plist
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
@@ -132,7 +132,7 @@ targets:
       base:
         # Distinct product name + bundle ID so Xcode never overwrites the remote client.
         PRODUCT_NAME: LocalUsageMonitor
-        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.local
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.local.ios
         DEVELOPMENT_TEAM: CC8UTF7ATG
         INFOPLIST_FILE: LocalApp/Resources/Info.plist
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
@@ -174,7 +174,7 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.widget
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.widget
         DEVELOPMENT_TEAM: CC8UTF7ATG
         INFOPLIST_FILE: UsageMonitorWidget/Info.plist
         CODE_SIGN_ENTITLEMENTS: UsageMonitorWidget/UsageMonitorWidget.entitlements
@@ -198,7 +198,7 @@ targets:
       - path: UsageMonitorTests
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.tests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: UsageMonitor
@@ -222,7 +222,7 @@ targets:
       - path: UsageMonitorWidget/BudgetWidgetIntent.swift
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.widgettests
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.widgettests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: UsageMonitorKit

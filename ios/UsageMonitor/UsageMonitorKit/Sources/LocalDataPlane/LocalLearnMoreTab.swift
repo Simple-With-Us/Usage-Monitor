@@ -110,10 +110,12 @@ public struct LocalLearnMoreTab: View {
                 detail: "usage.jays.services",
                 url: "https://usage.jays.services"
             )
-            // No "iPhone App" App Store link yet: the Usage Monitor App Store
-            // record for `com.simplewithus.usage.client` has not been created.
-            // The old Apple ID belonged to the retired `services.jays.usage.*`
-            // record.  Add the row back with the new Apple ID once it exists.
+            linkRow(
+                icon: "arrow.down.app",
+                title: "iPhone App",
+                detail: "Usage Monitor on the App Store",
+                url: "https://apps.apple.com/app/id6820881005"
+            )
             linkRow(
                 icon: "envelope",
                 title: "Support",

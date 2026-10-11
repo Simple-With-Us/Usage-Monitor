@@ -8,9 +8,9 @@ import WidgetKit
 ///
 /// Two separate iOS apps share `group.com.simplewithus.usage`:
 ///
-/// - **Client** (`com.simplewithus.usage.client`) writes `widget-snapshot-v2.json`
+/// - **Client** (`com.simplewithus.usage.client.ios`) writes `widget-snapshot-v2.json`
 ///   through ``SharedStore``.
-/// - **Local** (`com.simplewithus.usage.local`) writes `local-widget-snapshot.json`
+/// - **Local** (`com.simplewithus.usage.local.ios`) writes `local-widget-snapshot.json`
 ///   through `LocalWidgetSnapshotWriter`.
 ///
 /// Before this type existed, every widget read *only* the Client filename, so a

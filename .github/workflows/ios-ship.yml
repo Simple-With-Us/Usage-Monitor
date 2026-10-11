@@ -182,8 +182,34 @@ jobs:
           fi
           printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
-          for name in ASC_KEY_ID ASC_ISSUER_ID \
-                      IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
+          # ASC API credentials live in the fleet secrets project under /asc
+          # (owner ruling 2026-10-11).  The distribution certificate stays in
+          # this app's project at / -- two sources, resolved independently.
+          FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
+          FLEET_ASC_PATH="/asc"
+
+          for name in ASC_KEY_ID ASC_ISSUER_ID; do
+            val="$(
+              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+                --plain --silent --telemetry=false --expand=false \
+                --projectId="$FLEET_ASC_PROJECT_ID" --env=prod --path="$FLEET_ASC_PATH" \
+                2>/dev/null || true
+            )"
+            if [ -z "$val" ]; then
+              echo "::error::Missing $name in fleet secrets /asc (project $FLEET_ASC_PROJECT_ID)." >&2
+              exit 1
+            fi
+            if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+              echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${val//'%'/'%25'}"
+            printf -v "$name" '%s' "$val"
+            export "$name"
+            printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
+          done
+
+          for name in IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
             val="$(
               INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
                 --plain --silent --telemetry=false --expand=false \
@@ -201,16 +227,13 @@ jobs:
             printf -v "$name" '%s' "$val"
             export "$name"
             # Certificate credentials belong only to this load/import step.
-            if [[ "$name" == ASC_KEY_ID || "$name" == ASC_ISSUER_ID ]]; then
-              printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
-            fi
           done
           # Keep multiline PEM out of GITHUB_ENV and every later step environment.
           # Only its mode-600 file path crosses the step boundary.
           key_material="$(
             INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
               --plain --silent --telemetry=false --expand=false \
-              --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
+              --projectId="$FLEET_ASC_PROJECT_ID" --env=prod --path="$FLEET_ASC_PATH" \
               2>/dev/null || true
           )"
           if [ -z "$key_material" ]; then

@@ -20,8 +20,8 @@ total spend).
 
 | App target | Bundle ID | Role |
 |---|---|---|
-| **UsageMonitor** (Usage Client Monitor) | `com.simplewithus.usage.client` | Remote live-sync client (owner + server self-hosters). §§1–9. |
-| **LocalUsageMonitor** (Usage Local Monitor) | `com.simplewithus.usage.local` | On-device self-host product. §10 + design doc. |
+| **UsageMonitor** (Usage Client Monitor) | `com.simplewithus.usage.client.ios` | Remote live-sync client (owner + server self-hosters). §§1–9. |
+| **LocalUsageMonitor** (Usage Local Monitor) | `com.simplewithus.usage.local.ios` | On-device self-host product. §10 + design doc. |
 
 See `ios/README.md` and
 `docs/designs/2026-08-04-mobile-parity-and-phone-self-host.md`.

@@ -5,7 +5,7 @@ import Foundation
 /// Schema authority: `docs/designs/2026-08-04-mobile-parity-and-phone-self-host.md` §2.2.1.
 ///
 /// Isolation rules:
-/// - Lives only in the Local app process (bundle `com.simplewithus.usage.local`).
+/// - Lives only in the Local app process (bundle `com.simplewithus.usage.local.ios`).
 /// - Never write provider API key material here (Keychain only).
 /// - Never share a database file with the remote client app group.
 public protocol LocalStoring: Sendable {

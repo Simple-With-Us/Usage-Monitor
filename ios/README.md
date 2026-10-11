@@ -4,8 +4,8 @@ Two App Store products that share kit code but **not** money-truth or identity.
 
 | App (user-visible name) | Scheme | Bundle ID | Purpose |
 |---|---|---|---|
-| **Usage Client Monitor** | `UsageMonitor` | `com.simplewithus.usage.client` | Live-sync **client** of a Usage Monitor **server** you host (or the owner fleet). Widget: `com.simplewithus.usage.client.widget`. |
-| **Usage Local Monitor** | `LocalUsageMonitor` | `com.simplewithus.usage.local` | **Free App Store candidate** — on-device only. Keys in Keychain; budgets in local SQLite. **No server required.** |
+| **Usage Client Monitor** | `UsageMonitor` | `com.simplewithus.usage.client.ios` | Live-sync **client** of a Usage Monitor **server** you host (or the owner fleet). Widget: `com.simplewithus.usage.client.widget`. |
+| **Usage Local Monitor** | `LocalUsageMonitor` | `com.simplewithus.usage.local.ios` | **Free App Store candidate** — on-device only. Keys in Keychain; budgets in local SQLite. **No server required.** |
 
 User-facing copy uses the **plain app name** only. Show `name` + `bundle ID` together only on identity/debug surfaces.
 
@@ -16,7 +16,7 @@ Binding contract: [`UsageMonitor/ARCHITECTURE-CONTRACT.md`](UsageMonitor/ARCHITE
 
 | | Usage Client Monitor | Usage Local Monitor |
 |---|---|---|
-| Bundle ID | `com.simplewithus.usage.client` | `com.simplewithus.usage.local` |
+| Bundle ID | `com.simplewithus.usage.client.ios` | `com.simplewithus.usage.local.ios` |
 | App group | `group.com.simplewithus.usage` | `group.com.simplewithus.usage` |
 | Deep link | `usageclientmonitor://` | `usagelocalmonitor://` |
 | ASC name | Usage Client Monitor | Usage Local Monitor |
@@ -45,8 +45,8 @@ xcodebuild -scheme LocalUsageMonitor -destination 'generic/platform=iOS Simulato
 
 | Scheme | Bundle ID | Home-screen name |
 |---|---|---|
-| `UsageMonitor` | `com.simplewithus.usage.client` | Usage Monitor |
-| `LocalUsageMonitor` | `com.simplewithus.usage.local` | Local Monitor |
+| `UsageMonitor` | `com.simplewithus.usage.client.ios` | Usage Monitor |
+| `LocalUsageMonitor` | `com.simplewithus.usage.local.ios` | Local Monitor |
 
 1. Scheme menu → **UsageMonitor** → Run.  
 2. Stop or leave running.  
