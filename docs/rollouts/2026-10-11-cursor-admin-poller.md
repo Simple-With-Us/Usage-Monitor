@@ -1,5 +1,23 @@
 # Cursor Admin API poller (2026-10-11)
 
+> **Task:** Poll billed Cursor usage into `ExternalUsageEvent` so editor, CLI, and cloud-agent runs land with charged cents.  Hook turns stay on `AgentTurn`; this poller is the billed ledger.
+>
+> **Acceptance criteria**
+>
+> - One `ExternalUsageEvent` row per published usage event from `POST /teams/filtered-usage-events`, with `sourceApp=cursor-admin`, `provider=cursor`, `metricType=cost`, `costUsd=chargedCents/100`, `billingMode=actual`, `confidence=actual`.
+> - Idempotent on a length-prefixed SHA-256 of the event identity (the API has no event id); reruns do not double count.
+> - Disabled by default; `CURSOR_ADMIN_POLLER_ENABLED` must be `true`, `1`, `on`, or `yes` AND `CURSOR_ADMIN_API_KEY` must be set.  Enabled without the key throws `CURSOR_ADMIN_API_KEY is required` at scheduler registration, before the interval is armed.
+> - Disabled does not log, call the API, or check in to Sentry.  Enabled upserts Sentry cron monitor `usage-monitor-cursor-admin` (60 minutes).
+> - A runtime failure inside an enabled poller stays inside the tick so it cannot fail maintenance or readiness.
+>
+> **Business rules / edge cases**
+>
+> - The Admin API is team-plan only.  This seat is not on one, so `CURSOR_ADMIN_POLLER_ENABLED` and `CURSOR_ADMIN_API_KEY` are intentionally unset on this seat.  Leave them unset.
+> - Daily-usage-data has no dollars; `/teams/spend` is a billing-cycle total of the same `chargedCents`.  Neither is stored, because budget math would `max()` them against these rows.
+> - Included-plan events still carry Cursor's `chargedCents`.  That is Cursor's attributed usage value, not a second copy of the seat fee (the seat subscription stays separate).
+> - `source` is `cloud-agent` when `cloudAgentId` is set, `headless` when `isHeadless` is true, else `client` (the published payload does not split editor from CLI).
+> - gen_ai platforms `cursor` and `cursor-agent` are overlap-skipped on `/api/otlp/v1/metrics` so estimated gen_ai rows cannot sit beside billed cents; an allowlist does not override that block.
+
 Billed Cursor usage was the gap left by #1654 and #1656.  The hook script (`scripts/agent-hook-otlp.mjs`) records turns on `AgentTurn`.  It does not see charged cents.  This poller is the billed ledger.
 
 ## What it calls
