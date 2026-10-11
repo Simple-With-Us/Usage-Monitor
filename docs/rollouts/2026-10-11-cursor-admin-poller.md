@@ -9,7 +9,7 @@ Docs fetched 2026-10-11:
 - https://cursor.com/docs/account/teams/admin-api
 - https://cursor.com/docs/api
 
-`POST https://api.cursor.com/teams/filtered-usage-events`.  Basic auth, `CURSOR_ADMIN_API_KEY` as the username and an empty password.  The key is Infisical-managed (`usage-monitor`, env `prod`, path `/`).  Do not commit it.  Jay must add `CURSOR_ADMIN_API_KEY` there if it is not already present.  A missing key logs a warning and skips.  The scheduler does not crash.
+`POST https://api.cursor.com/teams/filtered-usage-events`.  Basic auth, `CURSOR_ADMIN_API_KEY` as the username and an empty password.  The Admin API is team-plan only.  The poller ships inactive.  It runs only when `CURSOR_ADMIN_POLLER_ENABLED` is `true`, `1`, `on`, or `yes` and `CURSOR_ADMIN_API_KEY` is set.  Leave both unset to keep this seat off.  The key, when used, is Infisical-managed (`usage-monitor`, env `prod`, path `/`).  Do not commit it.  Enabled without the key throws `CURSOR_ADMIN_API_KEY is required` at scheduler registration, before the interval is armed.  A disabled process does not register the job or its Sentry cron monitor.
 
 The docs describe the endpoint as hourly aggregated, with a 60 request/minute limit.  The poller therefore runs at most once an hour from the existing 15-minute tick.  `429` honors `Retry-After` and caps the wait at 20 seconds, then retries up to four attempts.  A failed hour does not move the watermark.  The current hour stays open and is re-read on the next successful poll.
 
@@ -39,14 +39,15 @@ Included-plan events still carry Cursor's `chargedCents` (the docs' included exa
 
 ## Sentry
 
-New rows are summarized through the existing `fanoutPersistedUsage(..., "poll")` path.  Emails and the API key are not in that payload.  Cron monitor `usage-monitor-cursor-admin` is a 60-minute interval, 15-minute check-in margin, 5-minute max runtime, UTC.  A missing key checks in `ok` (the job ran; there was nothing to poll).  An HTTP, parse, or persist failure checks in `error`.
+New rows are summarized through the existing `fanoutPersistedUsage(..., "poll")` path.  Emails and the API key are not in that payload.  Cron monitor `usage-monitor-cursor-admin` is a 60-minute interval, 15-minute check-in margin, 5-minute max runtime, UTC.  It is upserted only when the poller is enabled and a poll checks in.  While the flag is unset there is no check-in and no hourly skip log.  An HTTP, parse, or persist failure on an enabled poller checks in `error`.  Enabled without the key fails startup and does not check in.
 
 ## Changes
 
-- `src/lib/cursor-admin-poller.ts`: hourly Admin API poller.  Zod-strict page and event schemas.  `import "server-only"`.  Seeds a generic `cursor` provider when none exists.  Missing `CURSOR_ADMIN_API_KEY` warns and skips.
+- `src/lib/cursor-admin-config.ts`: opt-in gate.  `CURSOR_ADMIN_POLLER_ENABLED` must be `true`, `1`, `on`, or `yes`.  Enabled without `CURSOR_ADMIN_API_KEY` throws `CursorAdminPollerConfigError`.
+- `src/lib/cursor-admin-poller.ts`: hourly Admin API poller.  Zod-strict page and event schemas.  `import "server-only"`.  Seeds a generic `cursor` provider when none exists.  Disabled returns `skipped` / `disabled` with no log and no check-in.  Enabled without a key throws and does not check in.
 - `src/lib/cursor-admin-fixtures.ts`: doc fixtures for filtered usage events and the documented 429 body.
-- `src/lib/usage-recorder.ts`: runs the poller inside the 15-minute tick, isolated so a failure cannot fail maintenance or readiness.
-- `src/lib/sentry-ops.ts`: cron monitor `usage-monitor-cursor-admin` at 60 minutes.
+- `src/lib/usage-recorder.ts`: calls the poller from the 15-minute tick only when the flag is on.  A runtime failure stays isolated so it cannot fail maintenance or readiness.  `startUsagePollingScheduler` asserts the key before arming the interval.
+- `src/lib/sentry-ops.ts`: cron monitor `usage-monitor-cursor-admin` at 60 minutes.  `recordCursorAdminPollerCheckIn` no-ops while the flag is unset, so the monitor is not registered.
 - `src/lib/otlp/gen-ai-mapper.ts`: `cursor` and `cursor-agent` are overlap platforms so estimated gen_ai rows do not sit beside billed cents.
 - `src/test-shims/server-only.ts` and `vitest.config.ts`: Node test runner stand-in for the `server-only` package.
 - Tests: `src/lib/__tests__/cursor-admin-poller.test.ts`, plus scheduler, Sentry cron, gen_ai mapper, and OTLP metrics route coverage.
@@ -60,10 +61,12 @@ Local, before the review follow-up:
 - `npx tsc --noEmit` passed.
 - `npx vitest run` on the poller, Sentry cron, gen_ai mapper, scheduler timeout, and OTLP metrics route tests passed (104 tests).
 - GitHub `CI / verify` on `5297d2a` passed, including the production build.
-- After the review follow-up, `npx eslint` on the poller, its test, and `vitest.config.ts` passed, `npx tsc --noEmit` passed, and the poller, Sentry cron, and scheduler timeout tests passed (60 tests).
+- After the review follow-up, `npx eslint` on the poller and its test passed, and the poller plus Sentry cron tests passed (31 tests).  The poller module starts with `import "server-only"`.
+- After the opt-in change, `npx eslint` and `npx tsc --noEmit` passed, and the poller, Sentry cron, scheduler boot, and provider-timeout tests passed (75 tests).  Disabled does not check in.  Enabled without a key throws before the interval is armed.
 
 ## Next steps
 
-- Add `CURSOR_ADMIN_API_KEY` to Infisical (`usage-monitor`, env `prod`, path `/`) if it is not already there.  Until then the poller logs a warning and skips.  The scheduler keeps running.
-- After the first successful production poll, confirm a provider row named `cursor` exists and that `ExternalUsageEvent` rows with `sourceApp=cursor-admin` are the billed totals.  The seat subscription stays separate.
-- Watch the Sentry cron `usage-monitor-cursor-admin`.  A missing key is `ok`.  An upstream or parse failure is `error`.
+- This deploy stays inactive.  Jay is not on a Cursor team plan, so do not set `CURSOR_ADMIN_POLLER_ENABLED` or `CURSOR_ADMIN_API_KEY` for this seat.  The scheduler keeps running and the Cursor cron monitor is not created.
+- A team-plan operator enables it by setting `CURSOR_ADMIN_POLLER_ENABLED=true` and `CURSOR_ADMIN_API_KEY` together (Infisical `usage-monitor`, env `prod`, path `/`) and restarting.  The flag without the key fails startup.
+- After the first successful poll on an enabled seat, confirm a provider row named `cursor` exists and that `ExternalUsageEvent` rows with `sourceApp=cursor-admin` are the billed totals.  The seat subscription stays separate.
+- On an enabled seat, watch the Sentry cron `usage-monitor-cursor-admin`.  An upstream or parse failure is `error`.  A disabled seat has no check-ins.

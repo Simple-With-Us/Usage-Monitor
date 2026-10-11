@@ -52,6 +52,39 @@ describe("sentry cron monitor config", () => {
   });
 });
 
+describe("Cursor admin cron check-in", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.doUnmock("@sentry/nextjs");
+    vi.resetModules();
+  });
+
+  it("does not check in while the poller is off", async () => {
+    vi.resetModules();
+    const captureCheckIn = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({ captureCheckIn }));
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "false");
+    const { recordCursorAdminPollerCheckIn } = await import("@/lib/sentry-ops");
+    await recordCursorAdminPollerCheckIn("ok");
+    expect(captureCheckIn).not.toHaveBeenCalled();
+  });
+
+  it("checks in only after the poller is enabled", async () => {
+    vi.resetModules();
+    const captureCheckIn = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({ captureCheckIn }));
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "true");
+    const { recordCursorAdminPollerCheckIn } = await import("@/lib/sentry-ops");
+    await recordCursorAdminPollerCheckIn("error");
+    expect(captureCheckIn).toHaveBeenCalledWith(
+      { monitorSlug: "usage-monitor-cursor-admin", status: "error" },
+      expect.objectContaining({
+        schedule: { type: "interval", value: 60, unit: "minute" },
+      })
+    );
+  });
+});
+
 describe("sparse Sentry ops no-op without a client", () => {
   it("swallows SDK load failures", async () => {
     vi.resetModules();

@@ -9,8 +9,10 @@
 //   https://cursor.com/docs/account/teams/admin-api
 //   https://cursor.com/docs/api
 // Auth is Basic with the admin API key as the username and an empty
-// password.  The key is CURSOR_ADMIN_API_KEY (Infisical).  A missing key
-// logs a warning and skips.  It must never throw into the scheduler.
+// password.  The poller is opt-in and team-plan only.  It stays off unless
+// CURSOR_ADMIN_POLLER_ENABLED is set.  Enabled without CURSOR_ADMIN_API_KEY
+// throws at startup so the job and its Sentry cron monitor are not
+// registered.  A disabled process does not log, check in, or call the API.
 //
 // The docs say this endpoint is aggregated hourly and should be polled at
 // most once per hour (60 requests/minute hard limit; 429 carries
@@ -31,11 +33,18 @@ import type { Prisma } from "@prisma/client";
 import * as Sentry from "@sentry/nextjs";
 import { z } from "zod";
 
+import {
+  assertCursorAdminPollerConfigured,
+  CursorAdminPollerConfigError,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
 import type { ExternalUsageEventInput } from "@/lib/external-usage-events";
 import { persistExternalUsageEvents } from "@/lib/external-usage-events";
 import { prisma } from "@/lib/prisma";
 import { recordCursorAdminPollerCheckIn } from "@/lib/sentry-ops";
 import { fanoutPersistedUsage } from "@/lib/usage-fanout";
+
+export { assertCursorAdminPollerConfigured, isCursorAdminPollerEnabled };
 
 export const CURSOR_ADMIN_API_BASE = "https://api.cursor.com";
 export const CURSOR_ADMIN_USAGE_EVENTS_PATH = "/teams/filtered-usage-events";
@@ -95,7 +104,7 @@ export interface ParsedUsageEventsPage {
 }
 
 export type CursorAdminPollResult =
-  | { status: "skipped"; reason: "test_process" | "missing_key" | "not_due" }
+  | { status: "skipped"; reason: "test_process" | "disabled" | "not_due" }
   | {
       status: "ok";
       fetched: number;
@@ -140,11 +149,9 @@ interface PollWindow {
 }
 
 let inFlight: Promise<CursorAdminPollResult> | null = null;
-let lastMissingKeyNoticeMs = 0;
 
 export function resetCursorAdminPollerForTests(): void {
   inFlight = null;
-  lastMissingKeyNoticeMs = 0;
 }
 
 function encodeField(value: string): string {
@@ -538,19 +545,15 @@ async function executePoll(options: CursorAdminPollOptions): Promise<CursorAdmin
     return { status: "skipped", reason: "test_process" };
   }
 
+  if (!isCursorAdminPollerEnabled(env)) {
+    return { status: "skipped", reason: "disabled" };
+  }
+
   const apiKey = env.CURSOR_ADMIN_API_KEY?.trim() ?? "";
   const now = options.now ?? (() => new Date());
   const checkIn = options.checkIn ?? recordCursorAdminPollerCheckIn;
   if (!apiKey) {
-    const nowMs = now().getTime();
-    if (options.force || nowMs - lastMissingKeyNoticeMs >= CURSOR_ADMIN_POLL_INTERVAL_MS) {
-      lastMissingKeyNoticeMs = nowMs;
-      console.warn(
-        "[cursor-admin] CURSOR_ADMIN_API_KEY is not set; skipping Cursor usage poll"
-      );
-      await checkIn("ok");
-    }
-    return { status: "skipped", reason: "missing_key" };
+    throw new CursorAdminPollerConfigError();
   }
 
   const state = options.state ?? prismaState();

@@ -1017,6 +1017,7 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
         markTickStarted,
         markTickCompleted,
         pollCursorAdmin,
+        cursorAdminEnabled: true,
       })
     ).resolves.toBeUndefined();
 
@@ -1030,5 +1031,34 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       providerFetchDegraded: false,
       cloudflareLegacyHandoff: "disabled",
     });
+  });
+
+  it("does not call the Cursor admin poller when it is left off", async () => {
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => undefined);
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickCompleted,
+      pollCursorAdmin,
+    });
+
+    expect(pollCursorAdmin).not.toHaveBeenCalled();
+    expect(markTickCompleted).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ maintenanceHealthy: true })
+    );
   });
 });

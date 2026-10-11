@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CursorAdminPollerConfigError,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
+import {
   CURSOR_ADMIN_RATE_LIMIT_BODY,
   CURSOR_FILTERED_USAGE_EVENTS_FIXTURE,
   CURSOR_SERVICE_ACCOUNT_USAGE_EVENT_FIXTURE,
@@ -265,7 +269,11 @@ describe("pollCursorAdminUsage", () => {
     const ensureProvider = vi.fn(async () => undefined);
     const run = (force = extras.force) =>
       pollCursorAdminUsage({
-        env: env({ CURSOR_ADMIN_API_KEY: API_KEY, ...extras.env }),
+        env: env({
+          CURSOR_ADMIN_POLLER_ENABLED: "true",
+          CURSOR_ADMIN_API_KEY: API_KEY,
+          ...extras.env,
+        }),
         fetchImpl,
         sleep: extras.sleep ?? (async () => undefined),
         now: extras.now ?? (() => NOW),
@@ -283,7 +291,10 @@ describe("pollCursorAdminUsage", () => {
   it("skips inside Vitest unless the test opts in", async () => {
     const fetchImpl = vi.fn();
     const result = await pollCursorAdminUsage({
-      env: env({ CURSOR_ADMIN_API_KEY: API_KEY }),
+      env: env({
+        CURSOR_ADMIN_POLLER_ENABLED: "true",
+        CURSOR_ADMIN_API_KEY: API_KEY,
+      }),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       runInTests: false,
     });
@@ -291,30 +302,56 @@ describe("pollCursorAdminUsage", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("warns and skips when the admin key is missing", async () => {
+  it("stays off without a warning or check-in when the flag is unset", async () => {
     const fetchImpl = vi.fn();
     const checkIn = vi.fn(async () => undefined);
-    const first = await pollCursorAdminUsage({
-      env: env(),
+    const result = await pollCursorAdminUsage({
+      env: env({ CURSOR_ADMIN_API_KEY: API_KEY }),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      checkIn,
+      force: true,
+      runInTests: true,
+    });
+    expect(result).toEqual({ status: "skipped", reason: "disabled" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(checkIn).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("treats only true, 1, on, and yes as enabled", () => {
+    expect(isCursorAdminPollerEnabled(env())).toBe(false);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: "false" }))).toBe(false);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: "0" }))).toBe(false);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: " TRUE " }))).toBe(true);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: "1" }))).toBe(true);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: "on" }))).toBe(true);
+    expect(isCursorAdminPollerEnabled(env({ CURSOR_ADMIN_POLLER_ENABLED: "yes" }))).toBe(true);
+  });
+
+  it("throws when enabled without an API key and does not check in", async () => {
+    const fetchImpl = vi.fn();
+    const checkIn = vi.fn(async () => undefined);
+    const missing = pollCursorAdminUsage({
+      env: env({ CURSOR_ADMIN_POLLER_ENABLED: "true" }),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       now: () => NOW,
       checkIn,
       runInTests: true,
     });
-    const second = await pollCursorAdminUsage({
-      env: env({ CURSOR_ADMIN_API_KEY: "   " }),
+    await expect(missing).rejects.toBeInstanceOf(CursorAdminPollerConfigError);
+    await expect(missing).rejects.toThrow(/CURSOR_ADMIN_API_KEY is required/);
+    const blank = pollCursorAdminUsage({
+      env: env({ CURSOR_ADMIN_POLLER_ENABLED: "yes", CURSOR_ADMIN_API_KEY: "   " }),
       fetchImpl: fetchImpl as unknown as typeof fetch,
-      now: () => new Date(NOW.getTime() + 15 * 60 * 1000),
       checkIn,
       runInTests: true,
     });
-    expect(first).toEqual({ status: "skipped", reason: "missing_key" });
-    expect(second).toEqual({ status: "skipped", reason: "missing_key" });
+    await expect(blank).rejects.toThrow(/CURSOR_ADMIN_API_KEY is required/);
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(checkIn).toHaveBeenCalledTimes(1);
-    expect(checkIn).toHaveBeenCalledWith("ok");
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain("CURSOR_ADMIN_API_KEY");
+    expect(checkIn).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("pages the documented events and sends Basic auth with an empty password", async () => {
@@ -386,7 +423,10 @@ describe("pollCursorAdminUsage", () => {
 
     const later = new Date(NOW.getTime() + HOUR_MS);
     const continued = await pollCursorAdminUsage({
-      env: env({ CURSOR_ADMIN_API_KEY: API_KEY }),
+      env: env({
+        CURSOR_ADMIN_POLLER_ENABLED: "true",
+        CURSOR_ADMIN_API_KEY: API_KEY,
+      }),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       sleep: async () => undefined,
       now: () => later,

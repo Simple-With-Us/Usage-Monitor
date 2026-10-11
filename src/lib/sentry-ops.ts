@@ -14,11 +14,15 @@
 // `docs/observability/producer-coverage-matrix.md`.  The mirror is
 // DSN-gated by SENTRY_FLEET_DSN; absent = no-op.
 
+import { isCursorAdminPollerEnabled } from "@/lib/cursor-admin-config";
+
 export const SENTRY_CRON_MONITOR_SLUG = "usage-monitor-scheduler";
 
-// Cursor Admin API usage is aggregated hourly.  The poller in
-// cursor-admin-poller.ts runs from the 15-minute scheduler but only calls
-// the API once an hour.  This monitor matches that poll, not the scheduler.
+// Cursor Admin API usage is aggregated hourly.  When the opt-in poller is
+// enabled it runs from the 15-minute scheduler but only calls the API once
+// an hour.  This monitor matches that poll, not the scheduler.  Check-ins
+// no-op while CURSOR_ADMIN_POLLER_ENABLED is unset, so the monitor is not
+// upserted for a process that left the poller off.
 export const SENTRY_CURSOR_ADMIN_CRON_SLUG = "usage-monitor-cursor-admin";
 export const SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES = 60;
 export const SENTRY_CURSOR_ADMIN_CRON_CHECKIN_MARGIN = 15;
@@ -87,6 +91,7 @@ export function sentryCursorAdminCronMonitorConfig(): {
 export async function recordCursorAdminPollerCheckIn(
   status: "ok" | "error"
 ): Promise<void> {
+  if (!isCursorAdminPollerEnabled()) return;
   try {
     const mod = await loadSentry();
     const captureCheckIn = mod
