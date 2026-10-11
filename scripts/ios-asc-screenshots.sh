@@ -114,8 +114,8 @@ boot "$IPHONE_UDID"
 build_app UsageMonitor
 build_app LocalUsageMonitor
 
-capture_app UsageMonitor UsageMonitor com.simplewithus.usage.client client "dashboard,providers,projects,alerts,settings"
-capture_app LocalUsageMonitor LocalUsageMonitor com.simplewithus.usage.local local "overview,providers,projects,alerts,settings"
+capture_app UsageMonitor UsageMonitor com.simplewithus.usage.client.ios client "dashboard,providers,projects,alerts,settings"
+capture_app LocalUsageMonitor LocalUsageMonitor com.simplewithus.usage.local.ios local "overview,providers,projects,alerts,settings"
 
 echo "Screenshots under $OUT_ROOT"
 find "$OUT_ROOT" -name '*.png' | sort
