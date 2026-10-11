@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 import * as Sentry from "@sentry/nextjs";
+import { z } from "zod";
 
 import type { ExternalUsageEventInput } from "@/lib/external-usage-events";
 import { persistExternalUsageEvents } from "@/lib/external-usage-events";
@@ -152,40 +153,108 @@ function canonicalNumber(value: number): string {
   return JSON.stringify(value);
 }
 
-function finiteNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
+// Zod schemas are the trust boundary for the untrusted Admin API response.
+// The hand-written parsers they replaced used bespoke type guards that
+// could not be reasoned about centrally; schema parsing gives one place to
+// see the documented shape and lets Zod return every validation issue.
+
+const TimestampEpochMillisSchema = z
+  .union([z.string(), z.number()])
+  .transform((value, ctx) => {
+    const raw =
+      typeof value === "string"
+        ? value.trim()
+        : Number.isFinite(value)
+          ? String(Math.trunc(value))
+          : "";
+    if (!/^\d{12,16}$/.test(raw)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "timestamp must be a 12-16 digit epoch milliseconds string",
+      });
+      return z.NEVER;
+    }
+    const ms = Number(raw);
+    if (!Number.isSafeInteger(ms)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "timestamp must be a safe integer",
+      });
+      return z.NEVER;
+    }
+    const year = new Date(ms).getUTCFullYear();
+    if (year < 2000 || year > 2100) {
+      ctx.addIssue({
+        code: "custom",
+        message: "timestamp year must be between 2000 and 2100",
+      });
+      return z.NEVER;
+    }
+    return raw;
+  });
+
+function optionalNonEmptyTrimmedString(max: number) {
+  return z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .transform((value) => (value === undefined || value === "" ? undefined : value));
 }
 
-function requiredBoolean(value: unknown): boolean | null {
-  return typeof value === "boolean" ? value : null;
-}
+const CursorTokenUsageSchema = z
+  .object({
+    inputTokens: z.number().finite(),
+    outputTokens: z.number().finite(),
+    cacheWriteTokens: z.number().finite(),
+    cacheReadTokens: z.number().finite(),
+    totalCents: z.number().finite(),
+    discountPercentOff: z.number().finite().optional(),
+  })
+  .strict();
 
-function optionalString(value: unknown, max: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  return trimmed.slice(0, max);
-}
+const CursorFilteredUsageEventSchema = z
+  .object({
+    timestamp: TimestampEpochMillisSchema,
+    userEmail: z
+      .string()
+      .trim()
+      .min(1)
+      .max(320)
+      .refine((value) => value.includes("@"), {
+        message: "userEmail must contain @",
+      }),
+    model: z.string().trim().min(1).max(200),
+    kind: z.string().trim().min(1).max(200),
+    maxMode: z.boolean(),
+    requestsCosts: z.number().finite(),
+    isTokenBasedCall: z.boolean(),
+    isChargeable: z.boolean(),
+    isHeadless: z.boolean(),
+    chargedCents: z.number().finite(),
+    serviceAccountId: optionalNonEmptyTrimmedString(200),
+    serviceAccountName: optionalNonEmptyTrimmedString(200),
+    cloudAgentId: optionalNonEmptyTrimmedString(200),
+    automationId: optionalNonEmptyTrimmedString(200),
+    conversationId: optionalNonEmptyTrimmedString(200),
+    tokenUsage: CursorTokenUsageSchema.nullish().transform((value) => value ?? undefined),
+    cursorTokenFee: z.number().finite().optional(),
+  })
+  .strict()
+  .refine((data) => !(data.isTokenBasedCall && data.tokenUsage === undefined), {
+    message: "isTokenBasedCall=true requires a tokenUsage object",
+  });
 
-function epochMillis(value: unknown): string | null {
-  const raw =
-    typeof value === "string"
-      ? value.trim()
-      : typeof value === "number" && Number.isFinite(value)
-        ? String(Math.trunc(value))
-        : "";
-  if (!/^\d{12,16}$/.test(raw)) return null;
-  const ms = Number(raw);
-  if (!Number.isSafeInteger(ms)) return null;
-  const year = new Date(ms).getUTCFullYear();
-  if (year < 2000 || year > 2100) return null;
-  return raw;
-}
+const CursorFilteredUsageEventsPageSchema = z
+  .object({
+    usageEvents: z.array(CursorFilteredUsageEventSchema),
+    pagination: z
+      .object({
+        hasNextPage: z.boolean(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 
 function usageSource(event: Pick<CursorFilteredUsageEvent, "cloudAgentId" | "isHeadless">): CursorUsageSource {
   if (event.cloudAgentId) return "cloud-agent";
@@ -223,104 +292,17 @@ export function cursorUsageEventIdempotencyKey(event: CursorFilteredUsageEvent):
   return `cursor-admin:${digest}`;
 }
 
-function parseTokenUsage(value: unknown): CursorTokenUsage | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const inputTokens = finiteNumber(record.inputTokens);
-  const outputTokens = finiteNumber(record.outputTokens);
-  const cacheWriteTokens = finiteNumber(record.cacheWriteTokens);
-  const cacheReadTokens = finiteNumber(record.cacheReadTokens);
-  const totalCents = finiteNumber(record.totalCents);
-  if (
-    inputTokens == null ||
-    outputTokens == null ||
-    cacheWriteTokens == null ||
-    cacheReadTokens == null ||
-    totalCents == null
-  ) {
-    return null;
-  }
-  const discount = finiteNumber(record.discountPercentOff);
-  return {
-    inputTokens,
-    outputTokens,
-    cacheWriteTokens,
-    cacheReadTokens,
-    totalCents,
-    ...(discount == null ? {} : { discountPercentOff: discount }),
-  };
-}
-
 export function parseCursorFilteredUsageEvent(value: unknown): CursorFilteredUsageEvent | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const timestamp = epochMillis(record.timestamp);
-  const userEmail = optionalString(record.userEmail, 320);
-  const model = optionalString(record.model, 200);
-  const kind = optionalString(record.kind, 200);
-  const maxMode = requiredBoolean(record.maxMode);
-  const requestsCosts = finiteNumber(record.requestsCosts);
-  const isTokenBasedCall = requiredBoolean(record.isTokenBasedCall);
-  const isChargeable = requiredBoolean(record.isChargeable);
-  const isHeadless = requiredBoolean(record.isHeadless);
-  const chargedCents = finiteNumber(record.chargedCents);
-  if (
-    !timestamp ||
-    !userEmail ||
-    !userEmail.includes("@") ||
-    !model ||
-    !kind ||
-    maxMode == null ||
-    requestsCosts == null ||
-    isTokenBasedCall == null ||
-    isChargeable == null ||
-    isHeadless == null ||
-    chargedCents == null
-  ) {
-    return null;
-  }
-  const tokenUsage = record.tokenUsage == null ? undefined : parseTokenUsage(record.tokenUsage);
-  if (record.tokenUsage != null && !tokenUsage) return null;
-  if (isTokenBasedCall && !tokenUsage) return null;
-  const cursorTokenFee = finiteNumber(record.cursorTokenFee);
-  if (record.cursorTokenFee != null && cursorTokenFee == null) return null;
-  return {
-    timestamp,
-    userEmail,
-    serviceAccountId: optionalString(record.serviceAccountId, 200),
-    serviceAccountName: optionalString(record.serviceAccountName, 200),
-    cloudAgentId: optionalString(record.cloudAgentId, 200),
-    automationId: optionalString(record.automationId, 200),
-    conversationId: optionalString(record.conversationId, 200),
-    model,
-    kind,
-    maxMode,
-    requestsCosts,
-    isTokenBasedCall,
-    isChargeable,
-    isHeadless,
-    ...(tokenUsage ? { tokenUsage } : {}),
-    chargedCents,
-    ...(cursorTokenFee == null ? {} : { cursorTokenFee }),
-  };
+  const result = CursorFilteredUsageEventSchema.safeParse(value);
+  if (!result.success) return null;
+  return result.data;
 }
 
 export function parseFilteredUsageEventsPage(data: unknown): ParsedUsageEventsPage | null {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
-  const record = data as Record<string, unknown>;
-  if (!Array.isArray(record.usageEvents)) return null;
-  const pagination = record.pagination;
-  if (!pagination || typeof pagination !== "object" || Array.isArray(pagination)) return null;
-  const hasNextPage = (pagination as Record<string, unknown>).hasNextPage;
-  if (typeof hasNextPage !== "boolean") return null;
-  const events: CursorFilteredUsageEvent[] = [];
-  for (const item of record.usageEvents) {
-    const parsed = parseCursorFilteredUsageEvent(item);
-    if (!parsed) return null;
-    events.push(parsed);
-  }
-  if (events.length === 0 && hasNextPage) return null;
-  return { events, hasNextPage };
+  const result = CursorFilteredUsageEventsPageSchema.safeParse(data);
+  if (!result.success) return null;
+  if (result.data.usageEvents.length === 0 && result.data.pagination.hasNextPage) return null;
+  return { events: result.data.usageEvents, hasNextPage: result.data.pagination.hasNextPage };
 }
 
 export function mapCursorUsageEvent(event: CursorFilteredUsageEvent): ExternalUsageEventInput {
