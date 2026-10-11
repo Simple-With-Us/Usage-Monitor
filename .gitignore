@@ -24,6 +24,7 @@ __pycache__/
 !.cursor/
 !.cursor/environment.json
 !.cursor/infisical.env
+!.cursor/hooks.json
 .wrangler/
 
 # Downloaded by scripts/fetch-litestream.sh at build time - never committed.
