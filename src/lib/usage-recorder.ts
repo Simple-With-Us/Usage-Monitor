@@ -38,6 +38,11 @@ import {
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { redactProviderRawData } from "@/lib/data-privacy";
 import { budgetPollingPaused } from "@/lib/budget-controls";
+import {
+  assertCursorAdminPollerConfigured,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
+import { pollCursorAdminUsage } from "@/lib/cursor-admin-poller";
 import { isDecommissionedProviderName } from "@/lib/provider-definitions";
 import {
   logSchedulerDegraded,
@@ -699,6 +704,9 @@ export interface UsagePollingSchedulerTickDependencies {
   runMaintenance?: typeof runUsageMaintenance;
   markTickStarted?: typeof markSchedulerTickStarted;
   markTickCompleted?: typeof markSchedulerTickCompleted;
+  pollCursorAdmin?: () => Promise<unknown>;
+  /** Test override.  Production reads CURSOR_ADMIN_POLLER_ENABLED. */
+  cursorAdminEnabled?: boolean;
 }
 
 export async function runUsagePollingSchedulerTick(
@@ -729,6 +737,27 @@ async function runUsagePollingSchedulerTickBody(
       { name: "usage-scheduler.maintenance", op: "task" },
       () => (dependencies.runMaintenance ?? runUsageMaintenance)()
     );
+    // Billed Cursor usage.  Off unless CURSOR_ADMIN_POLLER_ENABLED is set,
+    // in which case the job is not entered at all (no span, no log, no
+    // Sentry cron check-in).  When it is on, a runtime poll failure stays
+    // isolated so a 429 cannot fail maintenance or readiness.  Enabled
+    // without CURSOR_ADMIN_API_KEY fails in startUsagePollingScheduler
+    // before this interval is armed.
+    const cursorAdminEnabled =
+      dependencies.cursorAdminEnabled ?? isCursorAdminPollerEnabled();
+    if (cursorAdminEnabled) {
+      try {
+        await Sentry.startSpan(
+          { name: "usage-scheduler.cursor-admin-poll", op: "task" },
+          () => (dependencies.pollCursorAdmin ?? pollCursorAdminUsage)()
+        );
+      } catch (error) {
+        console.error(
+          "[cursor-admin] poll failed",
+          error instanceof Error ? error.name : "unknown"
+        );
+      }
+    }
     const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a
@@ -798,6 +827,10 @@ export function startUsagePollingScheduler(
   tick: () => Promise<void> = runUsagePollingSchedulerTick
 ): void {
   if (schedulerStarted) return; // instrumentation.register() can fire more than once in some Next.js scenarios - guard against double-scheduling
+  // Assert before arming the interval.  A throw leaves schedulerStarted
+  // false so a misconfigured opt-in fails Next register() instead of
+  // leaving a half-started scheduler.  The default (flag unset) no-ops.
+  assertCursorAdminPollerConfigured();
   schedulerStarted = true;
   markSchedulerStarted();
   setInterval(() => void tick(), POLL_INTERVAL_MS);

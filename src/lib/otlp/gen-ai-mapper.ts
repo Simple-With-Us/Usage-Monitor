@@ -55,9 +55,10 @@ import type {
 //
 // Double-counting guard (lives in the ROUTE, not here — this function is
 // pure): platforms with an exact local JSONL collector (codex, grok,
-// copilot, deepseek, antigravity) are skipped by default; see
-// OVERLAP_SOURCE_APPS + shouldMapGenAiPlatform in this module and the
-// OTLP_GEN_AI_* env knobs in .env.example.
+// copilot, deepseek, antigravity) and Cursor (billed by the Admin API
+// poller) are skipped by default; see OVERLAP_SOURCE_APPS +
+// shouldMapGenAiPlatform in this module and the OTLP_GEN_AI_* env knobs
+// in .env.example.  Cursor hook turns stay on AgentTurn, not this path.
 // ---------------------------------------------------------------------------
 
 export const GEN_AI_TOKEN_USAGE_METRIC = "gen_ai.client.token.usage";
@@ -70,9 +71,11 @@ const KNOWN_GEN_AI_METRICS = new Set([
   GEN_AI_COST_METRIC,
 ]);
 
-/** Platforms whose tokens already arrive via an exact local JSONL collector.
- * OTLP gen_ai rows for these are skipped unless explicitly allowlisted, so
- * running both the collector and the relay cannot double count one turn. */
+/** Platforms whose tokens or billed cost already arrive on another path.
+ * OTLP gen_ai rows for these are skipped unless overlap is explicitly
+ * allowed, so a second feed cannot double count one turn.  `cursor` and
+ * `cursor-agent` are billed by the Cursor Admin API poller; hook turns stay
+ * on AgentTurn and are not part of this set. */
 export const OVERLAP_SOURCE_APPS = new Set([
   "openai-codex",
   "codex-cli",
@@ -83,6 +86,8 @@ export const OVERLAP_SOURCE_APPS = new Set([
   "deepseek-harness",
   "antigravity-cli",
   "antigravity-statusline",
+  "cursor",
+  "cursor-agent",
 ]);
 
 function readEnvList(name: string): string[] | null {

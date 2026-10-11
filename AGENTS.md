@@ -207,6 +207,12 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
   `POST /api/otlp/v1/logs` route above remains the accept-and-drop stub it
   always was — see `docs/rollouts/2026-09-23-claude-code-logs-sentry.md`.
 
+## Cursor Admin API poller
+
+Billed Cursor usage (editor, CLI, and cloud agents) can be polled in-process from `POST /teams/filtered-usage-events` by `src/lib/cursor-admin-poller.ts`.  The Admin API is team-plan only, so the poller is optional and off by default.  Set `CURSOR_ADMIN_POLLER_ENABLED` to `true`, `1`, `on`, or `yes` and set `CURSOR_ADMIN_API_KEY` (Basic auth username, empty password; Infisical `usage-monitor`, env `prod`, path `/`).  When the flag is unset the scheduled job and its Sentry cron monitor are not registered: no skip logs and no check-ins.  Enabled without the key throws `CURSOR_ADMIN_API_KEY is required` at scheduler registration, before the interval is armed.  A runtime failure on an enabled poller stays inside the tick and does not fail maintenance.  The endpoint is hourly aggregated, so an enabled poller runs at most once an hour even though the scheduler tick stays at 15 minutes.  Sentry cron slug `usage-monitor-cursor-admin` uses that same 60-minute interval and is upserted only by those check-ins.
+
+Each usage event becomes one `ExternalUsageEvent` (`sourceApp=cursor-admin`, `provider=cursor`, `metricType=cost`, `costUsd=chargedCents/100`).  The published payload has no event id and no editor-vs-CLI field.  Dedupe is a length-prefixed SHA-256 of the event identity.  `service` is `cursor-client` (connected editor or CLI), `cursor-headless`, or `cursor-cloud-agent`.  Hook turns stay on `AgentTurn` and are not cash.  gen_ai platforms `cursor` and `cursor-agent` are overlap-skipped so they cannot double count these billed rows.  Daily-usage-data has no dollars, and `/teams/spend` is the same charged cents totaled, so neither is stored again.  Included-plan `chargedCents` is Cursor's attributed usage value.  The seat fee stays the existing Cursor Subscription and is not a second copy of these rows.  See `docs/rollouts/2026-10-11-cursor-admin-poller.md`.
+
 ## Per-project cost attribution
 
 `ExternalUsageEvent.projectId` (nullable FK → `Project`, `onDelete: SetNull`) is the first-class

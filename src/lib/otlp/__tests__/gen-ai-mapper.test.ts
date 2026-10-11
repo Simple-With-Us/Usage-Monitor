@@ -25,7 +25,7 @@ function genAiRequest(
         resource: {
           attributes: [
             { key: "service.name", value: { stringValue: "fleet-telemetry-relay" } },
-            { key: "agent.platform", value: { stringValue: "cursor-agent" } },
+            { key: "agent.platform", value: { stringValue: "botfleet" } },
           ],
         },
         scopeMetrics: [
@@ -78,7 +78,9 @@ describe("resolveGenAiIdentity", () => {
 describe("shouldMapGenAiPlatform", () => {
   it("skips overlap platforms by default", () => {
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(false);
-    expect(shouldMapGenAiPlatform("cursor-agent")).toBe(true);
+    expect(shouldMapGenAiPlatform("cursor")).toBe(false);
+    expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
     for (const app of OVERLAP_SOURCE_APPS) {
       expect(shouldMapGenAiPlatform(app)).toBe(false);
     }
@@ -89,11 +91,12 @@ describe("shouldMapGenAiPlatform", () => {
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(true);
   });
 
-  it("honors an explicit platform allowlist", () => {
-    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "cursor-agent,botfleet");
-    expect(shouldMapGenAiPlatform("cursor-agent")).toBe(true);
+  it("honors an explicit platform allowlist and still blocks overlap platforms", () => {
+    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "botfleet,muse-code,cursor-agent");
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
-    expect(shouldMapGenAiPlatform("muse-code")).toBe(false);
+    expect(shouldMapGenAiPlatform("muse-code")).toBe(true);
+    expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("openai")).toBe(false);
   });
 
   it("is off when the master switch is false", () => {
@@ -116,8 +119,8 @@ describe("mapGenAiMetrics", () => {
     );
     expect(token.events).toHaveLength(1);
     expect(token.events[0]).toMatchObject({
-      sourceApp: "cursor-agent",
-      provider: "cursor",
+      sourceApp: "botfleet",
+      provider: "openai",
       metricType: "usage",
       unit: "token",
       quantity: 1200,

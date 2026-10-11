@@ -91,4 +91,36 @@ describe("startUsagePollingScheduler timing", () => {
     expect(second).not.toHaveBeenCalled();
     expect(first).toHaveBeenCalled();
   });
+
+  it("starts when the Cursor poller is left off", async () => {
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "false");
+    const { startUsagePollingScheduler } = await import("@/lib/usage-recorder");
+    const tick = vi.fn().mockResolvedValue(undefined);
+
+    expect(() => startUsagePollingScheduler(tick)).not.toThrow();
+    vi.advanceTimersByTime(30_000);
+    expect(tick).toHaveBeenCalledOnce();
+  });
+
+  it("fails registration when the Cursor poller is enabled without an API key", async () => {
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "true");
+    vi.stubEnv("CURSOR_ADMIN_API_KEY", "   ");
+    const { startUsagePollingScheduler } = await import("@/lib/usage-recorder");
+    const tick = vi.fn().mockResolvedValue(undefined);
+
+    expect(() => startUsagePollingScheduler(tick)).toThrow(/CURSOR_ADMIN_API_KEY is required/);
+    vi.advanceTimersByTime(POLL_INTERVAL_MS * 2);
+    expect(tick).not.toHaveBeenCalled();
+  });
+
+  it("starts when the Cursor poller is enabled and the API key is present", async () => {
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "true");
+    vi.stubEnv("CURSOR_ADMIN_API_KEY", "crsr_admin_test_key_do_not_log");
+    const { startUsagePollingScheduler } = await import("@/lib/usage-recorder");
+    const tick = vi.fn().mockResolvedValue(undefined);
+
+    startUsagePollingScheduler(tick);
+    vi.advanceTimersByTime(30_000);
+    expect(tick).toHaveBeenCalledOnce();
+  });
 });

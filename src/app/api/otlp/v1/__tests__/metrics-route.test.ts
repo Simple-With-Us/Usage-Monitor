@@ -751,7 +751,7 @@ const genAiPayload = {
     {
       resource: {
         attributes: [
-          { key: "agent.platform", value: { stringValue: "cursor-agent" } },
+          { key: "agent.platform", value: { stringValue: "botfleet" } },
           { key: "gen_ai.system", value: { stringValue: "openai" } },
         ],
       },
@@ -780,6 +780,17 @@ const genAiPayload = {
           ],
         },
       ],
+    },
+  ],
+};
+
+const cursorAgentGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "cursor-agent" } }],
+      },
+      scopeMetrics: genAiPayload.resourceMetrics[0].scopeMetrics,
     },
   ],
 };
@@ -816,7 +827,7 @@ const overlapGenAiPayload = {
 };
 
 describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
-  it("persists a cursor-agent gen_ai token point", async () => {
+  it("persists a non-overlap gen_ai token point", async () => {
     const res = await POST(
       jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
     );
@@ -825,7 +836,7 @@ describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
     expect(body.accepted).toBe(1);
     expect(body.ignoredOverlap).toBeUndefined();
     const rows = await prisma.externalUsageEvent.findMany({
-      where: { sourceApp: "cursor-agent" },
+      where: { sourceApp: "botfleet" },
     });
     expect(rows).toHaveLength(1);
     expect(rows[0].provider).toBe("openai");
@@ -846,17 +857,33 @@ describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
     ).toBe(0);
   });
 
-  it("accepts a cursor-agent scoped producer token for gen_ai rows", async () => {
+  it("skips cursor-agent gen_ai rows so the admin poller is the billed ledger", async () => {
+    const res = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
+  });
+
+  it("authenticates a cursor-agent scoped token and still skips the overlap rows", async () => {
     vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "cursor-agent:tok-cursor");
     vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
     const denied = await POST(
-      jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
     );
     expect(denied.status).toBe(401);
     const res = await POST(
-      jsonRequest(genAiPayload, { authorization: "Bearer tok-cursor" })
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer tok-cursor" })
     );
     expect(res.status).toBe(202);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
   });
 });
 
