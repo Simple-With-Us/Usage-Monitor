@@ -207,6 +207,12 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
   `POST /api/otlp/v1/logs` route above remains the accept-and-drop stub it
   always was — see `docs/rollouts/2026-09-23-claude-code-logs-sentry.md`.
 
+## Cursor Admin API poller
+
+Billed Cursor usage (editor, CLI, and cloud agents) is polled in-process from `POST /teams/filtered-usage-events` by `src/lib/cursor-admin-poller.ts`.  Auth is Basic with `CURSOR_ADMIN_API_KEY` as the username and an empty password (Infisical `usage-monitor`, env `prod`, path `/`).  A missing key logs a warning and skips.  It must not throw into the 15-minute scheduler.  The endpoint is hourly aggregated, so the poller runs at most once an hour even though the scheduler tick stays at 15 minutes.  Sentry cron slug `usage-monitor-cursor-admin` uses that same 60-minute interval.
+
+Each usage event becomes one `ExternalUsageEvent` (`sourceApp=cursor-admin`, `provider=cursor`, `metricType=cost`, `costUsd=chargedCents/100`).  The published payload has no event id and no editor-vs-CLI field.  Dedupe is a length-prefixed SHA-256 of the event identity.  `service` is `cursor-client` (connected editor or CLI), `cursor-headless`, or `cursor-cloud-agent`.  Hook turns stay on `AgentTurn` and are not cash.  gen_ai platforms `cursor` and `cursor-agent` are overlap-skipped so they cannot double count these billed rows.  Daily-usage-data has no dollars, and `/teams/spend` is the same charged cents totaled, so neither is stored again.  Included-plan `chargedCents` is Cursor's attributed usage value.  The seat fee stays the existing Cursor Subscription and is not a second copy of these rows.  See `docs/rollouts/2026-10-11-cursor-admin-poller.md`.
+
 ## Per-project cost attribution
 
 `ExternalUsageEvent.projectId` (nullable FK → `Project`, `onDelete: SetNull`) is the first-class

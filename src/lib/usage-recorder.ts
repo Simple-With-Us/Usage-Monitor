@@ -46,6 +46,7 @@ import {
   recordSchedulerDuration,
 } from "@/lib/sentry-ops";
 import * as Sentry from "@sentry/nextjs";
+import { pollCursorAdminUsage } from "@/lib/cursor-admin-poller";
 import { fanoutPollSnapshot } from "@/lib/usage-fanout";
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
 const providerAttemptTokens = new Map<string, symbol>();
@@ -699,6 +700,7 @@ export interface UsagePollingSchedulerTickDependencies {
   runMaintenance?: typeof runUsageMaintenance;
   markTickStarted?: typeof markSchedulerTickStarted;
   markTickCompleted?: typeof markSchedulerTickCompleted;
+  pollCursorAdmin?: () => Promise<unknown>;
 }
 
 export async function runUsagePollingSchedulerTick(
@@ -729,6 +731,19 @@ async function runUsagePollingSchedulerTickBody(
       { name: "usage-scheduler.maintenance", op: "task" },
       () => (dependencies.runMaintenance ?? runUsageMaintenance)()
     );
+    // Billed Cursor usage.  Isolated from the tick result: a missing admin
+    // key or an upstream 429 must not fail maintenance or readiness.
+    try {
+      await Sentry.startSpan(
+        { name: "usage-scheduler.cursor-admin-poll", op: "task" },
+        () => (dependencies.pollCursorAdmin ?? pollCursorAdminUsage)()
+      );
+    } catch (error) {
+      console.error(
+        "[cursor-admin] poll failed",
+        error instanceof Error ? error.name : "unknown"
+      );
+    }
     const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a

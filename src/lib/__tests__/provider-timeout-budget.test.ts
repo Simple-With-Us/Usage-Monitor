@@ -991,4 +991,44 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       cloudflareLegacyHandoff: "disabled",
     });
   });
+
+  it("keeps the tick healthy when the Cursor admin poller throws", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => {
+      throw new Error("cursor admin down");
+    });
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await expect(
+      runUsagePollingSchedulerTick({
+        fetchProviders,
+        runMaintenance,
+        markTickStarted,
+        markTickCompleted,
+        pollCursorAdmin,
+      })
+    ).resolves.toBeUndefined();
+
+    expect(pollCursorAdmin).toHaveBeenCalledOnce();
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      maintenanceHealthy: true,
+      providerFetchDegraded: false,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
 });

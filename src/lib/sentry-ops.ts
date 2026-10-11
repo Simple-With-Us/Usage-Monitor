@@ -16,6 +16,14 @@
 
 export const SENTRY_CRON_MONITOR_SLUG = "usage-monitor-scheduler";
 
+// Cursor Admin API usage is aggregated hourly.  The poller in
+// cursor-admin-poller.ts runs from the 15-minute scheduler but only calls
+// the API once an hour.  This monitor matches that poll, not the scheduler.
+export const SENTRY_CURSOR_ADMIN_CRON_SLUG = "usage-monitor-cursor-admin";
+export const SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES = 60;
+export const SENTRY_CURSOR_ADMIN_CRON_CHECKIN_MARGIN = 15;
+export const SENTRY_CURSOR_ADMIN_CRON_MAX_RUNTIME = 5;
+
 // Must match POLL_INTERVAL_MS in usage-recorder.ts (15 minutes).  The 2026-08-31
 // expansion upserted this monitor as 1 minute + 5 minute margin, so a healthy
 // 15-minute tick looked like a missed check-in.  Do not change the job cadence
@@ -56,6 +64,42 @@ async function loadSentry(): Promise<SentryMod | null> {
 
 function api<T>(mod: SentryMod, key: "captureCheckIn" | "logger" | "metrics"): T | undefined {
   return (mod[key] ?? mod.default?.[key]) as T | undefined;
+}
+
+export function sentryCursorAdminCronMonitorConfig(): {
+  schedule: { type: "interval"; value: number; unit: "minute" };
+  checkinMargin: number;
+  maxRuntime: number;
+  timezone: "UTC";
+} {
+  return {
+    schedule: {
+      type: "interval",
+      value: SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES,
+      unit: "minute",
+    },
+    checkinMargin: SENTRY_CURSOR_ADMIN_CRON_CHECKIN_MARGIN,
+    maxRuntime: SENTRY_CURSOR_ADMIN_CRON_MAX_RUNTIME,
+    timezone: "UTC",
+  };
+}
+
+export async function recordCursorAdminPollerCheckIn(
+  status: "ok" | "error"
+): Promise<void> {
+  try {
+    const mod = await loadSentry();
+    const captureCheckIn = mod
+      ? api<typeof import("@sentry/nextjs").captureCheckIn>(mod, "captureCheckIn")
+      : undefined;
+    if (typeof captureCheckIn !== "function") return;
+    captureCheckIn(
+      { monitorSlug: SENTRY_CURSOR_ADMIN_CRON_SLUG, status },
+      sentryCursorAdminCronMonitorConfig()
+    );
+  } catch {
+    // Sentry cron check-in is best-effort and non-fatal.
+  }
 }
 
 export async function recordSentryCronHeartbeat(
