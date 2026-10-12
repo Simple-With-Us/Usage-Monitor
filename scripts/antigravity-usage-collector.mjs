@@ -553,7 +553,7 @@ async function postBatch(events, ingestToken) {
   const body = JSON.stringify({
     schemaVersion: 2,
     producerId: PRODUCER_ID,
-    producerInstanceId: hostname(),
+    producerInstanceId: process.env.USAGE_MACHINE_ID?.trim() || hostname(),
     events,
   });
 
