@@ -1,3 +1,4 @@
+import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
 import {
   DEFAULT_PROVIDER_MANIFEST,
   type ResolvedProviderConfig,
@@ -81,6 +82,8 @@ export interface QuotaProviderGroup {
 export interface QuotaWindowsResponse {
   generatedAt: string;
   windows: QuotaWindow[];
+  /** Merged subscription windows with primary-source selection (additive). */
+  quotaGroups?: QuotaProviderQuotaGroup[];
   skipModelTypes: SkipModelType[];
   /**
    * Windows grouped by provider, with an entry for every expected provider even
@@ -105,7 +108,7 @@ const ANTIGRAVITY_INSTANCE = "antigravity";
  * `antigravityGroupDisplayName` in scripts/lib/quota-event.mjs and
  * `AntigravityQuotaGroups` in the macOS app.
  */
-export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party Models";
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party";
 
 // "Claude and GPT models", "Claude & GPT models", "Claude/GPT", ... as a
 // label prefix.  The lookahead stops it rewriting a longer model name such as
@@ -171,9 +174,7 @@ export function quotaStatus(input: {
   if (input.isExhausted || (input.remainingPercent != null && input.remainingPercent <= 0)) {
     return "exhausted";
   }
-  // antigravity-usage prints N/A when remainingPercentage is omitted.
-  // Owner 2026-09-04: that means none remains.
-  if (input.remainingUnknown || input.remainingPercent == null) return "exhausted";
+  if (input.remainingUnknown || input.remainingPercent == null) return "unknown";
   if (input.remainingPercent < 20) return "near_cap";
   return "available";
 }
@@ -294,12 +295,18 @@ export function projectQuotaWindows(
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
     const omitted = asBoolean(meta.remainingUnknown) || event.credits == null;
     const remainingPercent = omitted
-      ? 0
+      ? null
       : Math.round((Number(event.credits) / limit) * 10_000) / 100;
+    const remainingUnknown = omitted;
     const isExhausted =
-      asBoolean(meta.isExhausted) || omitted || remainingPercent <= 0;
-    const remainingUnknown = false;
+      asBoolean(meta.isExhausted) ||
+      (!remainingUnknown && remainingPercent != null && remainingPercent <= 0);
     const status = quotaStatus({ remainingPercent, remainingUnknown, isExhausted });
+    const viaMarker = viaFor(eventCanonicalKey, resolved);
+    const antigravityNaSkip =
+      viaMarker === "antigravity" &&
+      remainingUnknown &&
+      asString(meta.source) === "antigravity-usage";
     latest.set(dedupeKey, {
       series,
       window: {
@@ -324,9 +331,9 @@ export function projectQuotaWindows(
         resetAt: asString(meta.resetAt),
         window: asString(meta.quotaWindow),
         status,
-        skip: status === "exhausted",
+        skip: status === "exhausted" || antigravityNaSkip,
         skipReason:
-          status === "exhausted"
+          status === "exhausted" || antigravityNaSkip
             ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
             : null,
         occurredAt: iso(event.occurredAt),
@@ -404,6 +411,7 @@ export function projectQuotaWindows(
   return {
     generatedAt: now.toISOString(),
     windows,
+    quotaGroups: buildQuotaGroups(events, now, resolved),
     skipModelTypes,
     providerGroups: groupWindowsByProvider(windows, resolved),
   };

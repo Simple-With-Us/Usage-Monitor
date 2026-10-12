@@ -23,11 +23,20 @@ import { describe, expect, it, vi } from "vitest";
 import FleetQuotaMatrixCard, {
   ProviderLogo,
   ProviderSection,
+  QuotaMergedWindowCard,
   QuotaWindowCard,
+  buildMergedQuotaSections,
   buildProviderGroups,
   defaultProviderGroups,
   formatCountdown,
+  formatCountdownCompact,
+  formatFreshnessLabel,
+  formatQuotaPercentLabel,
+  formatSourceOptionLabel,
+  quotaPercentPillClasses,
+  QuotaUsageBar,
   quotaTone,
+  windowRowTagLabel,
 } from "@/components/FleetQuotaMatrixCard";
 
 const NBSP = " ";
@@ -203,16 +212,16 @@ describe("buildProviderGroups", () => {
     const groups = buildProviderGroups(mixedPayload);
     const antigravity = groups.find((g) => g.provider === "google-antigravity")!;
     expect(antigravity.windows).toHaveLength(1);
-    expect(antigravity.windows[0].label).toBe("Third-Party Models");
+    expect(antigravity.windows[0].label).toBe("Third-Party");
     expect(antigravity.windows[0].via).toBe("antigravity");
   });
 
   it("maps every legacy Antigravity label variant and keeps the window suffix", () => {
     const variants: Array<[string, string]> = [
-      ["Claude and GPT models (weekly)", "Third-Party Models (weekly)"],
-      ["Claude & GPT models (5h)", "Third-Party Models (5h)"],
-      ["Claude/GPT", "Third-Party Models"],
-      ["Third-Party Models (5h)", "Third-Party Models (5h)"],
+      ["Claude and GPT models (weekly)", "Third-Party (weekly)"],
+      ["Claude & GPT models (5h)", "Third-Party (5h)"],
+      ["Claude/GPT", "Third-Party"],
+      ["Third-Party (5h)", "Third-Party (5h)"],
       ["Gemini Models (weekly)", "Gemini Models (weekly)"],
     ];
     for (const [legacy, expected] of variants) {
@@ -369,7 +378,7 @@ describe("QuotaWindowCard rendering", () => {
     );
 
     expect(html).toContain("via Antigravity");
-    expect(html).toContain("Third-Party Models");
+    expect(html).toContain("Third-Party");
     expect(html).not.toContain("Claude and GPT models");
     expect(html).toContain("40.0% remaining");
     expect(html).toContain("Source: Unknown");
@@ -442,18 +451,68 @@ describe("FleetQuotaMatrixCard default render (before any fetch resolves)", () =
   });
 });
 
+describe("formatQuotaPercentLabel and QuotaUsageBar", () => {
+  it("formats plain percents without a remaining suffix", () => {
+    expect(formatQuotaPercentLabel(73, false)).toBe("73%");
+    expect(formatQuotaPercentLabel(62.5, false)).toBe("62.5%");
+    expect(formatQuotaPercentLabel(null, true)).toBe("—");
+  });
+
+  it("renders red used, green remaining, and a black elapsed marker", () => {
+    const html = renderToStaticMarkup(
+      createElement(QuotaUsageBar, {
+        remainingPercent: 73,
+        remainingUnknown: false,
+        resetAt: "2026-09-12T17:00:00.000Z",
+        windowKey: "5h",
+        nowMs: new Date("2026-09-12T12:00:00.000Z").getTime(),
+        stale: false,
+      }),
+    );
+    expect(html).toContain("bg-red-500");
+    expect(html).toContain("bg-teal-800");
+    expect(html).toContain("bg-black");
+  });
+});
+
+describe("CodeCaps row labels", () => {
+  it("uses Jay-approved window tags and compact countdown", () => {
+    expect(windowRowTagLabel("5h", "5-hour")).toBe("5-hour");
+    expect(windowRowTagLabel("7d", "7-day")).toBe("7-day");
+    expect(windowRowTagLabel("monthly", "1-month")).toBe("1-month");
+    expect(formatCountdownCompact("2026-09-12T03:15:00.000Z", NOW_MS)).toBe("3h 15m");
+    expect(formatCountdownCompact("2026-09-14T06:00:00.000Z", NOW_MS)).toBe("2d 6h");
+  });
+
+  it("styles percent pills with pastel backgrounds", () => {
+    const freshHigh = {
+      source: "codecaps",
+      sourceLabel: "CodeCaps",
+      machine: null,
+      collector: null,
+      remainingPercent: 71,
+      remainingUnknown: false,
+      isExhausted: false,
+      resetAt: null,
+      reportedAt: "2026-09-12T00:00:00.000Z",
+      freshness: "fresh" as const,
+    };
+    expect(quotaPercentPillClasses(freshHigh)).toContain("bg-emerald-100");
+  });
+});
+
 describe("formatCountdown and quotaTone branches", () => {
   it("covers rolling, past, day, hour, and minute countdown copy", () => {
-    expect(formatCountdown(null, NOW_MS)).toBe("Rolling refresh");
-    expect(formatCountdown("2026-09-11T00:00:00.000Z", NOW_MS)).toBe("Refreshing now");
-    expect(formatCountdown("2026-09-14T06:00:00.000Z", NOW_MS)).toBe("Resets in 2d 6h");
-    expect(formatCountdown("2026-09-12T03:15:00.000Z", NOW_MS)).toBe("Resets in 3h 15m");
-    expect(formatCountdown("2026-09-12T00:09:00.000Z", NOW_MS)).toBe("Resets in 9m");
-    expect(formatCountdown("2026-09-13T00:00:00.000Z", NOW_MS)).toBe("Resets in 1d 0h");
+    expect(formatCountdown(null, NOW_MS)).toBe("Rolling Refresh");
+    expect(formatCountdown("2026-09-11T00:00:00.000Z", NOW_MS)).toBe("Refreshing Now");
+    expect(formatCountdown("2026-09-14T06:00:00.000Z", NOW_MS)).toBe("Resets In 2d 6h");
+    expect(formatCountdown("2026-09-12T03:15:00.000Z", NOW_MS)).toBe("Resets In 3h 15m");
+    expect(formatCountdown("2026-09-12T00:09:00.000Z", NOW_MS)).toBe("Resets In 9m");
+    expect(formatCountdown("2026-09-13T00:00:00.000Z", NOW_MS)).toBe("Resets In 1d 0h");
   });
 
   it("covers unknown, exhausted, available, moderate, and near-cap tones", () => {
-    expect(quotaTone("unknown", null).label).toBe("Not reported");
+    expect(quotaTone("unknown", null).label).toBe("Not Reported");
     expect(quotaTone("exhausted", 0).label).toBe("Exhausted");
     expect(quotaTone("available", 80).label).toBe("Available");
     expect(quotaTone("available", 30).label).toBe("Moderate Quota");
@@ -480,7 +539,7 @@ describe("QuotaWindowCard remainingUnknown and via without a window token", () =
       }),
     );
     expect(html).toContain("via Antigravity");
-    expect(html).toContain("Not reported");
+    expect(html).toContain("Not Reported");
     expect(html).not.toContain("% remaining");
   });
 });
@@ -537,6 +596,80 @@ describe("ProviderLogo fallback", () => {
       createElement(ProviderLogo, { providerKey: "unknown", providerLabel: "123" }),
     );
     expect(html).toContain("?");
+  });
+});
+
+describe("buildMergedQuotaSections", () => {
+  it("renders merged window cards with a source select and freshness copy", () => {
+    const sections = buildMergedQuotaSections({
+      quotaGroups: [
+        {
+          provider: "anthropic",
+          providerLabel: "Claude",
+          windows: [
+            {
+              windowKey: "5h",
+              displayName: "5-hour",
+              platformTitle: null,
+              rawKey: "five_hour",
+              primary: {
+                source: "codecaps",
+                sourceLabel: "CodeCaps",
+                machine: "Mac.Jays.Services",
+                collector: "codecaps",
+                remainingPercent: 62.5,
+                remainingUnknown: false,
+                isExhausted: false,
+                resetAt: "2026-09-12T05:00:00.000Z",
+                reportedAt: "2026-09-12T00:00:00.000Z",
+                freshness: "fresh",
+              },
+              sources: [
+                {
+                  source: "codecaps",
+                  sourceLabel: "CodeCaps",
+                  machine: "Mac.Jays.Services",
+                  collector: "codecaps",
+                  remainingPercent: 62.5,
+                  remainingUnknown: false,
+                  isExhausted: false,
+                  resetAt: "2026-09-12T05:00:00.000Z",
+                  reportedAt: "2026-09-12T00:00:00.000Z",
+                  freshness: "fresh",
+                },
+                {
+                  source: "api.anthropic.com",
+                  sourceLabel: "Anthropic API",
+                  machine: null,
+                  collector: "subscription-quota-collector",
+                  remainingPercent: 40,
+                  remainingUnknown: false,
+                  isExhausted: false,
+                  resetAt: "2026-09-12T05:00:00.000Z",
+                  reportedAt: "2026-09-11T20:00:00.000Z",
+                  freshness: "stale",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const html = renderToStaticMarkup(
+      createElement(QuotaMergedWindowCard, { view: sections[0]!.windows[0]!, nowMs: NOW_MS }),
+    );
+    expect(html).toContain("5-hour");
+    expect(html).toContain("62.5%");
+    expect(html).not.toContain("Remaining");
+    expect(html).not.toContain("Claude ·");
+    expect(html).toContain('for="');
+    expect(html).toContain("Source");
+    expect(html).toContain("bg-emerald-100");
+    expect(html).toContain("CodeCaps · Mac.Jays.Services");
+    expect(formatFreshnessLabel(sections[0]!.windows[0]!.primary, NOW_MS)).toContain("Updated");
+    expect(
+      formatSourceOptionLabel(sections[0]!.windows[0]!.sources[1]!, NOW_MS),
+    ).toContain("Anthropic API");
   });
 });
 

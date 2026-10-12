@@ -146,22 +146,31 @@ describe("parseClaudeUsage", () => {
 
   it("converts utilization (percent used) into percent remaining per window", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].remainingPercent).toBe(62.5);
-    expect(rows["5h window"].usedPercent).toBe(37.5);
-    expect(rows["7d window"].remainingPercent).toBe(18);
+    expect(rows["5-hour"].remainingPercent).toBe(62.5);
+    expect(rows["5-hour"].usedPercent).toBe(37.5);
+    const weekly = readings.filter((row) => row.label === "7-day");
+    expect(weekly.map((row) => row.remainingPercent).sort((a, b) => a - b)).toEqual([4.5, 18]);
   });
 
-  it("labels the per-model window and keeps its model id", () => {
-    const rows = byLabel(readings);
-    expect(rows["7d window (Opus)"].remainingPercent).toBe(4.5);
-    expect(rows["7d window (Opus)"].modelId).toBe("opus");
-    expect(rows["7d window (Opus)"].quotaWindow).toBe("7d");
+  it("rolls per-model windows up to the platform window label and keeps model id in metadata", () => {
+    const opus = readings.find((row) => row.modelId === "opus");
+    expect(opus?.label).toBe("7-day");
+    expect(opus?.remainingPercent).toBe(4.5);
+    expect(opus?.quotaWindow).toBe("7d");
+  });
+
+  it("maps unknown Anthropic window keys to other-limit display labels", () => {
+    const readings = parseClaudeUsage({
+      iguana_necktie: { utilization: 10, resets_at: "2026-09-12T17:00:00Z" },
+    });
+    expect(readings[0].label).toMatch(/^other-limit · resets /);
+    expect(readings[0].bucketId).toBe("anthropic:iguana_necktie");
   });
 
   it("carries resetAt and the plan type, and ignores non-window keys", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].resetAt).toBe("2026-09-12T18:00:00.000Z");
-    expect(rows["5h window"].planType).toBe("max_20x");
+    expect(rows["5-hour"].resetAt).toBe("2026-09-12T18:00:00.000Z");
+    expect(rows["5-hour"].planType).toBe("max_20x");
     expect(readings).toHaveLength(3);
   });
 
