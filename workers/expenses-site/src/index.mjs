@@ -136,7 +136,11 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(syncExpenses(env));
+    ctx.waitUntil(
+      syncExpenses(env).catch((error) => {
+        console.error("expenses scheduled sync failed:", error);
+      }),
+    );
   },
 };
 
