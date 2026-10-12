@@ -19,7 +19,8 @@ export const dynamic = "force-dynamic";
  * `windows` and `skipModelTypes` and must keep working unchanged.  `windows[]`
  * gained `providerKey`, `providerLabel` and `via`, and the body gained
  * `providerGroups` (one entry per provider, including the expected providers
- * that have reported nothing yet).  `providerGroups[]` entries additionally
+ * that have reported nothing yet), and `quotaGroups` (merged windows with a
+ * primary source plus per-source readings for the Agents dashboard).  `providerGroups[]` entries additionally
  * carry `sortOrder`, `iconHint`, and `terms` (optional, additive) sourced
  * from the backend provider-manifest (PROVIDER_MANIFEST_JSON Infisical knob
  * -- see src/lib/provider-manifest.ts).  Apps can render a provider with

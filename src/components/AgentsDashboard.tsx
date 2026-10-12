@@ -357,15 +357,14 @@ export function AgentsDashboard() {
                       {/* Model Usage Breakdown */}
                       {platform.modelsUsed.length > 0 && (
                         <div className="mt-3">
-                          <div className="text-[11px] font-medium text-muted-foreground mb-1.5 flex justify-between">
-                            <span>Models Used</span>
-                            <span>{platform.modelsUsed.length} model(s)</span>
+                          <div className="text-xs font-medium text-foreground mb-1.5">
+                            <span>Usage by Model</span>
                           </div>
                           <div className="space-y-1.5">
                             {platform.modelsUsed.slice(0, isExpanded ? undefined : 2).map((m) => (
-                              <div key={m.model} className="text-xs">
-                                <div className="flex justify-between font-mono text-[11px] text-muted-foreground mb-0.5">
-                                  <span className="truncate max-w-[200px] text-foreground font-medium">{m.model}</span>
+                              <div key={m.model} className="text-xs" title={m.model}>
+                                <div className="flex justify-between text-xs text-foreground mb-0.5">
+                                  <span className="font-medium">Token Share</span>
                                   <span>{formatTokens(m.tokens)} ({m.percentOfPlatform.toFixed(0)}%)</span>
                                 </div>
                                 <div className="w-full bg-muted h-1 rounded-full overflow-hidden">
@@ -380,9 +379,9 @@ export function AgentsDashboard() {
                           {platform.modelsUsed.length > 2 && (
                             <button
                               onClick={() => setExpandedPlatform(isExpanded ? null : platform.id)}
-                              className="mt-1.5 text-[11px] font-medium text-primary hover:underline"
+                              className="mt-1.5 text-xs font-medium text-primary hover:underline"
                             >
-                              {isExpanded ? "Show fewer models" : `+${platform.modelsUsed.length - 2} more model(s)`}
+                              {isExpanded ? "Show Less" : "Show More"}
                             </button>
                           )}
                         </div>

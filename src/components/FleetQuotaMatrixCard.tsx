@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { Gauge, Clock } from "lucide-react";
+import React, { useEffect, useId, useState } from "react";
+import { ChevronDown, Gauge, Clock } from "lucide-react";
+import type { QuotaSourceReading } from "@/lib/quota-groups";
 import {
   EXPECTED_QUOTA_PROVIDERS,
   antigravityDisplayLabel,
@@ -44,21 +45,37 @@ export interface NormalizedGroup {
   windows: NormalizedWindow[];
 }
 
-/**
- * Provider row logos keyed by canonical providerKey — NEVER by matching text
- * inside a window's label. Antigravity routes several vendors' models under
- * its own subscription (its non-Gemini pool, which the Antigravity CLI calls
- * "Claude and GPT models" and this card shows as "Third-Party Models", is not
- * the user's Claude plan), so the per-row logo must come from the group's
- * providerKey alone, not from anything the window happens to be labelled.
- */
+export interface MergedQuotaWindowView {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  windowKey: string;
+  displayName: string;
+  rawKey: string;
+  platformTitle: string | null;
+  primary: QuotaSourceReading;
+  sources: QuotaSourceReading[];
+  olderSources: QuotaSourceReading[];
+}
+
+/** Reset / time-remaining copy — always high-contrast (≥ 4.5:1), never faint grey. */
+export const QUOTA_TIME_REMAINING_CLASS =
+  "text-xs font-semibold text-gray-900 dark:text-gray-100 shrink-0 whitespace-nowrap";
+
+export interface MergedProviderSection {
+  provider: string;
+  providerLabel: string;
+  windows: MergedQuotaWindowView[];
+}
+
+/** Orange Anthropic starburst — never a monochrome variant. */
+const CLAUDE_LOGO_SRC = "/logos/claude.svg";
+
 const PROVIDER_LOGOS: Record<string, string> = {
-  anthropic: "/logos/claude.svg",
+  anthropic: CLAUDE_LOGO_SRC,
   openai: "/logos/openai.svg",
   "google-antigravity": "/logos/antigravity.svg",
   xai: "/logos/grok.svg",
-  // minimax intentionally omitted: no shipped logo asset yet, so it renders
-  // the text-badge fallback in ProviderLogo instead of a mismatched image.
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -100,7 +117,7 @@ function quotaWindowHeading(window: string): string {
 function normalizeWindow(
   raw: unknown,
   fallbackVia: string | null,
-  fallbackId: string
+  fallbackId: string,
 ): NormalizedWindow {
   const rec = asRecord(raw);
   const remainingPercent = asNumber(rec.remainingPercent);
@@ -109,9 +126,6 @@ function normalizeWindow(
   const label = asString(rec.label) ?? "Quota window";
   return {
     id: asString(rec.id) ?? fallbackId,
-    // The API already maps Antigravity's "Claude and GPT models" bucket to
-    // "Third-Party Models"; repeating it here keeps an older cached or
-    // proxied response from showing the legacy name.
     label: via === "antigravity" ? antigravityDisplayLabel(label) : label,
     window: asString(rec.window),
     remainingPercent,
@@ -127,14 +141,6 @@ function normalizeWindow(
   };
 }
 
-/**
- * Build one section per provider. Prefers the API's own `providerGroups` (in
- * the order it returned them). Falls back to grouping the flat `windows`
- * array client-side by `providerKey ?? provider` for an older server
- * response, and always includes the five expected providers even when
- * nothing has been reported yet. Tolerant of missing/malformed fields so a
- * partial or unexpected payload never crashes the card.
- */
 export function buildProviderGroups(data: unknown): NormalizedGroup[] {
   const rec = asRecord(data);
   const rawGroups = asArray(rec.providerGroups);
@@ -146,7 +152,7 @@ export function buildProviderGroups(data: unknown): NormalizedGroup[] {
       const providerLabel = asString(groupRec.providerLabel) ?? quotaProviderLabel(provider);
       const via = asString(groupRec.via) ?? quotaProviderVia(provider);
       const windows = asArray(groupRec.windows).map((rawWindow, windowIndex) =>
-        normalizeWindow(rawWindow, via, `${provider}-${windowIndex}`)
+        normalizeWindow(rawWindow, via, `${provider}-${windowIndex}`),
       );
       return { provider, providerLabel, via, windows };
     });
@@ -182,6 +188,73 @@ export function buildProviderGroups(data: unknown): NormalizedGroup[] {
   return [...groups.values()];
 }
 
+function normalizeSourceReading(raw: unknown): QuotaSourceReading | null {
+  const rec = asRecord(raw);
+  const reportedAt = asString(rec.reportedAt);
+  if (!reportedAt) return null;
+  const freshness = asString(rec.freshness);
+  if (freshness !== "fresh" && freshness !== "stale" && freshness !== "old") return null;
+  return {
+    source: asString(rec.source) ?? "unknown",
+    sourceLabel: asString(rec.sourceLabel) ?? "Unknown",
+    machine: asString(rec.machine),
+    collector: asString(rec.collector),
+    remainingPercent: asNumber(rec.remainingPercent),
+    remainingUnknown: rec.remainingUnknown === true,
+    isExhausted: rec.isExhausted === true,
+    resetAt: asString(rec.resetAt),
+    reportedAt,
+    freshness,
+  };
+}
+
+/** Prefer additive `quotaGroups` from /api/quota-windows when present. */
+export function buildMergedQuotaSections(data: unknown): MergedProviderSection[] {
+  const rec = asRecord(data);
+  const rawGroups = asArray(rec.quotaGroups);
+  if (rawGroups.length === 0) return [];
+
+  return rawGroups.map((rawGroup, groupIndex) => {
+    const groupRec = asRecord(rawGroup);
+    const provider = asString(groupRec.provider) ?? `unknown-${groupIndex}`;
+    const providerLabel = asString(groupRec.providerLabel) ?? quotaProviderLabel(provider);
+    const windows = asArray(groupRec.windows).map((rawWindow, windowIndex) => {
+      const winRec = asRecord(rawWindow);
+      const windowKey = asString(winRec.windowKey) ?? "unknown";
+      const displayName = asString(winRec.displayName) ?? windowKey;
+      const rawKey = asString(winRec.rawKey) ?? windowKey;
+      const platformTitle = asString(winRec.platformTitle);
+      const primary = normalizeSourceReading(winRec.primary);
+      const sources = asArray(winRec.sources)
+        .map(normalizeSourceReading)
+        .filter((row): row is QuotaSourceReading => row != null);
+      const resolvedPrimary = primary ?? sources[0];
+      if (!resolvedPrimary) {
+        return null;
+      }
+      const olderSources = sources.filter((row) => row.freshness === "old");
+      const visibleSources = sources.filter((row) => row.freshness !== "old");
+      return {
+        id: `${provider}:${windowKey}:${windowIndex}`,
+        provider,
+        providerLabel,
+        windowKey,
+        displayName,
+        rawKey,
+        platformTitle,
+        primary: resolvedPrimary,
+        sources: visibleSources.length > 0 ? visibleSources : [resolvedPrimary],
+        olderSources,
+      };
+    });
+    return {
+      provider,
+      providerLabel,
+      windows: windows.filter((row): row is MergedQuotaWindowView => row != null),
+    };
+  });
+}
+
 export function defaultProviderGroups(): NormalizedGroup[] {
   return EXPECTED_QUOTA_PROVIDERS.map((provider) => ({
     provider,
@@ -191,11 +264,19 @@ export function defaultProviderGroups(): NormalizedGroup[] {
   }));
 }
 
+export function defaultMergedSections(): MergedProviderSection[] {
+  return EXPECTED_QUOTA_PROVIDERS.map((provider) => ({
+    provider,
+    providerLabel: quotaProviderLabel(provider),
+    windows: [],
+  }));
+}
+
 export function formatCountdown(resetAtStr: string | null, nowMs: number): string {
-  if (!resetAtStr) return "Rolling refresh";
+  if (!resetAtStr) return "Rolling Refresh";
   const target = new Date(resetAtStr).getTime();
   const diffMs = target - nowMs;
-  if (diffMs <= 0) return "Refreshing now";
+  if (diffMs <= 0) return "Refreshing Now";
 
   const diffSec = Math.floor(diffMs / 1000);
   const hours = Math.floor(diffSec / 3600);
@@ -204,17 +285,45 @@ export function formatCountdown(resetAtStr: string | null, nowMs: number): strin
 
   if (days > 0) {
     const remHours = hours % 24;
-    return `Resets in ${days}d ${remHours}h`;
+    return `Resets In ${days}d ${remHours}h`;
   }
   if (hours > 0) {
-    return `Resets in ${hours}h ${minutes}m`;
+    return `Resets In ${hours}h ${minutes}m`;
   }
-  return `Resets in ${minutes}m`;
+  return `Resets In ${minutes}m`;
+}
+
+function formatAgeShort(ageMs: number): string {
+  const sec = Math.max(0, Math.floor(ageMs / 1000));
+  if (sec < 60) return `${sec} Sec Ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} Min Ago`;
+  const hours = Math.floor(min / 60);
+  if (hours < 48) return `${hours} Hour${hours === 1 ? "" : "s"} Ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} Day${days === 1 ? "" : "s"} Ago`;
+}
+
+export function formatFreshnessLabel(
+  source: QuotaSourceReading,
+  nowMs: number,
+): string {
+  const ageMs = nowMs - Date.parse(source.reportedAt);
+  const ageLabel = formatAgeShort(ageMs);
+  if (source.freshness === "fresh") return `Updated ${ageLabel}`;
+  return `Stale · ${ageLabel}`;
+}
+
+export function formatSourceOptionLabel(source: QuotaSourceReading, nowMs: number): string {
+  const parts = [source.sourceLabel];
+  if (source.machine) parts.push(source.machine);
+  parts.push(formatAgeShort(nowMs - Date.parse(source.reportedAt)));
+  return parts.join(" · ");
 }
 
 export function quotaTone(
   status: QuotaWindowStatus,
-  percent: number | null
+  percent: number | null,
 ): {
   bar: string;
   badge: string;
@@ -224,7 +333,7 @@ export function quotaTone(
     return {
       bar: "bg-gray-300 dark:bg-gray-600",
       badge: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
-      label: "Not reported",
+      label: "Not Reported",
     };
   }
   if (status === "exhausted" || percent <= 0) {
@@ -255,6 +364,90 @@ export function quotaTone(
   };
 }
 
+export function quotaPercentTextClass(
+  source: QuotaSourceReading,
+): string {
+  if (source.freshness !== "fresh") {
+    return "text-gray-500 dark:text-gray-400";
+  }
+  if (source.remainingUnknown || source.remainingPercent == null) {
+    return "text-gray-500 dark:text-gray-400";
+  }
+  if (source.isExhausted || source.remainingPercent <= 0) {
+    return "text-rose-600 dark:text-rose-400";
+  }
+  if (source.remainingPercent <= 20) {
+    return "text-amber-600 dark:text-amber-400";
+  }
+  return "text-teal-600 dark:text-teal-400";
+}
+
+function windowDurationMs(windowKey: string): number | null {
+  if (windowKey === "5h") return 5 * 3_600_000;
+  if (windowKey === "7d" || windowKey === "7d:opus") return 7 * 86_400_000;
+  if (windowKey === "weekly") return 7 * 86_400_000;
+  if (windowKey === "monthly") return 30 * 86_400_000;
+  const match = /^(\d+)h$/.exec(windowKey);
+  if (match) return Number(match[1]) * 3_600_000;
+  const dayMatch = /^(\d+)d$/.exec(windowKey);
+  if (dayMatch) return Number(dayMatch[1]) * 86_400_000;
+  return null;
+}
+
+export function QuotaUsageBar({
+  remainingPercent,
+  remainingUnknown,
+  resetAt,
+  windowKey,
+  nowMs,
+  stale,
+}: {
+  remainingPercent: number | null;
+  remainingUnknown: boolean;
+  resetAt: string | null;
+  windowKey: string;
+  nowMs: number;
+  stale: boolean;
+}) {
+  const remaining = remainingUnknown || remainingPercent == null
+    ? null
+    : Math.min(100, Math.max(0, remainingPercent));
+  const used = remaining == null ? null : 100 - remaining;
+
+  let elapsedMarker: number | null = null;
+  if (resetAt) {
+    const resetMs = Date.parse(resetAt);
+    const duration = windowDurationMs(windowKey);
+    if (Number.isFinite(resetMs) && duration) {
+      const start = resetMs - duration;
+      const elapsed = (nowMs - start) / duration;
+      elapsedMarker = Math.min(1, Math.max(0, elapsed));
+    }
+  }
+
+  const opacity = stale ? "opacity-70" : "";
+
+  return (
+    <div className={`relative w-full h-3 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700 ${opacity}`}>
+      {used != null && remaining != null ? (
+        <div className="flex h-full w-full">
+          <div className="h-full bg-rose-500" style={{ width: `${used}%` }} />
+          <div className="h-full bg-teal-500 flex-1" />
+        </div>
+      ) : (
+        <div className="h-full w-full bg-gray-300 dark:bg-gray-600" />
+      )}
+      {elapsedMarker != null ? (
+        <div
+          className="absolute top-0 bottom-0 w-0.5 bg-gray-900/80 dark:bg-gray-100/80"
+          style={{ left: `${elapsedMarker * 100}%` }}
+          aria-hidden
+        />
+      ) : null}
+    </div>
+  );
+}
+
 export function ProviderLogo({
   providerKey,
   providerLabel,
@@ -283,6 +476,128 @@ export function ProviderLogo({
       className="w-7 h-7 flex items-center justify-center rounded-md bg-gray-100 dark:bg-gray-700 border border-gray-100 dark:border-gray-700 shadow-2xs shrink-0 text-[10px] font-semibold text-gray-600 dark:text-gray-300"
     >
       {initials}
+    </div>
+  );
+}
+
+export function QuotaMergedWindowCard({
+  view,
+  nowMs,
+}: {
+  view: MergedQuotaWindowView;
+  nowMs: number;
+}) {
+  const selectId = useId();
+  const sourceValue = (source: QuotaSourceReading) => `${source.source}::${source.reportedAt}`;
+  const [selectedSourceKey, setSelectedSourceKey] = useState(sourceValue(view.primary));
+  const [showOlder, setShowOlder] = useState(false);
+
+  const active =
+    view.sources.find((row) => sourceValue(row) === selectedSourceKey) ?? view.primary;
+  const percent = active.remainingUnknown ? null : active.remainingPercent;
+  const status: QuotaWindowStatus =
+    active.isExhausted || (percent != null && percent <= 0)
+      ? "exhausted"
+      : active.remainingUnknown || percent == null
+        ? "unknown"
+        : percent < 20
+          ? "near_cap"
+          : "available";
+  const tone = quotaTone(status, percent);
+  const countdown = formatCountdown(active.resetAt, nowMs);
+  const freshness = formatFreshnessLabel(active, nowMs);
+  const percentClass = quotaPercentTextClass(active);
+  const cardTitle = view.platformTitle ?? view.displayName;
+  const cardSubtitle = view.platformTitle ? view.displayName : null;
+  const tooltipParts = [view.rawKey, active.detail].filter(Boolean).join(" · ");
+
+  return (
+    <div className="p-4 rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h4
+            className="text-sm font-semibold text-gray-900 dark:text-gray-100 leading-tight"
+            title={tooltipParts || undefined}
+          >
+            {cardTitle}
+          </h4>
+          {cardSubtitle ? (
+            <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{cardSubtitle}</p>
+          ) : null}
+          <p className={`text-xs font-medium text-gray-900 dark:text-gray-100`} title={tooltipParts || undefined}>
+            {freshness}
+          </p>
+        </div>
+        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded-full ${tone.badge}`}>
+          {tone.label}
+        </span>
+      </div>
+
+      <div>
+        <div className="flex flex-wrap justify-between items-baseline gap-x-3 gap-y-1 text-xs mb-1.5">
+          <span className={`font-semibold ${percentClass}`}>
+            {percent == null ? "Remaining Unknown" : `${percent.toFixed(1)}% Remaining`}
+          </span>
+          <span className={`${QUOTA_TIME_REMAINING_CLASS} flex items-center gap-1`}>
+            <Clock className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" aria-hidden />
+            {countdown}
+          </span>
+        </div>
+        <QuotaUsageBar
+          remainingPercent={active.remainingPercent}
+          remainingUnknown={active.remainingUnknown}
+          resetAt={active.resetAt}
+          windowKey={view.windowKey}
+          nowMs={nowMs}
+          stale={active.freshness !== "fresh"}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor={selectId} className="text-[10px] font-medium text-gray-600 dark:text-gray-300">
+          Source
+        </label>
+        <div className="relative">
+          <select
+            id={selectId}
+            className="w-full appearance-none rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs py-1.5 pl-2 pr-8 text-gray-800 dark:text-gray-100"
+            value={selectedSourceKey}
+            onChange={(event) => setSelectedSourceKey(event.target.value)}
+          >
+            {view.sources.map((source) => (
+              <option key={sourceValue(source)} value={sourceValue(source)}>
+                {formatSourceOptionLabel(source, nowMs)}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-500"
+            aria-hidden
+          />
+        </div>
+      </div>
+
+      {view.olderSources.length > 0 ? (
+        <div>
+          <button
+            type="button"
+            className="text-[11px] font-medium text-gray-600 dark:text-gray-300 underline"
+            onClick={() => setShowOlder((open) => !open)}
+            aria-expanded={showOlder}
+          >
+            {showOlder ? "Hide Older Sources" : "Show Older Sources"}
+          </button>
+          {showOlder ? (
+            <ul className="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
+              {view.olderSources.map((source) => (
+                <li key={`${source.source}:${source.reportedAt}`}>
+                  {formatSourceOptionLabel(source, nowMs)}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -335,8 +650,8 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
             <span className="font-semibold text-gray-900 dark:text-gray-100">
               {percent == null ? "Remaining not reported" : `${percent.toFixed(1)}% remaining`}
             </span>
-            <span className="text-gray-500 dark:text-gray-400 flex items-center gap-1 font-mono text-[11px]">
-              <Clock className="h-3 w-3" />
+            <span className={`${QUOTA_TIME_REMAINING_CLASS} flex items-center gap-1`}>
+              <Clock className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" aria-hidden />
               {countdown}
             </span>
           </div>
@@ -352,6 +667,34 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
         </p>
       </div>
     </div>
+  );
+}
+
+export function MergedProviderSection({
+  section,
+  nowMs,
+}: {
+  section: MergedProviderSection;
+  nowMs: number;
+}) {
+  return (
+    <section>
+      <div className="flex items-center gap-2.5 mb-3">
+        <ProviderLogo providerKey={section.provider} providerLabel={section.providerLabel} />
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          {section.providerLabel}
+        </h3>
+      </div>
+      {section.windows.length === 0 ? (
+        <p className="text-sm text-gray-500 dark:text-gray-400">{EMPTY_STATE_COPY}</p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {section.windows.map((view) => (
+            <QuotaMergedWindowCard key={view.id} view={view} nowMs={nowMs} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -378,10 +721,12 @@ export function ProviderSection({ group, nowMs }: { group: NormalizedGroup; nowM
 }
 
 export default function FleetQuotaMatrixCard() {
-  const [groups, setGroups] = useState<NormalizedGroup[]>(() => defaultProviderGroups());
+  const [mergedSections, setMergedSections] = useState<MergedProviderSection[]>(() =>
+    defaultMergedSections(),
+  );
+  const [legacyGroups, setLegacyGroups] = useState<NormalizedGroup[] | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // Recompute ticking countdowns every 10 seconds.
   useEffect(() => {
     const interval = setInterval(() => {
       setNowMs(Date.now());
@@ -396,11 +741,18 @@ export default function FleetQuotaMatrixCard() {
         const res = await fetch("/api/quota-windows", { cache: "no-store" });
         if (!res.ok) return;
         const data: unknown = await res.json();
-        const nextGroups = buildProviderGroups(data);
-        if (!unmounted) setGroups(nextGroups);
+        const merged = buildMergedQuotaSections(data);
+        if (!unmounted) {
+          if (merged.length > 0) {
+            setMergedSections(merged);
+            setLegacyGroups(null);
+          } else {
+            setLegacyGroups(buildProviderGroups(data));
+            setMergedSections(defaultMergedSections());
+          }
+        }
       } catch {
-        // Keep the default/last-known groups; a fetch failure must never
-        // crash this card or leave it stuck rendering nothing.
+        // Keep the default/last-known groups.
       }
     };
 
@@ -409,6 +761,8 @@ export default function FleetQuotaMatrixCard() {
       unmounted = true;
     };
   }, []);
+
+  const useLegacy = legacyGroups != null;
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden shadow-sm">
@@ -424,9 +778,13 @@ export default function FleetQuotaMatrixCard() {
       </div>
 
       <div className="p-6 flex flex-col gap-6">
-        {groups.map((group) => (
-          <ProviderSection key={group.provider} group={group} nowMs={nowMs} />
-        ))}
+        {useLegacy
+          ? legacyGroups.map((group) => (
+              <ProviderSection key={group.provider} group={group} nowMs={nowMs} />
+            ))
+          : mergedSections.map((section) => (
+              <MergedProviderSection key={section.provider} section={section} nowMs={nowMs} />
+            ))}
       </div>
     </div>
   );

@@ -34,7 +34,7 @@
  * move.  Mirrors `antigravityDisplayLabel` in src/lib/quota-windows.ts, which
  * also fixes labels already ingested.
  */
-export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party Models";
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party";
 
 /** Map a raw Antigravity group name onto its display name; others pass through. */
 export function antigravityGroupDisplayName(name) {
