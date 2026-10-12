@@ -64,7 +64,46 @@ describe("projectQuotaWindows", () => {
       collector: "subscription-quota-collector",
       sourceApp: "claude-code",
       source: "api.anthropic.com",
+      reportedAt: "2026-09-12T00:00:00.000Z",
+      occurredAt: "2026-09-12T00:00:00.000Z",
+      windowKey: "5h",
     });
+  });
+
+  it("includes reportedAt and windowKey on every windows[] row and providerGroups copy", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T00:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", quotaWindow: "5h", source: "api.anthropic.com" },
+      },
+      {
+        provider: "anthropic",
+        label: "7d window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-09-11T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:seven_day", quotaWindow: "7d" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    for (const row of result.windows) {
+      expect(row.reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(row.windowKey).toBeTruthy();
+    }
+    expect(result.windows.map((w) => w.windowKey).sort()).toEqual(["5h", "7d"]);
+
+    const anthropicGroup = result.providerGroups.find((g) => g.provider === "anthropic");
+    expect(anthropicGroup?.windows).toHaveLength(2);
+    for (const row of anthropicGroup?.windows ?? []) {
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(["5h", "7d"]).toContain(row.windowKey);
+    }
   });
 
   it("projects per-model skip targets from antigravity-usage events", () => {

@@ -1,4 +1,5 @@
 import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
+import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
 import {
   DEFAULT_PROVIDER_MANIFEST,
   type ResolvedProviderConfig,
@@ -58,6 +59,10 @@ export interface QuotaWindow {
   skip: boolean;
   skipReason: string | null;
   occurredAt: string;
+  /** ISO timestamp of the reading (same instant as `occurredAt`; explicit for clients). */
+  reportedAt: string;
+  /** Normalized window key (`5h`, `7d`, …) aligned with `quotaGroups[].windows[].windowKey`. */
+  windowKey: string;
   source: string | null;
 }
 
@@ -307,6 +312,14 @@ export function projectQuotaWindows(
       viaMarker === "antigravity" &&
       remainingUnknown &&
       asString(meta.source) === "antigravity-usage";
+    const { windowKey: normalizedWindowKey } = normalizeQuotaWindowKey({
+      quotaWindow: asString(meta.quotaWindow),
+      bucketId,
+      label: event.label,
+      modelId,
+    });
+    const windowKey = rollupQuotaWindowKey(normalizedWindowKey);
+    const occurredAtIso = iso(event.occurredAt);
     latest.set(dedupeKey, {
       series,
       window: {
@@ -336,7 +349,9 @@ export function projectQuotaWindows(
           status === "exhausted" || antigravityNaSkip
             ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
             : null,
-        occurredAt: iso(event.occurredAt),
+        occurredAt: occurredAtIso,
+        reportedAt: occurredAtIso,
+        windowKey,
         source: asString(meta.source),
       },
     });

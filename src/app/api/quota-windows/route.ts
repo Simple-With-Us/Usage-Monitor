@@ -17,7 +17,8 @@ export const dynamic = "force-dynamic";
  *
  * Response fields are ADDITIVE ONLY -- the iOS app and BotFleet both read
  * `windows` and `skipModelTypes` and must keep working unchanged.  `windows[]`
- * gained `providerKey`, `providerLabel` and `via`, and the body gained
+ * gained `providerKey`, `providerLabel`, `via`, `reportedAt`, and `windowKey`,
+ * and the body gained
  * `providerGroups` (one entry per provider, including the expected providers
  * that have reported nothing yet), and `quotaGroups` (merged windows with a
  * primary source plus per-source readings for the Agents dashboard).  `providerGroups[]` entries additionally
