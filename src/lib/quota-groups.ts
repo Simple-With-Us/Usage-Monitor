@@ -87,7 +87,7 @@ function sourceKindRank(source: string | null, collector: string | null): number
   const c = (collector ?? "").toLowerCase();
   if (s === "codecaps" || c === "codecaps") return 3;
   if (
-    s.includes("api.anthropic.com") ||
+    s === "api.anthropic.com" ||
     c.includes("claude-code") ||
     s.includes("claude-code") ||
     c.includes("subscription-quota-collector")
@@ -101,7 +101,7 @@ function humanSourceLabel(source: string | null, collector: string | null): stri
   const s = (source ?? "").toLowerCase();
   const c = (collector ?? "").toLowerCase();
   if (s === "codecaps" || c === "codecaps") return "CodeCaps";
-  if (s.includes("api.anthropic.com")) return "Anthropic API";
+  if (s === "api.anthropic.com") return "Anthropic API";
   if (c.includes("claude-code") || s.includes("claude-code")) return "Claude Code";
   if (c.includes("subscription-quota-collector")) return "Quota Collector";
   if (source) {
@@ -116,7 +116,7 @@ function normalizeSourceId(source: string | null, collector: string | null): str
   const s = (source ?? "").toLowerCase();
   const c = (collector ?? "").toLowerCase();
   if (s === "codecaps" || c === "codecaps") return "codecaps";
-  if (s.includes("api.anthropic.com")) return "api.anthropic.com";
+  if (s === "api.anthropic.com") return "api.anthropic.com";
   if (c.includes("claude-code") || s.includes("claude-code")) return "claude-code";
   if (collector) return collector.toLowerCase();
   return (source ?? "unknown").toLowerCase();
