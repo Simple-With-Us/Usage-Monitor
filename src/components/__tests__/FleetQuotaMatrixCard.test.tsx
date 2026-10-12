@@ -36,7 +36,7 @@ import FleetQuotaMatrixCard, {
   quotaPercentPillClasses,
   QuotaUsageBar,
   quotaTone,
-  windowKeyToCompactTag,
+  windowRowTagLabel,
 } from "@/components/FleetQuotaMatrixCard";
 
 const NBSP = " ";
@@ -475,10 +475,11 @@ describe("formatQuotaPercentLabel and QuotaUsageBar", () => {
   });
 });
 
-describe("CodeCaps compact labels", () => {
-  it("maps display names to short window tags and compact countdown", () => {
-    expect(windowKeyToCompactTag("5h", "5-hour")).toBe("5h");
-    expect(windowKeyToCompactTag("7d", "7-day")).toBe("7d");
+describe("CodeCaps row labels", () => {
+  it("uses Jay-approved window tags and compact countdown", () => {
+    expect(windowRowTagLabel("5h", "5-hour")).toBe("5-hour");
+    expect(windowRowTagLabel("7d", "7-day")).toBe("7-day");
+    expect(windowRowTagLabel("monthly", "1-month")).toBe("1-month");
     expect(formatCountdownCompact("2026-09-12T03:15:00.000Z", NOW_MS)).toBe("3h 15m");
     expect(formatCountdownCompact("2026-09-14T06:00:00.000Z", NOW_MS)).toBe("2d 6h");
   });
@@ -657,7 +658,7 @@ describe("buildMergedQuotaSections", () => {
     const html = renderToStaticMarkup(
       createElement(QuotaMergedWindowCard, { view: sections[0]!.windows[0]!, nowMs: NOW_MS }),
     );
-    expect(html).toContain("5h");
+    expect(html).toContain("5-hour");
     expect(html).toContain("62.5%");
     expect(html).not.toContain("Remaining");
     expect(html).not.toContain("Claude ·");

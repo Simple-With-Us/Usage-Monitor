@@ -3,6 +3,7 @@
 import React, { useEffect, useId, useState } from "react";
 import { ChevronDown, Gauge, Clock } from "lucide-react";
 import type { QuotaSourceReading } from "@/lib/quota-groups";
+import { windowKeyToDisplayLabel } from "@/lib/quota-window-display";
 import {
   EXPECTED_QUOTA_PROVIDERS,
   antigravityDisplayLabel,
@@ -60,7 +61,7 @@ export interface MergedQuotaWindowView {
 
 /** Reset / time-remaining copy — always high-contrast (≥ 4.5:1), never faint grey. */
 export const QUOTA_TIME_REMAINING_CLASS =
-  "text-xs font-semibold text-gray-900 dark:text-gray-100 shrink-0 whitespace-nowrap";
+  "text-xs font-semibold text-gray-950 dark:text-gray-50 shrink-0 whitespace-nowrap";
 
 export interface MergedProviderSection {
   provider: string;
@@ -315,21 +316,17 @@ export function formatCountdownCompact(resetAtStr: string | null, nowMs: number)
   return `${minutes}m`;
 }
 
-/** Short column label beside the bar (CodeCaps uses `5h` / `7d` / `1m`). */
-export function windowKeyToCompactTag(windowKey: string, displayName: string): string {
-  if (windowKey === "5h" || displayName === "5-hour") return "5h";
-  if (windowKey === "7d" || windowKey === "7d:opus" || displayName === "7-day") return "7d";
-  if (windowKey === "monthly" || displayName === "1-month") return "1m";
-  if (windowKey === "weekly" || displayName === "weekly") return "7d";
-  if (displayName === "5-hour") return "5h";
-  if (displayName === "7-day") return "7d";
-  if (displayName === "1-month") return "1m";
-  const hours = /^(\d+)-hour$/.exec(displayName);
-  if (hours) return `${hours[1]}h`;
-  const days = /^(\d+)-day$/.exec(displayName);
-  if (days) return `${days[1]}d`;
-  if (displayName.length <= 6) return displayName;
-  return displayName.slice(0, 6);
+/** Jay-approved window tag beside the bar (`5-hour`, `7-day`, `1-month`, …). */
+export function windowRowTagLabel(windowKey: string, displayName: string): string {
+  const canonical = new Set(["5-hour", "7-day", "1-month", "plan"]);
+  if (canonical.has(displayName)) return displayName;
+  if (/^\d+-(hour|day|month)$/.test(displayName) && !displayName.startsWith("other")) {
+    return displayName;
+  }
+  if (displayName && !displayName.startsWith("other-limit")) {
+    return displayName;
+  }
+  return windowKeyToDisplayLabel(windowKey);
 }
 
 /** Rounded percent pill matching CodeCaps pastel green / salmon. */
@@ -617,7 +614,7 @@ export function QuotaMergedWindowSlot({
   const active =
     view.sources.find((row) => sourceValue(row) === selectedSourceKey) ?? view.primary;
   const percent = active.remainingUnknown ? null : active.remainingPercent;
-  const compactTag = windowKeyToCompactTag(view.windowKey, view.displayName);
+  const windowTag = windowRowTagLabel(view.windowKey, view.displayName);
   const countdown = formatCountdownCompact(active.resetAt, nowMs);
   const freshness = formatFreshnessLabel(active, nowMs);
   const tooltipParts = [view.rawKey, active.detail, freshness].filter(Boolean).join(" · ");
@@ -640,8 +637,8 @@ export function QuotaMergedWindowSlot({
         className="flex items-center gap-2"
         title={tooltipParts || undefined}
       >
-        <span className="w-7 shrink-0 text-[11px] font-semibold text-gray-800 dark:text-gray-200 tabular-nums">
-          {compactTag}
+        <span className="w-[3.25rem] shrink-0 text-xs font-semibold text-gray-900 dark:text-gray-100 tabular-nums leading-tight">
+          {windowTag}
         </span>
         {unavailable ? (
           <span className="flex-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">
@@ -667,7 +664,7 @@ export function QuotaMergedWindowSlot({
         >
           {formatQuotaPercentLabel(percent, active.remainingUnknown)}
         </span>
-        <span className={`${QUOTA_TIME_REMAINING_CLASS} text-[11px] min-w-[3.5rem] text-right`}>
+        <span className={`${QUOTA_TIME_REMAINING_CLASS} min-w-[3.75rem] text-right`}>
           {countdown}
         </span>
       </div>
@@ -900,7 +897,7 @@ function QuotaMergedWindowSlotInner({
   nowMs: number;
 }) {
   const percent = active.remainingUnknown ? null : active.remainingPercent;
-  const compactTag = windowKeyToCompactTag(view.windowKey, view.displayName);
+  const windowTag = windowRowTagLabel(view.windowKey, view.displayName);
   const countdown = formatCountdownCompact(active.resetAt, nowMs);
   const freshness = formatFreshnessLabel(active, nowMs);
   const tooltipParts = [view.rawKey, active.detail, freshness].filter(Boolean).join(" · ");
@@ -911,8 +908,8 @@ function QuotaMergedWindowSlotInner({
       className="flex items-center gap-2 min-w-[9.5rem] flex-1 basis-40 max-w-md"
       title={tooltipParts || undefined}
     >
-      <span className="w-7 shrink-0 text-[11px] font-semibold text-gray-800 dark:text-gray-200 tabular-nums">
-        {compactTag}
+      <span className="w-[3.25rem] shrink-0 text-xs font-semibold text-gray-900 dark:text-gray-100 tabular-nums leading-tight">
+        {windowTag}
       </span>
       {unavailable ? (
         <span className="flex-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">
@@ -936,7 +933,7 @@ function QuotaMergedWindowSlotInner({
       >
         {formatQuotaPercentLabel(percent, active.remainingUnknown)}
       </span>
-      <span className={`${QUOTA_TIME_REMAINING_CLASS} text-[11px] min-w-[3.5rem] text-right`}>
+      <span className={`${QUOTA_TIME_REMAINING_CLASS} min-w-[3.75rem] text-right`}>
         {countdown}
       </span>
     </div>
