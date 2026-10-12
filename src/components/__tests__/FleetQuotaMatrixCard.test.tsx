@@ -29,11 +29,14 @@ import FleetQuotaMatrixCard, {
   buildProviderGroups,
   defaultProviderGroups,
   formatCountdown,
+  formatCountdownCompact,
   formatFreshnessLabel,
   formatQuotaPercentLabel,
   formatSourceOptionLabel,
+  quotaPercentPillClasses,
   QuotaUsageBar,
   quotaTone,
+  windowKeyToCompactTag,
 } from "@/components/FleetQuotaMatrixCard";
 
 const NBSP = " ";
@@ -467,9 +470,33 @@ describe("formatQuotaPercentLabel and QuotaUsageBar", () => {
       }),
     );
     expect(html).toContain("bg-red-500");
-    expect(html).toContain("bg-green-500");
+    expect(html).toContain("bg-teal-800");
     expect(html).toContain("bg-black");
-    expect(html).not.toContain("bg-teal-500");
+  });
+});
+
+describe("CodeCaps compact labels", () => {
+  it("maps display names to short window tags and compact countdown", () => {
+    expect(windowKeyToCompactTag("5h", "5-hour")).toBe("5h");
+    expect(windowKeyToCompactTag("7d", "7-day")).toBe("7d");
+    expect(formatCountdownCompact("2026-09-12T03:15:00.000Z", NOW_MS)).toBe("3h 15m");
+    expect(formatCountdownCompact("2026-09-14T06:00:00.000Z", NOW_MS)).toBe("2d 6h");
+  });
+
+  it("styles percent pills with pastel backgrounds", () => {
+    const freshHigh = {
+      source: "codecaps",
+      sourceLabel: "CodeCaps",
+      machine: null,
+      collector: null,
+      remainingPercent: 71,
+      remainingUnknown: false,
+      isExhausted: false,
+      resetAt: null,
+      reportedAt: "2026-09-12T00:00:00.000Z",
+      freshness: "fresh" as const,
+    };
+    expect(quotaPercentPillClasses(freshHigh)).toContain("bg-emerald-100");
   });
 });
 
@@ -630,12 +657,13 @@ describe("buildMergedQuotaSections", () => {
     const html = renderToStaticMarkup(
       createElement(QuotaMergedWindowCard, { view: sections[0]!.windows[0]!, nowMs: NOW_MS }),
     );
-    expect(html).toContain("5-hour");
+    expect(html).toContain("5h");
     expect(html).toContain("62.5%");
     expect(html).not.toContain("Remaining");
     expect(html).not.toContain("Claude ·");
     expect(html).toContain('for="');
     expect(html).toContain("Source");
+    expect(html).toContain("bg-emerald-100");
     expect(html).toContain("CodeCaps · Mac.Jays.Services");
     expect(formatFreshnessLabel(sections[0]!.windows[0]!.primary, NOW_MS)).toContain("Updated");
     expect(

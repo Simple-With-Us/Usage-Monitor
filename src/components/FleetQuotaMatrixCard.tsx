@@ -293,6 +293,65 @@ export function formatCountdown(resetAtStr: string | null, nowMs: number): strin
   return `Resets In ${minutes}m`;
 }
 
+/** CodeCaps menu-bar style countdown (e.g. `1h 39m`, `6d 15h`). */
+export function formatCountdownCompact(resetAtStr: string | null, nowMs: number): string {
+  if (!resetAtStr) return "—";
+  const target = new Date(resetAtStr).getTime();
+  const diffMs = target - nowMs;
+  if (diffMs <= 0) return "now";
+
+  const diffSec = Math.floor(diffMs / 1000);
+  const hours = Math.floor(diffSec / 3600);
+  const minutes = Math.floor((diffSec % 3600) / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    const remHours = hours % 24;
+    return `${days}d ${remHours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+/** Short column label beside the bar (CodeCaps uses `5h` / `7d` / `1m`). */
+export function windowKeyToCompactTag(windowKey: string, displayName: string): string {
+  if (windowKey === "5h" || displayName === "5-hour") return "5h";
+  if (windowKey === "7d" || windowKey === "7d:opus" || displayName === "7-day") return "7d";
+  if (windowKey === "monthly" || displayName === "1-month") return "1m";
+  if (windowKey === "weekly" || displayName === "weekly") return "7d";
+  if (displayName === "5-hour") return "5h";
+  if (displayName === "7-day") return "7d";
+  if (displayName === "1-month") return "1m";
+  const hours = /^(\d+)-hour$/.exec(displayName);
+  if (hours) return `${hours[1]}h`;
+  const days = /^(\d+)-day$/.exec(displayName);
+  if (days) return `${days[1]}d`;
+  if (displayName.length <= 6) return displayName;
+  return displayName.slice(0, 6);
+}
+
+/** Rounded percent pill matching CodeCaps pastel green / salmon. */
+export function quotaPercentPillClasses(
+  source: QuotaSourceReading,
+): string {
+  const base = "inline-flex items-center justify-center min-w-[2.75rem] px-1.5 py-0.5 text-xs font-semibold tabular-nums rounded-md";
+  if (source.freshness !== "fresh") {
+    return `${base} bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300`;
+  }
+  if (source.remainingUnknown || source.remainingPercent == null) {
+    return `${base} bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300`;
+  }
+  if (source.isExhausted || source.remainingPercent <= 0) {
+    return `${base} bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300`;
+  }
+  if (source.remainingPercent <= 20) {
+    return `${base} bg-orange-100 text-orange-900 dark:bg-orange-950/40 dark:text-orange-200`;
+  }
+  return `${base} bg-emerald-100 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200`;
+}
+
 function formatAgeShort(ageMs: number): string {
   const sec = Math.max(0, Math.floor(ageMs / 1000));
   if (sec < 60) return `${sec} Sec Ago`;
@@ -437,19 +496,21 @@ export function QuotaUsageBar({
   const opacity = stale ? "opacity-70" : "";
 
   return (
-    <div className={`relative w-full h-3 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700 ${opacity}`}>
+    <div
+      className={`relative w-full h-2.5 rounded-sm overflow-visible bg-gray-200 dark:bg-gray-700 ${opacity}`}
+    >
       {used != null && remaining != null ? (
-        <div className="flex h-full w-full">
+        <div className="flex h-full w-full rounded-sm overflow-hidden">
           <div className="h-full bg-red-500" style={{ width: `${used}%` }} />
-          <div className="h-full bg-green-500 flex-1" />
+          <div className="h-full bg-teal-800 dark:bg-teal-700 flex-1" />
         </div>
       ) : (
-        <div className="h-full w-full bg-gray-300 dark:bg-gray-600" />
+        <div className="h-full w-full rounded-sm bg-gray-300 dark:bg-gray-600" />
       )}
       {elapsedMarker != null ? (
         <div
-          className="absolute top-0 bottom-0 w-px bg-black"
-          style={{ left: `${elapsedMarker * 100}%` }}
+          className="absolute -top-0.5 bottom-[-2px] w-[2px] bg-black dark:bg-gray-950 z-10"
+          style={{ left: `calc(${elapsedMarker * 100}% - 1px)` }}
           aria-hidden
         />
       ) : null}
@@ -489,12 +550,64 @@ export function ProviderLogo({
   );
 }
 
-export function QuotaMergedWindowCard({
+function QuotaSourceSelect({
+  selectId,
+  sources,
+  selectedSourceKey,
+  onChange,
+  nowMs,
+  showLabel = false,
+}: {
+  selectId: string;
+  sources: QuotaSourceReading[];
+  selectedSourceKey: string;
+  onChange: (key: string) => void;
+  nowMs: number;
+  showLabel?: boolean;
+}) {
+  const sourceValue = (source: QuotaSourceReading) => `${source.source}::${source.reportedAt}`;
+  if (sources.length <= 1) return null;
+
+  return (
+    <div className="relative mb-1.5">
+      <label
+        htmlFor={selectId}
+        className={
+          showLabel
+            ? "block text-[10px] font-medium text-gray-600 dark:text-gray-300 mb-0.5"
+            : "sr-only"
+        }
+      >
+        Source
+      </label>
+      <select
+        id={selectId}
+        className="w-full appearance-none rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 text-[11px] py-1 pl-2 pr-7 text-gray-800 dark:text-gray-100"
+        value={selectedSourceKey}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {sources.map((source) => (
+          <option key={sourceValue(source)} value={sourceValue(source)}>
+            {formatSourceOptionLabel(source, nowMs)}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-500"
+        aria-hidden
+      />
+    </div>
+  );
+}
+
+export function QuotaMergedWindowSlot({
   view,
   nowMs,
+  showSourceSelect,
 }: {
   view: MergedQuotaWindowView;
   nowMs: number;
+  showSourceSelect: boolean;
 }) {
   const selectId = useId();
   const sourceValue = (source: QuotaSourceReading) => `${source.source}::${source.reportedAt}`;
@@ -504,53 +617,38 @@ export function QuotaMergedWindowCard({
   const active =
     view.sources.find((row) => sourceValue(row) === selectedSourceKey) ?? view.primary;
   const percent = active.remainingUnknown ? null : active.remainingPercent;
-  const status: QuotaWindowStatus =
-    active.isExhausted || (percent != null && percent <= 0)
-      ? "exhausted"
-      : active.remainingUnknown || percent == null
-        ? "unknown"
-        : percent < 20
-          ? "near_cap"
-          : "available";
-  const tone = quotaTone(status, percent);
-  const countdown = formatCountdown(active.resetAt, nowMs);
+  const compactTag = windowKeyToCompactTag(view.windowKey, view.displayName);
+  const countdown = formatCountdownCompact(active.resetAt, nowMs);
   const freshness = formatFreshnessLabel(active, nowMs);
-  const percentClass = quotaPercentTextClass(active);
-  const cardTitle = view.platformTitle ?? view.displayName;
-  const cardSubtitle = view.platformTitle ? view.displayName : null;
-  const tooltipParts = [view.rawKey, active.detail].filter(Boolean).join(" · ");
+  const tooltipParts = [view.rawKey, active.detail, freshness].filter(Boolean).join(" · ");
+  const unavailable =
+    active.remainingUnknown || percent == null;
 
   return (
-    <div className="p-4 rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 flex flex-col gap-3">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h4
-            className="text-sm font-semibold text-gray-900 dark:text-gray-100 leading-tight"
-            title={tooltipParts || undefined}
-          >
-            {cardTitle}
-          </h4>
-          {cardSubtitle ? (
-            <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{cardSubtitle}</p>
-          ) : null}
-          <p className={`text-xs font-medium text-gray-900 dark:text-gray-100`} title={tooltipParts || undefined}>
-            {freshness}
-          </p>
-        </div>
-        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded-full ${tone.badge}`}>
-          {tone.label}
-        </span>
-      </div>
+    <div className="flex flex-col min-w-[9.5rem] flex-1 basis-40 max-w-md">
+      {showSourceSelect ? (
+        <QuotaSourceSelect
+          selectId={selectId}
+          sources={view.sources}
+          selectedSourceKey={selectedSourceKey}
+          onChange={setSelectedSourceKey}
+          nowMs={nowMs}
+        />
+      ) : null}
 
-      <div>
-        <div className="flex flex-wrap justify-end items-center gap-x-2 gap-y-1 text-xs mb-1.5">
-          <span className={`${QUOTA_TIME_REMAINING_CLASS} flex items-center gap-1`}>
-            <Clock className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" aria-hidden />
-            {countdown}
+      <div
+        className="flex items-center gap-2"
+        title={tooltipParts || undefined}
+      >
+        <span className="w-7 shrink-0 text-[11px] font-semibold text-gray-800 dark:text-gray-200 tabular-nums">
+          {compactTag}
+        </span>
+        {unavailable ? (
+          <span className="flex-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">
+            unavailable
           </span>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex-1 min-w-0">
+        ) : (
+          <div className="flex-1 min-w-[4.5rem]">
             <QuotaUsageBar
               remainingPercent={active.remainingPercent}
               remainingUnknown={active.remainingUnknown}
@@ -560,53 +658,32 @@ export function QuotaMergedWindowCard({
               stale={active.freshness !== "fresh"}
             />
           </div>
-          <span
-            className={`text-sm font-semibold tabular-nums shrink-0 ${percentClass}`}
-            aria-label={
-              percent == null ? "Remaining percent not reported" : `${percent} percent remaining`
-            }
-          >
-            {formatQuotaPercentLabel(percent, active.remainingUnknown)}
-          </span>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label htmlFor={selectId} className="text-[10px] font-medium text-gray-600 dark:text-gray-300">
-          Source
-        </label>
-        <div className="relative">
-          <select
-            id={selectId}
-            className="w-full appearance-none rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs py-1.5 pl-2 pr-8 text-gray-800 dark:text-gray-100"
-            value={selectedSourceKey}
-            onChange={(event) => setSelectedSourceKey(event.target.value)}
-          >
-            {view.sources.map((source) => (
-              <option key={sourceValue(source)} value={sourceValue(source)}>
-                {formatSourceOptionLabel(source, nowMs)}
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-500"
-            aria-hidden
-          />
-        </div>
+        )}
+        <span
+          className={quotaPercentPillClasses(active)}
+          aria-label={
+            percent == null ? "Remaining percent not reported" : `${percent} percent remaining`
+          }
+        >
+          {formatQuotaPercentLabel(percent, active.remainingUnknown)}
+        </span>
+        <span className={`${QUOTA_TIME_REMAINING_CLASS} text-[11px] min-w-[3.5rem] text-right`}>
+          {countdown}
+        </span>
       </div>
 
       {view.olderSources.length > 0 ? (
-        <div>
+        <div className="mt-1">
           <button
             type="button"
-            className="text-[11px] font-medium text-gray-600 dark:text-gray-300 underline"
+            className="text-[10px] font-medium text-gray-600 dark:text-gray-300 underline"
             onClick={() => setShowOlder((open) => !open)}
             aria-expanded={showOlder}
           >
-            {showOlder ? "Hide Older Sources" : "Show Older Sources"}
+            {showOlder ? "Hide Older Sources" : "Older Sources"}
           </button>
           {showOlder ? (
-            <ul className="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
+            <ul className="mt-1 space-y-0.5 text-[10px] text-gray-500 dark:text-gray-400">
               {view.olderSources.map((source) => (
                 <li key={`${source.source}:${source.reportedAt}`}>
                   {formatSourceOptionLabel(source, nowMs)}
@@ -618,6 +695,45 @@ export function QuotaMergedWindowCard({
       ) : null}
     </div>
   );
+}
+
+/** @deprecated Name kept for tests; renders one CodeCaps-style window slot. */
+export function QuotaMergedWindowCard({
+  view,
+  nowMs,
+}: {
+  view: MergedQuotaWindowView;
+  nowMs: number;
+}) {
+  const rowTitle = view.platformTitle;
+  return (
+    <div className="flex flex-col gap-1 py-1">
+      {rowTitle ? (
+        <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">{rowTitle}</p>
+      ) : null}
+      <QuotaMergedWindowSlot view={view} nowMs={nowMs} showSourceSelect />
+    </div>
+  );
+}
+
+function windowSortOrder(windowKey: string): number {
+  if (windowKey === "5h") return 0;
+  if (windowKey === "7d" || windowKey === "7d:opus") return 1;
+  if (windowKey === "monthly") return 2;
+  return 3;
+}
+
+function groupMergedWindowsForRows(windows: MergedQuotaWindowView[]): MergedQuotaWindowView[][] {
+  const byRow = new Map<string, MergedQuotaWindowView[]>();
+  for (const view of windows) {
+    const key = view.platformTitle ?? "";
+    const list = byRow.get(key) ?? [];
+    list.push(view);
+    byRow.set(key, list);
+  }
+  return [...byRow.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, group]) => [...group].sort((a, b) => windowSortOrder(a.windowKey) - windowSortOrder(b.windowKey)));
 }
 
 export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: number }) {
@@ -688,6 +804,29 @@ export function QuotaWindowCard({ win, nowMs }: { win: NormalizedWindow; nowMs: 
   );
 }
 
+function collectProviderSourceOptions(windows: MergedQuotaWindowView[]): QuotaSourceReading[] {
+  const seen = new Set<string>();
+  const options: QuotaSourceReading[] = [];
+  for (const view of windows) {
+    for (const source of view.sources) {
+      const key = `${source.source}::${source.reportedAt}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push(source);
+    }
+  }
+  options.sort((a, b) => Date.parse(b.reportedAt) - Date.parse(a.reportedAt));
+  return options;
+}
+
+function resolveActiveSource(
+  view: MergedQuotaWindowView,
+  selectedSourceKey: string,
+): QuotaSourceReading {
+  const sourceValue = (source: QuotaSourceReading) => `${source.source}::${source.reportedAt}`;
+  return view.sources.find((row) => sourceValue(row) === selectedSourceKey) ?? view.primary;
+}
+
 export function MergedProviderSection({
   section,
   nowMs,
@@ -695,9 +834,17 @@ export function MergedProviderSection({
   section: MergedProviderSection;
   nowMs: number;
 }) {
+  const rowGroups = groupMergedWindowsForRows(section.windows);
+  const sectionSourceSelectId = useId();
+  const sourceOptions = collectProviderSourceOptions(section.windows);
+  const sourceValue = (source: QuotaSourceReading) => `${source.source}::${source.reportedAt}`;
+  const defaultSourceKey =
+    sourceOptions[0] != null ? sourceValue(sourceOptions[0]) : "";
+  const [selectedSourceKey, setSelectedSourceKey] = useState(defaultSourceKey);
+
   return (
-    <section>
-      <div className="flex items-center gap-2.5 mb-3">
+    <section className="border-b border-gray-100 dark:border-gray-700 last:border-b-0 pb-4 last:pb-0">
+      <div className="flex items-center gap-2.5 mb-2">
         <ProviderLogo providerKey={section.provider} providerLabel={section.providerLabel} />
         <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
           {section.providerLabel}
@@ -706,13 +853,93 @@ export function MergedProviderSection({
       {section.windows.length === 0 ? (
         <p className="text-sm text-gray-500 dark:text-gray-400">{EMPTY_STATE_COPY}</p>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {section.windows.map((view) => (
-            <QuotaMergedWindowCard key={view.id} view={view} nowMs={nowMs} />
-          ))}
+        <div className="flex flex-col gap-2 pl-9 sm:pl-10">
+          {sourceOptions.length > 1 ? (
+            <QuotaSourceSelect
+              selectId={sectionSourceSelectId}
+              sources={sourceOptions}
+              selectedSourceKey={selectedSourceKey || defaultSourceKey}
+              onChange={setSelectedSourceKey}
+              nowMs={nowMs}
+              showLabel
+            />
+          ) : null}
+          {rowGroups.map((group, groupIndex) => {
+            const rowTitle = group[0]?.platformTitle;
+            return (
+              <div key={`${section.provider}-row-${groupIndex}`} className="flex flex-col gap-1">
+                {rowTitle ? (
+                  <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">{rowTitle}</p>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                  {group.map((view) => (
+                    <QuotaMergedWindowSlotInner
+                      key={view.id}
+                      view={view}
+                      active={resolveActiveSource(view, selectedSourceKey || defaultSourceKey)}
+                      nowMs={nowMs}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
+  );
+}
+
+function QuotaMergedWindowSlotInner({
+  view,
+  active,
+  nowMs,
+}: {
+  view: MergedQuotaWindowView;
+  active: QuotaSourceReading;
+  nowMs: number;
+}) {
+  const percent = active.remainingUnknown ? null : active.remainingPercent;
+  const compactTag = windowKeyToCompactTag(view.windowKey, view.displayName);
+  const countdown = formatCountdownCompact(active.resetAt, nowMs);
+  const freshness = formatFreshnessLabel(active, nowMs);
+  const tooltipParts = [view.rawKey, active.detail, freshness].filter(Boolean).join(" · ");
+  const unavailable = active.remainingUnknown || percent == null;
+
+  return (
+    <div
+      className="flex items-center gap-2 min-w-[9.5rem] flex-1 basis-40 max-w-md"
+      title={tooltipParts || undefined}
+    >
+      <span className="w-7 shrink-0 text-[11px] font-semibold text-gray-800 dark:text-gray-200 tabular-nums">
+        {compactTag}
+      </span>
+      {unavailable ? (
+        <span className="flex-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">
+          unavailable
+        </span>
+      ) : (
+        <div className="flex-1 min-w-[4.5rem]">
+          <QuotaUsageBar
+            remainingPercent={active.remainingPercent}
+            remainingUnknown={active.remainingUnknown}
+            resetAt={active.resetAt}
+            windowKey={view.windowKey}
+            nowMs={nowMs}
+            stale={active.freshness !== "fresh"}
+          />
+        </div>
+      )}
+      <span
+        className={quotaPercentPillClasses(active)}
+        aria-label={percent == null ? "Remaining percent not reported" : `${percent} percent remaining`}
+      >
+        {formatQuotaPercentLabel(percent, active.remainingUnknown)}
+      </span>
+      <span className={`${QUOTA_TIME_REMAINING_CLASS} text-[11px] min-w-[3.5rem] text-right`}>
+        {countdown}
+      </span>
+    </div>
   );
 }
 
