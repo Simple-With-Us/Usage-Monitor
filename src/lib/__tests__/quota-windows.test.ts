@@ -70,6 +70,26 @@ describe("projectQuotaWindows", () => {
     });
   });
 
+  it("prefers metadata.reportedAt over occurredAt for freshness fields", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: {
+          bucketId: "anthropic:five_hour",
+          quotaWindow: "5h",
+          reportedAt: "2026-09-12T10:00:00.000Z",
+          windowKey: "5h",
+        },
+      },
+    ]);
+    expect(result.windows[0]?.reportedAt).toBe("2026-09-12T10:00:00.000Z");
+    expect(result.windows[0]?.occurredAt).toBe("2026-09-12T12:00:00.000Z");
+  });
+
   it("includes reportedAt and windowKey on every windows[] row and providerGroups copy", () => {
     const result = projectQuotaWindows([
       {
