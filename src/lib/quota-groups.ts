@@ -306,7 +306,12 @@ export function buildQuotaGroups(
     if (!primaryCandidate) continue;
 
     const primary = toReading(primaryCandidate);
-    const sources = sortSourcesForDisplay(candidates.map(toReading), primary);
+    // Drop the primary candidate by reference before mapping: `toReading` always
+    // returns fresh objects, so filtering the mapped readings would never match.
+    const sources = sortSourcesForDisplay(
+      candidates.filter((row) => row !== primaryCandidate).map(toReading),
+      primary,
+    );
 
     const displayName = quotaWindowDisplayName({
       windowKey,

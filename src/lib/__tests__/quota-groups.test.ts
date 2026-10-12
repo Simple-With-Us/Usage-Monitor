@@ -202,6 +202,13 @@ describe("buildQuotaGroups", () => {
     expect(window?.displayName).toBe("5-hour");
     expect(window?.primary.source).toBe("codecaps");
     expect(window?.sources.length).toBeGreaterThanOrEqual(2);
+    // The primary must appear exactly once; a duplicated entry would show up
+    // twice in the QuotaSourceSelect dropdown.
+    expect(
+      window?.sources.filter(
+        (row) => row.source === window?.primary.source && row.reportedAt === window?.primary.reportedAt,
+      ),
+    ).toHaveLength(1);
     const unknownRow = window?.sources.find((row) => row.remainingUnknown);
     expect(unknownRow?.remainingPercent).toBeNull();
     expect(unknownRow?.isExhausted).toBe(false);
