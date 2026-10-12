@@ -122,7 +122,11 @@ export function normalizeQuotaWindowKey({
   if (qw === "7d" || qw === "weekly") {
     return { windowKey: "7d", rawKey: qw };
   }
-  if (qw) return { windowKey: qw, rawKey: qw };
+  if (qw) {
+    const fromQuotaWindow = normalizeQuotaWindowKeyFromAnthropicKey(qw, modelId);
+    if (fromQuotaWindow.windowKey !== `other:${qw}`) return fromQuotaWindow;
+    return { windowKey: qw, rawKey: qw };
+  }
   const labelStr = label ? String(label).trim() : "";
   if (/^5h\b/i.test(labelStr) || /5[- ]?hour/i.test(labelStr)) {
     return { windowKey: "5h", rawKey: "five_hour" };

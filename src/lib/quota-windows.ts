@@ -270,7 +270,7 @@ export function projectQuotaWindows(
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
-    const machine = asString(meta.machine);
+    const machine = asString(meta.machine) ?? asString(meta._producerInstanceId);
     // Display label only: stored events keep their original label, so rows
     // ingested before the rename read "Third-Party Models" too.  Normalized
     // before the series key so an old and a new reading of the same bucket

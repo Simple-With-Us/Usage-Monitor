@@ -49,4 +49,16 @@ describe("quota window display mapping", () => {
       }).windowKey,
     ).toBe("7d");
   });
+
+  it("normalizes raw quotaWindow names from live box collectors", () => {
+    expect(normalizeQuotaWindowKey({ quotaWindow: "five_hour" })).toEqual({
+      windowKey: "5h",
+      rawKey: "five_hour",
+    });
+    expect(normalizeQuotaWindowKey({ quotaWindow: "seven_day" })).toEqual({
+      windowKey: "7d",
+      rawKey: "seven_day",
+    });
+    expect(normalizeQuotaWindowKey({ quotaWindow: "weekly" }).windowKey).toBe("7d");
+  });
 });

@@ -203,7 +203,7 @@ function eventToCandidate(
 
   const source = asString(meta.source);
   const collector = event.sourceApp ?? null;
-  const machine = asString(meta.machine);
+  const machine = asString(meta.machine) ?? asString(meta._producerInstanceId);
   const sourceId = normalizeSourceId(source, collector);
 
   return {

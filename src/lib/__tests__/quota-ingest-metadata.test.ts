@@ -54,6 +54,30 @@ describe("enrichQuotaIngestMetadata", () => {
     ).toBe("7d");
   });
 
+  it("normalizes live box-collector quotaWindow tokens (five_hour, weekly)", () => {
+    expect(resolveQuotaWindowKeyFromMetadata({ quotaWindow: "five_hour" }, null)).toBe("5h");
+    expect(resolveQuotaWindowKeyFromMetadata({ quotaWindow: "weekly" }, null)).toBe("7d");
+  });
+
+  it("uses occurredAt as reportedAt and grok-bot-vm provenance as machine", () => {
+    const metadata = enrichQuotaIngestMetadata(
+      {
+        metricType: "quota",
+        occurredAt: new Date("2026-10-12T09:15:00.000Z"),
+        label: "weekly window",
+        metadata: {
+          quotaWindow: "weekly",
+          _producerInstanceId: "grok-bot-vm",
+        },
+      },
+      { ingestTime },
+    );
+    expect(metadata?.reportedAt).toBe("2026-10-12T09:15:00.000Z");
+    expect(metadata?.windowKey).toBe("7d");
+    expect(metadata?.rawKey).toBe("weekly");
+    expect(metadata?.machine).toBe("grok-bot-vm");
+  });
+
   it("leaves non-quota events untouched", () => {
     expect(
       enrichQuotaIngestMetadata({
@@ -62,6 +86,37 @@ describe("enrichQuotaIngestMetadata", () => {
         metadata: { foo: "bar" },
       }),
     ).toEqual({ foo: "bar" });
+  });
+});
+
+describe("parseUsageTelemetryV2Batch quota enrichment", () => {
+  it("adds reportedAt and windowKey before persistence for v2 batches", async () => {
+    const { parseUsageTelemetryV2Batch } = await import("../usage-telemetry");
+    const parsed = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "gbu",
+      producerInstanceId: "grok-bot-vm",
+      events: [
+        {
+          eventId: "evt-1",
+          provider: "grok-bot",
+          service: "gbu",
+          metricType: "quota",
+          billingMode: "actual",
+          confidence: "actual",
+          limit: 100,
+          credits: 40,
+          label: "weekly",
+          occurredAt: "2026-10-12T09:15:00.000Z",
+          metadata: { quotaWindow: "weekly" },
+        },
+      ],
+    });
+    const event = parsed.events[0];
+    expect(event?.metadata?.reportedAt).toBe("2026-10-12T09:15:00.000Z");
+    expect(event?.metadata?.windowKey).toBe("7d");
+    expect(event?.metadata?.machine).toBe("grok-bot-vm");
+    expect(event?.metadata?._producerInstanceId).toBe("grok-bot-vm");
   });
 });
 

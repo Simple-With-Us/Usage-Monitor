@@ -42,13 +42,40 @@ export function resolveQuotaWindowKeyFromMetadata(
 ): string {
   const stamped = asString(metadata.windowKey);
   if (stamped) return rollupQuotaWindowKey(stamped);
-  const { windowKey } = normalizeQuotaWindowKey({
+  return rollupQuotaWindowKey(
+    normalizeQuotaWindowKey({
+      quotaWindow: asString(metadata.quotaWindow),
+      bucketId: asString(metadata.bucketId),
+      label,
+      modelId: asString(metadata.modelId),
+    }).windowKey,
+  );
+}
+
+function resolveQuotaRawKeyFromMetadata(
+  metadata: Record<string, unknown>,
+  label: string | null | undefined,
+): string {
+  const stamped = asString(metadata.rawKey);
+  if (stamped) return stamped;
+  return normalizeQuotaWindowKey({
     quotaWindow: asString(metadata.quotaWindow),
     bucketId: asString(metadata.bucketId),
     label,
     modelId: asString(metadata.modelId),
-  });
-  return rollupQuotaWindowKey(windowKey);
+  }).rawKey;
+}
+
+function resolveQuotaMachineFromMetadata(
+  metadata: Record<string, unknown>,
+  producerInstanceId?: string | null,
+): string | null {
+  return (
+    asString(metadata.machine) ??
+    asString(metadata._producerInstanceId) ??
+    asString(producerInstanceId) ??
+    null
+  );
 }
 
 /**
@@ -74,13 +101,14 @@ export function enrichQuotaIngestMetadata(
     ingestTime,
   });
   const windowKey = resolveQuotaWindowKeyFromMetadata(base, event.label ?? null);
-  const machine =
-    asString(base.machine) ?? asString(options.producerInstanceId) ?? null;
+  const rawKey = resolveQuotaRawKeyFromMetadata(base, event.label ?? null);
+  const machine = resolveQuotaMachineFromMetadata(base, options.producerInstanceId);
 
   const enriched: Record<string, string | number | boolean | null> = {
     ...(event.metadata ?? {}),
     reportedAt,
     windowKey,
+    rawKey,
   };
   if (machine) enriched.machine = machine;
   return enriched;
