@@ -25,6 +25,7 @@ jobs:
       E2E_TEST_PASSWORD: visual-test-password
     steps:
       - uses: actions/checkout@v7
+      - run: node scripts/test-e2e-visual-snapshot-files.mjs
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
