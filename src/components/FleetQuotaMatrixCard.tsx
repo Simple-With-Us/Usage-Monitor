@@ -379,7 +379,16 @@ export function quotaPercentTextClass(
   if (source.remainingPercent <= 20) {
     return "text-amber-600 dark:text-amber-400";
   }
-  return "text-teal-600 dark:text-teal-400";
+  return "text-green-700 dark:text-green-400";
+}
+
+/** Plain percent label for the bar (e.g. `73%`, no "remaining" copy). */
+export function formatQuotaPercentLabel(percent: number | null, remainingUnknown: boolean): string {
+  if (remainingUnknown || percent == null) return "—";
+  const clamped = Math.min(100, Math.max(0, percent));
+  const rounded = Math.round(clamped * 10) / 10;
+  const text = rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1);
+  return `${text}%`;
 }
 
 function windowDurationMs(windowKey: string): number | null {
@@ -431,15 +440,15 @@ export function QuotaUsageBar({
     <div className={`relative w-full h-3 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700 ${opacity}`}>
       {used != null && remaining != null ? (
         <div className="flex h-full w-full">
-          <div className="h-full bg-rose-500" style={{ width: `${used}%` }} />
-          <div className="h-full bg-teal-500 flex-1" />
+          <div className="h-full bg-red-500" style={{ width: `${used}%` }} />
+          <div className="h-full bg-green-500 flex-1" />
         </div>
       ) : (
         <div className="h-full w-full bg-gray-300 dark:bg-gray-600" />
       )}
       {elapsedMarker != null ? (
         <div
-          className="absolute top-0 bottom-0 w-0.5 bg-gray-900/80 dark:bg-gray-100/80"
+          className="absolute top-0 bottom-0 w-px bg-black"
           style={{ left: `${elapsedMarker * 100}%` }}
           aria-hidden
         />
@@ -534,23 +543,32 @@ export function QuotaMergedWindowCard({
       </div>
 
       <div>
-        <div className="flex flex-wrap justify-between items-baseline gap-x-3 gap-y-1 text-xs mb-1.5">
-          <span className={`font-semibold ${percentClass}`}>
-            {percent == null ? "Remaining Unknown" : `${percent.toFixed(1)}% Remaining`}
-          </span>
+        <div className="flex flex-wrap justify-end items-center gap-x-2 gap-y-1 text-xs mb-1.5">
           <span className={`${QUOTA_TIME_REMAINING_CLASS} flex items-center gap-1`}>
             <Clock className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" aria-hidden />
             {countdown}
           </span>
         </div>
-        <QuotaUsageBar
-          remainingPercent={active.remainingPercent}
-          remainingUnknown={active.remainingUnknown}
-          resetAt={active.resetAt}
-          windowKey={view.windowKey}
-          nowMs={nowMs}
-          stale={active.freshness !== "fresh"}
-        />
+        <div className="flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <QuotaUsageBar
+              remainingPercent={active.remainingPercent}
+              remainingUnknown={active.remainingUnknown}
+              resetAt={active.resetAt}
+              windowKey={view.windowKey}
+              nowMs={nowMs}
+              stale={active.freshness !== "fresh"}
+            />
+          </div>
+          <span
+            className={`text-sm font-semibold tabular-nums shrink-0 ${percentClass}`}
+            aria-label={
+              percent == null ? "Remaining percent not reported" : `${percent} percent remaining`
+            }
+          >
+            {formatQuotaPercentLabel(percent, active.remainingUnknown)}
+          </span>
+        </div>
       </div>
 
       <div className="flex flex-col gap-1">

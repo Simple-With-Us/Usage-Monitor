@@ -30,7 +30,9 @@ import FleetQuotaMatrixCard, {
   defaultProviderGroups,
   formatCountdown,
   formatFreshnessLabel,
+  formatQuotaPercentLabel,
   formatSourceOptionLabel,
+  QuotaUsageBar,
   quotaTone,
 } from "@/components/FleetQuotaMatrixCard";
 
@@ -446,6 +448,31 @@ describe("FleetQuotaMatrixCard default render (before any fetch resolves)", () =
   });
 });
 
+describe("formatQuotaPercentLabel and QuotaUsageBar", () => {
+  it("formats plain percents without a remaining suffix", () => {
+    expect(formatQuotaPercentLabel(73, false)).toBe("73%");
+    expect(formatQuotaPercentLabel(62.5, false)).toBe("62.5%");
+    expect(formatQuotaPercentLabel(null, true)).toBe("—");
+  });
+
+  it("renders red used, green remaining, and a black elapsed marker", () => {
+    const html = renderToStaticMarkup(
+      createElement(QuotaUsageBar, {
+        remainingPercent: 73,
+        remainingUnknown: false,
+        resetAt: "2026-09-12T17:00:00.000Z",
+        windowKey: "5h",
+        nowMs: new Date("2026-09-12T12:00:00.000Z").getTime(),
+        stale: false,
+      }),
+    );
+    expect(html).toContain("bg-red-500");
+    expect(html).toContain("bg-green-500");
+    expect(html).toContain("bg-black");
+    expect(html).not.toContain("bg-teal-500");
+  });
+});
+
 describe("formatCountdown and quotaTone branches", () => {
   it("covers rolling, past, day, hour, and minute countdown copy", () => {
     expect(formatCountdown(null, NOW_MS)).toBe("Rolling Refresh");
@@ -604,6 +631,8 @@ describe("buildMergedQuotaSections", () => {
       createElement(QuotaMergedWindowCard, { view: sections[0]!.windows[0]!, nowMs: NOW_MS }),
     );
     expect(html).toContain("5-hour");
+    expect(html).toContain("62.5%");
+    expect(html).not.toContain("Remaining");
     expect(html).not.toContain("Claude ·");
     expect(html).toContain('for="');
     expect(html).toContain("Source");
