@@ -279,15 +279,26 @@ export async function handleEmail(message, env, _ctx) {
   // parsing, R2, or lifecycle checks can fail. No-forward intake skips this:
   // the forwarder already holds the original and is the backstop if storage
   // fails below.
+  let forwardedToFallback = false;
   if (!noForward) {
-    await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
+    try {
+      await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
+      forwardedToFallback = true;
+    } catch (error) {
+      // Relay rejections (e.g. iCloud CS01, hop limits) must not fail intake:
+      // admission already succeeded and this Worker still holds the original.
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error("receipt fallback forward failed:", reason);
+    }
   }
 
   const ready = await readiness(env);
   if (!ready.ready) {
     throw new Error(noForward
       ? "Receipt inbox storage or lifecycle readiness is unavailable"
-      : "Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback");
+      : forwardedToFallback
+        ? "Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback"
+        : "Receipt inbox storage or lifecycle readiness is unavailable");
   }
 
   const raw = await new Response(message.raw).arrayBuffer();
@@ -335,7 +346,7 @@ export async function handleEmail(message, env, _ctx) {
     receivedAt,
     senderDomain: senderDomain(message.from),
     senderAuthentication: senderAuthentication(),
-    forwardedToFallback: !noForward,
+    forwardedToFallback,
     rawSizeBytes: raw.byteLength,
     attachmentCount: attachments.attachmentCount,
     supportedAttachmentCount: attachments.supportedAttachmentCount,

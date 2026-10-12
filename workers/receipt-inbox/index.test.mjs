@@ -271,22 +271,24 @@ describe("receipt inbox email worker", () => {
     expect(env.RECEIPTS_BUCKET.objects.size).toBe(2);
   });
 
-  it("forwards an admitted original before storage checks and never reads raw when fallback fails", async () => {
+  it("forwards before storage checks; relay rejection still files evidence in R2", async () => {
     const { env, storage } = createEnvironment();
     storage.values.set("lifecycle:audit", { ok: false, checkedAt: Date.now() });
     const preserved = receiptMessage("x");
     await expect(handleEmail(preserved, env)).rejects.toThrow("original forwarded");
     expect(preserved.forwardedTo).toBe("socratic.trade@jays.services");
 
-    let rawRead = false;
-    const fallbackFailure = receiptMessage("x", {
+    const { env: healthyEnv } = createEnvironment();
+    const fallbackFailure = receiptMessage(rawReceipt("relay rejected receipt"), {
       async forward() { throw new Error("simulated fallback failure"); },
     });
-    Object.defineProperty(fallbackFailure, "raw", {
-      get() { rawRead = true; return stream(new Uint8Array([1])); },
-    });
-    await expect(handleEmail(fallbackFailure, env)).rejects.toThrow("simulated fallback failure");
-    expect(rawRead).toBe(false);
+    await handleEmail(fallbackFailure, healthyEnv);
+    expect(fallbackFailure.forwardedTo).toBeUndefined();
+    expect(healthyEnv.RECEIPTS_BUCKET.objects.size).toBe(1);
+    const summary = await handleFetch(new Request("https://receipt-inbox.jays.services/v1/receipts/summary", {
+      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+    }), healthyEnv).then((response) => response.json());
+    expect(summary.items[0].forwardedToFallback).toBe(false);
   });
 
   it("matches the no-forward local-part case-insensitively and ignores other recipients", () => {

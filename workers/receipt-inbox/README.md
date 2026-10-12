@@ -22,8 +22,10 @@ billing-receipt ingest token, billing identity key, or billing HMAC signing key
 and cannot create a money event.
 
 Every admitted email is first forwarded to a verified private fallback mailbox.
-That copy preserves the original even if lifecycle verification, MIME parsing,
-R2, or the index fails. Receipt processing remains explicit: the dashboard only
+Relay rejections (for example iCloud CS01 policy) are logged and intake
+continues into R2 so the Worker-held original is not lost.  When forwarding
+succeeds, that copy preserves the original even if lifecycle verification, MIME
+parsing, R2, or the index fails afterward. Receipt processing remains explicit: the dashboard only
 shows a needs-review item; it does not turn email into spend automatically.
 
 Required public intake Worker secrets:
