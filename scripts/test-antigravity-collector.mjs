@@ -172,6 +172,9 @@ check("events are well formed and collision free", () => {
   assertEqual(geminiWeekly.metricType, "quota", "metricType");
   assertEqual(geminiWeekly.billingMode, "actual", "billingMode");
   assertEqual(geminiWeekly.confidence, "actual", "confidence");
+  assertEqual(geminiWeekly.metadata.reportedAt, OCCURRED_AT, "reportedAt");
+  assertEqual(typeof geminiWeekly.metadata.windowKey, "string", "windowKey");
+  assertEqual(typeof geminiWeekly.metadata.machine, "string", "machine");
   assertEqual(geminiWeekly.limit, 100, "percent scale limit");
   assertEqual(geminiWeekly.credits, 92.67, "credits are percent remaining");
   assertEqual(geminiWeekly.occurredAt, OCCURRED_AT, "occurredAt is passed through");

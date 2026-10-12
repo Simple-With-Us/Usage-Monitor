@@ -1,3 +1,8 @@
+import {
+  normalizeQuotaWindowKey,
+  rollupQuotaWindowKey,
+} from "./quota-window-display.mjs";
+
 // Shared builder for `metricType: "quota"` remaining-percent events.
 //
 // The Antigravity collector (scripts/fleet-usage-collector.mjs and
@@ -112,6 +117,8 @@ export function buildQuotaEvent({
   reading,
   source,
   occurredAtIso = new Date().toISOString(),
+  reportedAtIso,
+  machine,
 }) {
   const remaining = reading.remainingUnknown ? null : clampPercent(reading.remainingPercent);
   const used =
@@ -121,6 +128,14 @@ export function buildQuotaEvent({
         ? null
         : Math.round((100 - remaining) * 100) / 100;
   const seriesKey = reading.resetAt ?? `${occurredAtIso.slice(0, 13)}:00`;
+  const reportedAt = toIsoTimestamp(reportedAtIso ?? reading.reportedAt ?? occurredAtIso);
+  const { windowKey: normalizedKey, rawKey } = normalizeQuotaWindowKey({
+    quotaWindow: reading.quotaWindow,
+    bucketId: reading.bucketId,
+    label: reading.label,
+    modelId: reading.modelId,
+  });
+  const windowKey = rollupQuotaWindowKey(normalizedKey);
   return {
     eventId: `subq:${provider}:${reading.bucketId}:${seriesKey}:${occurredAtIso}`,
     provider,
@@ -156,6 +171,10 @@ export function buildQuotaEvent({
       remainingUnknown: Boolean(reading.remainingUnknown),
       scale: "percent_0_100",
       source,
+      reportedAt,
+      windowKey,
+      rawKey,
+      ...(machine ? { machine } : {}),
     },
   };
 }

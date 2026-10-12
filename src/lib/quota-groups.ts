@@ -10,6 +10,7 @@ import {
   type ResolvedProviderManifest,
   resolveProviderManifest,
 } from "@/lib/provider-manifest";
+import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
 import type { QuotaEventLike } from "@/lib/quota-windows";
 import { antigravityDisplayLabel, quotaProviderLabel } from "@/lib/quota-windows";
 
@@ -186,7 +187,7 @@ function eventToCandidate(
   const bucketId = asString(meta.bucketId);
   const label =
     via === "antigravity" ? antigravityDisplayLabel(event.label) : event.label;
-  const reportedAt = iso(event.occurredAt);
+  const reportedAt = quotaEventReportedAtIso(event.occurredAt, meta);
   const freshness = quotaSourceFreshness(reportedAt, nowMs);
   if (freshness === "expired") return null;
 
@@ -254,13 +255,17 @@ export function buildQuotaGroups(
     const via =
       resolved.byKey.get(providerKey)?.terms?.via ??
       (providerKey === "google-antigravity" ? "antigravity" : null);
-    const { windowKey, rawKey } = normalizeQuotaWindowKey({
+    const stampedWindowKey = asString(meta.windowKey);
+    const normalized = normalizeQuotaWindowKey({
       quotaWindow: asString(meta.quotaWindow),
       bucketId: asString(meta.bucketId),
       label: event.label ?? null,
       modelId: asString(meta.modelId),
     });
-    const rolledKey = rollupQuotaWindowKey(windowKey);
+    const rolledKey = stampedWindowKey
+      ? rollupQuotaWindowKey(stampedWindowKey)
+      : rollupQuotaWindowKey(normalized.windowKey);
+    const rawKey = asString(meta.rawKey) ?? normalized.rawKey;
     const pool =
       via === "antigravity"
         ? antigravityQuotaPool({

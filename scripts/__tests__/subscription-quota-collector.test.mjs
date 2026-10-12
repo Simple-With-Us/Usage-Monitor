@@ -79,6 +79,7 @@ describe("quota-event helpers", () => {
       service: "claude-code",
       source: "api.anthropic.com",
       occurredAtIso: "2026-09-12T12:00:00.000Z",
+      machine: "Mac.Jays.Services",
       reading: {
         bucketId: "anthropic:five_hour",
         label: "5h window",
@@ -99,6 +100,10 @@ describe("quota-event helpers", () => {
     expect(event.metadata.quotaWindow).toBe("5h");
     expect(event.metadata.resetAt).toBe("2026-09-12T18:00:00.000Z");
     expect(event.metadata.source).toBe("api.anthropic.com");
+    expect(event.metadata.reportedAt).toBe("2026-09-12T12:00:00.000Z");
+    expect(event.metadata.windowKey).toBe("5h");
+    expect(event.metadata.rawKey).toBe("five_hour");
+    expect(event.metadata.machine).toBe("Mac.Jays.Services");
     // eventId must include the observation time.  Ingest 409s when credits
     // change under the same (producerId, eventId); a reset-only key would
     // freeze remaining % after the first LaunchAgent tick.

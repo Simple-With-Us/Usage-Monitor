@@ -1,4 +1,5 @@
 import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
+import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
 import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
 import {
   DEFAULT_PROVIDER_MANIFEST,
@@ -312,14 +313,19 @@ export function projectQuotaWindows(
       viaMarker === "antigravity" &&
       remainingUnknown &&
       asString(meta.source) === "antigravity-usage";
-    const { windowKey: normalizedWindowKey } = normalizeQuotaWindowKey({
-      quotaWindow: asString(meta.quotaWindow),
-      bucketId,
-      label: event.label,
-      modelId,
-    });
-    const windowKey = rollupQuotaWindowKey(normalizedWindowKey);
+    const stampedWindowKey = asString(meta.windowKey);
+    const windowKey = stampedWindowKey
+      ? rollupQuotaWindowKey(stampedWindowKey)
+      : rollupQuotaWindowKey(
+          normalizeQuotaWindowKey({
+            quotaWindow: asString(meta.quotaWindow),
+            bucketId,
+            label: event.label,
+            modelId,
+          }).windowKey,
+        );
     const occurredAtIso = iso(event.occurredAt);
+    const reportedAtIso = quotaEventReportedAtIso(event.occurredAt, meta);
     latest.set(dedupeKey, {
       series,
       window: {
@@ -350,7 +356,7 @@ export function projectQuotaWindows(
             ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
             : null,
         occurredAt: occurredAtIso,
-        reportedAt: occurredAtIso,
+        reportedAt: reportedAtIso,
         windowKey,
         source: asString(meta.source),
       },
