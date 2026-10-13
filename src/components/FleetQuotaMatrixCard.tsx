@@ -11,6 +11,10 @@ import {
   quotaProviderLabel,
   quotaProviderVia,
 } from "@/lib/quota-windows";
+import {
+  quotaSourceReadingSchema,
+  quotaWindowsClientResponseSchema,
+} from "@/lib/quota-windows-client-schema";
 
 const SENTENCE_GAP = "  ";
 
@@ -190,23 +194,9 @@ export function buildProviderGroups(data: unknown): NormalizedGroup[] {
 }
 
 function normalizeSourceReading(raw: unknown): QuotaSourceReading | null {
-  const rec = asRecord(raw);
-  const reportedAt = asString(rec.reportedAt);
-  if (!reportedAt) return null;
-  const freshness = asString(rec.freshness);
-  if (freshness !== "fresh" && freshness !== "stale" && freshness !== "old") return null;
-  return {
-    source: asString(rec.source) ?? "unknown",
-    sourceLabel: asString(rec.sourceLabel) ?? "Unknown",
-    machine: asString(rec.machine),
-    collector: asString(rec.collector),
-    remainingPercent: asNumber(rec.remainingPercent),
-    remainingUnknown: rec.remainingUnknown === true,
-    isExhausted: rec.isExhausted === true,
-    resetAt: asString(rec.resetAt),
-    reportedAt,
-    freshness,
-  };
+  const parsed = quotaSourceReadingSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return parsed.data;
 }
 
 /** Prefer additive `quotaGroups` from /api/quota-windows when present. */
@@ -982,7 +972,10 @@ export default function FleetQuotaMatrixCard() {
       try {
         const res = await fetch("/api/quota-windows", { cache: "no-store" });
         if (!res.ok) return;
-        const data: unknown = await res.json();
+        const raw: unknown = await res.json();
+        const parsed = quotaWindowsClientResponseSchema.safeParse(raw);
+        if (!parsed.success) return;
+        const data = parsed.data;
         const merged = buildMergedQuotaSections(data);
         if (!unmounted) {
           if (merged.length > 0) {

@@ -227,7 +227,10 @@ function sortSourcesForDisplay(
   sources: QuotaSourceReading[],
   primary: QuotaSourceReading,
 ): QuotaSourceReading[] {
-  const rest = sources.filter((row) => row !== primary);
+  const isSameAsPrimary = (row: QuotaSourceReading) =>
+    row === primary ||
+    (row.source === primary.source && row.reportedAt === primary.reportedAt);
+  const rest = sources.filter((row) => !isSameAsPrimary(row));
   rest.sort((a, b) => Date.parse(b.reportedAt) - Date.parse(a.reportedAt));
   return [primary, ...rest];
 }
