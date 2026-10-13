@@ -5,7 +5,7 @@
  * Double-checks the bundled LiteLLM snapshot against upstream and major provider list prices:
  * - Google Gemini (gemini-3.7-flash, gemini-3.6-flash, gemini-2.5-pro)
  * - Anthropic (claude-3-7-sonnet, claude-3-5-haiku, claude-opus-5)
- * - OpenAI (gpt-4o, gpt-4o-mini, o3-mini)
+ * - OpenAI (gpt-4o, gpt-4o-mini, gpt-5.6-sol)
  * - xAI (grok-4.6, grok-3)
  * - DeepSeek (deepseek-v4-pro, deepseek-chat)
  *
@@ -41,7 +41,7 @@ const PROVIDER_BASELINES = {
   "claude-opus-5": { inputPerM: 15.00, outputPerM: 75.00, provider: "anthropic" },
   "gpt-4o": { inputPerM: 2.50, outputPerM: 10.00, provider: "openai" },
   "gpt-4o-mini": { inputPerM: 0.15, outputPerM: 0.60, provider: "openai" },
-  "o3-mini": { inputPerM: 1.10, outputPerM: 4.40, provider: "openai" },
+  "gpt-5.6-sol": { inputPerM: 2.00, outputPerM: 10.00, provider: "openai" },
   "grok-4.6": { inputPerM: 2.00, outputPerM: 10.00, provider: "xai" },
   "deepseek-chat": { inputPerM: 0.14, outputPerM: 0.28, provider: "deepseek" },
 };
