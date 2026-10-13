@@ -628,7 +628,7 @@ export async function postUsageBatches({
   const bodyFor = (batch) => ({
     schemaVersion: 2,
     producerId,
-    producerInstanceId: hostname(),
+    producerInstanceId: process.env.USAGE_MACHINE_ID?.trim() || hostname(),
     events: batch,
   });
   if (dryRun) {
