@@ -62,6 +62,8 @@ describe("GET /api/quota-windows", () => {
     expect(body.skipModelTypes).toEqual([
       { instanceId: "antigravity", model: "claude-opus-4-6-thinking" },
     ]);
+    expect(body.windows[0].reportedAt).toBe("2026-09-04T04:20:02.182Z");
+    expect(body.windows[0].windowKey).toBeTruthy();
     expect(response.headers.get("x-api-version")).toBe("1");
   });
 

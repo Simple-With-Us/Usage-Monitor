@@ -10,6 +10,11 @@
 // Fixtures live in scripts/__tests__/fixtures/.
 
 import { clampPercent, toIsoTimestamp, windowLabelFromSeconds } from "./quota-event.mjs";
+import {
+  claudeAnthropicKeyToToken,
+  normalizeQuotaWindowKeyFromAnthropicKey,
+  quotaWindowDisplayName,
+} from "./quota-window-display.mjs";
 
 function asRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -67,30 +72,9 @@ function reading(partial) {
 
 // ---------------------------------------------------------------- Claude ----
 
-const WORD_NUMBERS = {
-  one: 1,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  ten: 10,
-  twelve: 12,
-  fourteen: 14,
-  thirty: 30,
-};
-
-const UNIT_SUFFIX = { hour: "h", day: "d", week: "w", month: "mo" };
-
-/** "five_hour" -> "5h", "seven_day" -> "7d".  Unknown keys pass through. */
+/** "five_hour" -> "5h", "seven_day" -> "7d".  Unknown keys return null. */
 export function claudeWindowToken(key) {
-  const match = /^([a-z]+)_(hour|day|week|month)s?/.exec(String(key));
-  if (!match) return null;
-  const count = WORD_NUMBERS[match[1]] ?? Number(match[1]);
-  if (!Number.isFinite(count)) return null;
-  return `${count}${UNIT_SUFFIX[match[2]]}`;
+  return claudeAnthropicKeyToToken(key);
 }
 
 const CLAUDE_MODEL_SUFFIXES = ["opus", "sonnet", "haiku"];
@@ -132,7 +116,15 @@ export function parseClaudeUsage(payload, { planType = null } = {}) {
         break;
       }
     }
-    const token = claudeWindowToken(baseKey) ?? claudeWindowToken(key) ?? baseKey;
+    const token = claudeWindowToken(baseKey) ?? claudeWindowToken(key);
+    const { windowKey, rawKey } = normalizeQuotaWindowKeyFromAnthropicKey(key, suffixModel);
+    const resetAt = firstTimestamp(windowRecord, ["resets_at", "resetsAt", "reset_at", "resetAt"]);
+    const displayName = quotaWindowDisplayName({
+      windowKey,
+      rawKey,
+      resetAt,
+      nowMs: Date.now(),
+    });
     const used = utilization != null ? clampPercent(utilization) : null;
     const remaining =
       remainingDirect != null ? clampPercent(remainingDirect) : used == null ? null : 100 - used;
@@ -140,11 +132,11 @@ export function parseClaudeUsage(payload, { planType = null } = {}) {
     readings.push(
       reading({
         bucketId: `anthropic:${key}`,
-        label: suffixModel ? `${token} window (${titleCaseModel(suffixModel)})` : `${token} window`,
-        quotaWindow: token,
+        label: displayName,
+        quotaWindow: token ?? windowKey,
         remainingPercent: remaining,
         usedPercent: used,
-        resetAt: firstTimestamp(windowRecord, ["resets_at", "resetsAt", "reset_at", "resetAt"]),
+        resetAt,
         planType,
         modelId: suffixModel,
         remainingUnknown: remaining == null,

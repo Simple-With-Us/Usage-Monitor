@@ -6,6 +6,8 @@ import {
   type UsageTelemetryV2Batch,
 } from "@jaywedgeworth22/congress-trading-shared";
 
+import { enrichQuotaIngestMetadata } from "@/lib/quota-ingest-metadata";
+
 const MAX_EVENTS = 100;
 const MAX_METADATA_KEYS = 50;
 const MAX_METADATA_STRING_LENGTH = 500;
@@ -211,39 +213,55 @@ function summarizeV2Issues(error: {
     );
 }
 
+function finalizeQuotaIngestEvent(
+  event: ParsedUsageTelemetryEvent,
+  options: { producerInstanceId?: string | null; ingestTime?: Date } = {},
+): ParsedUsageTelemetryEvent {
+  if (event.metricType !== "quota") return event;
+  return {
+    ...event,
+    metadata: enrichQuotaIngestMetadata(event, options),
+  };
+}
+
 async function mapV2Event(
   batch: UsageTelemetryV2Batch,
-  event: UsageTelemetryV2Batch["events"][number]
+  event: UsageTelemetryV2Batch["events"][number],
+  ingestTime = new Date(),
 ): Promise<ParsedUsageTelemetryEvent> {
-  return {
-    sourceApp: batch.producerId,
-    environment: event.environment,
-    provider: event.provider,
-    service: event.service,
-    project: event.project,
-    label: event.label,
-    keyRef: event.producerKeyRef,
-    billingMode: event.billingMode,
-    metricType: event.metricType,
-    quantity: event.quantity,
-    unit: event.unit,
-    costUsd: event.costUsd,
-    requests: event.requests,
-    credits: event.credits,
-    limit: event.limit,
-    limitWindow: event.limitWindow,
-    tier: event.tier,
-    confidence: event.confidence,
-    windowStart: event.windowStart ? new Date(event.windowStart) : undefined,
-    windowEnd: event.windowEnd ? new Date(event.windowEnd) : undefined,
-    occurredAt: event.occurredAt ? new Date(event.occurredAt) : new Date(),
-    metadata: v2Metadata(batch, event),
-    providerRequestId: event.providerRequestId,
-    idempotencyKey: await deriveUsageTelemetryV2IdempotencyKey({
-      producerId: batch.producerId,
-      eventId: event.eventId,
-    }),
-  };
+  const occurredAt = event.occurredAt ? new Date(event.occurredAt) : ingestTime;
+  return finalizeQuotaIngestEvent(
+    {
+      sourceApp: batch.producerId,
+      environment: event.environment,
+      provider: event.provider,
+      service: event.service,
+      project: event.project,
+      label: event.label,
+      keyRef: event.producerKeyRef,
+      billingMode: event.billingMode,
+      metricType: event.metricType,
+      quantity: event.quantity,
+      unit: event.unit,
+      costUsd: event.costUsd,
+      requests: event.requests,
+      credits: event.credits,
+      limit: event.limit,
+      limitWindow: event.limitWindow,
+      tier: event.tier,
+      confidence: event.confidence,
+      windowStart: event.windowStart ? new Date(event.windowStart) : undefined,
+      windowEnd: event.windowEnd ? new Date(event.windowEnd) : undefined,
+      occurredAt,
+      metadata: v2Metadata(batch, event),
+      providerRequestId: event.providerRequestId,
+      idempotencyKey: await deriveUsageTelemetryV2IdempotencyKey({
+        producerId: batch.producerId,
+        eventId: event.eventId,
+      }),
+    },
+    { producerInstanceId: batch.producerInstanceId, ingestTime },
+  );
 }
 
 /**
@@ -516,7 +534,7 @@ function parseEvent(value: unknown): ParsedUsageTelemetryEvent {
   const requests = readInteger(record, "requests");
   const credits = readNumber(record, "credits");
 
-  return {
+  return finalizeQuotaIngestEvent({
     sourceApp,
     environment,
     provider,
@@ -557,7 +575,7 @@ function parseEvent(value: unknown): ParsedUsageTelemetryEvent {
       requests,
       credits,
     }),
-  };
+  });
 }
 
 export function parseUsageTelemetryBatch(value: unknown): ParsedUsageTelemetryEvent[] {

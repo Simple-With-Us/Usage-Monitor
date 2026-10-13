@@ -58,7 +58,7 @@ import { readFile, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -492,11 +492,19 @@ export function parseArgs(argv) {
   return args;
 }
 
+const COLLECTOR_MACHINE = hostname();
+
 /** Turn one provider's raw payload into ingest events.  Pure; used by tests. */
-export function eventsForProvider(providerKey, payload, { context, source, occurredAtIso } = {}) {
+export function eventsForProvider(
+  providerKey,
+  payload,
+  { context, source, occurredAtIso, machine } = {},
+) {
   const definition = PROVIDERS[providerKey];
   if (!definition) throw new Error(`Unknown provider ${providerKey}`);
   const readings = definition.parse(payload, context ?? {});
+  const observedAtIso = occurredAtIso ?? new Date().toISOString();
+  const host = machine ?? COLLECTOR_MACHINE;
   // A window whose remaining percent we could not read is dropped, not posted.
   // The read path's "N/A remaining means none remains" rule is an Antigravity
   // ruling (owner 2026-09-04); applying it to a field-name mismatch would tell
@@ -510,7 +518,9 @@ export function eventsForProvider(providerKey, payload, { context, source, occur
         service: definition.service,
         reading: r,
         source: source ?? definition.defaultSource,
-        occurredAtIso: occurredAtIso ?? new Date().toISOString(),
+        occurredAtIso: observedAtIso,
+        reportedAtIso: r.reportedAt ?? observedAtIso,
+        machine: host,
       }),
     );
 }

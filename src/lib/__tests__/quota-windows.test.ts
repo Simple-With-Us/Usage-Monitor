@@ -20,9 +20,9 @@ describe("quotaStatus", () => {
     );
   });
 
-  it("treats omitted remaining (N/A) as exhausted", () => {
+  it("treats omitted remaining as unknown, not exhausted", () => {
     expect(quotaStatus({ remainingPercent: null, remainingUnknown: true, isExhausted: false })).toBe(
-      "exhausted",
+      "unknown",
     );
   });
 
@@ -38,9 +38,9 @@ describe("quotaStatus", () => {
     );
   });
 
-  it("treats remainingPercent null without remainingUnknown as exhausted", () => {
+  it("treats remainingPercent null without remainingUnknown as unknown", () => {
     expect(quotaStatus({ remainingPercent: null, remainingUnknown: false, isExhausted: false })).toBe(
-      "exhausted",
+      "unknown",
     );
   });
 });
@@ -64,7 +64,66 @@ describe("projectQuotaWindows", () => {
       collector: "subscription-quota-collector",
       sourceApp: "claude-code",
       source: "api.anthropic.com",
+      reportedAt: "2026-09-12T00:00:00.000Z",
+      occurredAt: "2026-09-12T00:00:00.000Z",
+      windowKey: "5h",
     });
+  });
+
+  it("prefers metadata.reportedAt over occurredAt for freshness fields", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: {
+          bucketId: "anthropic:five_hour",
+          quotaWindow: "5h",
+          reportedAt: "2026-09-12T10:00:00.000Z",
+          windowKey: "5h",
+        },
+      },
+    ]);
+    expect(result.windows[0]?.reportedAt).toBe("2026-09-12T10:00:00.000Z");
+    expect(result.windows[0]?.occurredAt).toBe("2026-09-12T12:00:00.000Z");
+  });
+
+  it("includes reportedAt and windowKey on every windows[] row and providerGroups copy", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T00:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", quotaWindow: "5h", source: "api.anthropic.com" },
+      },
+      {
+        provider: "anthropic",
+        label: "7d window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-09-11T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:seven_day", quotaWindow: "7d" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    for (const row of result.windows) {
+      expect(row.reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(row.windowKey).toBeTruthy();
+    }
+    expect(result.windows.map((w) => w.windowKey).sort()).toEqual(["5h", "7d"]);
+
+    const anthropicGroup = result.providerGroups.find((g) => g.provider === "anthropic");
+    expect(anthropicGroup?.windows).toHaveLength(2);
+    for (const row of anthropicGroup?.windows ?? []) {
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(["5h", "7d"]).toContain(row.windowKey);
+    }
   });
 
   it("projects per-model skip targets from antigravity-usage events", () => {
@@ -101,9 +160,10 @@ describe("projectQuotaWindows", () => {
       "gemini-3.1-pro-high",
     ]);
     const gemini = result.windows.find((row) => row.modelId === "gemini-3.1-pro-high");
-    expect(gemini?.status).toBe("exhausted");
+    expect(gemini?.status).toBe("unknown");
     expect(gemini?.skip).toBe(true);
-    expect(gemini?.remainingPercent).toBe(0);
+    expect(gemini?.remainingPercent).toBeNull();
+    expect(gemini?.remainingUnknown).toBe(true);
   });
 
   it("keeps the latest event per series", () => {
@@ -615,23 +675,21 @@ describe("Antigravity third-party pool display label", () => {
     occurredAt: "2026-09-12T12:00:00.000Z",
   };
 
-  it("uses Third-Party Models as the display name", () => {
-    expect(ANTIGRAVITY_THIRD_PARTY_LABEL).toBe("Third-Party Models");
+  it("uses Third-Party as the display name", () => {
+    expect(ANTIGRAVITY_THIRD_PARTY_LABEL).toBe("Third-Party");
   });
 
   it("maps the legacy Claude and GPT label variants and keeps the window suffix", () => {
-    expect(antigravityDisplayLabel("Claude and GPT models")).toBe("Third-Party Models");
-    expect(antigravityDisplayLabel("Claude and GPT models (weekly)")).toBe(
-      "Third-Party Models (weekly)",
-    );
-    expect(antigravityDisplayLabel("Claude and GPT models (5h)")).toBe("Third-Party Models (5h)");
-    expect(antigravityDisplayLabel("Claude & GPT models (5h)")).toBe("Third-Party Models (5h)");
-    expect(antigravityDisplayLabel("claude/gpt")).toBe("Third-Party Models");
-    expect(antigravityDisplayLabel("Claude and GPT (weekly)")).toBe("Third-Party Models (weekly)");
+    expect(antigravityDisplayLabel("Claude and GPT models")).toBe("Third-Party");
+    expect(antigravityDisplayLabel("Claude and GPT models (weekly)")).toBe("Third-Party (weekly)");
+    expect(antigravityDisplayLabel("Claude and GPT models (5h)")).toBe("Third-Party (5h)");
+    expect(antigravityDisplayLabel("Claude & GPT models (5h)")).toBe("Third-Party (5h)");
+    expect(antigravityDisplayLabel("claude/gpt")).toBe("Third-Party");
+    expect(antigravityDisplayLabel("Claude and GPT (weekly)")).toBe("Third-Party (weekly)");
   });
 
   it("passes every other label through untouched", () => {
-    expect(antigravityDisplayLabel("Third-Party Models (5h)")).toBe("Third-Party Models (5h)");
+    expect(antigravityDisplayLabel("Third-Party (5h)")).toBe("Third-Party (5h)");
     expect(antigravityDisplayLabel("Gemini Models (weekly)")).toBe("Gemini Models (weekly)");
     expect(antigravityDisplayLabel("Claude Opus 4.6 (Thinking)")).toBe("Claude Opus 4.6 (Thinking)");
     expect(antigravityDisplayLabel("Claude and GPT-OSS")).toBe("Claude and GPT-OSS");
@@ -639,14 +697,14 @@ describe("Antigravity third-party pool display label", () => {
     expect(antigravityDisplayLabel(undefined)).toBeUndefined();
   });
 
-  it("shows already-ingested legacy labels as Third-Party Models without touching the stored event", () => {
+  it("shows already-ingested legacy labels as Third-Party without touching the stored event", () => {
     const stored = {
       ...base,
       label: "Claude and GPT models (weekly)",
       metadata: { bucketId: "3p-weekly", quotaWindow: "weekly", modelGroup: "Claude and GPT models" },
     };
     const result = projectQuotaWindows([stored]);
-    expect(result.windows[0]?.label).toBe("Third-Party Models (weekly)");
+    expect(result.windows[0]?.label).toBe("Third-Party (weekly)");
     // The stored row and its raw group name are display-mapped, never rewritten.
     expect(stored.label).toBe("Claude and GPT models (weekly)");
     expect(stored.metadata.modelGroup).toBe("Claude and GPT models");
@@ -655,19 +713,19 @@ describe("Antigravity third-party pool display label", () => {
 
   it("collapses a legacy and a new reading of one label-keyed series onto the newest", () => {
     const result = projectQuotaWindows([
-      { ...base, label: "Third-Party Models (5h)", credits: 70, occurredAt: "2026-09-12T12:00:00.000Z" },
+      { ...base, label: "Third-Party (5h)", credits: 70, occurredAt: "2026-09-12T12:00:00.000Z" },
       { ...base, label: "Claude and GPT models (5h)", credits: 10, occurredAt: "2026-09-12T08:00:00.000Z" },
     ]);
     expect(result.windows).toHaveLength(1);
-    expect(result.windows[0]?.label).toBe("Third-Party Models (5h)");
+    expect(result.windows[0]?.label).toBe("Third-Party (5h)");
     expect(result.windows[0]?.remainingPercent).toBe(70);
   });
 
   it("uses the display label in skipReason and still emits Claude/GPT skip targets", () => {
-    for (const label of ["Claude and GPT models", "Third-Party Models"]) {
+    for (const label of ["Claude and GPT models", "Third-Party"]) {
       const result = projectQuotaWindows([{ ...base, label, credits: 0 }]);
-      expect(result.windows[0]?.label).toBe("Third-Party Models");
-      expect(result.windows[0]?.skipReason).toBe("Third-Party Models remaining 0%");
+      expect(result.windows[0]?.label).toBe("Third-Party");
+      expect(result.windows[0]?.skipReason).toBe("Third-Party remaining 0%");
       const models = result.skipModelTypes.map((row) => row.model);
       expect(models).toContain("claude-opus-4-6-thinking");
       expect(models).toContain("gpt-oss-120b-medium");

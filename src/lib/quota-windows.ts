@@ -1,3 +1,6 @@
+import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
+import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
+import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
 import {
   DEFAULT_PROVIDER_MANIFEST,
   type ResolvedProviderConfig,
@@ -57,6 +60,10 @@ export interface QuotaWindow {
   skip: boolean;
   skipReason: string | null;
   occurredAt: string;
+  /** ISO timestamp of the reading (same instant as `occurredAt`; explicit for clients). */
+  reportedAt: string;
+  /** Normalized window key (`5h`, `7d`, …) aligned with `quotaGroups[].windows[].windowKey`. */
+  windowKey: string;
   source: string | null;
 }
 
@@ -81,6 +88,8 @@ export interface QuotaProviderGroup {
 export interface QuotaWindowsResponse {
   generatedAt: string;
   windows: QuotaWindow[];
+  /** Merged subscription windows with primary-source selection (additive). */
+  quotaGroups?: QuotaProviderQuotaGroup[];
   skipModelTypes: SkipModelType[];
   /**
    * Windows grouped by provider, with an entry for every expected provider even
@@ -105,7 +114,7 @@ const ANTIGRAVITY_INSTANCE = "antigravity";
  * `antigravityGroupDisplayName` in scripts/lib/quota-event.mjs and
  * `AntigravityQuotaGroups` in the macOS app.
  */
-export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party Models";
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party";
 
 // "Claude and GPT models", "Claude & GPT models", "Claude/GPT", ... as a
 // label prefix.  The lookahead stops it rewriting a longer model name such as
@@ -171,9 +180,7 @@ export function quotaStatus(input: {
   if (input.isExhausted || (input.remainingPercent != null && input.remainingPercent <= 0)) {
     return "exhausted";
   }
-  // antigravity-usage prints N/A when remainingPercentage is omitted.
-  // Owner 2026-09-04: that means none remains.
-  if (input.remainingUnknown || input.remainingPercent == null) return "exhausted";
+  if (input.remainingUnknown || input.remainingPercent == null) return "unknown";
   if (input.remainingPercent < 20) return "near_cap";
   return "available";
 }
@@ -263,7 +270,7 @@ export function projectQuotaWindows(
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
-    const machine = asString(meta.machine);
+    const machine = asString(meta.machine) ?? asString(meta._producerInstanceId);
     // Display label only: stored events keep their original label, so rows
     // ingested before the rename read "Third-Party Models" too.  Normalized
     // before the series key so an old and a new reading of the same bucket
@@ -294,12 +301,31 @@ export function projectQuotaWindows(
     const limit = typeof event.limit === "number" && event.limit > 0 ? event.limit : 100;
     const omitted = asBoolean(meta.remainingUnknown) || event.credits == null;
     const remainingPercent = omitted
-      ? 0
+      ? null
       : Math.round((Number(event.credits) / limit) * 10_000) / 100;
+    const remainingUnknown = omitted;
     const isExhausted =
-      asBoolean(meta.isExhausted) || omitted || remainingPercent <= 0;
-    const remainingUnknown = false;
+      asBoolean(meta.isExhausted) ||
+      (!remainingUnknown && remainingPercent != null && remainingPercent <= 0);
     const status = quotaStatus({ remainingPercent, remainingUnknown, isExhausted });
+    const viaMarker = viaFor(eventCanonicalKey, resolved);
+    const antigravityNaSkip =
+      viaMarker === "antigravity" &&
+      remainingUnknown &&
+      asString(meta.source) === "antigravity-usage";
+    const stampedWindowKey = asString(meta.windowKey);
+    const windowKey = stampedWindowKey
+      ? rollupQuotaWindowKey(stampedWindowKey)
+      : rollupQuotaWindowKey(
+          normalizeQuotaWindowKey({
+            quotaWindow: asString(meta.quotaWindow),
+            bucketId,
+            label: event.label,
+            modelId,
+          }).windowKey,
+        );
+    const occurredAtIso = iso(event.occurredAt);
+    const reportedAtIso = quotaEventReportedAtIso(event.occurredAt, meta);
     latest.set(dedupeKey, {
       series,
       window: {
@@ -324,12 +350,14 @@ export function projectQuotaWindows(
         resetAt: asString(meta.resetAt),
         window: asString(meta.quotaWindow),
         status,
-        skip: status === "exhausted",
+        skip: status === "exhausted" || antigravityNaSkip,
         skipReason:
-          status === "exhausted"
+          status === "exhausted" || antigravityNaSkip
             ? `${label ?? modelId ?? "model"} remaining ${remainingPercent ?? 0}%`
             : null,
-        occurredAt: iso(event.occurredAt),
+        occurredAt: occurredAtIso,
+        reportedAt: reportedAtIso,
+        windowKey,
         source: asString(meta.source),
       },
     });
@@ -404,6 +432,7 @@ export function projectQuotaWindows(
   return {
     generatedAt: now.toISOString(),
     windows,
+    quotaGroups: buildQuotaGroups(events, now, resolved),
     skipModelTypes,
     providerGroups: groupWindowsByProvider(windows, resolved),
   };
