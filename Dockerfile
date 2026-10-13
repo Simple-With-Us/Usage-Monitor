@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.27
+# syntax=docker/dockerfile:1.28
 FROM node:24.21.0-bookworm-slim AS build
 
 RUN apt-get update \
