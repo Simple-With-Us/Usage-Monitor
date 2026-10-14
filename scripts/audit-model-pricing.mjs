@@ -18,6 +18,20 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
+// Bundled snapshot is { meta, pricing }, not the flat LiteLLM catalog.
+const ModelPricingSchema = z
+  .object({
+    input_cost_per_token: z.number().finite().optional(),
+    output_cost_per_token: z.number().finite().optional(),
+  })
+  .passthrough();
+
+const SnapshotSchema = z.object({
+  meta: z.record(z.string(), z.unknown()).optional(),
+  pricing: z.record(z.string(), ModelPricingSchema),
+});
 
 const SNAPSHOT_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -51,19 +65,19 @@ async function runAudit() {
   console.log("=== Weekly Model Pricing Audit & Catalog Verification ===");
   console.log(`Checking snapshot at: ${SNAPSHOT_PATH}`);
 
-  let snapshotFile = {};
+  let currentSnapshot = {};
   try {
-    snapshotFile = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
+    const parsed = SnapshotSchema.parse(JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")));
+    currentSnapshot = parsed.pricing;
   } catch (err) {
+    const name = err && typeof err === "object" && "name" in err ? err.name : "";
+    // A readable but malformed snapshot must fail the audit.  A missing file
+    // still starts empty so a fresh checkout can print the report.
+    if (name === "ZodError" || err instanceof SyntaxError) {
+      throw new Error(`Pricing snapshot failed validation: ${err.message}`);
+    }
     console.warn("Could not read current snapshot, starting fresh:", err.message);
   }
-
-  // The bundled file is { meta, pricing }.  Upstream LiteLLM is a flat model
-  // map.  Reading the wrapper makes every lookup miss and report $0.
-  const currentSnapshot =
-    snapshotFile.pricing && typeof snapshotFile.pricing === "object"
-      ? snapshotFile.pricing
-      : snapshotFile;
 
   console.log(`Current snapshot has ${Object.keys(currentSnapshot).length} priced models.`);
   console.log(`Fetching latest catalog from LiteLLM upstream...`);
