@@ -41,7 +41,8 @@ const PROVIDER_BASELINES = {
   "claude-opus-5": { inputPerM: 15.00, outputPerM: 75.00, provider: "anthropic" },
   "gpt-4o": { inputPerM: 2.50, outputPerM: 10.00, provider: "openai" },
   "gpt-4o-mini": { inputPerM: 0.15, outputPerM: 0.60, provider: "openai" },
-  "gpt-5.6-sol": { inputPerM: 2.00, outputPerM: 10.00, provider: "openai" },
+  // Matches GPT_56_SOL and the bundled snapshot (4e-6 / 20e-6 per token).
+  "gpt-5.6-sol": { inputPerM: 4.00, outputPerM: 20.00, provider: "openai" },
   "grok-4.6": { inputPerM: 2.00, outputPerM: 10.00, provider: "xai" },
   "deepseek-chat": { inputPerM: 0.14, outputPerM: 0.28, provider: "deepseek" },
 };
@@ -50,12 +51,19 @@ async function runAudit() {
   console.log("=== Weekly Model Pricing Audit & Catalog Verification ===");
   console.log(`Checking snapshot at: ${SNAPSHOT_PATH}`);
 
-  let currentSnapshot = {};
+  let snapshotFile = {};
   try {
-    currentSnapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
+    snapshotFile = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
   } catch (err) {
     console.warn("Could not read current snapshot, starting fresh:", err.message);
   }
+
+  // The bundled file is { meta, pricing }.  Upstream LiteLLM is a flat model
+  // map.  Reading the wrapper makes every lookup miss and report $0.
+  const currentSnapshot =
+    snapshotFile.pricing && typeof snapshotFile.pricing === "object"
+      ? snapshotFile.pricing
+      : snapshotFile;
 
   console.log(`Current snapshot has ${Object.keys(currentSnapshot).length} priced models.`);
   console.log(`Fetching latest catalog from LiteLLM upstream...`);
