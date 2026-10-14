@@ -57,7 +57,7 @@ describe("agents-overview", () => {
           {
             sourceApp: "openai-codex",
             provider: "openai",
-            keyRef: "o3-mini",
+            keyRef: "gpt-5.6-sol",
             label: "input_tokens",
             _sum: { quantity: 50_000 },
           },
@@ -140,7 +140,7 @@ describe("agents-overview", () => {
             {
               sourceApp: "openai-codex",
               provider: "openai",
-              keyRef: "o3-mini",
+              keyRef: "gpt-5.6-sol",
               label: "input_tokens",
               _sum: { totalQuantity: 50_000 },
             },
