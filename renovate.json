@@ -15,6 +15,12 @@
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "typescript devDep is the TS 6 API alias for eslint; compiler is @typescript/native (TS 7).",
+      "matchManagers": ["npm"],
+      "matchDepNames": ["typescript"],
+      "enabled": false
     }
   ],
   "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }
