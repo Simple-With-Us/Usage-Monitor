@@ -609,6 +609,14 @@ struct MonitorSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Usage Monitor Settings").font(.title2.bold())
+            GroupBox("Automatic Updates") {
+                HStack {
+                    Text(AppUpdater.shared.availability.summary)
+                    Spacer()
+                    Button("Check For Updates…") { AppUpdater.shared.checkForUpdates() }
+                        .disabled(!AppUpdater.shared.canCheckForUpdates)
+                }.padding(10)
+            }
             GroupBox("Appearance") {
                 Picker("Show In", selection: $model.displayMode) {
                     ForEach(DisplayMode.allCases) { Text($0.title).tag($0) }
