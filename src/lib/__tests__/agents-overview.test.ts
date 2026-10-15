@@ -67,9 +67,7 @@ function cursorAdminEvents(rows: CursorAdminEventRow[]): ExternalUsageEvent[] {
   return rows as ExternalUsageEvent[];
 }
 
-function metricTypeFromUsageEventWhere(
-  where: Prisma.ExternalUsageEventWhereInput | undefined,
-): string | undefined {
+function metricTypeFromWhere(where: { metricType?: unknown } | undefined): string | undefined {
   if (!where || typeof where !== "object") return undefined;
   const { metricType } = where;
   return typeof metricType === "string" ? metricType : undefined;
@@ -109,7 +107,7 @@ describe("agents-overview", () => {
 
   it("computes agent overview with Max/Heavy seat costs from the catalog", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      const metricType = metricTypeFromUsageEventWhere(args.where);
+      const metricType = metricTypeFromWhere(args.where);
       if (metricType === "usage") {
         return usageGroupByRows([
           {
@@ -212,7 +210,7 @@ describe("agents-overview", () => {
       expect(lt instanceof Date ? lt.getTime() : lt).toBe(
         new Date("2026-08-01T00:00:00.000Z").getTime(),
       );
-      if (metricTypeFromUsageEventWhere(args.where) === "usage") {
+      if (metricTypeFromWhere(args.where) === "usage") {
         return rollupGroupByRows([
           {
             sourceApp: "openai-codex",
@@ -233,7 +231,7 @@ describe("agents-overview", () => {
 
   it("prefers Claude Code OTLP reported cost over token-derived PAYG when both exist", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      const metricType = metricTypeFromUsageEventWhere(args.where);
+      const metricType = metricTypeFromWhere(args.where);
       if (metricType === "usage") {
         return usageGroupByRows([
           {
@@ -270,7 +268,7 @@ describe("agents-overview", () => {
 
   it("folds cursor-admin billed rows into the Cursor platform without double-counting cursor-agent", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      const metricType = metricTypeFromUsageEventWhere(args.where);
+      const metricType = metricTypeFromWhere(args.where);
       if (metricType === "usage") {
         return usageGroupByRows([
           {
@@ -329,7 +327,7 @@ describe("agents-overview", () => {
 
   it("does not treat request-based cursor-admin quantity as tokens", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      if (metricTypeFromUsageEventWhere(args.where) === "cost") {
+      if (metricTypeFromWhere(args.where) === "cost") {
         return usageGroupByRows([
           {
             sourceApp: "cursor-admin",
@@ -375,7 +373,7 @@ describe("agents-overview", () => {
           ? occurredAt.gte
           : undefined;
       if (gte instanceof Date && gte.getTime() > Date.now() - 6 * 3600 * 1000) {
-        const metricType = metricTypeFromUsageEventWhere(args.where);
+        const metricType = metricTypeFromWhere(args.where);
         if (metricType === "usage") {
           return usageGroupByRows([
             {
@@ -412,7 +410,7 @@ describe("agents-overview", () => {
 
   it("uses $70 net Antigravity seat cost and never treats its estimates as usage", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      if (metricTypeFromUsageEventWhere(args.where) === "usage") {
+      if (metricTypeFromWhere(args.where) === "usage") {
         return usageGroupByRows([
           {
             sourceApp: "antigravity-cli",
@@ -490,7 +488,7 @@ describe("agents-overview", () => {
 
   it("prices DeepSeek flash output from the event UTC hour", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      if (metricTypeFromUsageEventWhere(args.where) === "usage") {
+      if (metricTypeFromWhere(args.where) === "usage") {
         return usageGroupByRows([
           {
             sourceApp: "deepseek-dsh",
@@ -533,7 +531,7 @@ describe("agents-overview", () => {
 
   it("does not include cache-unsplit input in the known API-equivalent subtotal", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
-      if (metricTypeFromUsageEventWhere(args.where) === "usage") {
+      if (metricTypeFromWhere(args.where) === "usage") {
         return usageGroupByRows([
           {
             sourceApp: "antigravity-statusline",
