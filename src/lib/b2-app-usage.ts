@@ -27,7 +27,8 @@ export type {
   B2AppUsageSlice,
 } from "@/lib/b2-app-usage-types";
 
-export const B2_APP_USAGE_CACHE_TTL_MS = 180_000;
+/** Match the 15-minute scheduler maintenance tick so `runB2UsageCheck` reuses cache. */
+export const B2_APP_USAGE_CACHE_TTL_MS = 16 * 60 * 1000;
 export const B2_CLASS_C_DAILY_FREE_DEFAULT = 2500;
 export const B2_DOWNLOAD_GB_DAILY_FREE_DEFAULT = 1;
 export const B2_CLASS_C_NEAR_CAP_RATIO = 0.8;
@@ -212,9 +213,23 @@ function recentUtcDates(count: number, now: Date): string[] {
   return dates;
 }
 
+/** Friendly download URL path uses the bucket **name**, not bucket id. */
+export function buildB2UsageReportDownloadUrl(
+  downloadUrl: string,
+  bucketName: string,
+  fileName: string
+): string {
+  const encodedFile = fileName
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `${downloadUrl.replace(/\/$/, "")}/file/${bucketName}/${encodedFile}`;
+}
+
 async function downloadReportCsvForDate(
   auth: B2Auth,
   reportsBucketId: string,
+  reportsBucketName: string,
   date: string,
   fetchImpl: typeof fetch
 ): Promise<string | null> {
@@ -256,7 +271,11 @@ async function downloadReportCsvForDate(
       ? downloadAuth.authorizationToken
       : auth.token;
 
-  const url = `${auth.downloadUrl}/file/${reportsBucketId}/${fileName}`;
+  const url = buildB2UsageReportDownloadUrl(
+    auth.downloadUrl,
+    reportsBucketName,
+    fileName
+  );
   const response = await fetchImpl(url, {
     headers: { Authorization: downloadToken },
     signal: AbortSignal.timeout(30_000),
@@ -532,6 +551,7 @@ export async function fetchB2AppUsageBreakdown(
           const csv = await downloadReportCsvForDate(
             auth,
             reportsBucketId,
+            reportsBucketName,
             date,
             fetchImpl
           );

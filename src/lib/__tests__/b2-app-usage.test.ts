@@ -13,16 +13,34 @@ vi.mock("@/lib/prisma", () => ({
 
 import {
   aggregateReportRows,
+  buildB2UsageReportDownloadUrl,
   parseUsageReportCsv,
   resolveBucketAppId,
   resetB2AppUsageCacheForTests,
   fetchB2AppUsageBreakdown,
+  B2_APP_USAGE_CACHE_TTL_MS,
 } from "../b2-app-usage";
 
 describe("b2-app-usage", () => {
   beforeEach(() => {
     resetB2AppUsageCacheForTests();
     vi.restoreAllMocks();
+  });
+
+  it("builds download-by-name URLs with bucket name not bucket id", () => {
+    const url = buildB2UsageReportDownloadUrl(
+      "https://f003.backblazeb2.com",
+      "b2-reports-abc123",
+      "2026-08-24/usage.account-abc123.csv"
+    );
+    expect(url).toBe(
+      "https://f003.backblazeb2.com/file/b2-reports-abc123/2026-08-24/usage.account-abc123.csv"
+    );
+    expect(url).not.toContain("/file/4c001");
+  });
+
+  it("cache TTL covers the 15-minute maintenance interval", () => {
+    expect(B2_APP_USAGE_CACHE_TTL_MS).toBeGreaterThanOrEqual(15 * 60 * 1000);
   });
 
   it("maps fleet buckets to app ids", () => {
