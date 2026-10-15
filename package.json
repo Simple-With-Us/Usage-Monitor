@@ -60,7 +60,7 @@
     "test:e2e-visual-snapshot-files": "node scripts/test-e2e-visual-snapshot-files.mjs",
     "test:audit-ci": "node scripts/test-audit-ci.mjs",
     "test:sentry-ci-report": "python3 scripts/test-sentry-ci-report.py",
-    "verify": "npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run build"
+    "verify": "npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run test:audit-ci && npm run build"
   },
   "dependencies": {
     "@datadog/browser-logs": "^7.15.0",
@@ -112,6 +112,7 @@
     "js-yaml": "^5.4.1",
     "deepmerge-ts": "^8.0.0",
     "brace-expansion": "^5.0.12",
-    "braces": "^3.0.3"
+    "braces": "^3.0.3",
+    "source-map-js": "1.2.2"
   }
 }

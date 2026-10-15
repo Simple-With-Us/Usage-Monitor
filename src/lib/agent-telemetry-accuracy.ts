@@ -9,6 +9,7 @@
 export type TokenTelemetryKind =
   | "otlp"
   | "session_jsonl"
+  | "billing_api"
   | "character_estimate"
   | "none";
 
@@ -32,7 +33,7 @@ export interface TelemetryAccuracyResult {
 export function isReliableTokenTelemetryKind(
   kind: TokenTelemetryKind,
 ): boolean {
-  return kind === "otlp" || kind === "session_jsonl";
+  return kind === "otlp" || kind === "session_jsonl" || kind === "billing_api";
 }
 
 export function resolveTelemetryAccuracy(
@@ -68,7 +69,9 @@ export function resolveTelemetryAccuracy(
       note:
         tokenTelemetryKind === "otlp"
           ? `${name} token counts come from the live OTLP stream.`
-          : `${name} token counts come from local session logs.  They are estimates, not a vendor invoice.`,
+          : tokenTelemetryKind === "billing_api"
+            ? `${name} token counts and billed cost come from the vendor Admin API.`
+            : `${name} token counts come from local session logs.  They are estimates, not a vendor invoice.`,
     };
   }
 
