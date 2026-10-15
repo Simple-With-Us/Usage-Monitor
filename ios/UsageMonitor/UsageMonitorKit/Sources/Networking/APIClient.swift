@@ -105,6 +105,11 @@ public actor APIClient {
         try await get("/api/server-metrics", authorization: .read, timeout: Self.operationsTimeout)
     }
 
+    /// `GET /api/b2-app-usage` — fleet Backblaze B2 storage + daily usage breakdown.
+    public func b2AppUsage() async throws -> B2AppUsageBreakdown {
+        try await get("/api/b2-app-usage", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
     /// `GET /api/platform-status` — one status card per external platform the
     /// fleet runs on.  Bearer read token or dashboard session, same dual-auth
     /// preamble as `/api/server-metrics`.
