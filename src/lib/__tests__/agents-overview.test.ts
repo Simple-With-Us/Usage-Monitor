@@ -225,6 +225,7 @@ describe("agents-overview", () => {
           {
             keyRef: "claude-sonnet-4-5",
             quantity: 30_000,
+            unit: "token",
             costUsd: 1.5,
             metadata: {
               inputTokens: 20_000,
@@ -248,6 +249,45 @@ describe("agents-overview", () => {
     expect(cursor?.reportedCostUsd).toBeCloseTo(1.5, 2);
     expect(cursor?.fidelityTier).toBe("session_jsonl");
     expect(result.summary.totalTokens).toBe(30_000);
+  });
+
+  it("does not treat request-based cursor-admin quantity as tokens", async () => {
+    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
+      if (args.where?.metricType === "cost") {
+        return [
+          {
+            sourceApp: "cursor-admin",
+            provider: "cursor",
+            keyRef: "claude-sonnet-4-5",
+            _sum: { costUsd: 2 },
+          },
+        ] as any;
+      }
+      return [] as any;
+    });
+    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockImplementation(async (args: any) => {
+      if (args?.where?.sourceApp === "cursor-admin") {
+        return [
+          {
+            keyRef: "claude-sonnet-4-5",
+            quantity: 7,
+            unit: "request",
+            costUsd: 2,
+            metadata: {},
+            occurredAt: new Date(),
+          },
+        ] as any;
+      }
+      return [] as any;
+    });
+    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+
+    const result = await computeAgentsOverview(30);
+    const cursor = result.platforms.find((p) => p.id === "cursor-agent");
+    expect(cursor?.totalTokens).toBe(0);
+    expect(cursor?.usageIsReliable).toBe(false);
+    expect(cursor?.fidelityTier).toBe("session_jsonl");
+    expect(result.summary.totalTokens).toBe(0);
   });
 
   it("reconciles 5h burn cost with max(reported, derived) except Claude Code prefers reported", async () => {

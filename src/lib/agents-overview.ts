@@ -465,6 +465,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       select: {
         keyRef: true,
         quantity: true,
+        unit: true,
         costUsd: true,
         metadata: true,
         occurredAt: true,
@@ -935,6 +936,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 type CursorAdminUsageRow = {
   keyRef: string | null;
   quantity: number | null;
+  unit: string | null;
   metadata: unknown;
   occurredAt: Date;
 };
@@ -959,7 +961,11 @@ function cursorAdminTokenBreakdown(row: CursorAdminUsageRow): {
   const cacheCreation = cursorAdminMetadataNumber(row.metadata, "cacheWriteTokens");
   const fromMeta = input + output + cacheRead + cacheCreation;
   const total =
-    fromMeta > 0 ? fromMeta : Math.max(0, row.quantity || 0);
+    fromMeta > 0
+      ? fromMeta
+      : row.unit === "token"
+        ? Math.max(0, row.quantity || 0)
+        : 0;
   return {
     model: row.keyRef || "unknown-model",
     input,
