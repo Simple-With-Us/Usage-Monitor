@@ -22,10 +22,12 @@ without documenting the advisory.  This rollout restores a **full lockfile** aud
 ## Verification
 
 - `npm run test:audit-ci` exits 0 (full tree; allowlisted GHSA only).
+- `npm run verify` includes `test:audit-ci` so local verify matches the CI audit step.
 - Production highs still fail the gate (no blanket ignore).
 - Re-review when `braces` publishes a fix or Next removes the `fast-glob` dependency.
 
 ## Related
 
-- Board `c59d7e2a0b544300ad31d359bc3d2467`
+- Board `c59d7e2a0b544300ad31d359bc3d2467` (lesson / resolution)
+- Board `c3adc4050aeb47a39dd5d56e55995ca3` (agent-report duplicate; closed by #1600 + verify parity)
 - Prior workaround: #1589 (`--omit=dev`)
