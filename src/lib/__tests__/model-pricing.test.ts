@@ -87,12 +87,62 @@ describe("resolvePricingKey", () => {
     expect(resolvePricingKey("gpt-5.3-codex-spark")).toBeNull();
   });
 
-  it("prices Claude Sonnet 5 without inventing a cache-write rate", () => {
+  it("prices Claude Opus 5 at Anthropic list rates (not retired Opus 4.1)", () => {
+    const pricing = getModelPricing("claude-opus-5")?.pricing;
+    expect(pricing?.input_cost_per_token).toBeCloseTo(5e-6, 12);
+    expect(pricing?.output_cost_per_token).toBeCloseTo(25e-6, 12);
+    expect(pricing?.cache_read_input_token_cost).toBeCloseTo(0.5e-6, 12);
+    expect(pricing?.cache_creation_input_token_cost).toBeCloseTo(6.25e-6, 12);
+    const derived = deriveTokenCostUsd(pricing!, {
+      input: 1_000_000,
+      output: 1_000_000,
+      cacheRead: 1_000_000,
+      cacheCreation: 1_000_000,
+    });
+    expect(derived.complete).toBe(true);
+    expect(derived.costUsd).toBeCloseTo(36.75, 6);
+  });
+
+  it("prices Claude Opus 5.5 explicitly instead of fuzzy-matching Opus 5", () => {
+    expect(resolvePricingKey("claude-opus-5-5")).toBe("claude-opus-5-5");
+    expect(resolvePricingKey("claude-opus-5.5")).toBe("claude-opus-5.5");
+    const pricing = getModelPricing("claude-opus-5-5")?.pricing;
+    expect(pricing?.input_cost_per_token).toBeCloseTo(4e-6, 12);
+    expect(pricing?.output_cost_per_token).toBeCloseTo(20e-6, 12);
+    expect(pricing?.cache_read_input_token_cost).toBeCloseTo(0.2e-6, 12);
+    expect(pricing?.cache_creation_input_token_cost).toBeCloseTo(5e-6, 12);
+  });
+
+  it("prices Claude Sonnet 5.5 explicitly", () => {
+    expect(resolvePricingKey("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
+    const pricing = getModelPricing("claude-sonnet-5-5")?.pricing;
+    expect(pricing?.input_cost_per_token).toBeCloseTo(2e-6, 12);
+    expect(pricing?.cache_read_input_token_cost).toBeCloseTo(0.1e-6, 12);
+    expect(pricing?.output_cost_per_token).toBeCloseTo(10e-6, 12);
+    expect(pricing?.cache_creation_input_token_cost).toBeCloseTo(2.5e-6, 12);
+  });
+
+  it("prices Claude Sonnet 5 with 5m cache-write rate", () => {
     const pricing = getModelPricing("claude-sonnet-5")?.pricing;
     expect(pricing?.input_cost_per_token).toBeCloseTo(2e-6, 12);
     expect(pricing?.cache_read_input_token_cost).toBeCloseTo(0.2e-6, 12);
     expect(pricing?.output_cost_per_token).toBeCloseTo(10e-6, 12);
-    expect(pricing?.cache_creation_input_token_cost).toBeUndefined();
+    expect(pricing?.cache_creation_input_token_cost).toBeCloseTo(2.5e-6, 12);
+  });
+
+  it("prices grok-4.7 at xAI list rates", () => {
+    expect(resolvePricingKey("grok-4.7")).toBe("grok-4.7");
+    const pricing = getModelPricing("grok-4.7")?.pricing;
+    expect(pricing?.input_cost_per_token).toBeCloseTo(2e-6, 12);
+    expect(pricing?.output_cost_per_token).toBeCloseTo(6e-6, 12);
+    expect(pricing?.cache_read_input_token_cost).toBeCloseTo(5e-7, 12);
+    const derived = deriveTokenCostUsd(pricing!, {
+      input: 1_000_000,
+      output: 1_000_000,
+      cacheRead: 1_000_000,
+    });
+    expect(derived.complete).toBe(true);
+    expect(derived.costUsd).toBeCloseTo(8.5, 6);
   });
 
   it("does not apply a flat DeepSeek V4 catalog rate without an event time", () => {

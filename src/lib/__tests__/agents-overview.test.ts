@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
-import { computeAgentsOverview } from "../agents-overview";
+import {
+  computeAgentsOverview,
+  preferPlatformEstimatedCostUsd,
+  platformIdForSourceApp,
+} from "../agents-overview";
 import * as retention from "../data-retention";
 import { getLatestMacHealth } from "@/lib/mac-health";
 
@@ -155,7 +159,98 @@ describe("agents-overview", () => {
     expect(codexFromRollup?.totalTokens).toBe(50_000);
   });
 
-  it("reconciles 5h burn cost with max(reported, derived) instead of sum", async () => {
+  it("prefers Claude Code OTLP reported cost over token-derived PAYG when both exist", async () => {
+    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
+      if (args.where?.metricType === "usage") {
+        return [
+          {
+            sourceApp: "claude-code",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-5",
+            label: "input_tokens",
+            _sum: { quantity: 1_000_000 },
+          },
+        ] as any;
+      }
+      if (args.where?.metricType === "cost") {
+        return [
+          {
+            sourceApp: "claude-code",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-5",
+            _sum: { costUsd: 0.25 },
+          },
+        ] as any;
+      }
+      return [] as any;
+    });
+    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+
+    const result = await computeAgentsOverview(30);
+    const claude = result.platforms.find((p) => p.id === "claude-code");
+    expect(claude?.tokenDerivedCostUsd).toBeCloseTo(2, 2);
+    expect(claude?.reportedCostUsd).toBeCloseTo(0.25, 2);
+    expect(claude?.estimatedCostUsd).toBeCloseTo(0.25, 2);
+    expect(preferPlatformEstimatedCostUsd("claude-code", 2, 0.25)).toBe(0.25);
+  });
+
+  it("folds cursor-admin billed rows into the Cursor platform without double-counting cursor-agent", async () => {
+    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
+      if (args.where?.metricType === "usage") {
+        return [
+          {
+            sourceApp: "cursor-agent",
+            provider: "cursor",
+            keyRef: "gpt-5",
+            label: "input_tokens",
+            _sum: { quantity: 99_000 },
+          },
+        ] as any;
+      }
+      if (args.where?.metricType === "cost") {
+        return [
+          {
+            sourceApp: "cursor-admin",
+            provider: "cursor",
+            keyRef: "claude-sonnet-4-5",
+            _sum: { costUsd: 1.5 },
+          },
+        ] as any;
+      }
+      return [] as any;
+    });
+    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockImplementation(async (args: any) => {
+      if (args?.where?.sourceApp === "cursor-admin") {
+        return [
+          {
+            keyRef: "claude-sonnet-4-5",
+            quantity: 30_000,
+            costUsd: 1.5,
+            metadata: {
+              inputTokens: 20_000,
+              outputTokens: 10_000,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+            },
+            occurredAt: new Date(),
+          },
+        ] as any;
+      }
+      return [] as any;
+    });
+    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+
+    const result = await computeAgentsOverview(30);
+    expect(platformIdForSourceApp("cursor-admin")).toBe("cursor-agent");
+    const cursor = result.platforms.find((p) => p.id === "cursor-agent");
+    expect(cursor?.usageIsReliable).toBe(true);
+    expect(cursor?.totalTokens).toBe(30_000);
+    expect(cursor?.reportedCostUsd).toBeCloseTo(1.5, 2);
+    expect(cursor?.fidelityTier).toBe("session_jsonl");
+    expect(result.summary.totalTokens).toBe(30_000);
+  });
+
+  it("reconciles 5h burn cost with max(reported, derived) except Claude Code prefers reported", async () => {
     vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
       if (args.where?.occurredAt?.gte && args.where.occurredAt.gte.getTime() > Date.now() - 6 * 3600 * 1000) {
         if (args.where?.metricType === "usage") {
@@ -187,7 +282,7 @@ describe("agents-overview", () => {
 
     const result = await computeAgentsOverview(30);
     expect(result.burn5h.tokens5h).toBe(100_000);
-    // Derived for 100k input tokens on claude-3-7-sonnet is $0.30; reported is $0.50. Max is 0.50.
+    // Derived for 100k input tokens on claude-sonnet is below reported; Claude prefers reported.
     expect(result.burn5h.costEstimate5hUsd).toBe(0.5);
   });
 
@@ -260,7 +355,7 @@ describe("agents-overview", () => {
     expect(grok?.telemetryAccuracyNote).toContain("not confirmed as zero usage");
   });
 
-  it("always marks Cursor usage as not reported", async () => {
+  it("marks Cursor usage as not reported when Admin API rows are absent", async () => {
     emptyGroupBy();
     const result = await computeAgentsOverview(30);
     const cursor = result.platforms.find((p) => p.id === "cursor-agent");
@@ -284,16 +379,19 @@ describe("agents-overview", () => {
       }
       return [] as any;
     });
-    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockResolvedValue([
-      {
-        sourceApp: "deepseek-dsh",
-        keyRef: "deepseek-v4-flash",
-        label: "token:output",
-        quantity: 1_000_000,
-        // Monday 02:30 UTC is inside the first peak window.  Flash output peak is $1.20 / 1M.
-        occurredAt: new Date("2026-09-21T02:30:00.000Z"),
-      },
-    ] as any);
+    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockImplementation(async (args: any) => {
+      if (args?.where?.sourceApp === "cursor-admin") return [] as any;
+      return [
+        {
+          sourceApp: "deepseek-dsh",
+          keyRef: "deepseek-v4-flash",
+          label: "token:output",
+          quantity: 1_000_000,
+          // Monday 02:30 UTC is inside the first peak window.  Flash output peak is $1.20 / 1M.
+          occurredAt: new Date("2026-09-21T02:30:00.000Z"),
+        },
+      ] as any;
+    });
     vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
 
     const result = await computeAgentsOverview(30);
