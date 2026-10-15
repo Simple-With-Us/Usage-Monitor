@@ -145,7 +145,8 @@ describe("runtime health state", () => {
       providerFetchDegraded: true,
       cloudflareLegacyHandoff: "disabled",
     });
-    expect(runtime.lastTickSucceeded).toBe(false);
+    expect(runtime.lastTickSucceeded).toBe(true);
+    expect(runtime.lastTickProviderPollHealthy).toBe(false);
     expect(getSchedulerReadiness(completedAt)).toMatchObject({
       ok: true,
       reason: "provider_fetch_degraded",

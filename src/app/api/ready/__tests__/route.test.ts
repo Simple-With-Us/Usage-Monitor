@@ -592,6 +592,7 @@ describe("GET /api/ready", () => {
       providerFetchDegraded: false,
       consecutiveProviderFetchDegradedTicks: 1,
       lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
     });
   });
 
@@ -617,7 +618,8 @@ describe("GET /api/ready", () => {
       readinessReason: "provider_fetch_degraded",
       providerFetchDegraded: true,
       consecutiveProviderFetchDegradedTicks: 1,
-      lastTickSucceeded: false,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
       lastRun: {
         successes: 0,
         failures: 2,
@@ -655,7 +657,8 @@ describe("GET /api/ready", () => {
       providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 3,
       consecutiveProviderFetchDegradedTicks: 3,
-      lastTickSucceeded: false,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
       consecutiveFailures: 0,
     });
   });

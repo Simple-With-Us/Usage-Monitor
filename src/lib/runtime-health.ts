@@ -44,6 +44,9 @@ export interface SchedulerRuntimeStatus {
   lastTickStartedAt: string | null;
   lastTickCompletedAt: string | null;
   lastTickSucceeded: boolean | null;
+  // Whether THIS tick's provider-fetch phase succeeded (distinct from
+  // maintenanceHealthy / lastTickSucceeded, which stay deploy-gate safe).
+  lastTickProviderPollHealthy: boolean | null;
   consecutiveFailures: number;
   firstFailureAt: string | null;
   // Streak of consecutive ticks whose provider-fetch phase was degraded.
@@ -135,6 +138,7 @@ const state =
       lastTickStartedAt: null,
       lastTickCompletedAt: null,
       lastTickSucceeded: null,
+      lastTickProviderPollHealthy: null,
       consecutiveFailures: 0,
       firstFailureAt: null,
       consecutiveProviderFetchDegradedTicks: 0,
@@ -227,12 +231,12 @@ export function markSchedulerTickCompleted(
   const normalizedLastRun = lastRun
     ? normalizeSchedulerRunSummary(lastRun)
     : null;
-  // Maintenance health (`succeeded`) still drives consecutiveFailures only.
-  // lastTickSucceeded additionally reflects a total provider-poll outage so
-  // deploy observers and strict readiness do not treat "0 successes, N
-  // failures, providerFetchDegraded" as a healthy poll tick (UM-1373).
-  state.scheduler.lastTickSucceeded =
-    succeeded && !isZeroSuccessProviderFetchOutage(normalizedLastRun);
+  // Maintenance-only: deploy verification gates on lastTickSucceeded and must
+  // not flip false for upstream provider API outages (see usage-recorder).
+  state.scheduler.lastTickSucceeded = succeeded;
+  state.scheduler.lastTickProviderPollHealthy = normalizedLastRun
+    ? !normalizedLastRun.providerFetchDegraded
+    : null;
   if (succeeded) {
     state.scheduler.consecutiveFailures = 0;
     state.scheduler.firstFailureAt = null;
@@ -1386,6 +1390,7 @@ export function resetRuntimeHealthForTests(): void {
     lastTickStartedAt: null,
     lastTickCompletedAt: null,
     lastTickSucceeded: null,
+    lastTickProviderPollHealthy: null,
     consecutiveFailures: 0,
     firstFailureAt: null,
     consecutiveProviderFetchDegradedTicks: 0,
