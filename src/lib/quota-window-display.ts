@@ -85,6 +85,8 @@ function inferResetPeriodLabel(resetAtIso: string | null, nowMs: number): string
 
 /** Jay-approved window labels: `5-hour`, `7-day`, `1-month`, and so on. */
 export function windowKeyToDisplayLabel(windowKey: string): string {
+  if (windowKey === "billing-cycle") return "1-month";
+  if (windowKey === "1w" || windowKey === "1-week") return "7-day";
   if (windowKey === "5h" || windowKey === "5-hour") return "5-hour";
   if (windowKey === "7d" || windowKey === "7d:opus" || windowKey === "weekly") return "7-day";
   if (windowKey === "monthly") return "1-month";
@@ -158,6 +160,8 @@ export function normalizeQuotaWindowKey(input: {
 /** Collapse legacy per-model window keys onto platform-level windows. */
 export function rollupQuotaWindowKey(windowKey: string): string {
   if (windowKey === "7d:opus") return "7d";
+  if (windowKey === "1w" || windowKey === "1-week" || windowKey === "weekly") return "7d";
+  if (windowKey === "billing-cycle") return "monthly";
   return windowKey;
 }
 

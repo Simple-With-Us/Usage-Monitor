@@ -3,7 +3,7 @@
 import React, { useEffect, useId, useState } from "react";
 import { ChevronDown, Gauge, Clock } from "lucide-react";
 import type { QuotaSourceReading } from "@/lib/quota-groups";
-import { windowKeyToDisplayLabel } from "@/lib/quota-window-display";
+import { rollupQuotaWindowKey, windowKeyToDisplayLabel } from "@/lib/quota-window-display";
 import {
   EXPECTED_QUOTA_PROVIDERS,
   antigravityDisplayLabel,
@@ -211,7 +211,10 @@ export function buildMergedQuotaSections(data: unknown): MergedProviderSection[]
     const providerLabel = asString(groupRec.providerLabel) ?? quotaProviderLabel(provider);
     const windows = asArray(groupRec.windows).map((rawWindow, windowIndex) => {
       const winRec = asRecord(rawWindow);
-      const windowKey = asString(winRec.windowKey) ?? "unknown";
+      const rawWindowKey = asString(winRec.windowKey) ?? "unknown";
+      // Normalize legacy keys (1w -> 7d, billing-cycle -> monthly) at query
+      // time so data ingested before the rollup still deduplicates.
+      const windowKey = rollupQuotaWindowKey(rawWindowKey);
       const displayName = asString(winRec.displayName) ?? windowKey;
       const rawKey = asString(winRec.rawKey) ?? windowKey;
       const platformTitle = asString(winRec.platformTitle);
@@ -238,10 +241,50 @@ export function buildMergedQuotaSections(data: unknown): MergedProviderSection[]
         olderSources,
       };
     });
+    const validWindows = windows.filter((row): row is MergedQuotaWindowView => row != null);
+
+    // MiniMax 4-hour is a long-standing data error (mislabeled 5-hour from
+    // long ago) — never show it.
+    const withoutBadMiniMax4h = validWindows.filter((view) => {
+      if (view.provider !== "minimax") return true;
+      const key = view.windowKey.toLowerCase();
+      return key !== "4h" && key !== "4-hour";
+    });
+
+    // If a 7-day or monthly window is exhausted (0% remaining), shorter
+    // windows are misleading (they may show available quota that cannot be
+    // used) — hide them.
+    const hasExhaustedLongWindow = withoutBadMiniMax4h.some((view) => {
+      const key = view.windowKey.toLowerCase();
+      const isLong = key === "7d" || key === "7-day" || key === "1w" || key === "weekly"
+        || key === "monthly" || key === "1-month" || key === "billing-cycle";
+      if (!isLong) return false;
+      const pct = view.primary.remainingUnknown ? null : view.primary.remainingPercent;
+      return pct != null && pct <= 0;
+    });
+    const finalWindows = hasExhaustedLongWindow
+      ? withoutBadMiniMax4h.filter((view) => {
+          const key = view.windowKey.toLowerCase();
+          const isShort = key === "5h" || key === "5-hour" || key === "4h" || key === "4-hour"
+            || key === "1d" || key === "1-day" || key === "daily";
+          return !isShort;
+        })
+      : withoutBadMiniMax4h;
+
+    // Deduplicate by rolled-up (windowKey, platformTitle): "1w" and "7d"
+    // collapse to a single "7d" row.
+    const seen = new Set<string>();
+    const dedupedWindows = finalWindows.filter((view) => {
+      const key = `${view.windowKey}::${view.platformTitle ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
     return {
       provider,
       providerLabel,
-      windows: windows.filter((row): row is MergedQuotaWindowView => row != null),
+      windows: dedupedWindows,
     };
   });
 }
@@ -440,12 +483,19 @@ export function formatQuotaPercentLabel(percent: number | null, remainingUnknown
 function windowDurationMs(windowKey: string): number | null {
   if (windowKey === "5h") return 5 * 3_600_000;
   if (windowKey === "7d" || windowKey === "7d:opus") return 7 * 86_400_000;
-  if (windowKey === "weekly") return 7 * 86_400_000;
-  if (windowKey === "monthly") return 30 * 86_400_000;
+  if (windowKey === "weekly" || windowKey === "1w" || windowKey === "1-week") return 7 * 86_400_000;
+  if (windowKey === "monthly" || windowKey === "billing-cycle" || windowKey === "1-month") return 30 * 86_400_000;
   const match = /^(\d+)h$/.exec(windowKey);
   if (match) return Number(match[1]) * 3_600_000;
   const dayMatch = /^(\d+)d$/.exec(windowKey);
   if (dayMatch) return Number(dayMatch[1]) * 86_400_000;
+  // Word-based keys: "5-hour", "4-hour", "1-day", "7-day", "1-month"
+  const wordHour = /^(\d+)-hour$/.exec(windowKey);
+  if (wordHour) return Number(wordHour[1]) * 3_600_000;
+  const wordDay = /^(\d+)-day$/.exec(windowKey);
+  if (wordDay) return Number(wordDay[1]) * 86_400_000;
+  const wordMonth = /^(\d+)-month$/.exec(windowKey);
+  if (wordMonth) return Number(wordMonth[1]) * 30 * 86_400_000;
   return null;
 }
 
@@ -489,7 +539,7 @@ export function QuotaUsageBar({
       {used != null && remaining != null ? (
         <div className="flex h-full w-full rounded-sm overflow-hidden">
           <div className="h-full bg-red-500" style={{ width: `${used}%` }} />
-          <div className="h-full bg-teal-800 dark:bg-teal-700 flex-1" />
+          <div className="h-full bg-emerald-600 dark:bg-emerald-500 flex-1" />
         </div>
       ) : (
         <div className="h-full w-full rounded-sm bg-gray-300 dark:bg-gray-600" />
@@ -887,8 +937,11 @@ function QuotaMergedWindowSlotInner({
   nowMs: number;
 }) {
   const percent = active.remainingUnknown ? null : active.remainingPercent;
-  const windowTag = windowRowTagLabel(view.windowKey, view.displayName);
-  const countdown = formatCountdownCompact(active.resetAt, nowMs);
+  // Muse Assist "balance" is extra usage beyond the weekly cap — show "+"
+  // and "extra" (matching CodeCaps) instead of a window label/countdown.
+  const isMuseExtra = view.provider === "muse" && view.windowKey.toLowerCase() === "balance";
+  const windowTag = isMuseExtra ? "+" : windowRowTagLabel(view.windowKey, view.displayName);
+  const countdown = isMuseExtra ? "extra" : formatCountdownCompact(active.resetAt, nowMs);
   const freshness = formatFreshnessLabel(active, nowMs);
   const tooltipParts = [view.rawKey, active.detail, freshness].filter(Boolean).join(" · ");
   const unavailable = active.remainingUnknown || percent == null;
