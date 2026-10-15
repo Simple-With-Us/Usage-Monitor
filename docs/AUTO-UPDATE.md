@@ -43,7 +43,7 @@ Settings shows "Automatic Updates: On/Off" and a **Check For Updates…** button
 
 Names only; no value is ever printed:
 
-- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`.  Canonical in Fleet Secrets (Fleet-OPS Infisical project, `prod`, `/mac-certs/`); same-named GitHub repository secrets are the synced copies this workflow reads.
+- `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD` — the Developer ID Application certificate for team `CC8UTF7ATG`.  Read at runtime from Fleet Secrets (Fleet-OPS Infisical project, `prod`, path `/mac-certs/`) via a dedicated workflow step using the org secrets `INFISICAL_FLEET_OPS_PROJECT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`.  Same-named GitHub repository secrets are the synced-copy fallback.
 - `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` — the App Store Connect API key; `notarytool` signs in with it.  Canonical in Fleet Secrets `/asc/`; same-named repository secrets as the fallback.
 - `SPARKLE_ED_PRIVATE_KEY` — the EdDSA private key (base64 of the 32-byte seed) that signs each update archive; same-named repository secret as the fallback.  Generated 2026-10-15 for Usage Monitor; the matching public key is committed above.
 

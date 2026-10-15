@@ -53,6 +53,19 @@ build_and_stage() {
   mkdir -p "$APP_MACOS" "$APP_RESOURCES"
   cp "$build_binary" "$APP_EXECUTABLE"
   chmod +x "$APP_EXECUTABLE"
+  # Frameworks from SwiftPM binary targets (Sparkle) sit beside the executable
+  # in the build dir; the staged bundle needs them in Contents/Frameworks or
+  # dyld fails at launch.  ditto preserves the framework symlinks codesign
+  # requires.
+  for framework in "$build_bin_dir"/*.framework; do
+    [[ -d "$framework" ]] || continue
+    mkdir -p "$APP_CONTENTS/Frameworks"
+    /usr/bin/ditto "$framework" "$APP_CONTENTS/Frameworks/$(basename "$framework")"
+  done
+  if [[ -d "$APP_CONTENTS/Frameworks/Sparkle.framework" ]] && \
+     ! /usr/bin/otool -l "$APP_EXECUTABLE" | /usr/bin/grep -q '@executable_path/../Frameworks'; then
+    /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE"
+  fi
   build_resources="$(find "$build_bin_dir" -maxdepth 1 -type d \( -name "*_"$PRODUCT_NAME.bundle -o -name "*_"$PRODUCT_NAME.resources \) -print -quit)"
   [[ -n "$build_resources" ]] || {
     echo "SwiftPM resource bundle not found in: $build_bin_dir" >&2
