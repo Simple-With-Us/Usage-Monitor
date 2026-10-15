@@ -104,6 +104,21 @@ const GROK_45: ModelPricingEntry = {
   max_input_tokens: 500_000,
 };
 
+/** xAI public list prices (docs.x.ai/docs/models — Text API Pricing, 2026-10-15). */
+const GROK_47: ModelPricingEntry = {
+  input_cost_per_token: 2e-6,
+  output_cost_per_token: 6e-6,
+  cache_read_input_token_cost: 5e-7,
+  cache_creation_input_token_cost: 2e-6,
+  input_cost_per_token_above_200k_tokens: 4e-6,
+  output_cost_per_token_above_200k_tokens: 12e-6,
+  cache_read_input_token_cost_above_200k_tokens: 1e-6,
+  cache_creation_input_token_cost_above_200k_tokens: 4e-6,
+  litellm_provider: "xai",
+  mode: "chat",
+  max_input_tokens: 500_000,
+};
+
 const GEMINI_36_FLASH: ModelPricingEntry = {
   input_cost_per_token: 3.75e-7,
   output_cost_per_token: 1.875e-6,
@@ -122,11 +137,21 @@ const GEMINI_25_PRO: ModelPricingEntry = {
   mode: "chat",
 };
 
+/** Anthropic API list prices (docs.anthropic.com/en/docs/about-claude/pricing). */
 const CLAUDE_OPUS_5: ModelPricingEntry = {
-  input_cost_per_token: 1.5e-5,
-  output_cost_per_token: 7.5e-5,
-  cache_read_input_token_cost: 1.5e-6,
-  cache_creation_input_token_cost: 1.875e-5,
+  input_cost_per_token: 5e-6,
+  output_cost_per_token: 25e-6,
+  cache_read_input_token_cost: 0.5e-6,
+  cache_creation_input_token_cost: 6.25e-6,
+  litellm_provider: "anthropic",
+  mode: "chat",
+};
+
+const CLAUDE_OPUS_5_5: ModelPricingEntry = {
+  input_cost_per_token: 4e-6,
+  output_cost_per_token: 20e-6,
+  cache_read_input_token_cost: 0.2e-6,
+  cache_creation_input_token_cost: 5e-6,
   litellm_provider: "anthropic",
   mode: "chat",
 };
@@ -135,6 +160,16 @@ const CLAUDE_SONNET_5: ModelPricingEntry = {
   input_cost_per_token: 2e-6,
   output_cost_per_token: 10e-6,
   cache_read_input_token_cost: 0.2e-6,
+  cache_creation_input_token_cost: 2.5e-6,
+  litellm_provider: "anthropic",
+  mode: "chat",
+};
+
+const CLAUDE_SONNET_5_5: ModelPricingEntry = {
+  input_cost_per_token: 2e-6,
+  output_cost_per_token: 10e-6,
+  cache_read_input_token_cost: 0.1e-6,
+  cache_creation_input_token_cost: 2.5e-6,
   litellm_provider: "anthropic",
   mode: "chat",
 };
@@ -179,7 +214,11 @@ const RUNTIME_PRICING_OVERRIDES: Record<string, ModelPricingEntry> = {
   "gemini-3.6-flash": GEMINI_36_FLASH,
   "gemini-2.5-pro": GEMINI_25_PRO,
   "claude-opus-5": CLAUDE_OPUS_5,
+  "claude-opus-5-5": CLAUDE_OPUS_5_5,
+  "claude-opus-5.5": CLAUDE_OPUS_5_5,
   "claude-sonnet-5": CLAUDE_SONNET_5,
+  "claude-sonnet-5-5": CLAUDE_SONNET_5_5,
+  "claude-sonnet-5.5": CLAUDE_SONNET_5_5,
   "gpt-5.6-luna": GPT_56_LUNA,
   "gpt-5.6-terra": GPT_56_TERRA,
   "gpt-5.6-sol": GPT_56_SOL,
@@ -192,6 +231,8 @@ const RUNTIME_PRICING_OVERRIDES: Record<string, ModelPricingEntry> = {
   "grok-4.5-build": GROK_45,
   "xai/grok-4.5": GROK_45,
   "xai/grok-4.5-build": GROK_45,
+  "grok-4.7": GROK_47,
+  "xai/grok-4.7": GROK_47,
 };
 
 // Codex Spark has no published standard API rate.  DeepSeek Flash / V4 Pro
