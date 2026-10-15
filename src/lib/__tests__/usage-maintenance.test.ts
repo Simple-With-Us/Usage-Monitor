@@ -1,4 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/b2-app-usage", () => ({
+  runB2UsageCheck: vi.fn(async () => ({
+    assessment: { configured: false, apps: [], dailySeries: [], alerts: {} },
+    pushoverSent: false,
+  })),
+}));
 import {
   AlertNotificationSummaryPersistenceTimeout,
   type AlertDeliveryResult,
@@ -242,6 +249,7 @@ describe("runUsageMaintenance", () => {
         degraded: false,
       },
       r2UsageCheck: result.r2UsageCheck,
+      b2UsageCheck: result.b2UsageCheck,
     });
     expect(isUsageMaintenanceHealthy(result)).toBe(false);
     expect(deliverAlerts).toHaveBeenCalledOnce();

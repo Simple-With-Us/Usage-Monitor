@@ -17,6 +17,7 @@ import type { HostPreventionPanel } from "@/lib/server-metrics-indicators";
 
 const REFRESH_INTERVAL_MS = 60_000;
 
+import B2AppUsageBreakdownCard from "@/components/B2AppUsageBreakdownCard";
 import { MacHealthCard } from "@/components/MacHealthCard";
 import SentryHealthCard from "@/components/SentryHealthCard";
 
@@ -1244,6 +1245,7 @@ export default function OperationsOverview() {
           <SentryHealthCard />
           <R2FleetCard data={data.r2Fleet} />
           <FleetBackupsCard data={data.fleetBackups} />
+          <B2AppUsageBreakdownCard />
           <ReceiptInboxCard data={data.receiptInbox} />
           <SocraticInfrastructureCard data={data.socraticInfrastructure} />
           <CongressInfrastructureCard data={data.congressInfrastructure} />

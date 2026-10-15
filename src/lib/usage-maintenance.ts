@@ -36,6 +36,7 @@ import {
   applyBudgetControls,
   type BudgetControlsResult,
 } from "@/lib/budget-controls";
+import { runB2UsageCheck, type B2UsageCheckResult } from "@/lib/b2-app-usage";
 import { runR2UsageCheck, type R2UsageAssessment } from "@/lib/r2-usage";
 import { pauseGmailUnverifiedSeedSubscriptions } from "@/lib/gmail-ledger-ghosts";
 
@@ -53,6 +54,7 @@ export interface UsageMaintenanceResult {
   // problem must never flip scheduler/readiness health.
   budgetControls?: BudgetControlsResult;
   r2UsageCheck?: R2UsageAssessment;
+  b2UsageCheck?: B2UsageCheckResult;
 }
 
 export interface SubscriptionAdoptionMaintenanceError {
@@ -296,6 +298,13 @@ export async function runUsageMaintenance(
       console.error("[usage-maintenance] R2 free tier usage check failed:", error);
     }
 
+    let b2UsageCheck: B2UsageCheckResult | undefined;
+    try {
+      b2UsageCheck = await runB2UsageCheck();
+    } catch (error) {
+      console.error("[usage-maintenance] B2 app usage check failed:", error);
+    }
+
     return {
       subscriptionAdoption,
       subscriptions,
@@ -306,6 +315,7 @@ export async function runUsageMaintenance(
       reconciliation,
       budgetControls,
       r2UsageCheck,
+      b2UsageCheck,
     };
   })();
 

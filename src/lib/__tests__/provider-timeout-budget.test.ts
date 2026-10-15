@@ -945,9 +945,8 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       markTickCompleted,
     });
 
-    // maintenanceHealthy (and therefore `succeeded`) stays true - a
-    // provider-fetch outage must not flip lastTickSucceeded/
-    // consecutiveFailures on its own.
+    // maintenanceHealthy stays true (consecutiveFailures unchanged), but the
+    // summary still records a total provider-poll outage for readiness.
     expect(markTickCompleted).toHaveBeenCalledWith(true, {
       total: 3,
       successes: 0,
