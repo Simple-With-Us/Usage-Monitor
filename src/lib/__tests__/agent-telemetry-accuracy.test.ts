@@ -58,6 +58,18 @@ describe("agent-telemetry-accuracy", () => {
     expect(claude.label).toBe("no events in this window");
   });
 
+  it("treats billing_api telemetry as reliable when tokens are present", () => {
+    expect(isReliableTokenTelemetryKind("billing_api")).toBe(true);
+    const cursor = resolveTelemetryAccuracy({
+      name: "Cursor",
+      tokenTelemetryKind: "billing_api",
+      totalTokens: 50_000,
+      isRunningOnMac: false,
+    });
+    expect(cursor.usageIsReliable).toBe(true);
+    expect(cursor.note).toContain("Admin API");
+  });
+
   it("marks idle session-jsonl zero as not a confirmed zero", () => {
     const codex = resolveTelemetryAccuracy({
       name: "OpenAI Codex",

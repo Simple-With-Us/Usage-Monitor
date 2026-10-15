@@ -32,12 +32,22 @@ describe("buildClaudeCostCheck", () => {
 
   it("counts a catalog model with an unavailable token-type rate as incomplete", () => {
     const report = buildClaudeCostCheck(
-      [{ model: "claude-sonnet-5", tokenType: "cacheCreation", quantity: 5000 }],
+      [{ model: "gpt-5.6-luna", tokenType: "cacheCreation", quantity: 5000 }],
+      []
+    );
+    expect(report.models[0].pricingKey).toBe("gpt-5.6-luna");
+    expect(report.models[0].derivationComplete).toBe(false);
+    expect(report.totals.unpricedModelCount).toBe(1);
+  });
+
+  it("prices claude-sonnet-5 cacheCreation after the 5m cache-write override landed", () => {
+    const report = buildClaudeCostCheck(
+      [{ model: "claude-sonnet-5", tokenType: "cacheCreation", quantity: 1_000_000 }],
       []
     );
     expect(report.models[0].pricingKey).toBe("claude-sonnet-5");
-    expect(report.models[0].derivationComplete).toBe(false);
-    expect(report.totals.unpricedModelCount).toBe(1);
+    expect(report.models[0].derivationComplete).toBe(true);
+    expect(report.models[0].derivedCostUsd).toBeCloseTo(2.5, 6);
   });
 
   it("buckets unrecognized token types as unknown and incomplete", () => {
