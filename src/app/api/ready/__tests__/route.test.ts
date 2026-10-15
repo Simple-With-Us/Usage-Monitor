@@ -591,6 +591,40 @@ describe("GET /api/ready", () => {
       readinessReason: null,
       providerFetchDegraded: false,
       consecutiveProviderFetchDegradedTicks: 1,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
+    });
+  });
+
+  it("surfaces a zero-success provider-fetch outage on the first tick (UM-1373)", async () => {
+    const degradedRun = {
+      total: 27,
+      successes: 0,
+      failures: 2,
+      skipped: 25,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled" as const,
+    };
+    markSchedulerTickCompleted(true, degradedRun);
+
+    const response = await GET(READY_REQUEST);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, status: "ready" });
+    expect(body.checks.scheduler).toMatchObject({
+      ok: true,
+      readinessReason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
+      consecutiveProviderFetchDegradedTicks: 1,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
+      lastRun: {
+        successes: 0,
+        failures: 2,
+        providerFetchDegraded: true,
+      },
     });
   });
 
@@ -624,6 +658,7 @@ describe("GET /api/ready", () => {
       providerFetchDegradedTickThreshold: 3,
       consecutiveProviderFetchDegradedTicks: 3,
       lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
       consecutiveFailures: 0,
     });
   });
