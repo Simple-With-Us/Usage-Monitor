@@ -121,8 +121,9 @@ describe("runtime health state", () => {
   });
 
   it("preserves scheduler summary fields in lastRun without attaching provider details (AGENTS.md L226-228)", () => {
-    markSchedulerStarted();
     const tickAt = new Date("2026-09-12T12:00:00.000Z");
+    const completedAt = new Date("2026-09-12T12:01:00.000Z");
+    markSchedulerStarted(tickAt);
     markSchedulerTickStarted(tickAt);
     const summary = {
       total: 27,
@@ -133,7 +134,7 @@ describe("runtime health state", () => {
       providerFetchDegraded: true,
       cloudflareLegacyHandoff: "disabled" as const,
     };
-    markSchedulerTickCompleted(true, summary, tickAt);
+    markSchedulerTickCompleted(true, summary, completedAt);
     const runtime = getSchedulerRuntimeStatus();
     expect(runtime.lastRun).toEqual({
       total: 27,
@@ -144,6 +145,16 @@ describe("runtime health state", () => {
       providerFetchDegraded: true,
       cloudflareLegacyHandoff: "disabled",
     });
+    expect(runtime.lastTickSucceeded).toBe(false);
+    expect(getSchedulerReadiness(completedAt)).toMatchObject({
+      ok: true,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
+      providerFetchDegradedTickThreshold: 3,
+    });
+    expect(getSchedulerRuntimeStatus().consecutiveProviderFetchDegradedTicks).toBe(
+      1
+    );
     // AGENTS.md lines 226-228: /api/ready exposes the scheduler summary without
     // attaching target/provider IDs, env values, billing payloads, or provider errors.
     expect("failedProviders" in (runtime.lastRun ?? {})).toBe(false);
@@ -1021,9 +1032,8 @@ describe("runtime health state", () => {
       providerFetchDegraded: false,
     };
 
-    // A single degraded tick must not flip readiness - only a sustained run
-    // does. `succeeded` here stays true throughout: provider-fetch health is
-    // deliberately independent of maintenanceHealthy/lastTickSucceeded.
+    // Partial degradation (some successes) still needs a sustained streak
+    // before readinessReason latches; maintenance stays healthy throughout.
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({ ok: true, reason: null });
     expect(
@@ -1042,8 +1052,6 @@ describe("runtime health state", () => {
     });
     expect(getSchedulerRuntimeStatus()).toMatchObject({
       consecutiveProviderFetchDegradedTicks: 3,
-      // Never affects lastTickSucceeded/consecutiveFailures - the app itself
-      // is still serving; a provider-fetch outage is upstream.
       lastTickSucceeded: true,
       consecutiveFailures: 0,
     });
@@ -1092,13 +1100,15 @@ describe("runtime health state", () => {
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
-      reason: null,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
       reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
   });

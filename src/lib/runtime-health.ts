@@ -13,6 +13,17 @@ import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
 import { appSettings } from "@/lib/app-settings";
 
+/** Total provider-poll outage: every attempted poll failed (skipped excluded). */
+export function isZeroSuccessProviderFetchOutage(
+  lastRun: Pick<
+    SchedulerRunSummary,
+    "successes" | "failures" | "providerFetchDegraded"
+  > | null
+): boolean {
+  if (!lastRun?.providerFetchDegraded) return false;
+  return lastRun.successes === 0 && lastRun.failures > 0;
+}
+
 export interface SchedulerRunSummary {
   total: number;
   successes: number;
@@ -213,7 +224,15 @@ export function markSchedulerTickCompleted(
 ): void {
   state.scheduler.tickInProgress = false;
   state.scheduler.lastTickCompletedAt = at.toISOString();
-  state.scheduler.lastTickSucceeded = succeeded;
+  const normalizedLastRun = lastRun
+    ? normalizeSchedulerRunSummary(lastRun)
+    : null;
+  // Maintenance health (`succeeded`) still drives consecutiveFailures only.
+  // lastTickSucceeded additionally reflects a total provider-poll outage so
+  // deploy observers and strict readiness do not treat "0 successes, N
+  // failures, providerFetchDegraded" as a healthy poll tick (UM-1373).
+  state.scheduler.lastTickSucceeded =
+    succeeded && !isZeroSuccessProviderFetchOutage(normalizedLastRun);
   if (succeeded) {
     state.scheduler.consecutiveFailures = 0;
     state.scheduler.firstFailureAt = null;
@@ -232,9 +251,7 @@ export function markSchedulerTickCompleted(
     state.scheduler.consecutiveProviderFetchDegradedTicks = 0;
     state.scheduler.firstProviderFetchDegradedAt = null;
   }
-  state.scheduler.lastRun = lastRun
-    ? normalizeSchedulerRunSummary(lastRun)
-    : null;
+  state.scheduler.lastRun = normalizedLastRun;
 }
 
 export function getSchedulerRuntimeStatus(): SchedulerRuntimeStatus {
@@ -251,8 +268,15 @@ export function getSchedulerReadiness(now = new Date()): SchedulerReadiness {
   const staleAfterMs = schedulerStaleAfterMs();
   const failureThreshold = schedulerFailureThreshold();
   const degradedTickThreshold = providerFetchDegradedTickThreshold();
+  const zeroSuccessOutage = isZeroSuccessProviderFetchOutage(
+    scheduler.lastRun
+  );
+  // Partial poll degradation still needs a sustained streak before latching;
+  // a total outage (0 successes, >0 failures) surfaces on the first tick so
+  // paging/readinessReason do not wait three 15-minute ticks (UM-1373).
   const providerFetchDegraded =
-    scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold;
+    scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold ||
+    zeroSuccessOutage;
   if (!scheduler.startedAt) {
     return {
       ok: false,

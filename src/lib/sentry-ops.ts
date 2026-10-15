@@ -171,18 +171,37 @@ export async function logSchedulerOutcome(
 export async function logSchedulerDegraded(
   attributes: Record<string, string | number | boolean | undefined>
 ): Promise<void> {
+  const cleanAttrs = Object.fromEntries(
+    Object.entries(attributes).filter(
+      ([, value]) => value !== undefined && value !== null
+    )
+  ) as Record<string, string | number | boolean>;
+  const zeroSuccessOutage =
+    cleanAttrs.successes === 0 &&
+    typeof cleanAttrs.failures === "number" &&
+    cleanAttrs.failures > 0;
   try {
     const mod = await loadSentry();
     if (!mod) return;
     const logger = api<{
       warn: (message: string, attrs?: Record<string, unknown>) => void;
     }>(mod, "logger");
-    const attrs = Object.fromEntries(
-      Object.entries(attributes).filter(([, value]) => value !== undefined)
-    ) as Record<string, string | number | boolean>;
-    logger?.warn?.("scheduler.provider_fetch_degraded", attrs);
+    logger?.warn?.("scheduler.provider_fetch_degraded", cleanAttrs);
   } catch {
     // Sparse Sentry logs are best-effort.
+  }
+  // Total poll outage pages via fleet-infra on the first tick; partial
+  // degradation still waits for the consecutive-tick latch (UM-1373).
+  if (!zeroSuccessOutage) return;
+  try {
+    const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");
+    await recordFleetInfraMetric(
+      "scheduler.provider_fetch_zero_success",
+      1,
+      cleanAttrs
+    );
+  } catch {
+    // best-effort
   }
 }
 
