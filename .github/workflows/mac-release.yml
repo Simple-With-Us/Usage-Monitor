@@ -8,9 +8,11 @@ name: Mac Release (Sparkle)
 #
 # Secrets (names only; no value is ever printed):
 #   MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD  The Developer ID Application
-#       certificate for team CC8UTF7ATG.  Canonical in Fleet Secrets
-#       (Fleet-OPS Infisical project, prod, /mac-certs/); same-named
-#       repository secrets are the synced copies this workflow reads.
+#       certificate for team CC8UTF7ATG.  Read at runtime from Fleet Secrets
+#       (Fleet-OPS Infisical project, prod, /mac-certs/) via a dedicated step
+#       using the org secrets INFISICAL_FLEET_OPS_PROJECT_ID and the
+#       universal-auth pair; same-named repository secrets are the synced-copy
+#       fallback.
 #   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  The App Store Connect API key that
 #       ios-ship.yml already uses; notarytool signs in with it.  Canonical in
 #       Fleet Secrets /asc/; same-named repository secrets as the fallback.
