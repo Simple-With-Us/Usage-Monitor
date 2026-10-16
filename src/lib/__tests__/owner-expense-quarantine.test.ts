@@ -146,6 +146,21 @@ describe("recordOwnerExpense duplicate quarantine", () => {
     expect(where.occurredAt.gte).toEqual(new Date("2026-09-29T00:00:00.000Z"));
     expect(where.occurredAt.lt).toEqual(new Date("2026-10-14T00:00:00.000Z"));
   });
+
+  it("lifts the date bound when checking by receipt inbox id", async () => {
+    const withInboxId = parseOwnerExpenseInput({
+      provider: "Anthropic",
+      amountUsd: 213.2,
+      occurredAt: "2026-10-06T12:00:00.000Z",
+      kind: "subscription",
+      label: "Anthropic receipt",
+      receiptInboxId: "c".repeat(64),
+    });
+    await recordOwnerExpense(withInboxId);
+    const where = mocks.findMany.mock.calls[0][0].where;
+    expect(where.sourceApp).toBe("owner-recorded-expense");
+    expect(where.occurredAt).toBeUndefined();
+  });
 });
 
 describe("resolveQuarantinedOwnerExpense", () => {

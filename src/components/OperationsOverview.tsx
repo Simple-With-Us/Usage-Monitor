@@ -222,7 +222,8 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
     event.preventDefault();
     setFormError(null);
     setFormNotice(null);
-    const form = new FormData(event.currentTarget);
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
     const amount = Number(form.get("amountUsd"));
     const occurred = String(form.get("occurredOn") ?? "");
     const occurredAt = occurred
@@ -256,12 +257,12 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         setFormNotice(
           `Held for review as a suspected duplicate — nothing was posted.  ${body.matchReason ?? ""}  See “Held duplicates” below to post it anyway or discard it.`
         );
-        event.currentTarget.reset();
+        formEl.reset();
         await fetchQuarantine();
         return;
       }
       setFormNotice("Expense recorded on the ledger.");
-      event.currentTarget.reset();
+      formEl.reset();
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Could not record this expense");
     }

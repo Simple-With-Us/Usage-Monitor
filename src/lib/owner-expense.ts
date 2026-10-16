@@ -189,6 +189,10 @@ export function duplicateMatchReason(
  * One bounded range query (±7 days around the charge date); all matching is
  * exact and done in JS so SQLite's lack of case-insensitive filters and JSON
  * path quirks can't change the semantics.
+ *
+ * The receipt-inbox-id check is UNCONDITIONAL: an agent-forwarded archival
+ * copy may carry a charge date far from the original posting, so when the
+ * incoming entry carries a receiptInboxId the date bound is lifted.
  */
 export async function findDuplicateOwnerExpenses(
   input: OwnerExpenseInput
@@ -203,7 +207,9 @@ export async function findDuplicateOwnerExpenses(
   const rows = await prisma.externalUsageEvent.findMany({
     where: {
       sourceApp: OWNER_EXPENSE_SOURCE_APP,
-      occurredAt: { gte: from, lt: to },
+      // Lift the date bound for the inbox-id check: that match must be
+      // unconditional, not limited to the scan window.
+      ...(input.receiptInboxId ? {} : { occurredAt: { gte: from, lt: to } }),
     },
     select: {
       idempotencyKey: true,
