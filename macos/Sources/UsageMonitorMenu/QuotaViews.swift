@@ -598,6 +598,7 @@ private struct CompactDashboardQuotaRow: View {
 
 struct MonitorSettings: View {
     @ObservedObject var model: MonitorModel
+    @ObservedObject private var updater = AppUpdater.shared
     @State private var local = true
     @State private var server = false
     @State private var endpoint = ""
@@ -609,6 +610,14 @@ struct MonitorSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Usage Monitor Settings").font(.title2.bold())
+            GroupBox("Automatic Updates") {
+                HStack {
+                    Text(updater.availability.summary)
+                    Spacer()
+                    Button("Check For Updates…") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheckForUpdates)
+                }.padding(10)
+            }
             GroupBox("Appearance") {
                 Picker("Show In", selection: $model.displayMode) {
                     ForEach(DisplayMode.allCases) { Text($0.title).tag($0) }

@@ -38,6 +38,7 @@ describe("middleware matcher — /api/budget-status exclusion (regression for th
       "/api/ready",
       "/api/openrouter-credits",
       "/api/server-metrics",
+      "/api/b2-app-usage",
       "/api/cron",
       "/api/auth/login",
       "/api/bills.ics",
