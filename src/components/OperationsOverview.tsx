@@ -126,12 +126,76 @@ function truncateReceiptId(id: string): string {
   return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
+interface QuarantinedMatch {
+  idempotencyKey: string;
+  provider: string;
+  amountUsd: number | null;
+  occurredAt: string;
+  label: string | null;
+  matchedOn: string;
+}
+
+interface QuarantinedExpense {
+  id: string;
+  quarantinedAt: string;
+  provider: string;
+  amountUsd: number;
+  occurredAt: string;
+  kind: string;
+  label: string;
+  notes: string | null;
+  receiptInboxId: string | null;
+  matchedEntries: QuarantinedMatch[];
+  matchReason: string;
+}
+
 export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
   const [expanded, setExpanded] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [quarantined, setQuarantined] = useState<QuarantinedExpense[] | null>(null);
+  const [quarantineBusyId, setQuarantineBusyId] = useState<string | null>(null);
   const count = `${data.countIsLowerBound ? "at least " : ""}${data.needsReviewCount}`;
+
+  const fetchQuarantine = useCallback(async () => {
+    try {
+      const response = await fetch("/api/owner-expenses/quarantine");
+      if (!response.ok) return;
+      const body = (await response.json()) as { quarantined?: QuarantinedExpense[] };
+      setQuarantined(Array.isArray(body.quarantined) ? body.quarantined : []);
+    } catch {
+      // Quarantine list is advisory; a failed fetch must not break the card.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (expanded) void fetchQuarantine();
+  }, [expanded, fetchQuarantine]);
+
+  async function resolveQuarantine(id: string, action: "post" | "discard") {
+    setQuarantineBusyId(id);
+    setFormError(null);
+    try {
+      const response = await fetch("/api/owner-expenses/quarantine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) throw new Error(body?.error ?? "Could not resolve this item");
+      setFormNotice(
+        action === "post"
+          ? "Held expense posted to the ledger."
+          : "Held expense discarded — nothing was posted."
+      );
+      await fetchQuarantine();
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "Could not resolve this item");
+    } finally {
+      setQuarantineBusyId(null);
+    }
+  }
 
   async function ignoreReceipt(id: string) {
     setBusyId(id);
@@ -180,9 +244,21 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+        quarantined?: boolean;
+        matchReason?: string;
+      } | null;
       if (!response.ok) {
         throw new Error(body?.error ?? "Could not record this expense");
+      }
+      if (body?.quarantined) {
+        setFormNotice(
+          `Held for review as a suspected duplicate — nothing was posted.  ${body.matchReason ?? ""}  See “Held duplicates” below to post it anyway or discard it.`
+        );
+        event.currentTarget.reset();
+        await fetchQuarantine();
+        return;
       }
       setFormNotice("Expense recorded on the ledger.");
       event.currentTarget.reset();
@@ -263,6 +339,61 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
           ) : (
             <p className="text-xs text-gray-500 dark:text-gray-400">No inbox items waiting.  You can still record an expense from a Gmail or iCloud receipt.</p>
           )}
+          <div className="mt-4 border-t border-gray-100 pt-3 dark:border-gray-700">
+            <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+              Held duplicates{quarantined && quarantined.length > 0 ? ` (${quarantined.length})` : ""}
+            </h4>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Expenses held by the duplicate guardrail instead of posting.  Nothing here is on the ledger.
+              Post one only if you are sure it is genuinely new spend; otherwise discard it.
+            </p>
+            {quarantined === null ? (
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Loading…</p>
+            ) : quarantined.length === 0 ? (
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">No held expenses.</p>
+            ) : (
+              <ul className="mt-2 divide-y divide-gray-100 dark:divide-gray-700">
+                {quarantined.map((item) => (
+                  <li key={item.id} className="py-2 text-xs">
+                    <p className="font-medium text-gray-800 dark:text-gray-200">
+                      {item.provider} · ${item.amountUsd.toFixed(2)} ·{" "}
+                      <time suppressHydrationWarning dateTime={item.occurredAt}>
+                        {item.occurredAt.slice(0, 10)}
+                      </time>
+                      {" · "}{item.label}
+                    </p>
+                    <p className="mt-0.5 text-amber-700 dark:text-amber-300">{item.matchReason}</p>
+                    {item.matchedEntries.length > 0 && (
+                      <p className="mt-0.5 text-gray-500 dark:text-gray-400">
+                        Matched ledger {item.matchedEntries.length === 1 ? "entry" : "entries"}:{" "}
+                        {item.matchedEntries
+                          .map((m) => `${m.provider} $${m.amountUsd != null ? m.amountUsd.toFixed(2) : "—"} on ${m.occurredAt.slice(0, 10)}`)
+                          .join("; ")}
+                      </p>
+                    )}
+                    <div className="mt-1 flex gap-2">
+                      <button
+                        type="button"
+                        disabled={quarantineBusyId === item.id}
+                        onClick={() => void resolveQuarantine(item.id, "post")}
+                        className="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200"
+                      >
+                        Post anyway
+                      </button>
+                      <button
+                        type="button"
+                        disabled={quarantineBusyId === item.id}
+                        onClick={() => void resolveQuarantine(item.id, "discard")}
+                        className="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <form className="mt-4 grid gap-2 sm:grid-cols-2" onSubmit={(event) => void recordExpense(event)}>
             <label className="text-xs text-gray-600 dark:text-gray-300">
               Provider

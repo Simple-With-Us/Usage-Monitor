@@ -862,3 +862,34 @@ model FleetBudgetGuard {
   blockedAt DateTime?
   revision  Int @default(0)
 }
+
+// Owner-expense duplicate quarantine.  When POST /api/owner-expenses receives
+// an entry that exactly matches an already-posted ledger row (same vendor +
+// same amount + same charge date, or same receipt inbox id), the entry is
+// HELD here for owner review instead of posting — it never auto-posts and
+// never deletes or alters the posted rows.  Review happens in the dashboard
+// Receipt Inbox card ("Held duplicates"); resolving as "post" force-records
+// the original input, resolving as "discard" drops it permanently.
+model QuarantinedOwnerExpense {
+  id                   String    @id @default(uuid())
+  quarantinedAt        DateTime  @default(now())
+  status               String    @default("held") // held | posted | discarded
+  resolvedAt           DateTime?
+  provider             String
+  amountUsd            Float
+  occurredAt           DateTime
+  kind                 String
+  label                String
+  notes                String?
+  confidence           String    @default("actual")
+  receiptInboxId       String?
+  dueDate              String?
+  nextDueDate          String?
+  calendarSort         String?
+  cancelledNoRenew     Boolean   @default(false)
+  // JSON array of { idempotencyKey, provider, amountUsd, occurredAt, label }
+  // describing the posted rows this entry matched.
+  matchedEntries       String    @default("[]")
+  // Human-readable why-held reason shown in the review list.
+  matchReason          String    @default("")
+}
