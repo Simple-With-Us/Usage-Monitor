@@ -20,9 +20,9 @@ def deployed_tag(name):
     if len(versions)!=1 or versions[0].get("percentage")!=100:return None
     v=api("/workers/scripts/"+name+"/versions/"+versions[0]["version_id"])
     return v.get("annotations",{}).get("workers/tag")
-def probe(target):
+def probe(target, name="unnamed target"):
     url=target.get("health")
-    if not url:raise RuntimeError("Functional probe not configured for "+target["name"])
+    if not url:raise RuntimeError("Functional probe not configured for "+name)
     headers={}
     if target.get("access"):
         headers["CF-Access-Client-Id"]=os.environ["WORKER_HEALTH_ACCESS_CLIENT_ID"]
@@ -41,15 +41,16 @@ def main():
     if not target.get("health"):raise SystemExit("No approved CI functional probe; activation blocked")
     sha=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
     if current_main()!=sha:print("Superseded; skipping");return
-    if deployed_tag(name)==sha:probe(target);print("Already deployed and healthy");return
+    if deployed_tag(name)==sha:probe(target,name);print("Already deployed and healthy");return
     # Do not start a deployment unless probe credentials are present and old live service is healthy.
-    probe(target)
+    # Fail closed: a live Worker that fails this probe is recovered by a manual deploy or rollback.
+    probe(target,name)
     if name.startswith("usage-monitor-receipt-"):
         subprocess.run(["node","scripts/verify-receipt-inbox-lifecycle.mjs"],check=True)
     if current_main()!=sha:print("Superseded before upload; skipping");return
     subprocess.run([*target["command"],"--keep-vars","--strict","--tag",sha,"--message","main "+sha],check=True,
                    env={**os.environ,"CLOUDFLARE_ACCOUNT_ID":ACCOUNT,"WRANGLER_SEND_METRICS":"false"})
     if deployed_tag(name)!=sha:raise RuntimeError("Exact version receipt does not match")
-    probe(target)
+    probe(target,name)
     print("Exact Worker version and functional probe verified: "+name+" "+sha)
 if __name__=="__main__":main()
