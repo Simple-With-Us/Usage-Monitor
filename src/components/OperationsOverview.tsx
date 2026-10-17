@@ -14,6 +14,13 @@ import type {
 import type { R2FleetAccountSnapshot, R2FleetSummary } from "@/lib/r2-usage";
 import type { ServerMetricsPayload } from "@/lib/server-metrics";
 import type { HostPreventionPanel } from "@/lib/server-metrics-indicators";
+import {
+  OwnerExpenseErrorSchema,
+  QuarantineListSchema,
+  QuarantineResolveResponseSchema,
+  RecordOwnerExpenseResponseSchema,
+  type QuarantinedExpense,
+} from "@/lib/owner-expense-quarantine-schema";
 
 const REFRESH_INTERVAL_MS = 60_000;
 
@@ -126,29 +133,6 @@ function truncateReceiptId(id: string): string {
   return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
-interface QuarantinedMatch {
-  idempotencyKey: string;
-  provider: string;
-  amountUsd: number | null;
-  occurredAt: string;
-  label: string | null;
-  matchedOn: string;
-}
-
-interface QuarantinedExpense {
-  id: string;
-  quarantinedAt: string;
-  provider: string;
-  amountUsd: number;
-  occurredAt: string;
-  kind: string;
-  label: string;
-  notes: string | null;
-  receiptInboxId: string | null;
-  matchedEntries: QuarantinedMatch[];
-  matchReason: string;
-}
-
 export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
   const [expanded, setExpanded] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -162,8 +146,9 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
     try {
       const response = await fetch("/api/owner-expenses/quarantine");
       if (!response.ok) return;
-      const body = (await response.json()) as { quarantined?: QuarantinedExpense[] };
-      setQuarantined(Array.isArray(body.quarantined) ? body.quarantined : []);
+      const parsed = QuarantineListSchema.safeParse(await response.json());
+      if (!parsed.success) return;
+      setQuarantined(parsed.data.quarantined);
     } catch {
       // Quarantine list is advisory; a failed fetch must not break the card.
     }
@@ -182,13 +167,22 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, action }),
       });
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(body?.error ?? "Could not resolve this item");
-      setFormNotice(
-        action === "post"
-          ? "Held expense posted to the ledger."
-          : "Held expense discarded — nothing was posted."
-      );
+      const json: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const failure = OwnerExpenseErrorSchema.safeParse(json);
+        throw new Error(failure.success ? failure.data.error : "Could not resolve this item");
+      }
+      const parsed = QuarantineResolveResponseSchema.safeParse(json);
+      if (!parsed.success) throw new Error("Could not read the resolve response");
+      if (parsed.data.status === "discarded") {
+        setFormNotice("Held expense discarded — nothing was posted.");
+      } else if (parsed.data.record?.persisted === 0) {
+        // Idempotency replay (or a retention tombstone): this exact entry was
+        // recorded before, so post-anyway added nothing new to the ledger.
+        setFormNotice("Nothing new was posted — this exact entry was recorded before.");
+      } else {
+        setFormNotice("Held expense posted to the ledger.");
+      }
       await fetchQuarantine();
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Could not resolve this item");
@@ -245,23 +239,27 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const body = (await response.json().catch(() => null)) as {
-        error?: string;
-        quarantined?: boolean;
-        matchReason?: string;
-      } | null;
+      const json: unknown = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(body?.error ?? "Could not record this expense");
+        const failure = OwnerExpenseErrorSchema.safeParse(json);
+        throw new Error(failure.success ? failure.data.error : "Could not record this expense");
       }
-      if (body?.quarantined) {
+      const parsed = RecordOwnerExpenseResponseSchema.safeParse(json);
+      if (!parsed.success) throw new Error("Could not read the record response");
+      if (response.status === 202 || parsed.data.quarantined === true) {
+        const reason = parsed.data.matchReason ? `${parsed.data.matchReason}\u00a0 ` : "";
         setFormNotice(
-          `Held for review as a suspected duplicate — nothing was posted.  ${body.matchReason ?? ""}  See “Held duplicates” below to post it anyway or discard it.`
+          `Held for review as a suspected duplicate — nothing was posted.\u00a0 ${reason}See “Held Duplicates” below to post it anyway or discard it.`
         );
         formEl.reset();
         await fetchQuarantine();
         return;
       }
-      setFormNotice("Expense recorded on the ledger.");
+      setFormNotice(
+        parsed.data.persisted === 0
+          ? "Nothing new was posted — this exact entry was recorded before."
+          : "Expense recorded on the ledger."
+      );
       formEl.reset();
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Could not record this expense");
@@ -342,11 +340,10 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
           )}
           <div className="mt-4 border-t border-gray-100 pt-3 dark:border-gray-700">
             <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-              Held duplicates{quarantined && quarantined.length > 0 ? ` (${quarantined.length})` : ""}
+              Held Duplicates{quarantined && quarantined.length > 0 ? ` (${quarantined.length})` : ""}
             </h4>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Expenses held by the duplicate guardrail instead of posting.  Nothing here is on the ledger.
-              Post one only if you are sure it is genuinely new spend; otherwise discard it.
+              Expenses held by the duplicate guardrail instead of posting.{"\u00a0"} Nothing here is on the ledger.{"\u00a0"} Post one only if you are sure it is genuinely new spend; otherwise discard it.
             </p>
             {quarantined === null ? (
               <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Loading…</p>
@@ -379,7 +376,7 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
                         onClick={() => void resolveQuarantine(item.id, "post")}
                         className="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200"
                       >
-                        Post anyway
+                        Post Anyway
                       </button>
                       <button
                         type="button"

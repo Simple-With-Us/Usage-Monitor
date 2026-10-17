@@ -868,7 +868,7 @@ model FleetBudgetGuard {
 // same amount + same charge date, or same receipt inbox id), the entry is
 // HELD here for owner review instead of posting — it never auto-posts and
 // never deletes or alters the posted rows.  Review happens in the dashboard
-// Receipt Inbox card ("Held duplicates"); resolving as "post" force-records
+// Receipt Inbox card ("Held Duplicates"); resolving as "post" force-records
 // the original input, resolving as "discard" drops it permanently.
 model QuarantinedOwnerExpense {
   id                   String    @id @default(uuid())

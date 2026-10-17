@@ -138,6 +138,15 @@ describe("POST /api/owner-expenses/quarantine", () => {
     expect(mocks.resolve).not.toHaveBeenCalled();
   });
 
+  it("400s on unexpected extra keys (strict schema)", async () => {
+    mocks.hasValidDashboardSession.mockReturnValue(true);
+    const response = await POST(
+      postRequest({ id: heldRow.id, action: "post", force: true })
+    );
+    expect(response.status).toBe(400);
+    expect(mocks.resolve).not.toHaveBeenCalled();
+  });
+
   it("posts a held item on post-anyway", async () => {
     mocks.hasValidDashboardSession.mockReturnValue(true);
     mocks.resolve.mockResolvedValue({ status: "posted", record: { persisted: 1 } });

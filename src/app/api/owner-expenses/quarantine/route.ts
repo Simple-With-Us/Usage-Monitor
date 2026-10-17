@@ -8,11 +8,12 @@ import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import { isUsageReadAuthorized } from "@/lib/ingest-auth";
 import { prisma } from "@/lib/prisma";
 import { resolveQuarantinedOwnerExpense } from "@/lib/owner-expense";
+import {
+  QUARANTINE_RESOLVE_BODY_ERROR,
+  QuarantineResolveSchema,
+} from "@/lib/owner-expense-quarantine-schema";
 
 export const dynamic = "force-dynamic";
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseMatchedEntries(raw: string): unknown[] {
   try {
@@ -101,15 +102,14 @@ export async function POST(request: NextRequest) {
     const message = error instanceof Error ? error.message : "Invalid request";
     return NextResponse.json({ error: message }, { status: 400 });
   }
-  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  const id = typeof record.id === "string" ? record.id : "";
-  const action = record.action;
-  if (!UUID_RE.test(id) || (action !== "post" && action !== "discard")) {
+  const parsed = QuarantineResolveSchema.safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: 'Body must be { "id": "<uuid>", "action": "post" | "discard" }' },
+      { error: QUARANTINE_RESOLVE_BODY_ERROR },
       { status: 400 }
     );
   }
+  const { id, action } = parsed.data;
   try {
     const result = await resolveQuarantinedOwnerExpense(id, action);
     return NextResponse.json({ id, ...result });
