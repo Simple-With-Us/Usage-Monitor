@@ -21,6 +21,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import FleetQuotaMatrixCard, {
+  MergedProviderSection,
   ProviderLogo,
   ProviderSection,
   QuotaMergedWindowCard,
@@ -470,7 +471,7 @@ describe("formatQuotaPercentLabel and QuotaUsageBar", () => {
       }),
     );
     expect(html).toContain("bg-red-500");
-    expect(html).toContain("bg-teal-800");
+    expect(html).toContain("bg-emerald-600");
     expect(html).toContain("bg-black");
   });
 });
@@ -691,5 +692,101 @@ describe("mocked fetch -> buildProviderGroups pipeline", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("buildMergedQuotaSections window filtering and rollup", () => {
+  const reading = (remainingPercent: number) => ({
+    source: "codecaps",
+    sourceLabel: "CodeCaps",
+    machine: null,
+    collector: "codecaps",
+    remainingPercent,
+    remainingUnknown: false,
+    isExhausted: remainingPercent <= 0,
+    resetAt: "2026-09-13T00:00:00.000Z",
+    reportedAt: "2026-09-12T00:00:00.000Z",
+    freshness: "fresh" as const,
+  });
+  const win = (
+    windowKey: string,
+    remainingPercent: number,
+    platformTitle: string | null = null,
+    displayName: string = windowKey,
+  ) => ({
+    windowKey,
+    displayName,
+    rawKey: windowKey,
+    platformTitle,
+    primary: reading(remainingPercent),
+    sources: [reading(remainingPercent)],
+  });
+  const keysOf = (provider: string, windows: ReturnType<typeof win>[]) =>
+    buildMergedQuotaSections({
+      quotaGroups: [{ provider, providerLabel: provider, windows }],
+    })[0]!.windows.map((view) => `${view.platformTitle ?? "-"}|${view.windowKey}|${view.displayName}`);
+
+  it("hides short windows only in the pool whose long window is exhausted", () => {
+    expect(
+      keysOf("google-antigravity", [
+        win("7d", 0, "Antigravity · Gemini", "7-day"),
+        win("5h", 55, "Antigravity · Gemini", "5-hour"),
+        win("7d", 60, "Antigravity · Third-Party", "7-day"),
+        win("5h", 80, "Antigravity · Third-Party", "5-hour"),
+      ]),
+    ).toEqual([
+      "Antigravity · Gemini|7d|7-day",
+      "Antigravity · Third-Party|7d|7-day",
+      "Antigravity · Third-Party|5h|5-hour",
+    ]);
+    // Providers without pools keep the provider-wide behaviour.
+    expect(keysOf("anthropic", [win("7d", 0, null, "7-day"), win("5h", 40, null, "5-hour")])).toEqual([
+      "-|7d|7-day",
+    ]);
+  });
+
+  it("relabels rolled-up legacy keys so the row tag is canonical", () => {
+    expect(keysOf("openai", [win("1w", 40), win("billing-cycle", 70)])).toEqual([
+      "-|7d|7-day",
+      "-|monthly|1-month",
+    ]);
+    expect(windowRowTagLabel("7d", "7-day")).toBe("7-day");
+  });
+
+  it("collapses every 7-day and monthly alias onto one row", () => {
+    expect(
+      keysOf("xai", [
+        win("7d", 40, null, "7-day"),
+        win("1w", 40),
+        win("7-day", 40),
+        win("monthly", 70, null, "1-month"),
+        win("1-month", 70),
+      ]),
+    ).toEqual(["-|7d|7-day", "-|monthly|1-month"]);
+  });
+
+  it("never shows the MiniMax 4-hour window", () => {
+    expect(keysOf("minimax", [win("4h", 90), win("5h", 45, null, "5-hour")])).toEqual([
+      "-|5h|5-hour",
+    ]);
+  });
+
+  it("renders the Muse Assist balance window as + and extra", () => {
+    const [section] = buildMergedQuotaSections({
+      quotaGroups: [
+        {
+          provider: "muse",
+          providerLabel: "Muse Assist",
+          windows: [win("7d", 35, null, "7-day"), win("balance", 64)],
+        },
+      ],
+    });
+    const html = renderToStaticMarkup(
+      createElement(MergedProviderSection, { section: section!, nowMs: NOW_MS }),
+    );
+    expect(html).toContain("Muse Assist");
+    expect(html).toContain(">+</span>");
+    expect(html).toContain(">extra</span>");
+    expect(html).toContain("7-day");
   });
 });

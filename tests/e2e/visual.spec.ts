@@ -310,3 +310,62 @@ test('visual: quota provenance distinguishes conflicting readings', async ({ pag
   await expect(page.getByRole('heading', { name: '5h Window', exact: true })).toHaveCount(2);
   await expect(page).toHaveScreenshot('quota-provenance.png', { ...stableShot, fullPage: true });
 });
+
+// Merged quotaGroups path (CodeCaps parity, #1674): pool-scoped hiding of
+// short windows under an exhausted week, the Muse Assist "+ extra" balance
+// row, legacy 1w/7d rows collapsed onto one canonical 7-day row, and the
+// MiniMax 4-hour data error never shown.
+test('visual: subscription quotas merged windows match CodeCaps', async ({ page }) => {
+  const reading = (remainingPercent: number, resetAt: string) => ({
+    source: 'codecaps', sourceLabel: 'CodeCaps', machine: 'Office Mac', collector: 'codecaps',
+    remainingPercent, remainingUnknown: false, isExhausted: remainingPercent <= 0,
+    resetAt, reportedAt: '2026-09-27T19:55:00.000Z', freshness: 'fresh',
+  });
+  const win = (windowKey: string, displayName: string, remainingPercent: number,
+    resetAt: string, platformTitle: string | null = null) => ({
+    windowKey, displayName, rawKey: windowKey, platformTitle,
+    primary: reading(remainingPercent, resetAt), sources: [reading(remainingPercent, resetAt)],
+  });
+  const in5h = '2026-09-27T23:00:00.000Z';
+  const in3d = '2026-09-30T20:00:00.000Z';
+  await settle(page);
+  await page.route('**/api/agents-overview?*', route => json(route, {}, 503));
+  await page.route('**/api/quota-windows', route => json(route, {
+    windows: [],
+    quotaGroups: [
+      { provider: 'anthropic', providerLabel: 'Claude', windows: [
+        win('5h', '5-hour', 72, in5h),
+        win('1w', '1w', 41, in3d),
+        win('7d', '7-day', 41, in3d),
+      ] },
+      { provider: 'google-antigravity', providerLabel: 'Antigravity', windows: [
+        win('7d', '7-day', 0, in3d, 'Antigravity · Gemini'),
+        win('5h', '5-hour', 55, in5h, 'Antigravity · Gemini'),
+        win('7d', '7-day', 60, in3d, 'Antigravity · Third-Party'),
+        win('5h', '5-hour', 80, in5h, 'Antigravity · Third-Party'),
+      ] },
+      { provider: 'minimax', providerLabel: 'MiniMax', windows: [
+        win('4h', '4-hour', 90, in5h),
+        win('5h', '5-hour', 45, in5h),
+      ] },
+      { provider: 'muse', providerLabel: 'Muse Assist', windows: [
+        win('7d', '7-day', 35, in3d),
+        win('balance', 'balance', 64, in3d),
+      ] },
+    ],
+  }));
+  await login(page);
+  await page.goto('/agents');
+  await pinFonts(page);
+  const card = page.getByRole('heading', { name: 'Subscription Quotas' })
+    .locator('xpath=ancestor::div[contains(@class, "rounded-xl")][1]');
+  await expect(card.getByText('Antigravity · Third-Party', { exact: true })).toBeVisible();
+  await expect(card.getByText('extra', { exact: true })).toBeVisible();
+  await expect(card.getByText('+', { exact: true })).toBeVisible();
+  await expect(card.getByText('4-hour', { exact: true })).toHaveCount(0);
+  // Claude 5h, Antigravity Third-Party 5h, MiniMax 5h; the Gemini 5h is hidden.
+  await expect(card.getByText('5-hour', { exact: true })).toHaveCount(3);
+  // Claude (1w and 7d collapsed), both Antigravity pools, Muse Assist.
+  await expect(card.getByText('7-day', { exact: true })).toHaveCount(4);
+  await expect(card).toHaveScreenshot('subscription-quotas-merged.png', stableShot);
+});
