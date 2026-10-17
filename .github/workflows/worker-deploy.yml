@@ -1,0 +1,44 @@
+name: Deploy mapped Workers
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '11,41 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mapped-workers-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: vars.WORKER_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        worker: ["expenses-jays-services", "usage-monitor-receipt-inbox"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npx --no-install vitest run workers/receipt-inbox/index.test.mjs workers/receipt-lifecycle-auditor/index.test.mjs --maxWorkers=1 --no-file-parallelism
+      - run: python3 scripts/test-deploy-mapped-worker.py
+      - name: Deploy exact main and verify receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+          WORKER_HEALTH_ACCESS_CLIENT_ID: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_ID }}
+          WORKER_HEALTH_ACCESS_CLIENT_SECRET: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_SECRET }}
+          RECEIPT_INBOX_READ_TOKEN: ${{ secrets.RECEIPT_INBOX_READ_TOKEN }}
+          RECEIPT_LIFECYCLE_AUDIT_TOKEN: ${{ secrets.RECEIPT_LIFECYCLE_AUDIT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 3a9368057468d0909cafaa85df12d1b7
+          TARGET: ${{ matrix.worker }}
+        run: python3 scripts/deploy-mapped-worker.py "$TARGET"
