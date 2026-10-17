@@ -2,7 +2,7 @@
 
 Default off: set WORKER_DEPLOY_ENABLED=true only after credentials, exact-version
 receipts, and functional probes are reviewed. No secrets are rotated by this
-workflow. CLOUDFLARE_DEPLOY_API_TOKEN is the existing scoped deploy credential;
+workflow. CLOUDFLARE_FLEET_API_TOKEN (Fleet-OPS/prod/root) is the existing scoped deploy credential;
 Access-protected probes use WORKER_HEALTH_ACCESS_CLIENT_ID/SECRET. Receipt inbox
 also needs its existing read token and lifecycle audit token. Do not widen access
 or publish private receipt data to satisfy a probe.
@@ -18,3 +18,8 @@ Incomplete targets deliberately excluded from the matrix: usage-monitor-receipt-
 or absent health routes need an approved probe before automation can be enabled.
 No public health bypass is introduced. Ambiguous start-jays-services,
 fleet-share-api and BotFleet broker are not included. No iOS workflow is changed.
+
+CI reads the scoped Cloudflare token from Fleet-OPS/prod/root through the existing
+automation identity. Repository bootstrap names: INFISICAL_AUTOMATION_CLIENT_ID
+and INFISICAL_AUTOMATION_CLIENT_SECRET. Provisioning those CI bootstrap secrets
+is a separate approved setup step; activation remains off until cutover.

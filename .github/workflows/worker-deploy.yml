@@ -31,10 +31,20 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npx --no-install vitest run workers/receipt-inbox/index.test.mjs workers/receipt-lifecycle-auditor/index.test.mjs --maxWorkers=1 --no-file-parallelism
       - run: python3 scripts/test-deploy-mapped-worker.py
+      - name: Load scoped deploy credential from Fleet-OPS
+        env:
+          INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
+          INFISICAL_ENVIRONMENT: prod
+          INFISICAL_SECRET_PATH: /
+          INFISICAL_NAMES: CLOUDFLARE_FLEET_API_TOKEN
+          INFISICAL_REQUIRED: CLOUDFLARE_FLEET_API_TOKEN
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_SECRET }}
+        run: node scripts/infisical-fetch.mjs
       - name: Deploy exact main and verify receipt
         env:
           GH_TOKEN: ${{ github.token }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_FLEET_API_TOKEN }}
           WORKER_HEALTH_ACCESS_CLIENT_ID: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_ID }}
           WORKER_HEALTH_ACCESS_CLIENT_SECRET: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_SECRET }}
           RECEIPT_INBOX_READ_TOKEN: ${{ secrets.RECEIPT_INBOX_READ_TOKEN }}
