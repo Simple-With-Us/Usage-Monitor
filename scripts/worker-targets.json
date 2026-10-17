@@ -1,0 +1,38 @@
+{
+  "expenses-jays-services": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/expenses-site/wrangler.jsonc"
+    ],
+    "health": "https://expenses.jays.services/api/expenses",
+    "access": true
+  },
+  "usage-monitor-receipt-inbox": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/receipt-inbox/wrangler.jsonc"
+    ],
+    "health": "https://receipt-inbox.jays.services/health",
+    "bearer": "RECEIPT_INBOX_READ_TOKEN",
+    "ok": true
+  },
+  "usage-monitor-receipt-lifecycle-auditor": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/receipt-lifecycle-auditor/wrangler.jsonc"
+    ],
+    "health": null
+  }
+}
