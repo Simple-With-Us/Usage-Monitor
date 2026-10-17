@@ -109,8 +109,16 @@ export const DEFAULT_PROVIDER_MANIFEST: ProviderManifest = {
       terms: { defaultWindowLabel: "weekly" },
     },
     {
+      key: "cursor",
+      label: "Cursor",
+      sortOrder: 65,
+      iconHint: "cursor",
+      expected: true,
+      terms: { defaultWindowLabel: "monthly" },
+    },
+    {
       key: "muse",
-      label: "Muse",
+      label: "Muse Assist",
       sortOrder: 70,
       iconHint: "muse",
       expected: true,

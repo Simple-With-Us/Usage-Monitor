@@ -52,6 +52,11 @@ export async function POST(request: NextRequest) {
       await readBoundedJsonBody(request, { label: "Owner expense body" })
     );
     const recorded = await recordOwnerExpense(input);
+    if (recorded.quarantined) {
+      // Held for owner review as a suspected exact duplicate: accepted but
+      // NOT posted.  202 signals "received, pending a decision".
+      return NextResponse.json(recorded, { status: 202 });
+    }
     return NextResponse.json(recorded, { status: recorded.persisted > 0 ? 201 : 200 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid request";
