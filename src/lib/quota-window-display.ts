@@ -159,9 +159,9 @@ export function normalizeQuotaWindowKey(input: {
 
 /** Collapse legacy per-model window keys onto platform-level windows. */
 export function rollupQuotaWindowKey(windowKey: string): string {
-  if (windowKey === "7d:opus") return "7d";
+  if (windowKey === "7d:opus" || windowKey === "7-day") return "7d";
   if (windowKey === "1w" || windowKey === "1-week" || windowKey === "weekly") return "7d";
-  if (windowKey === "billing-cycle") return "monthly";
+  if (windowKey === "billing-cycle" || windowKey === "1-month") return "monthly";
   return windowKey;
 }
 

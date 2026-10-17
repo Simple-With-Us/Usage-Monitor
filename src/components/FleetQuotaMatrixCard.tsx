@@ -215,7 +215,13 @@ export function buildMergedQuotaSections(data: unknown): MergedProviderSection[]
       // Normalize legacy keys (1w -> 7d, billing-cycle -> monthly) at query
       // time so data ingested before the rollup still deduplicates.
       const windowKey = rollupQuotaWindowKey(rawWindowKey);
-      const displayName = asString(winRec.displayName) ?? windowKey;
+      // A rolled-up key takes its canonical label too: the upstream
+      // displayName still names the legacy key ("1w"), and windowRowTagLabel
+      // would render that unchanged instead of "7-day".
+      const displayName =
+        windowKey !== rawWindowKey
+          ? windowKeyToDisplayLabel(windowKey)
+          : (asString(winRec.displayName) ?? windowKey);
       const rawKey = asString(winRec.rawKey) ?? windowKey;
       const platformTitle = asString(winRec.platformTitle);
       const primary = normalizeSourceReading(winRec.primary);
@@ -252,24 +258,30 @@ export function buildMergedQuotaSections(data: unknown): MergedProviderSection[]
     });
 
     // If a 7-day or monthly window is exhausted (0% remaining), shorter
-    // windows are misleading (they may show available quota that cannot be
-    // used) — hide them.
-    const hasExhaustedLongWindow = withoutBadMiniMax4h.some((view) => {
-      const key = view.windowKey.toLowerCase();
-      const isLong = key === "7d" || key === "7-day" || key === "1w" || key === "weekly"
-        || key === "monthly" || key === "1-month" || key === "billing-cycle";
-      if (!isLong) return false;
-      const pct = view.primary.remainingUnknown ? null : view.primary.remainingPercent;
-      return pct != null && pct <= 0;
-    });
-    const finalWindows = hasExhaustedLongWindow
-      ? withoutBadMiniMax4h.filter((view) => {
+    // windows in the same pool are misleading (they may show available quota
+    // that cannot be used) — hide them.  Scoped by platformTitle: an
+    // exhausted Antigravity Gemini week must not hide the Third-Party pool's
+    // live 5-hour window.  Providers without pools share the null title.
+    const poolOf = (view: MergedQuotaWindowView) => view.platformTitle ?? "";
+    const exhaustedLongPools = new Set(
+      withoutBadMiniMax4h
+        .filter((view) => {
           const key = view.windowKey.toLowerCase();
-          const isShort = key === "5h" || key === "5-hour" || key === "4h" || key === "4-hour"
-            || key === "1d" || key === "1-day" || key === "daily";
-          return !isShort;
+          const isLong = key === "7d" || key === "7-day" || key === "1w" || key === "weekly"
+            || key === "monthly" || key === "1-month" || key === "billing-cycle";
+          if (!isLong) return false;
+          const pct = view.primary.remainingUnknown ? null : view.primary.remainingPercent;
+          return pct != null && pct <= 0;
         })
-      : withoutBadMiniMax4h;
+        .map(poolOf),
+    );
+    const finalWindows = withoutBadMiniMax4h.filter((view) => {
+      if (!exhaustedLongPools.has(poolOf(view))) return true;
+      const key = view.windowKey.toLowerCase();
+      const isShort = key === "5h" || key === "5-hour" || key === "4h" || key === "4-hour"
+        || key === "1d" || key === "1-day" || key === "daily";
+      return !isShort;
+    });
 
     // Deduplicate by rolled-up (windowKey, platformTitle): "1w" and "7d"
     // collapse to a single "7d" row.
