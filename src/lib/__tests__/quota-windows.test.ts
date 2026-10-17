@@ -520,6 +520,7 @@ describe("provider grouping", () => {
       "xai",
       "minimax",
       "grok-bot",
+      "cursor",
       "muse",
     ]);
     const byProvider = new Map(result.providerGroups.map((group) => [group.provider, group]));
