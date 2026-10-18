@@ -38,7 +38,7 @@ export const OPENCODE_PRODUCER_ID = "opencode";
 export const FX_PRODUCER_ID = "fx";
 
 /** DSH events at or before this instant keep the pre-v3 event shape (provider
- *  "deepseek", bare metadata, file-based session key) so replaying archives
+ *  "deepseek", bare metadata, confidence "estimated", file-based session key) so replaying archives
  *  that were already ingested in September dedupes instead of returning
  *  HTTP 409 idempotency_conflict.  Production rows stop at 1788920242939. */
 export const DSH_LEGACY_EVENT_CUTOFF_MS = 1788920300000;
@@ -597,7 +597,9 @@ export function parseDeepSeekSessionJsonl(
     // separate count as diagnostic metadata without double-counting it.
     const reasoningTokens = finiteCount(usage.reasoningTokens);
     for (const event of parsed) {
-      event.confidence = "actual";
+      // The September rows were stored with confidence "estimated"; a replay
+      // that says "actual" is a content difference and returns HTTP 409.
+      if (!legacy) event.confidence = "actual";
       if (reasoningTokens > 0) {
         if (event.metadata?.tokenType === "output") {
           event.metadata.reasoningTokens = reasoningTokens;
