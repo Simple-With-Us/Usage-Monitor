@@ -104,9 +104,11 @@ slices, plus collector `harness`, `seat`, `billingMode`, `durationMs`, `ttftMs`
 and the output slice's `reasoningTokens`), so every producer aggregates the
 same way.  Ingest cost derivation prices the canonical tokens, 1-hour cache
 writes included, by served model, then requested model, then `producerKeyRef`.
-Each event that carried the typed block also gets one `AiRequest` row
-(UM-1590 per-request store, `sources: ingest`, dedupe key
-`ingest:<idempotencyKey>`).  Legacy-mapped events do not, because collector
+Each single-call event that carried the typed block (`requests` absent or `1`,
+no `windowStart` / `windowEnd`) also gets one `AiRequest` row (UM-1590
+per-request store, `sources: ingest`, dedupe key `ingest:<idempotencyKey>`).
+A run or window summary must set `requests` to its call count (or `0`) or give
+the window, so its total duration never reads as one request.  Legacy-mapped events do not, because collector
 rows are token slices or window totals rather than single requests.
 
 **Response `202` (v2 ACK):** counts satisfy
