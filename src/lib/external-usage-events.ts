@@ -14,12 +14,19 @@ import {
   receiptCashProviderId,
 } from "@/lib/receipt-cash";
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
-import { ingestCostDerivationEnabled } from "@/lib/pricing/derive-ingest-cost";
+import {
+  DERIVED_COST_METADATA_KEYS,
+  ingestCostDerivationEnabled,
+} from "@/lib/pricing/derive-ingest-cost";
 import {
   canonicalTokenType,
   deriveTokenCostUsd,
   getModelPricing,
 } from "@/lib/pricing/model-pricing";
+import {
+  hasCanonicalAiMetadata,
+  withoutCanonicalAiMetadata,
+} from "@/lib/ai-usage-metadata";
 import {
   DERIVED_ANALYTICS_TOKEN_SOURCE_APPS,
   isSubscriptionAnalyticsTelemetry,
@@ -305,12 +312,32 @@ function metadataComparableForReplay(value: unknown): unknown {
   return Object.keys(rest).length > 0 ? rest : null;
 }
 
+// `_derivedCost*` stamps are computed server-side at ingest from fields that
+// are already compared (tokens, model) plus the bundled pricing snapshot.  A
+// replay derived under a newer snapshot, or with canonical tokens a pre-UM-1592
+// row lacked, would otherwise read as a producer change and return 409.
+function withoutDerivedCostMetadata(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!DERIVED_COST_METADATA_KEYS.some((key) => key in record)) return value;
+  const rest = { ...record };
+  for (const key of DERIVED_COST_METADATA_KEYS) delete rest[key];
+  return Object.keys(rest).length > 0 ? rest : null;
+}
+
 // NOTE: providerRequestId is deliberately NOT a field here (see its doc
 // comment on ExternalUsageEventInput above) — a replay with a different
 // providerRequestId under the same idempotencyKey must still dedupe, not
 // throw ExternalUsageIdempotencyCollisionError.
-function comparableEvent(event: ExternalUsageEventInput | ExistingExternalUsageEvent) {
+function comparableEvent(
+  event: ExternalUsageEventInput | ExistingExternalUsageEvent,
+  options: { ignoreCanonicalAi?: boolean } = {}
+) {
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
+  const serverComparable = withoutDerivedCostMetadata(value.metadata ?? null);
+  const metadata = options.ignoreCanonicalAi
+    ? withoutCanonicalAiMetadata(serverComparable)
+    : serverComparable;
   const iso = (date: Date | undefined | null) => date?.toISOString() ?? null;
   return {
     sourceApp: value.sourceApp,
@@ -342,7 +369,7 @@ function comparableEvent(event: ExternalUsageEventInput | ExistingExternalUsageE
     // basis. Compare it separately so an old event can gain attribution on a
     // replay without weakening collision checks for every other metadata
     // field (or allowing one project name to be replaced by another).
-    metadata: stableJson(metadataComparableForReplay(value.metadata ?? null)),
+    metadata: stableJson(metadataComparableForReplay(metadata)),
   };
 }
 
@@ -350,8 +377,14 @@ function sameEvent(
   left: ExternalUsageEventInput | ExistingExternalUsageEvent,
   right: ExternalUsageEventInput | ExistingExternalUsageEvent
 ): boolean {
-  const leftComp = comparableEvent(left);
-  const rightComp = comparableEvent(right);
+  // The `_ai*` keys are a server-side projection added at ingest (UM-1592).
+  // A row persisted before that projection existed has none, so a replay of
+  // it must not read as an idempotency collision just because the replay now
+  // carries the projection.  When both sides have it, it is compared as usual.
+  const ignoreCanonicalAi =
+    hasCanonicalAiMetadata(left.metadata) !== hasCanonicalAiMetadata(right.metadata);
+  const leftComp = comparableEvent(left, { ignoreCanonicalAi });
+  const rightComp = comparableEvent(right, { ignoreCanonicalAi });
   if (stableJson(leftComp) === stableJson(rightComp)) {
     return true;
   }

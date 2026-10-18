@@ -42,7 +42,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export type AiRequestKind = "complete" | "codex-api" | "codex-completion";
-export type AiRequestSource = "logs" | "traces";
+/** `ingest`: a usage telemetry v2 event that carried the shared `ai` block (UM-1592). */
+export type AiRequestSource = "logs" | "traces" | "ingest";
 
 export interface AiRequestInput {
   dedupeKey: string;
