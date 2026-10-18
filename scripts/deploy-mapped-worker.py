@@ -3,12 +3,14 @@
 import fnmatch, json, os, re, subprocess, sys, urllib.request
 ACCOUNT = "3a9368057468d0909cafaa85df12d1b7"
 TARGETS = json.load(open("scripts/worker-targets.json"))
-# Paths whose change can alter what a Worker deploy publishes.  Keep this list identical
-# to the push: paths: list in .github/workflows/worker-deploy.yml.  The push filter cannot
-# cover the schedule and workflow_dispatch triggers, so worker_changed() applies it to them.
-WORKER_PATHS=["workers/**","scripts/deploy-mapped-worker.py","scripts/test-deploy-mapped-worker.py",
+# Paths whose change can alter what a Worker deploy PUBLISHES.  Deliberately narrower than
+# the push: paths: list in .github/workflows/worker-deploy.yml, which also includes test-only
+# files so test changes still run the pipeline.  The push filter cannot cover the schedule and
+# workflow_dispatch triggers, so worker_changed() applies this list to them.  The test in
+# scripts/test-deploy-mapped-worker.py asserts every entry here stays in the workflow list.
+WORKER_PATHS=["workers/**","scripts/deploy-mapped-worker.py",
   "scripts/worker-targets.json","scripts/infisical-fetch.mjs","scripts/verify-receipt-inbox-lifecycle.mjs",
-  "package.json","package-lock.json","vitest.config.ts","vitest.setup.ts",
+  "package.json","package-lock.json",
   ".github/workflows/worker-deploy.yml"]
 def worker_changed(live,target,cwd=None):
     """False only when git proves no deploy-relevant path differs between the live release and target.

@@ -3,9 +3,11 @@ on:
   push:
     branches: [main]
     # Native-only (ios/, macos/) and web-app-only merges must not redeploy the
-    # Workers.  schedule and workflow_dispatch cannot filter by path, so
-    # worker_changed() in scripts/deploy-mapped-worker.py applies the same
-    # list to them.  Keep both lists in step.
+    # Workers.  This list covers everything the pipeline needs (including
+    # test-only files, so test changes still run CI).  schedule and
+    # workflow_dispatch cannot filter by path, so worker_changed() in
+    # scripts/deploy-mapped-worker.py applies its narrower deploy-relevant
+    # subset to them; a unit test keeps that subset inside this list.
     paths:
       - 'workers/**'
       - 'scripts/deploy-mapped-worker.py'
