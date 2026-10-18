@@ -95,9 +95,11 @@ const AGENT_MARKER = new RegExp(`\\[\\s*(?:ag|${AGENT_NAMES})\\s*\\]`, "gi");
 const AGENT_NAME_DENY = new RegExp(`(?:\\b(?:${AGENT_NAMES})\\b|\\[\\s*ag\\s*\\])`, "i");
 
 function centralTimestamp(now = new Date()) {
-  // AGENT-SYNC renders "Mon, Aug 12, 2026 at 1:15 AM CT". One combined
-  // Intl call yields "Mon, Aug 12, 2026, 1:15 AM" (comma, not "at"), so build
-  // the two halves separately. America/Chicago handles CDT/CST automatically.
+  // AGENT-SYNC renders "Wed, Aug 12, 2026 at 1:15am": the owner's clock,
+  // 12-hour, lowercase am or pm with no space, and NO timezone abbreviation
+  // (owner rule; the older "1:15 AM CT" form is retired). One combined Intl
+  // call yields "Wed, Aug 12, 2026, 1:15 AM" (comma, not "at"), so build the
+  // two halves separately. America/Chicago handles daylight time automatically.
   const d = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
     weekday: "short", month: "short", day: "numeric", year: "numeric"
@@ -105,8 +107,8 @@ function centralTimestamp(now = new Date()) {
   const t = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
     hour: "numeric", minute: "2-digit", hour12: true
-  }).format(now);
-  return `${d} at ${t} CT`;
+  }).format(now).replace(/\s*([AP])M$/i, (_m, ap) => `${ap.toLowerCase()}m`);
+  return `${d} at ${t}`;
 }
 
 function gitSubjects(repoRoot, prevSha) {
