@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Local collector for DeepSeek Harness (DSH) session archives.
 //
-// Reads ~/.dsh/sessions/**/session.jsonl.zstd assistant/message records and
-// sends exact input/output/cache-read token counts plus model attribution.
+// Reads ~/.dsh/sessions and ~/.clutch/dsh/sessions session.jsonl.zstd and
+// session.v3.jsonl.zstd assistant/message records and sends exact
+// input/output/cache-read token counts plus model attribution, provider,
+// harness, billing mode and per-step duration.
 // BotFleet-managed child sessions can be excluded after BotFleet's durable
 // sender is deployed.  API-equivalent analytics only.
 //
@@ -13,18 +15,20 @@
 //   USAGE_INGEST_TOKEN or DEEPSEEK_INGEST_TOKEN
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
 //   DSH_HOME (default ~/.dsh)
+//   CLUTCH_DSH_HOME (default ~/.clutch/dsh)
 //   ZSTD_BIN (default /opt/homebrew/bin/zstd)
 
 
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import {
   DEEPSEEK_PRODUCER_ID,
+  DSH_LEGACY_PRODUCER_INSTANCE_ID,
   filterEventsSince,
   parseDeepSeekSessionJsonl,
   postUsageBatches,
@@ -67,33 +71,78 @@ async function decompress(path) {
   return stdout;
 }
 
+function defaultHomes() {
+  return [
+    {
+      home: expandHome(process.env.DSH_HOME || join(homedir(), ".dsh")),
+      harness: "dsh",
+    },
+    {
+      // Clutch bundles DSH and keeps its own session store.
+      home: expandHome(process.env.CLUTCH_DSH_HOME || join(homedir(), ".clutch", "dsh")),
+      harness: "clutch",
+    },
+  ];
+}
+
+const SESSION_FILE_NAMES = new Set(["session.jsonl.zstd", "session.v3.jsonl.zstd"]);
+
 export async function collectDeepSeekEvents({
-  dshHome = expandHome(process.env.DSH_HOME || join(homedir(), ".dsh")),
+  homes,
+  dshHome,
   since,
   scanStatus,
 } = {}) {
   const markIncomplete = () => {
     if (scanStatus) scanStatus.complete = false;
   };
-  const root = join(dshHome, "sessions");
-  const files = await walkFiles(root, {
-    name: "session.jsonl.zstd",
-    onTraversalError: markIncomplete,
-  });
+  const roots = homes ?? (dshHome ? [{ home: dshHome, harness: "dsh" }] : defaultHomes());
+  // v1 (session.jsonl.zstd) archives are read before their v3 twins so the
+  // pre-v3 event shape wins for messages that production already holds.
+  const seenMessageIds = new Set();
   const events = [];
-  for (const file of files) {
-    if (botFleetChildExclusionEnabled() && isBotFleetSessionPath(file)) continue;
-    try {
-      const fileStat = await stat(file);
-      if (since && fileStat.mtime < since) continue;
-      const text = await decompress(file);
-      const parsed = parseDeepSeekSessionJsonl(text, {
-        sessionKey: sessionKeyFor(dshHome, file),
+  for (const { home, harness } of roots) {
+    const files = await walkFiles(join(home, "sessions"), {
+      suffix: ".jsonl.zstd",
+      onTraversalError: markIncomplete,
+    });
+    const archives = files
+      .filter((file) => SESSION_FILE_NAMES.has(basename(file)))
+      .sort((a, b) => {
+        const av3 = basename(a) === "session.v3.jsonl.zstd" ? 1 : 0;
+        const bv3 = basename(b) === "session.v3.jsonl.zstd" ? 1 : 0;
+        return av3 - bv3 || (a < b ? -1 : a > b ? 1 : 0);
       });
-      events.push(...filterEventsSince(parsed, since));
-    } catch (error) {
-      if (scanStatus) scanStatus.complete = false;
-      if (DEBUG) log(`skipped unreadable archive (${error instanceof Error ? error.name : "error"})`);
+    const freshDirs = new Set();
+    const stats = new Map();
+    for (const file of archives) {
+      try {
+        const fileStat = await stat(file);
+        stats.set(file, fileStat);
+        if (!since || fileStat.mtime >= since) freshDirs.add(dirname(file));
+      } catch {
+        markIncomplete();
+      }
+    }
+    for (const file of archives) {
+      if (botFleetChildExclusionEnabled() && isBotFleetSessionPath(file)) continue;
+      // Read a stale v1 archive only when its v3 twin is fresh, so message
+      // ids already ingested from the v1 shape are not re-emitted from v3.
+      if (!stats.has(file) || !freshDirs.has(dirname(file))) continue;
+      try {
+        const text = await decompress(file);
+        const isV1 = basename(file) === "session.jsonl.zstd";
+        const parsed = parseDeepSeekSessionJsonl(text, {
+          sessionKey: sessionKeyFor(home, dirname(file)),
+          legacySessionKey: isV1 ? sessionKeyFor(home, file) : undefined,
+          seenMessageIds,
+          harness,
+        });
+        events.push(...filterEventsSince(parsed, since));
+      } catch (error) {
+        if (scanStatus) scanStatus.complete = false;
+        if (DEBUG) log(`skipped unreadable archive (${error instanceof Error ? error.name : "error"})`);
+      }
     }
   }
   return events;
@@ -126,14 +175,37 @@ async function main() {
     "USAGE_INGEST_TOKEN",
   ]);
   try {
-    const ack = await postUsageBatches({
-      events,
-      ingestUrl: INGEST_URL,
-      ingestToken: token,
-      producerId: PRODUCER_ID,
-      dryRun: DRY || args.dryRun,
-      log,
-    });
+    // Pre-v3 shaped events replay under the instance id they were first
+    // stored with; everything else uses this machine's id.
+    const legacyEvents = events.filter((event) => !event.metadata?.harness);
+    const currentEvents = events.filter((event) => event.metadata?.harness);
+    const acks = [];
+    for (const [batchEvents, producerInstanceId] of [
+      [legacyEvents, DSH_LEGACY_PRODUCER_INSTANCE_ID],
+      [currentEvents, undefined],
+    ]) {
+      if (batchEvents.length === 0) continue;
+      acks.push(
+        await postUsageBatches({
+          events: batchEvents,
+          ingestUrl: INGEST_URL,
+          ingestToken: token,
+          producerId: PRODUCER_ID,
+          producerInstanceId,
+          dryRun: DRY || args.dryRun,
+          log,
+        }),
+      );
+    }
+    const ack = acks.reduce(
+      (sum, part) => ({
+        received: sum.received + part.received,
+        persisted: sum.persisted + part.persisted,
+        rejected: sum.rejected + part.rejected,
+        dryRun: sum.dryRun || Boolean(part.dryRun),
+      }),
+      { received: 0, persisted: 0, rejected: 0, dryRun: false },
+    );
     log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);
     if (ack.rejected > 0) fail(`Ingest reported rejections: ${ack.rejected}`);
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
