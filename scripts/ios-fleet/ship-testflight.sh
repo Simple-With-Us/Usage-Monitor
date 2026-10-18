@@ -208,9 +208,12 @@ load_sentry_auth() {
     return 0
   fi
   # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired flat file.
-  local fs_bin="/Users/jay/.local/bin/fleet-secrets"
-  if [[ -x "$fs_bin" ]]; then
-    SENTRY_AUTH_TOKEN="$("$fs_bin" get SENTRY_AUTH_TOKEN 2>/dev/null || true)"
+  # Try the root path, then /global-api-keys, like the sibling scripts do.
+  if command -v fleet-secrets >/dev/null 2>/dev/null; then
+    SENTRY_AUTH_TOKEN="$(fleet-secrets get SENTRY_AUTH_TOKEN --path / 2>/dev/null \
+      || fleet-secrets get SENTRY_AUTH_TOKEN --path /global-api-keys 2>/dev/null \
+      || true)"
+    SENTRY_AUTH_TOKEN="${SENTRY_AUTH_TOKEN//$'\r'/}"
     export SENTRY_AUTH_TOKEN
   fi
 }
