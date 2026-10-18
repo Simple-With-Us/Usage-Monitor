@@ -2,6 +2,22 @@ name: Deploy mapped Workers
 on:
   push:
     branches: [main]
+    # Native-only (ios/, macos/) and web-app-only merges must not redeploy the
+    # Workers.  schedule and workflow_dispatch cannot filter by path, so
+    # worker_changed() in scripts/deploy-mapped-worker.py applies the same
+    # list to them.  Keep both lists in step.
+    paths:
+      - 'workers/**'
+      - 'scripts/deploy-mapped-worker.py'
+      - 'scripts/test-deploy-mapped-worker.py'
+      - 'scripts/worker-targets.json'
+      - 'scripts/infisical-fetch.mjs'
+      - 'scripts/verify-receipt-inbox-lifecycle.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vitest.config.ts'
+      - 'vitest.setup.ts'
+      - '.github/workflows/worker-deploy.yml'
   schedule:
     - cron: '11,41 * * * *'
   workflow_dispatch:
@@ -25,6 +41,8 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+          # worker_changed() diffs the deployed tag against main.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24

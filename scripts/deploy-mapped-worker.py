@@ -1,8 +1,28 @@
 #!/usr/bin/env python3
 """Serialized exact-main code deployment. Activation and credentials are external."""
-import json, os, subprocess, sys, urllib.request
+import fnmatch, json, os, re, subprocess, sys, urllib.request
 ACCOUNT = "3a9368057468d0909cafaa85df12d1b7"
 TARGETS = json.load(open("scripts/worker-targets.json"))
+# Paths whose change can alter what a Worker deploy publishes.  Keep this list identical
+# to the push: paths: list in .github/workflows/worker-deploy.yml.  The push filter cannot
+# cover the schedule and workflow_dispatch triggers, so worker_changed() applies it to them.
+WORKER_PATHS=["workers/**","scripts/deploy-mapped-worker.py","scripts/test-deploy-mapped-worker.py",
+  "scripts/worker-targets.json","scripts/infisical-fetch.mjs","scripts/verify-receipt-inbox-lifecycle.mjs",
+  "package.json","package-lock.json","vitest.config.ts","vitest.setup.ts",
+  ".github/workflows/worker-deploy.yml"]
+def worker_changed(live,target,cwd=None):
+    """False only when git proves no deploy-relevant path differs between the live release and target.
+
+    Any doubt (malformed tag, commit not in this checkout, diff failure) counts as changed:
+    deploy, never wrongly skip."""
+    if not re.fullmatch(r"[0-9a-f]{40}",live or ""):return True
+    def git(*args):return subprocess.run(["git",*args],cwd=cwd,capture_output=True,text=True)
+    if git("cat-file","-e",live+"^{commit}").returncode!=0:return True
+    base=git("merge-base",live,target)
+    if base.returncode!=0 or base.stdout.strip()!=live:return True
+    diff=git("diff","--name-only","--no-renames","-z",live,target)
+    if diff.returncode!=0:return True
+    return any(fnmatch.fnmatchcase(p,g) for p in diff.stdout.split("\0") if p for g in WORKER_PATHS)
 def api(path):
     request = urllib.request.Request("https://api.cloudflare.com/client/v4/accounts/" + ACCOUNT + path,
       headers={"Authorization":"Bearer " + os.environ["CLOUDFLARE_API_TOKEN"]})
@@ -41,7 +61,9 @@ def main():
     if not target.get("health"):raise SystemExit("No approved CI functional probe; activation blocked")
     sha=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
     if current_main()!=sha:print("Superseded; skipping");return
-    if deployed_tag(name)==sha:probe(target,name);print("Already deployed and healthy");return
+    tag=deployed_tag(name)
+    if tag==sha:probe(target,name);print("Already deployed and healthy");return
+    if not worker_changed(tag,sha):probe(target,name);print("No Worker-relevant changes since "+tag[:12]+"; healthy, skipping");return
     # Do not start a deployment unless probe credentials are present and old live service is healthy.
     # Fail closed: a live Worker that fails this probe is recovered by a manual deploy or rollback.
     probe(target,name)
