@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/prisma";
+import { classifyAiRequestCost } from "@/lib/ai-request-cost";
+import { PRICING_SNAPSHOT_META } from "@/lib/pricing/model-pricing";
 
 // Per-request performance summary over AiRequest (UM-1590).
 // Percentiles are computed in JS over a bounded, recent window: SQLite has no
@@ -24,9 +26,20 @@ export interface AiRequestPerformanceRow {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   reasoningTokens: number;
-  /** PAYG-equivalent cost reported by the harness (estimated), when present. */
+  /** PAYG-equivalent cost REPORTED by the harness, when present.  Never mixed with the estimate. */
   costUsd: number;
   costUsdKnownRequests: number;
+  /**
+   * Monitor-side estimate (UM-1610) for requests with tokens but no reported
+   * cost, from the bundled LiteLLM catalog.  Covers only those requests, so
+   * `costUsd + derivedCostUsd` never counts a request twice.
+   */
+  derivedCostUsd: number;
+  derivedCostRequests: number;
+  /** Derived requests whose estimate is a floor (catalog lacks a rate for a used token type). */
+  derivedCostIncompleteRequests: number;
+  /** Requests with tokens and no reported cost whose model is not in the catalog. */
+  unpricedRequests: number;
   billingModes: Record<string, number>;
 }
 
@@ -36,7 +49,13 @@ export interface AiRequestPerformance {
   since: string;
   totalRequests: number;
   truncated: boolean;
+  /** Sum of harness-reported cost. */
   totalCostUsd: number;
+  /** Sum of monitor-derived estimates for requests with no reported cost. */
+  totalDerivedCostUsd: number;
+  totalDerivedCostRequests: number;
+  /** Provenance of the catalog behind the estimates (ISO fetch time). */
+  pricingSnapshotFetchedAt: string | null;
   rows: AiRequestPerformanceRow[];
 }
 
@@ -56,6 +75,8 @@ type PerfInput = {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
+  cacheWrite5mTokens?: number | null;
+  cacheWrite1hTokens?: number | null;
   reasoningTokens: number | null;
   costUsd: number | null;
   billingMode: string | null;
@@ -97,6 +118,20 @@ export function summarizeAiRequests(rows: PerfInput[]): AiRequestPerformanceRow[
       billingModes[mode] = (billingModes[mode] ?? 0) + 1;
     }
     const rate = percentile(rates, 0.5);
+    let derivedCost = 0;
+    let derivedRequests = 0;
+    let derivedIncomplete = 0;
+    let unpriced = 0;
+    for (const r of list) {
+      const cost = classifyAiRequestCost(r);
+      if (cost.source === "derived") {
+        derivedCost += cost.costUsd ?? 0;
+        derivedRequests += 1;
+        if (cost.incomplete) derivedIncomplete += 1;
+      } else if (cost.source === "unpriced") {
+        unpriced += 1;
+      }
+    }
     out.push({
       harness,
       model,
@@ -115,6 +150,10 @@ export function summarizeAiRequests(rows: PerfInput[]): AiRequestPerformanceRow[
       reasoningTokens: sum((r) => r.reasoningTokens),
       costUsd: Math.round(sum((r) => r.costUsd) * 1e6) / 1e6,
       costUsdKnownRequests: list.filter((r) => r.costUsd != null).length,
+      derivedCostUsd: Math.round(derivedCost * 1e6) / 1e6,
+      derivedCostRequests: derivedRequests,
+      derivedCostIncompleteRequests: derivedIncomplete,
+      unpricedRequests: unpriced,
       billingModes,
     });
   }
@@ -124,7 +163,13 @@ export function summarizeAiRequests(rows: PerfInput[]): AiRequestPerformanceRow[
 export async function getAiRequestPerformance(days: number, now = new Date()): Promise<AiRequestPerformance> {
   const since = new Date(now.getTime() - days * 86_400_000);
   const rows = await prisma.aiRequest.findMany({
-    where: { occurredAt: { gte: since } },
+    where: {
+      occurredAt: { gte: since },
+      // Rows stored before UM-1610 for Codex calls that name no model and never
+      // got a completion (non-inference API calls).  They are not model calls;
+      // the mapper no longer stores them and retention removes the old ones.
+      NOT: { harness: "codex", requestedModel: null, servedModel: null, inputTokens: null, outputTokens: null },
+    },
     orderBy: { occurredAt: "desc" },
     take: MAX_PERFORMANCE_ROWS + 1,
     select: {
@@ -137,6 +182,8 @@ export async function getAiRequestPerformance(days: number, now = new Date()): P
       outputTokens: true,
       cacheReadTokens: true,
       cacheWriteTokens: true,
+      cacheWrite5mTokens: true,
+      cacheWrite1hTokens: true,
       reasoningTokens: true,
       costUsd: true,
       billingMode: true,
@@ -153,6 +200,9 @@ export async function getAiRequestPerformance(days: number, now = new Date()): P
     totalRequests: used.length,
     truncated,
     totalCostUsd: Math.round(summary.reduce((acc, r) => acc + r.costUsd, 0) * 1e6) / 1e6,
+    totalDerivedCostUsd: Math.round(summary.reduce((acc, r) => acc + r.derivedCostUsd, 0) * 1e6) / 1e6,
+    totalDerivedCostRequests: summary.reduce((acc, r) => acc + r.derivedCostRequests, 0),
+    pricingSnapshotFetchedAt: PRICING_SNAPSHOT_META?.fetchedAt ?? null,
     rows: summary,
   };
 }

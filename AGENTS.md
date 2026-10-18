@@ -146,6 +146,13 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
   `claude_code.interaction` is a turn).  `AiRequest` never feeds cash math.  Read path:
   `GET /api/ai-requests/performance?days=7` (session or `USAGE_READ_TOKEN`) and the Request
   Performance table on the Agents page.  Retention `AI_REQUEST_RETENTION_DAYS` (default 180).
+  `costUsd` is only the harness-reported figure.  Rows with tokens but no reported cost (Codex,
+  Claude trace-only rows) are priced at READ time from the bundled LiteLLM snapshot by
+  `src/lib/ai-request-cost.ts` (UM-1610):  nothing is stored, a reported cost always wins, and the
+  summary returns `costUsd` and `derivedCostUsd` separately, with `costUsdKnownRequests`,
+  `derivedCostRequests`, `derivedCostIncompleteRequests` and `unpricedRequests`, so the UI shows
+  reported and estimated apart.  A Codex `api_request` with no `model` attribute is not stored
+  (a housekeeping HTTP call that never gets a completion).
 - **Both routes are excluded from the dashboard-session middleware** (`src/middleware.ts`'s
   `api/otlp(?:/|$)` exclusion, alongside the pre-existing `api/ingest` one) — without this
   exclusion, even a request with a correct `USAGE_INGEST_TOKEN` gets a 401 from the middleware
