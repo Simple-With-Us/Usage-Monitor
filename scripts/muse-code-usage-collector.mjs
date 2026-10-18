@@ -362,7 +362,7 @@ async function main() {
   const token = resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   if (!token && !DRY_RUN) {
     log(
-      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure token is set in environment or ~/.secrets/global-api-keys.",
+      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`.",
     );
     process.exit(1);
   }

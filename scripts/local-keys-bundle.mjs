@@ -23,15 +23,18 @@
  *   build  --passphrase-file <path> --out <path.umkeys>
  *          [--providers a,b,c] [--config <local-export.json>]
  *          [--secrets-file <path>] [--iterations <n>]
+ *   Keys come from `fleet-secrets` (OPS-818).  --secrets-file names a KEY=VALUE
+ *   fixture file for tests;  never point it at the retired flat secrets file.
  *   verify --passphrase-file <path> <path.umkeys>
  */
 
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+
+import { fleetSecretsGet, fleetSecretsNames } from "./lib/fleet-secrets.mjs";
 
 // ---------------------------------------------------------------------------
 // THE MAP — catalog provider slug -> source env name(s) in the secrets file.
@@ -41,7 +44,7 @@ import { fileURLToPath } from "node:url";
 //     (phonePollAdapterKinds ∩ mode == .poll — only entries the phone can
 //      actually poll with a key; LocalAppModel additionally validates that
 //      xai carries a teamId and twilio an accountSid)
-//   ~/.secrets/global-api-keys key NAMES (never values) + .env.example.
+//   the fleet secret store's key NAMES (never values) + .env.example.
 //
 // | provider   | apiKey source env                                   | extra fields          | notes |
 // |------------|-----------------------------------------------------|-----------------------|-------|
@@ -95,7 +98,6 @@ export const KDF = "pbkdf2-hmac-sha256";
 export const DEFAULT_ITERATIONS = 600000;
 export const MIN_ITERATIONS = 100000;
 export const MAX_ITERATIONS = 5000000;
-export const DEFAULT_SECRETS_FILE = path.join(os.homedir(), ".secrets", "global-api-keys");
 
 const SALT_BYTES = 16;
 const NONCE_BYTES = 12;
@@ -128,7 +130,27 @@ export function parseSecretsFile(text) {
   return map;
 }
 
+/** Every env name PROVIDER_SOURCES can read, deduplicated. */
+function sourceEnvNames() {
+  const names = new Set();
+  for (const source of PROVIDER_SOURCES) {
+    if (source.apiKeyEnv) names.add(source.apiKeyEnv);
+    if (source.teamIdEnv) names.add(source.teamIdEnv);
+    for (const name of source.compositeEnvs ?? []) names.add(name);
+  }
+  return names;
+}
+
+/** Name -> value map for `build`: from a fixture file, else fleet-secrets. */
 function readSecretsMap(secretsPath) {
+  if (secretsPath === undefined) {
+    const map = new Map();
+    for (const name of sourceEnvNames()) {
+      const value = fleetSecretsGet(name);
+      if (value) map.set(name, value);
+    }
+    return map;
+  }
   let text;
   try {
     text = fs.readFileSync(secretsPath, "utf8");
@@ -136,6 +158,18 @@ function readSecretsMap(secretsPath) {
     throw new CliError(`Cannot read secrets file at ${secretsPath}.`);
   }
   return parseSecretsFile(text);
+}
+
+/** Names only for `list`: values never leave the store. */
+function readSecretNames(secretsPath) {
+  if (secretsPath === undefined) {
+    const names = fleetSecretsNames();
+    if (names.size === 0) {
+      throw new CliError("fleet-secrets returned no key names.  Run: fleet-secrets doctor");
+    }
+    return names;
+  }
+  return new Set(readSecretsMap(secretsPath).keys());
 }
 
 /** Refuse group/world-readable passphrase files; read and trim one trailing newline. */
@@ -331,10 +365,11 @@ export function resolveProvider(source, secretsMap) {
 // ---------------------------------------------------------------------------
 
 function cmdList(args) {
-  const secretsPath = args.get("--secrets-file") ?? DEFAULT_SECRETS_FILE;
-  // Names only: the values in the file are discarded at the parse boundary so
-  // nothing value-bearing can reach the console below.
-  const presentNames = new Set(readSecretsMap(secretsPath).keys());
+  const secretsPath = args.get("--secrets-file");
+  // Names only: `fleet-secrets names` never returns a value, and a fixture
+  // file's values are discarded at the parse boundary, so nothing
+  // value-bearing can reach the console below.
+  const presentNames = readSecretNames(secretsPath);
   const rows = PROVIDER_SOURCES.map((source) => {
     const presence = providerPresence(source, presentNames);
     const status =
@@ -348,7 +383,7 @@ function cmdList(args) {
   const providerWidth = Math.max(8, ...rows.map((row) => row.provider.length));
   const sourceWidth = Math.max(10, ...rows.map((row) => row.source.length));
   console.log("Local Keys Bundle — Provider Sources");
-  console.log(`Secrets file: ${secretsPath} (names checked, values never printed)`);
+  console.log(`Secrets source: ${secretsPath ?? "fleet-secrets"} (names checked, values never printed)`);
   console.log("");
   console.log(`  ${"Provider".padEnd(providerWidth)}  ${"Source Env".padEnd(sourceWidth)}  Status`);
   for (const row of rows) {
@@ -363,7 +398,7 @@ function cmdList(args) {
 function cmdBuild(args) {
   const passphrasePath = requireArg(args, "--passphrase-file");
   const outPath = requireArg(args, "--out");
-  const secretsPath = args.get("--secrets-file") ?? DEFAULT_SECRETS_FILE;
+  const secretsPath = args.get("--secrets-file");
   const iterations = args.has("--iterations")
     ? Number.parseInt(args.get("--iterations"), 10)
     : DEFAULT_ITERATIONS;

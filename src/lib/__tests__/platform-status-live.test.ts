@@ -12,8 +12,7 @@
  * `process.env` here, and redirect stderr away from anything that displays it.
  *
  * Run with:
- *   set -a; . ~/.secrets/global-api-keys; set +a
- *   PLATFORM_STATUS_LIVE=1 node_modules/.bin/vitest run \
+ *   fleet-secrets run -- env PLATFORM_STATUS_LIVE=1 node_modules/.bin/vitest run \
  *     src/lib/__tests__/platform-status-live.test.ts
  */
 

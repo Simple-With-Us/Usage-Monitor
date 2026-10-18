@@ -14,11 +14,11 @@
 # Every subcommand here is value-blind by construction:
 #   names            list secret KEY NAMES only
 #   has KEY          exit 0/1 — does KEY exist, with a non-empty value
-#   set KEY          copy KEY from a local secrets file into Infisical
-#   pull KEY         copy KEY from Infisical into the local secrets file
+#   set KEY          copy KEY from `fleet-secrets get` into this project's Infisical
+#   pull KEY         retired (OPS-818);  nothing writes or reads the flat secrets file
 #   sync-platforms   batch-copy the platform-status tokens (see MAP below)
 #
-# A value only ever travels: local file <-> shell variable <-> CLI (stdin or
+# A value only ever travels: fleet-secrets -> shell variable -> CLI (stdin or
 # captured --plain). It is never interpolated into a command line (visible in
 # `ps`), never echoed, and never written to a log.
 #
@@ -27,7 +27,6 @@
 #   bash scripts/infisical-secrets-safe.sh names
 #   bash scripts/infisical-secrets-safe.sh has UPTIMEROBOT_API_KEY
 #   bash scripts/infisical-secrets-safe.sh set UPTIMEROBOT_API_KEY
-#   bash scripts/infisical-secrets-safe.sh pull USAGE_INGEST_TOKEN
 #   bash scripts/infisical-secrets-safe.sh sync-platforms --dry-run
 #   bash scripts/infisical-secrets-safe.sh sync-platforms
 #
@@ -35,7 +34,6 @@
 #   INFISICAL_PROJECT_ID   (see fleet-ops:ATTACK-MAP.md)
 #   INFISICAL_ENV          default prod
 #   INFISICAL_PATH         default /
-#   SECRETS_FILE           default ~/.secrets/global-api-keys
 #   INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET  universal-auth machine identity
 #                          (falls back to INFISICAL_AUTOMATION_* / INFISICAL_UM_*)
 #
@@ -44,12 +42,21 @@ set -euo pipefail
 PROJECT_ID="${INFISICAL_PROJECT_ID:-${INFISICAL_UM_PROJECT_ID:-}}"
 ENV_SLUG="${INFISICAL_ENV:-prod}"
 SECRET_PATH="${INFISICAL_PATH:-/}"
-SECRETS_FILE="${SECRETS_FILE:-$HOME/.secrets/global-api-keys}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
 
 command -v infisical >/dev/null 2>/dev/null || die "infisical CLI not found on PATH."
+
+# One value from the Mac-side fleet-secrets CLI (root, then /global-api-keys).
+# Prints nothing and succeeds when the binary or the key is absent.
+fleet_value() {
+  local name="$1"
+  command -v fleet-secrets >/dev/null 2>/dev/null || return 0
+  fleet-secrets get "$name" --path / 2>/dev/null \
+    || fleet-secrets get "$name" --path /global-api-keys 2>/dev/null \
+    || true
+}
 
 # ---------------------------------------------------------------------------
 # Auth — mirrors scripts/infisical-run.mjs's credential precedence.
@@ -60,9 +67,12 @@ infisical_token() {
   local id secret
   id="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${INFISICAL_SHARED_CLIENT_ID:-}}}}"
   secret="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${INFISICAL_SHARED_CLIENT_SECRET:-}}}}"
+  # OPS-818: the flat ~/.secrets file is gone as a source;  fall back to
+  # fleet-secrets (captured, never echoed) for the automation identity.
+  [ -n "$id" ] || id="$(fleet_value INFISICAL_AUTOMATION_CLIENT_ID)"
+  [ -n "$secret" ] || secret="$(fleet_value INFISICAL_AUTOMATION_CLIENT_SECRET)"
   [ -n "$id" ] && [ -n "$secret" ] || die \
-    "No Infisical credentials. Load them first, e.g.:
-  set -a; . $SECRETS_FILE; set +a"
+    "No Infisical credentials. Export INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET (or INFISICAL_TOKEN), or install fleet-secrets."
 
   # --silent keeps the token off stdout except as the captured value.
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$id" \
@@ -92,26 +102,20 @@ cmd_has() {
   cmd_names | grep -qx "$key"
 }
 
-# Read KEY's value out of the local secrets file without printing it.
+# Read KEY's value from fleet-secrets without printing it.
 read_local_value() {
-  local key="$1" line
-  [ -r "$SECRETS_FILE" ] || die "Cannot read $SECRETS_FILE"
-  line="$(grep -m1 "^${key}=" "$SECRETS_FILE" 2>/dev/null || true)"
-  [ -n "$line" ] || return 1
-  # Strip KEY=, then one layer of surrounding quotes.
-  line="${line#*=}"
-  line="${line%\"}"; line="${line#\"}"
-  line="${line%\'}"; line="${line#\'}"
-  [ -n "$line" ] || return 1
-  printf '%s' "$line"
+  local key="$1" value
+  value="$(fleet_value "$key")"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
 }
 
-# Copy SRC_KEY from the local file into Infisical as DEST_KEY.
+# Copy SRC_KEY from fleet-secrets into this project's Infisical as DEST_KEY.
 # The value is passed as an argument to the CLI, so we scrub it from any
 # output the CLI produces before that output can reach a terminal.
 set_secret() {
   local src="$1" dest="${2:-$1}" value
-  value="$(read_local_value "$src")" || { note "  SKIP  $dest  (source $src not in $(basename "$SECRETS_FILE"))"; return 1; }
+  value="$(read_local_value "$src")" || { note "  SKIP  $dest  (source $src not available from fleet-secrets)"; return 1; }
   ensure_token
   if infisical secrets set "$dest=$value" \
       --token="$TOKEN" --projectId="$PROJECT_ID" \
@@ -128,47 +132,11 @@ cmd_set() {
   set_secret "$key" "${2:-$key}"
 }
 
-# Read KEY from Infisical without printing it.
-read_infisical_value() {
-  local key="$1"
-  ensure_token
-  infisical secrets get "$key" --plain --silent \
-    --token="$TOKEN" --projectId="$PROJECT_ID" \
-    --env="$ENV_SLUG" --path="$SECRET_PATH" 2>/dev/null
-}
-
-# Copy KEY from Infisical into the local secrets file as KEY="value".
-# Inverse of `set`. Reports only presence, length, and match — never the value.
+# Retired (OPS-818): `pull` copied an Infisical value into the flat local
+# secrets file, which nothing may read or edit by hand any more.  Read a value
+# with `fleet-secrets get KEY` instead.
 cmd_pull() {
-  local key="${1:?usage: pull KEY}" dest="${2:-$1}" value escaped existing
-  value="$(read_infisical_value "$key")" || die "Infisical has no $key (or it is empty)."
-  [ -n "$value" ] || die "Infisical $key is empty."
-  existing="$(read_local_value "$dest" 2>/dev/null || true)"
-  if [ -n "$existing" ] && [ "$existing" = "$value" ]; then
-    note "  OK    $dest  already matches Infisical (len=${#value})"
-    return 0
-  fi
-  escaped="${value//\\/\\\\}"
-  escaped="${escaped//\"/\\\"}"
-  if [ -n "$existing" ]; then
-    python3 - "$SECRETS_FILE" "$dest" "$escaped" <<'PY'
-import pathlib, re, sys
-path, key, escaped = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-text = path.read_text()
-line = f'{key}="{escaped}"\n'
-new, n = re.subn(rf'^{re.escape(key)}=.*\n?', line, text, count=1, flags=re.M)
-if n != 1:
-    raise SystemExit(f"failed to replace {key}")
-path.write_text(new)
-PY
-    note "  OK    $dest  <- Infisical $key  (replaced, len=${#value})"
-  else
-    printf '%s="%s"\n' "$dest" "$escaped" >>"$SECRETS_FILE"
-    note "  OK    $dest  <- Infisical $key  (appended, len=${#value})"
-  fi
-  chmod 600 "$SECRETS_FILE"
-  existing="$(read_local_value "$dest")" || die "wrote $dest but cannot re-read it"
-  [ "$existing" = "$value" ] || die "wrote $dest but the re-read does not match Infisical"
+  die "pull is retired.  Use: fleet-secrets get KEY"
 }
 
 # Delete KEY(s) from Infisical. `infisical secrets delete` prints nothing
@@ -210,7 +178,7 @@ cmd_delete() {
 #
 # Format: SRC_KEY:DEST_KEY.  They differ where the secret store's name does not
 # match the env var the probe reads; those renames are the whole reason a
-# blind copy of global-api-keys does not light these cards up.
+# blind copy of the fleet secrets does not light these cards up.
 # ---------------------------------------------------------------------------
 MAP=(
   "UPTIMEROBOT_API_KEY:UPTIMEROBOT_API_KEY"
@@ -219,7 +187,7 @@ MAP=(
   "SLACK_MCP_XOXB_TOKEN:SLACK_BOT_TOKEN"
   "PUSHOVER_USAGE_API_TOKEN:PUSHOVER_USAGE_API_TOKEN"
   "PUSHOVER_USER_KEY:PUSHOVER_USER_KEY"
-  # GITHUB_TOKEN in the local file is dead (GitHub 401s it directly), but
+  # GITHUB_TOKEN in the fleet-secrets store is dead (GitHub 401s it directly), but
   # GITHUB_MCP_TOKEN is live — verified 2026-08-12 against /rate_limit.
   "GITHUB_MCP_TOKEN:GITHUB_TOKEN"
   # The project's stored copy went stale while the local one still logs in —
@@ -232,7 +200,7 @@ MAP=(
 HELD_BACK=(
   "SENTRY_READ_TOKEN                        already present and WORKING in prod; never overwrite with SENTRY_AUTH_TOKEN (wrong token type)"
   "STRIPE_SECRET_KEY                        Stripe itself says api_key_expired for the stored key; issue a fresh restricted read key first"
-  "GITHUB_TOKEN (local file copy)           GitHub 401s it; the sync uses GITHUB_MCP_TOKEN instead — fix the file at leisure"
+  "GITHUB_TOKEN (fleet-secrets copy)         GitHub 401s it; the sync uses GITHUB_MCP_TOKEN instead — fix the store at leisure"
   "TWILIO_MCP_CREDS  -> TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN   one blob, needs splitting by hand"
   "ASC_KEY_PATH      -> ASC_PRIVATE_KEY     source is a FILE PATH; prod needs the .p8 PEM CONTENTS"
   "VERCEL_API_TOKEN                         intentionally absent; Vercel is not used by this fleet directly"
@@ -243,7 +211,7 @@ cmd_sync_platforms() {
   [ "${1:-}" = "--dry-run" ] && dry=1
 
   note "Infisical target: project ${PROJECT_ID}  env=${ENV_SLUG}  path=${SECRET_PATH}"
-  note "Source file:     ${SECRETS_FILE}"
+  note "Source:          fleet-secrets"
   note ""
   if [ "$dry" = 1 ]; then
     note "DRY RUN — nothing will be written.  Planned copies:"
@@ -285,13 +253,13 @@ infisical-secrets-safe.sh — value-blind Infisical access.
 
   names                       list secret KEY NAMES only
   has KEY                     exit 0 if KEY exists with a non-empty value
-  set KEY [DEST_KEY]          copy KEY from the local secrets file
-  pull KEY [DEST_KEY]         copy KEY from Infisical into the local secrets file
+  set KEY [DEST_KEY]          copy KEY from fleet-secrets into Infisical
+  pull KEY [DEST_KEY]         retired;  use fleet-secrets get KEY
   delete KEY [KEY...]         delete shared secret(s), verifying they are gone
   sync-platforms [--dry-run]  batch-copy the platform-status tokens
 
-Load credentials first:
-  set -a; . ~/.secrets/global-api-keys; set +a
+Credentials: export INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET (or INFISICAL_TOKEN),
+or let fleet-secrets supply the automation identity.
 USAGE
     exit 2
     ;;

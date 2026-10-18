@@ -36,7 +36,7 @@
 //     GBU_INGEST_TOKEN (gbu).
 //   Each falls back to SUBSCRIPTION_QUOTA_INGEST_TOKEN, then USAGE_INGEST_TOKEN
 //     (unscoped; refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true).  Every
-//     name is read from the environment first, then ~/.secrets/global-api-keys
+//     name is read from the environment first, then `fleet-secrets get`
 //     via resolveCollectorToken.
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
 //   CLAUDE_CODE_OAUTH_CREDENTIALS_JSON — Claude Code OAuth credential JSON

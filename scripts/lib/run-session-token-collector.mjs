@@ -1,35 +1,27 @@
-import { readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { homedir } from "node:os";
 
+import { fleetSecretsGet } from "./fleet-secrets.mjs";
+
 /**
- * Resolves an ingest token from environment variables or falls back to
- * ~/.secrets/global-api-keys (same pattern as mac-server-watchdog.sh and local-keys-bundle.mjs).
+ * Resolves an ingest token from the environment, then from the Mac-side
+ * `fleet-secrets` CLI (OPS-818;  the flat ~/.secrets file is no longer read).
  *
- * Names are tried strictly in order, each in the environment and then in the
- * secrets file, so a producer-scoped name kept in the file still beats an
- * unscoped USAGE_INGEST_TOKEN exported in the environment.
+ * Names are tried strictly in order, each in the environment and then through
+ * `fleet-secrets get`, so a producer-scoped name kept in Infisical still beats
+ * an unscoped USAGE_INGEST_TOKEN exported in the environment.  Pass
+ * `fleetSecretsGet: () => null` for an environment-only lookup.
  */
 export function resolveCollectorToken(
   tokenEnvVarNames = ["USAGE_INGEST_TOKEN"],
-  { env = process.env, secretsPath = join(homedir(), ".secrets", "global-api-keys") } = {},
+  { env = process.env, fleetSecretsGet: lookup = fleetSecretsGet } = {},
 ) {
-  let content = null;
-  try {
-    content = readFileSync(secretsPath, "utf8");
-  } catch {
-    // No secrets file: environment only.
-  }
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
-    if (content) {
-      const match = new RegExp(`^(?:export\\s+)?${name}=["\']?([^"\'\\r\\n]+)["\']?`, "m").exec(content);
-      if (match && match[1]?.trim()) {
-        return match[1].trim();
-      }
-    }
+    const fromFleet = lookup(name)?.trim();
+    if (fromFleet) return fromFleet;
   }
   return null;
 }

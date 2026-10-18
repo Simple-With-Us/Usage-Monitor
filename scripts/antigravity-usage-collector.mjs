@@ -616,7 +616,7 @@ async function main() {
   ]);
   if (!ingestToken && !DRY_RUN) {
     fail(
-      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure token is set in environment or ~/.secrets/global-api-keys."
+      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`."
     );
   }
 
