@@ -47,6 +47,11 @@ class Checks(unittest.TestCase):
    self.assertTrue(m.worker_changed(old,head(),cwd=d))
    self.assertTrue(m.worker_changed("0"*40,head(),cwd=d))
    self.assertTrue(m.worker_changed("",head(),cwd=d))
+ def test_worker_paths_stay_inside_workflow_push_filter(self):
+  with open(".github/workflows/worker-deploy.yml") as f:workflow=f.read()
+  yaml_paths=set(re.findall(r"^\s+-\s+'([^']+)'",workflow,re.M))
+  missing=[p for p in m.WORKER_PATHS if p not in yaml_paths]
+  self.assertEqual(missing,[],"WORKER_PATHS entries missing from workflow push filter: "+str(missing))
  def test_superseded_main_skips_before_any_mutation(self):
   with patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
    patch.object(m.subprocess,"check_output",return_value="old\n"),\
