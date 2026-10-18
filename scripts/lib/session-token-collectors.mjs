@@ -34,6 +34,18 @@ export const CLAUDE_PRODUCER_ID = "claude-code";
 export const DEEPSEEK_PRODUCER_ID = "deepseek-dsh";
 export const CURSOR_PRODUCER_ID = "cursor-agent";
 export const MUSE_PRODUCER_ID = "muse";
+export const OPENCODE_PRODUCER_ID = "opencode";
+export const FX_PRODUCER_ID = "fx";
+
+/** DSH events at or before this instant keep the pre-v3 event shape (provider
+ *  "deepseek", bare metadata, file-based session key) so replaying archives
+ *  that were already ingested in September dedupes instead of returning
+ *  HTTP 409 idempotency_conflict.  Production rows stop at 1788920242939. */
+export const DSH_LEGACY_EVENT_CUTOFF_MS = 1788920300000;
+/** Those production rows were posted while the Mac's hostname was
+ *  "jays.services"; the instance id is part of the stored metadata, so a
+ *  replay must send the same value. */
+export const DSH_LEGACY_PRODUCER_INSTANCE_ID = "jays.services";
 
 const TOKEN_TYPES = ["input", "output", "cacheRead", "cacheCreation"];
 
@@ -97,6 +109,7 @@ export function tokenEventsFromBreakdown({
   model,
   breakdown,
   extraId,
+  extraMetadata,
 }) {
   const events = [];
   for (const tokenType of TOKEN_TYPES) {
@@ -124,6 +137,7 @@ export function tokenEventsFromBreakdown({
       metadata: {
         tokenType,
         ...(model ? { model } : {}),
+        ...(extraMetadata ?? {}),
       },
     });
   }
@@ -435,10 +449,62 @@ export function parseAntigravityStatuslineJsonl(text, { fallbackOccurredAt } = {
   return events;
 }
 
-export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt } = {}) {
+/** DSH and Clutch run several upstream providers.  Map the harness's
+ *  `source.provider` to the UM provider string and a billing mode. */
+export function dshProviderInfo(rawProvider) {
+  const id = typeof rawProvider === "string" ? rawProvider.trim().toLowerCase() : "";
+  if (!id || id.startsWith("deepseek")) {
+    return { provider: "deepseek", billingMode: "payg", legacyEligible: true };
+  }
+  if (id.startsWith("minimax")) {
+    return { provider: "minimax", billingMode: "subscription", legacyEligible: false };
+  }
+  if (id === "meta" || id.startsWith("muse")) {
+    return { provider: "muse-code", billingMode: "subscription", legacyEligible: false };
+  }
+  return { provider: id, billingMode: "payg", legacyEligible: false };
+}
+
+function dshStepDurationMs(messageTimeMs, stepStartMs, stream) {
+  const MAX_MS = 6 * 60 * 60 * 1000;
+  if (Number.isFinite(stepStartMs)) {
+    const d = messageTimeMs - stepStartMs;
+    if (d >= 0 && d <= MAX_MS) return d;
+  }
+  if (Array.isArray(stream)) {
+    let first = Infinity;
+    for (const entry of stream) {
+      const t = Number(entry?.time ?? entry?.time0);
+      if (Number.isFinite(t) && t < first) first = t;
+    }
+    const d = messageTimeMs - first;
+    if (Number.isFinite(d) && d >= 0 && d <= MAX_MS) return d;
+  }
+  return null;
+}
+
+/**
+ * Parse one DSH / Clutch session archive.
+ *
+ * Options:
+ *   sessionKey            event-id namespace for this archive.  Callers pass the
+ *                         session DIRECTORY key so session.jsonl and
+ *                         session.v3.jsonl twins of one session share ids.
+ *   legacySessionKey      the pre-v3 file-based key.  When set, DeepSeek
+ *                         messages at or before DSH_LEGACY_EVENT_CUTOFF_MS keep
+ *                         the exact pre-v3 event shape under this key.
+ *   seenMessageIds        optional Set shared across archives; a message id
+ *                         already seen is skipped (v1/v3 twins hold copies).
+ *   harness               "dsh" or "clutch" (diagnostic metadata).
+ */
+export function parseDeepSeekSessionJsonl(
+  text,
+  { sessionKey, fallbackOccurredAt, legacySessionKey, seenMessageIds, harness } = {},
+) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
   const lines = text.split("\n");
+  const stepStarts = new Map();
   for (let lineNo = 0; lineNo < lines.length; lineNo += 1) {
     const line = lines[lineNo].trim();
     if (!line.startsWith("{")) continue;
@@ -446,6 +512,10 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
     try {
       obj = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (obj?.type === "step/start" && obj.data) {
+      stepStarts.set(`${obj.data.turn}:${obj.data.step}`, Number(obj.time));
       continue;
     }
     const dshData = obj?.data && typeof obj.data === "object" ? obj.data : null;
@@ -457,6 +527,14 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
     const source = isDshAssistantMessage && dshData.message?.source && typeof dshData.message.source === "object"
       ? dshData.message.source
       : {};
+    const messageId =
+      isDshAssistantMessage && typeof dshData.message?.id === "string" && dshData.message.id
+        ? dshData.message.id
+        : null;
+    if (messageId && seenMessageIds) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
     const model =
       (typeof source.model === "string" && source.model.trim()) ||
       (typeof obj.model === "string" && obj.model.trim()) ||
@@ -480,17 +558,40 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
           cacheRead: usage.prompt_cache_hit_tokens || usage.cache_read_input_tokens || 0,
           cacheCreation: usage.prompt_cache_miss_tokens || 0,
         });
+    const info = dshProviderInfo(isDshAssistantMessage ? source.provider : "deepseek");
+    const messageTimeMs = Date.parse(occurredAtIso);
+    const legacy =
+      Boolean(legacySessionKey) &&
+      info.legacyEligible &&
+      Number.isFinite(messageTimeMs) &&
+      messageTimeMs <= DSH_LEGACY_EVENT_CUTOFF_MS;
+    const extraId = messageId || `L${lineNo}:${model}`;
+    let extraMetadata;
+    if (!legacy && isDshAssistantMessage) {
+      const durationMs = dshStepDurationMs(
+        Number(obj.time),
+        stepStarts.get(`${dshData.turn}:${dshData.step}`),
+        dshData.stream,
+      );
+      extraMetadata = {
+        harness: harness || "dsh",
+        billingMode: info.billingMode,
+        ...(typeof source.provider === "string" && source.provider
+          ? { providerId: source.provider.slice(0, 80) }
+          : {}),
+        ...(durationMs !== null ? { durationMs } : {}),
+      };
+    }
     const parsed = tokenEventsFromBreakdown({
         producerId: DEEPSEEK_PRODUCER_ID,
-        provider: "deepseek",
+        provider: legacy ? "deepseek" : info.provider,
         service: "deepseek-harness",
-        sessionKey: sessionKey ?? "deepseek",
+        sessionKey: (legacy ? legacySessionKey : sessionKey) ?? "deepseek",
         occurredAtIso,
         model,
         breakdown,
-        extraId:
-          (isDshAssistantMessage && typeof dshData.message?.id === "string" && dshData.message.id) ||
-          `L${lineNo}:${model}`,
+        extraId,
+        extraMetadata,
       });
     // DeepSeek outputTokens already includes reasoning tokens.  Keep the
     // separate count as diagnostic metadata without double-counting it.
@@ -600,6 +701,172 @@ export function parseCopilotEventsJsonl(text, { sessionKey, fallbackOccurredAt }
   return events;
 }
 
+/** opencode providerID -> UM provider string and billing mode. */
+export function opencodeProviderInfo(providerId, modelId) {
+  const id = typeof providerId === "string" ? providerId.trim().toLowerCase() : "";
+  if (id.startsWith("minimax")) return { provider: "minimax", billingMode: "subscription" };
+  if (id === "meta" || id.startsWith("muse")) return { provider: "muse-code", billingMode: "subscription" };
+  if (id === "opencode") {
+    return { provider: "opencode", billingMode: "free" };
+  }
+  if (id === "deepseek") return { provider: "deepseek", billingMode: "payg" };
+  if (id === "anthropic" || id === "openai" || id === "google" || id === "xai") {
+    return { provider: id === "google" ? "google-ai" : id, billingMode: "payg" };
+  }
+  return { provider: id || "opencode", billingMode: "payg" };
+}
+
+/**
+ * Parse opencode `session_message` rows (assistant messages only).
+ * Row shape: { id, session_id, data } where data is the JSON string (or object)
+ * holding time.{created,streamed,completed}, model.{id,providerID,variant},
+ * cost, tokens.{input,output,reasoning,cache.{read,write}}.
+ *
+ * opencode's tokens.output EXCLUDES reasoning (143 rows have reasoning greater
+ * than output) and tokens.input is uncached, so reasoning is billed at the
+ * output rate: fold it into the output row (UM prices only input, output,
+ * cacheRead and cacheCreation) and keep the split in metadata.
+ * Rows without time.completed are still streaming and are skipped, because a
+ * changing quantity under one event id would return HTTP 409.
+ */
+export function parseOpencodeMessageRows(rows) {
+  const events = [];
+  for (const row of rows) {
+    let data = row?.data;
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        continue;
+      }
+    }
+    if (!data || typeof data !== "object") continue;
+    const tokens = data.tokens;
+    const time = data.time;
+    if (!tokens || typeof tokens !== "object" || !time || !Number.isFinite(Number(time.completed))) continue;
+    const messageId = typeof row.id === "string" && row.id ? row.id : null;
+    const sessionId = typeof row.session_id === "string" && row.session_id ? row.session_id : null;
+    if (!messageId || !sessionId) continue;
+    const model = typeof data.model?.id === "string" ? data.model.id.trim() : "";
+    const providerId = typeof data.model?.providerID === "string" ? data.model.providerID : "";
+    const info = opencodeProviderInfo(providerId, model);
+    const output = finiteCount(tokens.output);
+    const reasoning = finiteCount(tokens.reasoning);
+    const breakdown = {
+      input: finiteCount(tokens.input),
+      output: output + reasoning,
+      cacheRead: finiteCount(tokens.cache?.read),
+      cacheCreation: finiteCount(tokens.cache?.write),
+    };
+    const created = Number(time.created);
+    const completed = Number(time.completed);
+    const durationMs =
+      Number.isFinite(created) && completed >= created && completed - created <= 6 * 3600 * 1000
+        ? completed - created
+        : null;
+    const cost = Number(data.cost);
+    const events_ = tokenEventsFromBreakdown({
+      producerId: OPENCODE_PRODUCER_ID,
+      provider: info.provider,
+      service: "opencode",
+      sessionKey: sessionId,
+      occurredAtIso: new Date(completed).toISOString(),
+      model: model || undefined,
+      breakdown,
+      extraId: messageId,
+      extraMetadata: {
+        harness: "opencode",
+        billingMode: info.billingMode,
+        ...(providerId ? { providerId: providerId.slice(0, 80) } : {}),
+        ...(durationMs !== null ? { durationMs } : {}),
+        ...(typeof data.agent === "string" && data.agent ? { agent: data.agent.slice(0, 80) } : {}),
+        ...(typeof data.model?.variant === "string" && data.model.variant
+          ? { variant: data.model.variant.slice(0, 80) }
+          : {}),
+        ...(typeof data.finish === "string" && data.finish ? { finish: data.finish.slice(0, 80) } : {}),
+        ...(Number.isFinite(cost) && cost > 0 ? { reportedCostUsd: Number(cost.toFixed(9)) } : {}),
+      },
+    });
+    for (const event of events_) {
+      event.confidence = "actual";
+      if (event.metadata?.tokenType === "output" && reasoning > 0) {
+        event.metadata.reasoningTokens = reasoning;
+        event.metadata.outputTokensExcludingReasoning = output;
+      }
+    }
+    events.push(...events_);
+  }
+  return events;
+}
+
+/** fx model ids carry a vendor prefix ("grok/grok-4.6", "xai/grok-4.1-fast"). */
+export function fxModelName(model) {
+  const raw = typeof model === "string" ? model.trim() : "";
+  const slash = raw.lastIndexOf("/");
+  return slash >= 0 ? raw.slice(slash + 1) : raw;
+}
+
+/**
+ * Parse ~/.fx/usage.jsonl.  Only `kind: "generation"` facts count; `pending`,
+ * `incident` and `coverage` rows are bookkeeping.  Fact ids (gen_...) are
+ * unique, so they are the stable event key.  xAI semantics: input_tokens is
+ * inclusive of cache reads and output_tokens includes reasoning.
+ */
+export function parseFxUsageJsonl(text) {
+  const events = [];
+  const seen = new Set();
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let obj;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (obj?.kind !== "generation") continue;
+    const fact = obj.fact;
+    if (!fact || typeof fact !== "object" || typeof fact.id !== "string" || !fact.id) continue;
+    if (seen.has(fact.id)) continue;
+    seen.add(fact.id);
+    const occurredAtIso = isoTimestamp(Number(fact.created_at_ms), null);
+    if (!occurredAtIso) continue;
+    const model = fxModelName(fact.model);
+    const breakdown = splitInclusiveCache({
+      input: fact.input_tokens,
+      output: fact.output_tokens,
+      cacheRead: fact.cache_read_tokens,
+      cacheCreation: fact.cache_write_tokens,
+    });
+    const reasoning = finiteCount(fact.reasoning_tokens);
+    const searches = finiteCount(fact.billable_web_search_calls);
+    const parsed = tokenEventsFromBreakdown({
+      producerId: FX_PRODUCER_ID,
+      provider: "xai",
+      service: "fx",
+      sessionKey: "fx",
+      occurredAtIso,
+      model: model || undefined,
+      breakdown,
+      extraId: fact.id,
+      extraMetadata: {
+        harness: "fx",
+        billingMode: "payg",
+        ...(typeof fact.model === "string" && fact.model !== model ? { rawModel: fact.model.slice(0, 120) } : {}),
+        ...(searches > 0 ? { billableWebSearchCalls: searches } : {}),
+      },
+    });
+    for (const event of parsed) {
+      event.confidence = "actual";
+      if (event.metadata?.tokenType === "output" && reasoning > 0) {
+        event.metadata.reasoningTokens = reasoning;
+      }
+    }
+    events.push(...parsed);
+  }
+  return events;
+}
+
 export function chunkEvents(events, size = MAX_EVENTS_PER_BATCH) {
   const chunks = [];
   for (let i = 0; i < events.length; i += size) {
@@ -622,13 +889,15 @@ export async function postUsageBatches({
   ingestUrl,
   ingestToken,
   producerId,
+  producerInstanceId,
   dryRun = false,
   log = console.log,
 }) {
   const bodyFor = (batch) => ({
     schemaVersion: 2,
     producerId,
-    producerInstanceId: process.env.USAGE_MACHINE_ID?.trim() || hostname(),
+    producerInstanceId:
+      producerInstanceId || process.env.USAGE_MACHINE_ID?.trim() || hostname(),
     events: batch,
   });
   if (dryRun) {

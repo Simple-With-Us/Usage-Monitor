@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/fx-usage-collector.mjs.
+
+  Must run on the Mac that has ~/.fx/usage.jsonl.
+
+  Run it from the installed collector runtime, never from ~/Code:
+    /opt/homebrew/opt/node@24/bin/node scripts/update-local-collector-runtime.mjs --sha <40-char origin/main SHA>
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.fx-usage-collector
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.fx-usage-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/node@24/bin/node</string>
+    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collector-runtime/current/scripts/fx-usage-collector.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/fx-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/fx-usage-collector.log</string>
+</dict>
+</plist>
