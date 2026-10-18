@@ -224,7 +224,7 @@ async function collectAllSessionEvents(since) {
 /**
  * Scoped ingest token names per producer.  A scoped token authorizes exactly
  * one producerId, so every batch resolves its own token (environment first,
- * then ~/.secrets/global-api-keys) before the unscoped USAGE_INGEST_TOKEN,
+ * then `fleet-secrets get`) before the unscoped USAGE_INGEST_TOKEN,
  * which is refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
  */
 export const FLEET_TOKEN_ENV_BY_PRODUCER = {
