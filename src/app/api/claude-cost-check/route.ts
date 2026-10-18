@@ -42,7 +42,6 @@ export async function GET(request: NextRequest) {
           occurredAt: { gte: since },
         },
         _sum: { quantity: true },
-        _count: { _all: true },
       }),
       prisma.externalUsageEvent.groupBy({
         by: ["keyRef"],
@@ -62,7 +61,6 @@ export async function GET(request: NextRequest) {
         // anything else defensively maps to "unknown" inside the report.
         tokenType: group.label?.startsWith("token:") ? group.label.slice("token:".length) : "unknown",
         quantity: group._sum.quantity ?? 0,
-        rows: group._count._all,
       })),
       costGroups.map((group) => ({
         model: group.keyRef,

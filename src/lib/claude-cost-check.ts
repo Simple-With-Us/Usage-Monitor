@@ -14,7 +14,6 @@ import {
   deriveTokenCostUsd,
   getModelPricing,
   hasLongContextTier,
-  longContextThresholdTokens,
   PRICING_SNAPSHOT_META,
 } from "@/lib/pricing/model-pricing";
 
@@ -25,10 +24,6 @@ export interface ClaudeTokenEventRow {
    * cacheCreation1h (also the cacheWrite* aliases) | unknown */
   tokenType: string;
   quantity: number;
-  /** Number of ingested rows behind `quantity` (each row is one exporter
-   * flush covering one or more requests).  Only used to choose the
-   * long-prompt tier for models that have one (Claude Haiku 5.5). */
-  rows?: number;
   provider?: string;
   sourceApp?: string;
 }
@@ -63,9 +58,11 @@ export interface ModelCostCheck {
   /** Same derivation with every untyped cache write priced at the 1h rate:
    * the upper end of the band `reportedCostUsd` should fall in. */
   derivedCostUpperBoundUsd: number;
-  /** True when the long-prompt tier was applied (average prompt per ingested
-   * row over the model's threshold). */
-  longPromptTier: boolean;
+  /** True when the model has a long-prompt tier (Haiku 5.5: prompts over 100k
+   * tokens pay 5x).  Grouped rows do not carry per-request prompt size, so
+   * derivedCostUsd is always at the standard tier and
+   * derivedCostUpperBoundUsd prices everything at the long tier. */
+  hasLongPromptTier: boolean;
   /** False when some tokens could not be priced (unknown model or missing
    * rate) — derivedCostUsd then under-counts. */
   derivationComplete: boolean;
@@ -100,7 +97,6 @@ export function buildClaudeCostCheck(
   costEvents: ClaudeCostEventRow[]
 ): ClaudeCostCheckReport {
   const byModel = new Map<string, ModelCostCheck>();
-  const rowCounts = new Map<string, number>();
 
   const ensure = (model: string | null): ModelCostCheck => {
     const key = model?.trim() || "(no model)";
@@ -113,7 +109,7 @@ export function buildClaudeCostCheck(
         pricingStatus: "no-tokens",
         derivedCostUsd: 0,
         derivedCostUpperBoundUsd: 0,
-        longPromptTier: false,
+        hasLongPromptTier: false,
         derivationComplete: true,
         reportedCostUsd: 0,
         deltaUsd: 0,
@@ -130,7 +126,6 @@ export function buildClaudeCostCheck(
     const tokenType = canonicalTokenType(event.tokenType);
     if (tokenType) {
       entry.tokens[tokenType] += event.quantity;
-      if (event.rows && event.rows > 0) rowCounts.set(entry.model, Math.max(rowCounts.get(entry.model) ?? 0, event.rows));
     } else {
       entry.tokens.unknown += event.quantity;
       entry.derivationComplete = false;
@@ -151,18 +146,12 @@ export function buildClaudeCostCheck(
       if (resolved) {
         entry.pricingKey = resolved.key;
         entry.pricingStatus = "priced";
-        // Long-prompt tier (Haiku 5.5: prompts over 100k pay 5x).  Per-request
-        // size is not recorded; an exporter flush covers >= 1 request, so the
-        // per-row average is an upper bound on the per-request prompt.  Use
-        // the tier only when that average clears the threshold.
-        const rows = rowCounts.get(entry.model) ?? 0;
-        const promptTokens = entry.tokens.input + entry.tokens.cacheRead +
-          entry.tokens.cacheCreation + entry.tokens.cacheCreation1h;
-        const longPrompt =
-          hasLongContextTier(resolved.pricing) &&
-          rows > 0 &&
-          promptTokens / rows > longContextThresholdTokens(resolved.pricing);
-        entry.longPromptTier = longPrompt;
+        // Long-prompt tier: per-request prompt size is not recorded on grouped
+        // rows (an exporter flush can combine many requests), so the standard
+        // tier is used for the point estimate and the long tier only widens
+        // the upper bound.  Averaging a flush would misprice short requests.
+        const longTierPossible = hasLongContextTier(resolved.pricing);
+        entry.hasLongPromptTier = longTierPossible;
         const breakdown = {
           input: entry.tokens.input,
           output: entry.tokens.output,
@@ -170,7 +159,7 @@ export function buildClaudeCostCheck(
           cacheCreation: entry.tokens.cacheCreation,
           cacheCreation1h: entry.tokens.cacheCreation1h,
         };
-        const derived = deriveTokenCostUsd(resolved.pricing, breakdown, { longContext: longPrompt });
+        const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
         entry.derivedCostUsd = derived.costUsd;
         entry.derivedCostUpperBoundUsd = deriveTokenCostUsd(
           resolved.pricing,
@@ -179,7 +168,7 @@ export function buildClaudeCostCheck(
             cacheCreation: 0,
             cacheCreation1h: entry.tokens.cacheCreation + entry.tokens.cacheCreation1h,
           },
-          { longContext: longPrompt }
+          { longContext: longTierPossible }
         ).costUsd;
         if (!derived.complete) entry.derivationComplete = false;
       } else if (tokenTotal > 0) {

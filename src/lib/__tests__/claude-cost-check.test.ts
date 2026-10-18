@@ -222,34 +222,27 @@ describe("UM-1591 pricing resolution in the cost check", () => {
     expect(m.reportedCostUsd).toBeLessThan(m.derivedCostUpperBoundUsd);
   });
 
-  it("applies Haiku 5.5's long-prompt tier only when the per-row prompt clears 100k", () => {
-    const short = buildClaudeCostCheck(
+  it("never guesses Haiku 5.5's long-prompt tier from grouped rows: standard point estimate, long tier only in the upper bound", () => {
+    const m = buildClaudeCostCheck(
       [
-        { model: "claude-haiku-5-5", tokenType: "input", quantity: 1_000_000, rows: 100 },
-        { model: "claude-haiku-5-5", tokenType: "output", quantity: 1_000_000, rows: 100 },
+        { model: "claude-haiku-5-5", tokenType: "input", quantity: 1_000_000 },
+        { model: "claude-haiku-5-5", tokenType: "output", quantity: 1_000_000 },
       ],
       []
     ).models[0];
-    expect(short.longPromptTier).toBe(false);
-    expect(short.derivedCostUsd).toBeCloseTo(0.1 + 0.5, 6);
-
-    const long = buildClaudeCostCheck(
-      [
-        { model: "claude-haiku-5-5", tokenType: "input", quantity: 1_000_000, rows: 2 },
-        { model: "claude-haiku-5-5", tokenType: "output", quantity: 1_000_000, rows: 2 },
-      ],
-      []
-    ).models[0];
-    expect(long.longPromptTier).toBe(true);
-    expect(long.derivedCostUsd).toBeCloseTo(0.5 + 2.5, 6);
+    expect(m.hasLongPromptTier).toBe(true);
+    expect(m.derivedCostUsd).toBeCloseTo(0.1 + 0.5, 6);
+    // Upper bound: everything at the >100k tier (0.50 + 2.50).
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(3, 6);
   });
 
   it("never applies a long-prompt tier to models that have none", () => {
     const m = buildClaudeCostCheck(
-      [{ model: "claude-opus-5-5[1m]", tokenType: "cacheRead", quantity: 900_000_000, rows: 1 }],
+      [{ model: "claude-opus-5-5[1m]", tokenType: "cacheRead", quantity: 900_000_000 }],
       []
     ).models[0];
-    expect(m.longPromptTier).toBe(false);
+    expect(m.hasLongPromptTier).toBe(false);
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(180, 6);
     expect(m.derivedCostUsd).toBeCloseTo(180, 6);
   });
 });
