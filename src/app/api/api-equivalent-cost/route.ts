@@ -36,6 +36,7 @@ export async function GET(request: NextRequest) {
           occurredAt: { gte: since },
         },
         _sum: { quantity: true },
+        _count: { _all: true },
       }),
       prisma.externalUsageEvent.groupBy({
         by: ["provider", "sourceApp", "keyRef"],
@@ -57,6 +58,7 @@ export async function GET(request: NextRequest) {
           ? group.label.slice("token:".length)
           : "unknown",
         quantity: group._sum.quantity ?? 0,
+        rows: group._count._all,
       })),
       costGroups.map((group) => ({
         provider: group.provider,
