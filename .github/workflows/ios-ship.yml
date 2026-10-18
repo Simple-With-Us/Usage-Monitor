@@ -12,6 +12,20 @@ name: iOS TestFlight ship (Mac runner)
 #
 # Ships Usage Client Monitor and LocalUsageMonitor (Import Package tap).
 #
+# RE-ENABLED 2026-10-17 (owner: bring every app up to date).  This workflow sat
+# `disabled_manually` after the 2026-09-27 failures ("no App Store Connect record
+# yet", ascRecordPending).  #1652 pointed apps.json at the live .ios records
+# (6820881005 client, 6820885210 local) but nobody turned the workflow back on,
+# so merges such as #1683 reached main and never reached TestFlight.  A merge to
+# main that touches ios/ now uploads both apps with no human step.  If this file
+# is ever disabled again, `gh workflow view ios-ship.yml` will say so; check
+# that state before assuming an iOS merge shipped.
+#
+# The two ship steps are independent: each is gated on its own app's output from
+# the scheduled gate, and Local still runs when the Client upload failed (they
+# are separate ASC records with separate failure modes).  Rate gate and
+# same-HEAD skip stay at the ship script defaults -- no standing override.
+#
 # WHY THERE IS A `schedule:` TRIGGER (2026-08-13)
 # ----------------------------------------------
 # `push:` alone is not a reliable trigger. A PR merged by github-actions[bot]
@@ -135,6 +149,7 @@ jobs:
 
       # Identity stays on GitHub.  Apple/iOS signing material comes from Infisical prod.
       - name: Load Infisical signing secrets
+        id: signing
         if: steps.gate.outputs.should_ship == '1'
         env:
           INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
@@ -247,13 +262,17 @@ jobs:
           unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
       - name: Ship UsageMonitor to TestFlight
-        if: steps.gate.outputs.should_ship == '1'
+        id: ship_usage
+        if: steps.gate.outputs.ship_usage == '1'
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh"
 
+      # !cancelled() so a Client failure does not silently skip Local; the
+      # secrets step must have succeeded so we never ship without signing.
       - name: Ship LocalUsageMonitor to TestFlight
-        if: steps.gate.outputs.should_ship == '1'
+        id: ship_usage_local
+        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh"
