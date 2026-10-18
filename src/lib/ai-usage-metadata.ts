@@ -146,7 +146,11 @@ export function legacyAiTokens(event: LegacyAiMappingEvent): CanonicalAiTokens |
     const field = LEGACY_TOKEN_TYPES[tokenType];
     const quantity = nonNegativeNumber(event.quantity);
     if (!field || event.unit !== "token" || quantity == null || quantity <= 0) return null;
-    return { [field]: quantity };
+    const slice: CanonicalAiTokens = { [field]: quantity };
+    // Collectors (DSH) put the reasoning share of output on the output slice.
+    const sliceReasoning = nonNegativeNumber(metadata.reasoningTokens);
+    if (field === "output" && sliceReasoning != null) slice.reasoning = sliceReasoning;
+    return slice;
   }
 
   const prompt = nonNegativeNumber(metadata.promptTokens) ?? nonNegativeNumber(metadata.inputTokens);
@@ -188,8 +192,19 @@ export function legacyAiMetadata(event: LegacyAiMappingEvent): Metadata | null {
   const metadata = event.metadata ?? {};
   const model = nonEmptyString(metadata.model);
   if (model) out[AI_METADATA_KEYS.modelServed] = model;
-  const latency = nonNegativeNumber(metadata.latencyMs);
-  if (latency != null) out[AI_METADATA_KEYS.durationMs] = latency;
+  const duration = nonNegativeNumber(metadata.durationMs) ?? nonNegativeNumber(metadata.latencyMs);
+  if (duration != null) out[AI_METADATA_KEYS.durationMs] = duration;
+  const ttft = nonNegativeNumber(metadata.ttftMs);
+  if (ttft != null) out[AI_METADATA_KEYS.ttftMs] = ttft;
+  // Collector context keys already spelled the canonical way (DSH, Clutch).
+  const harness = nonEmptyString(metadata.harness, 80);
+  if (harness) out[AI_METADATA_KEYS.harness] = harness;
+  const seat = nonEmptyString(metadata.seat, 80);
+  if (seat) out[AI_METADATA_KEYS.seat] = seat;
+  const billingMode = metadata.billingMode;
+  if (billingMode === "subscription" || billingMode === "payg" || billingMode === "free") {
+    out[AI_METADATA_KEYS.billingMode] = billingMode;
+  }
   out[AI_METADATA_KEYS.source] = "legacy";
   return out;
 }

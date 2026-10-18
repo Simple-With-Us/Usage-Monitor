@@ -111,6 +111,32 @@ describe("canonicalAiMetadata", () => {
     });
   });
 
+  it("carries collector context keys and the output slice's reasoning share", () => {
+    expect(canonicalAiMetadata({
+      unit: "token",
+      quantity: 80,
+      label: "token:output",
+      metadata: {
+        tokenType: "output",
+        reasoningTokens: 30,
+        harness: "clutch",
+        billingMode: "subscription",
+        durationMs: 1200,
+        model: "deepseek-v4",
+      },
+    })).toEqual({
+      _aiTokensOutput: 80,
+      _aiTokensReasoning: 30,
+      _aiModelServed: "deepseek-v4",
+      _aiDurationMs: 1200,
+      _aiHarness: "clutch",
+      _aiBillingMode: "subscription",
+      _aiSource: "legacy",
+    });
+    expect(canonicalAiMetadata({ metadata: { promptTokens: 1, billingMode: "estimated" } }))
+      .toEqual({ _aiTokensInput: 1, _aiSource: "legacy" });
+  });
+
   it("returns null for non-AI events", () => {
     expect(canonicalAiMetadata({ metadata: { model: "gpt-4o", latencyMs: 5 } })).toBeNull();
   });
