@@ -306,4 +306,45 @@ describe("mapClaudeCodeMetrics", () => {
     const { events } = mapClaudeCodeMetrics(sampleRequest());
     expect(events.every((e) => e.projectName === undefined)).toBe(true);
   });
+  describe("repository attributes (OTEL_METRICS_INCLUDE_REPOSITORY=1, UM-1599)", () => {
+    const vcs = [
+      { key: "vcs.repository.url.full", value: { stringValue: "https://github.com/simple-with-us/usage-monitor" } },
+      { key: "vcs.owner.name", value: { stringValue: "simple-with-us" } },
+      { key: "vcs.repository.name", value: { stringValue: "usage-monitor" } },
+      { key: "vcs.provider.name", value: { stringValue: "github" } },
+    ];
+
+    function withPointAttrs(extra: unknown[]) {
+      const request = sampleRequest();
+      for (const metric of (request.resourceMetrics as any)[0].scopeMetrics[0].metrics) {
+        for (const point of metric.sum.dataPoints) point.attributes.push(...extra);
+      }
+      return request;
+    }
+
+    it("uses vcs.repository.name as the project and keeps vcs.* in metadata", () => {
+      const { events } = mapClaudeCodeMetrics(withPointAttrs(vcs));
+      expect(events.length).toBeGreaterThan(0);
+      for (const event of events) {
+        expect(event.projectName).toBe("usage-monitor");
+        expect(event.metadata).toMatchObject({
+          "vcs.repository.name": "usage-monitor",
+          "vcs.owner.name": "simple-with-us",
+          "vcs.provider.name": "github",
+          "vcs.repository.url.full": "https://github.com/simple-with-us/usage-monitor",
+        });
+      }
+    });
+
+    it("lets an explicit project attribute win over the repository name", () => {
+      const request = withPointAttrs(vcs);
+      (request.resourceMetrics as any)[0].resource.attributes.push({
+        key: "project",
+        value: { stringValue: "socratic-trade" },
+      });
+      const { events } = mapClaudeCodeMetrics(request);
+      expect(events.every((e) => e.projectName === "socratic-trade")).toBe(true);
+      expect(events[0].metadata["vcs.repository.name"]).toBe("usage-monitor");
+    });
+  });
 });

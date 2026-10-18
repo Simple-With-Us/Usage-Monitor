@@ -37,6 +37,30 @@ import {
 //   The persistence layer stitches an api_request and its later completion
 //   into one row (see src/lib/ai-requests.ts).
 //
+// Attribution (verified 2026-10-17 by capturing real exports with a local OTLP
+// receiver, claude 2.x and codex-cli 0.163.0):
+//   - Seat and project ride on OTEL_RESOURCE_ATTRIBUTES (`seat=...,project=...`),
+//     which both harnesses copy into the OTLP resource.  Codex builds its
+//     resource with the SDK's env detector, so the env var is honoured; there
+//     is no equivalent key in ~/.codex/config.toml ([otel] only configures
+//     exporters, environment and span_attributes for traces).  Codex events
+//     carry no cwd or workspace attribute at all, so project cannot be derived
+//     from them.
+//   - Claude Code with OTEL_METRICS_INCLUDE_REPOSITORY=1 adds vcs.repository.name
+//     (lowercased, from the origin remote) to metrics, events and spans.
+//   - Codex rows with no seat resource attribute default to seat CODEX (the
+//     platform default seat).  A `codex exec` launched by another seat is
+//     attributed to CODEX unless that launcher exports OTEL_RESOURCE_ATTRIBUTES.
+//
+// Served vs requested model: neither harness exports a separate response-model
+// attribute (Claude Code's llm_request span has gen_ai.request.model equal to
+// `model` and only gen_ai.response.id; Codex events carry `model` and `slug`
+// only).  Both are emitted after the response completed, so the reported model
+// is the one that ran: servedModel falls back to it when no explicit
+// gen_ai.response.model exists, and an explicit response model always wins.
+// A Codex api_request/websocket_request is a pending row (no response yet), so
+// it stores requestedModel only; the response.completed event fills servedModel.
+//
 // Never read: prompt, body, tool_input, response.model_output, user.email.
 // Only the scalar attributes named here are retained.
 // ---------------------------------------------------------------------------
@@ -81,6 +105,8 @@ export interface MapAiRequestsResult {
   ignored: number;
 }
 
+/** Codex's platform default seat, used when its OTLP resource names none. */
+const CODEX_DEFAULT_SEAT = "CODEX";
 const MAX_REQUESTS_PER_BATCH = 2_000;
 const MAX_STRING = 200;
 const ERROR_MAX = 500;
@@ -173,8 +199,10 @@ function projectOf(attrs: FlatAttributes, arrays: Record<string, string>): strin
   return (
     str(attrs["project"]) ??
     str(attrs["project.name"]) ??
-    str(attrs["vcs.repository.name"]) ??
-    projectFromPath(arrays["workspace.host_paths"] ?? str(attrs["workspace.host_paths"], 1000))
+    // The workspace path keeps the repo's original casing; vcs.repository.name
+    // (Claude Code lowercases it) is the fallback when no path is exported.
+    projectFromPath(arrays["workspace.host_paths"] ?? str(attrs["workspace.host_paths"], 1000)) ??
+    str(attrs["vcs.repository.name"])
   );
 }
 
@@ -227,7 +255,7 @@ function claudeRequest(
     billingMode: billingOf(attrs),
     sessionId: str(attrs["session.id"], 120),
     requestedModel: str(attrs["gen_ai.request.model"]) ?? str(attrs["model"]),
-    servedModel: str(attrs["gen_ai.response.model"]),
+    servedModel: str(attrs["gen_ai.response.model"]) ?? str(attrs["gen_ai.request.model"]) ?? str(attrs["model"]),
     durationMs: int(attrs["duration_ms"]),
     ttftMs: int(attrs["ttft_ms"]),
     inputTokens: int(attrs["input_tokens"]),
@@ -254,7 +282,7 @@ function codexBase(attrs: FlatAttributes, arrays: Record<string, string>) {
   return {
     source: "logs" as const,
     harness: "codex",
-    seat: seatOf(attrs),
+    seat: seatOf(attrs) ?? CODEX_DEFAULT_SEAT,
     project: projectOf(attrs, arrays),
     billingMode: billingOf(attrs),
     sessionId: str(attrs["conversation.id"], 120),
@@ -305,6 +333,7 @@ function codexCompletion(
     ...codexBase(attrs, arrays),
     dedupeKey: `codex|done|${hash([attrs["conversation.id"], attrs["event.timestamp"], input, attrs["output_token_count"]])}`,
     kind: "codex-completion",
+    servedModel: str(attrs["model"]),
     ttftMs: int(attrs["ttft_ms"]),
     inputTokens: uncached,
     outputTokens: int(attrs["output_token_count"]),

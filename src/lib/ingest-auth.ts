@@ -22,6 +22,19 @@ export function safeEqual(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+/**
+ * Producer ids whose scoped token may also write rows tagged with another
+ * source app / harness name.  The producer id is the name a token is minted
+ * under (USAGE_INGEST_PRODUCER_TOKENS); the OTLP mappers tag rows with the
+ * harness name, and for Codex the two differ: the quota/usage collector
+ * writes sourceApp "openai-codex" while the logs mapper writes harness
+ * "codex" (UM-1599).  This is an explicit allow-list, one entry per known
+ * mismatch.  It never widens a token to any other name.
+ */
+export const PRODUCER_SOURCE_APP_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  "openai-codex": ["codex"],
+};
+
 export interface IngestCredential {
   credentialId: string;
   token: string;
@@ -48,7 +61,7 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
         return {
           credentialId: producerId,
           token: actual,
-          allowedSourceApps: new Set([producerId]),
+          allowedSourceApps: new Set([producerId, ...(PRODUCER_SOURCE_APP_ALIASES[producerId] ?? [])]),
         };
       }
     }
