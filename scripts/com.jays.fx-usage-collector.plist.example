@@ -5,8 +5,8 @@
 
   Must run on the Mac that has ~/.fx/usage.jsonl.
 
-  Run it from the installed collector runtime, never from ~/Code:
-    /opt/homebrew/opt/node@24/bin/node scripts/update-local-collector-runtime.mjs --sha <40-char origin/main SHA>
+  Run it from the installed collector copy, never from ~/Code:
+    scripts/install-collectors.sh        (see docs/runbooks/mac-collectors-install.md)
 
   Uninstall:
     launchctl bootout gui/$(id -u)/com.jays.fx-usage-collector
@@ -18,7 +18,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/opt/node@24/bin/node</string>
-    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collector-runtime/current/scripts/fx-usage-collector.mjs</string>
+    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collectors/scripts/fx-usage-collector.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
