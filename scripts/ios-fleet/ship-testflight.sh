@@ -74,7 +74,7 @@
 # Secrets (never printed):
 #   ~/.secrets/appstore-connect.env  (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH)
 #   or Xcode-signed-in session for destination=upload export
-#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or `fleet-secrets get`)
+#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or Infisical via fleet-secrets)
 #   SENTRY_DSN         (injected into xcodebuild so Cocoa plist $(SENTRY_DSN) is set)
 #
 # Sentry after a successful archive (2026-09-01):
@@ -201,15 +201,16 @@ sentry_project_for_app() {
   esac
 }
 
-# Pull SENTRY_AUTH_TOKEN from the environment, then from `fleet-secrets get`
-# (OPS-818;  the flat ~/.secrets handoff file is no longer read).  Capture into
-# a var, never echo.  A missing binary or an absent key leaves it unset.
+# Pull SENTRY_AUTH_TOKEN from the handoff file if the environment does not
+# already have it.  Names-only grep trap: extract into a var, never echo.
 load_sentry_auth() {
   if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
     return 0
   fi
-  if command -v fleet-secrets >/dev/null 2>/dev/null; then
-    SENTRY_AUTH_TOKEN="$(fleet-secrets get SENTRY_AUTH_TOKEN 2>/dev/null | tr -d '\r' || true)"
+  # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired flat file.
+  local fs_bin="/Users/jay/.local/bin/fleet-secrets"
+  if [[ -x "$fs_bin" ]]; then
+    SENTRY_AUTH_TOKEN="$("$fs_bin" get SENTRY_AUTH_TOKEN 2>/dev/null || true)"
     export SENTRY_AUTH_TOKEN
   fi
 }
