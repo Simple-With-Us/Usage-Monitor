@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Thin wrapper: ship Usage Local Monitor to TestFlight (no Xcode UI).
 # Canonical implementation: scripts/ios-fleet/ship-testflight.sh (in this repo).
-# Hosted macos-latest ios-ship.yml does NOT call this -- LocalUsageMonitor
-# stays skipped. Keep this wrapper for an explicit later Local ship only.
+# The hosted macos-latest ios-ship.yml calls this as its second ship step, so a
+# merge to main that touches ios/ uploads Local as well as Client.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
