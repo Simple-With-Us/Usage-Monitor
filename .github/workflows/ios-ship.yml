@@ -12,6 +12,15 @@ name: iOS TestFlight ship (Mac runner)
 #
 # Ships Usage Client Monitor and LocalUsageMonitor (Import Package tap).
 #
+# MANUAL SIGNING (2026-10-17): Release signs with the App Store profiles named in
+# ios/UsageMonitor/appstore-profiles.json, which
+# scripts/ios-install-appstore-profiles.sh downloads over the App Store Connect
+# API.  Xcode 26 automatic signing talks to developerservices2.apple.com, where the
+# fleet API key gets HTTP 401, so a hosted ship cannot use it.  The three profiles
+# (Client, Client Widget, Local) must carry group.com.simplewithus.usage; the
+# installer fails with the exact owner step when they do not.  See
+# docs/rollouts/2026-10-17-ios-autoship.md.
+#
 # WHY THERE IS A `schedule:` TRIGGER (2026-08-13)
 # ----------------------------------------------
 # `push:` alone is not a reliable trigger. A PR merged by github-actions[bot]
@@ -52,6 +61,11 @@ on:
       - 'scripts/ios-fleet-pin.sh'
       - 'scripts/ios-fleet.sha256'
   workflow_dispatch:
+    inputs:
+      export_only:
+        description: 'Archive + export the IPA only; do not upload (signing check)'
+        type: boolean
+        default: false
   schedule:
     # Twice an hour, offset from Socratic.Trade ('*/30') and Congress.Trade
     # ('7,37') so the three fleet repos do not start three ships on the same
@@ -246,14 +260,51 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
           unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
+      # No IOS_TF_MIN_INTERVAL_SEC here.  That variable is a PER-RUN override.
+      # The standing gate is DEFAULT_MIN_INTERVAL_SEC in the fleet script.
       - name: Ship UsageMonitor to TestFlight
         if: steps.gate.outputs.should_ship == '1'
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh"
+          IOS_MANUAL_SIGN: "1"  # 2026-10-17: App Store profiles, no Xcode provisioning service
+          IOS_PROFILE_REQUIRE_APP_GROUPS: group.com.simplewithus.usage
+          EXPORT_ONLY_INPUT: ${{ inputs.export_only }}
+        run: |
+          args=()
+          if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
+            echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
+            args+=(--export-only)
+          fi
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" ${args[@]+"${args[@]}"}
 
       - name: Ship LocalUsageMonitor to TestFlight
         if: steps.gate.outputs.should_ship == '1'
         env:
           IOS_TF_RELEASE_NOTES: "1"
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh"
+          IOS_MANUAL_SIGN: "1"
+          IOS_PROFILE_REQUIRE_APP_GROUPS: group.com.simplewithus.usage
+          EXPORT_ONLY_INPUT: ${{ inputs.export_only }}
+        run: |
+          args=()
+          if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
+            echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
+            args+=(--export-only)
+          fi
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" ${args[@]+"${args[@]}"}
+
+      # Archive/export/upload logs are tee'd into the job log, but Xcode's
+      # .xcdistributionlogs are not.  Collect both on failure, redact the ASC and
+      # Sentry identifiers, and refuse to upload anything holding key material.
+      - name: Collect ship logs (failure only)
+        id: shiplogs
+        if: failure() && steps.gate.outputs.should_ship == '1'
+        run: bash scripts/ios-collect-ship-logs.sh "$RUNNER_TEMP/ios-ship-logs"
+
+      - name: Upload ship logs (failure only)
+        if: failure() && steps.shiplogs.outputs.safe == '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-ship-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-ship-logs
+          retention-days: 7
+          if-no-files-found: ignore

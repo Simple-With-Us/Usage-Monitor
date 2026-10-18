@@ -80,6 +80,15 @@ targets:
         ENABLE_PREVIEWS: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+      # Release is signed MANUALLY with the App Store profile named below, which
+      # scripts/ios-install-appstore-profiles.sh downloads over the App Store
+      # Connect API (Xcode 26 automatic signing 401s on the fleet API key).  Keep
+      # this specifier and appstore-profiles.json identical.  Debug stays Automatic.
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: "Usage Monitor Client App Store (API)"
     dependencies:
       - target: UsageMonitorWidgetExtension
         embed: true
@@ -144,6 +153,15 @@ targets:
         ENABLE_PREVIEWS: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+      # Release is signed MANUALLY with the App Store profile named below, which
+      # scripts/ios-install-appstore-profiles.sh downloads over the App Store
+      # Connect API (Xcode 26 automatic signing 401s on the fleet API key).  Keep
+      # this specifier and appstore-profiles.json identical.  Debug stays Automatic.
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: "Usage Monitor Local App Store (API)"
     dependencies:
       - package: UsageMonitorKit
         product: DesignSystem
@@ -180,6 +198,15 @@ targets:
         CODE_SIGN_ENTITLEMENTS: UsageMonitorWidget/UsageMonitorWidget.entitlements
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         TARGETED_DEVICE_FAMILY: "1,2"
+      # Release is signed MANUALLY with the App Store profile named below, which
+      # scripts/ios-install-appstore-profiles.sh downloads over the App Store
+      # Connect API (Xcode 26 automatic signing 401s on the fleet API key).  Keep
+      # this specifier and appstore-profiles.json identical.  Debug stays Automatic.
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: "Usage Monitor Client Widget App Store (API)"
     dependencies:
       - package: UsageMonitorKit
         product: WidgetShared

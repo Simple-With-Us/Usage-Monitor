@@ -303,10 +303,15 @@ jobs:
           bash -n scripts/test-ios-stage-asc-key.sh
           bash -n scripts/ios-fleet-pin.sh
           bash -n scripts/test-ios-fleet-appupdate-pin.sh
+          bash -n scripts/ios-install-appstore-profiles.sh
+          bash -n scripts/ios-collect-ship-logs.sh
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/test-ios-manual-signing.sh
           bash scripts/ios-fleet-pin.sh --check
           bash scripts/test-ios-scheduled-ship-gate.sh
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
+          bash scripts/test-ios-manual-signing.sh
 
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
