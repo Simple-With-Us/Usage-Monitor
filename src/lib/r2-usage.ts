@@ -2521,6 +2521,27 @@ export async function runR2UsageCheck(
         console.warn(
           "[r2-usage] GraphQL storage samples are stale; ignoring storage for kill decisions (ops still enforced)"
         );
+      } else if (!liveStorage) {
+        // Samples are fresh, but an orphan bucket (deleted/renamed, asOf null)
+        // can still carry its stale month-max size into currentBytes and trip a
+        // false kill or block auto-resume.  Drop orphans from the CURRENT
+        // snapshot; GB-month stays untouched — the bucket's earlier residency
+        // this month really does bill (same rule as the fleet rollup).
+        const liveSamples = buckets.filter((b) => b.asOf);
+        if (liveSamples.length !== buckets.length) {
+          const orphans = buckets
+            .filter((b) => !b.asOf)
+            .map((b) => b.bucketName);
+          console.warn(
+            `[r2-usage] dropping ${orphans.length} orphan bucket(s) from current storage: ${orphans.join(", ")}`
+          );
+          buckets = liveSamples;
+          currentBytes = liveSamples.reduce((sum, b) => sum + b.bytes, 0);
+          billingBytes = resolveBillingStorageBytes(
+            currentBytes,
+            metrics.gbMonthBytes
+          );
+        }
       }
 
       assessment = assessR2Usage(
