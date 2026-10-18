@@ -28,8 +28,10 @@ try {
     "codex-usage-collector.mjs",
     "copilot-usage-collector.mjs",
     "deepseek-usage-collector.mjs",
+    "fx-usage-collector.mjs",
     "grok-usage-collector.mjs",
     "minimax-usage-collector.mjs",
+    "opencode-usage-collector.mjs",
   ];
   for (const script of scripts) writeFileSync(join(source, "scripts", script), "export {};\n");
   git(source, ["add", "."]);

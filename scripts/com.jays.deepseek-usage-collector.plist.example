@@ -1,14 +1,36 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/deepseek-usage-collector.mjs.
+
+  Reads DSH (~/.dsh/sessions) and Clutch (~/.clutch/dsh/sessions) archives, both
+  session.jsonl.zstd and session.v3.jsonl.zstd.  Needs /opt/homebrew/bin/zstd.
+
+  Run it from the installed collector copy, never from ~/Code:
+    scripts/install-collectors.sh        (see docs/runbooks/mac-collectors-install.md)
+
+  USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1 skips BotFleet-managed DSH
+  workspaces, which BotFleet already reports under the botfleet producer.
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.deepseek-usage-collector
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.jays.deepseek-usage-collector</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/deepseek-usage-collector.mjs</string>
+    <string>/opt/homebrew/opt/node@24/bin/node</string>
+    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collectors/scripts/deepseek-usage-collector.mjs</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN</key>
+    <string>1</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>

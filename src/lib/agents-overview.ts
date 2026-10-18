@@ -832,12 +832,16 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       continue;
     }
     const modelPricing = getModelPricing(model);
+    const isCacheWrite =
+      label.includes("cachecreation") || label.includes("cache_creation") || label.includes("cache_write");
     const breakdown = label.includes("output")
       ? { output: qty }
       : label.includes("cacheread") || label.includes("cache_read") || label.includes("cache_hit")
         ? { cacheRead: qty }
-        : label.includes("cachecreation") || label.includes("cache_creation") || label.includes("cache_write")
-          ? { cacheCreation: qty }
+        : isCacheWrite
+          ? /(1h|onehour)/.test(label)
+            ? { cacheCreation1h: qty }
+            : { cacheCreation: qty }
           : { input: qty };
     const priced = modelPricing
       ? deriveTokenCostUsd(modelPricing.pricing, breakdown)

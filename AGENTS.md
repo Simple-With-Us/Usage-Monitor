@@ -92,6 +92,8 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   (see `docs/rollouts/2026-09-12-subscription-quota-collector.md`).  All of them
   emit through `scripts/lib/quota-event.mjs`: `credits` = percent REMAINING,
   `limit` = 100, everything else in `metadata`.  Do not invent a second shape.
+  The Mac LaunchAgents run an installed copy (`scripts/install-collectors.sh`,
+  `docs/runbooks/mac-collectors-install.md`), never `~/Code/Usage-Monitor`.
 - `GET /api/budget-status` — dashboard session cookie OR Bearer `USAGE_READ_TOKEN`
   (required in production; falls back to `USAGE_INGEST_TOKEN` only outside
   production or with the explicit break-glass flag — see "Env vars").
@@ -128,10 +130,22 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
   `OTEL_EXPORTER_OTLP_PROTOCOL` value) — a gRPC-configured client gets a 415 telling it to switch
   to `http/json` or `http/protobuf`. Same auth as `/api/ingest/usage` (Bearer `USAGE_INGEST_TOKEN`
   or `x-usage-ingest-token`) via the now-shared `src/lib/ingest-auth.ts`.
-- `POST /api/otlp/v1/logs` — accept-and-drop stub. Authenticated and decoded (so malformed
-  payloads still 400, not silently swallowed) but never persisted — see the docblock in
-  `src/app/api/otlp/v1/logs/route.ts` for why (no per-event-log concept in this app's schema;
-  errors/health live in Sentry per the owner's goal split, see the Sentry Health card below).
+- `POST /api/otlp/v1/logs` — stores per-request AI telemetry (UM-1590) and drops everything
+  else.  `claude_code.api_request` and `codex.api_request` / `codex.websocket_request` +
+  `codex.sse_event` (response.completed) become one `AiRequest` row per model call: requested
+  model, duration, TTFT (Codex, or the Claude Code traces beta), input / output / cache read /
+  cache write (5m and 1h when a source splits them) / reasoning tokens, the harness's
+  PAYG-equivalent `cost_usd`, harness, seat, project and billing mode.  Only allowlisted scalar
+  attributes are read; prompt and response bodies and `user.email` never are.  Idempotent on
+  `dedupeKey` (Claude `request_id`, else `client_request_id`, else a hash of session, prompt,
+  sequence and timestamp); Codex's two events are stitched per conversation in
+  `src/lib/ai-requests.ts`.  Every other log record (user_prompt, tool_result, api_error, ...)
+  stays accept-and-drop; errors/health live in Sentry.  `/api/otlp/v1/traces` upserts
+  `claude_code.llm_request` spans into the same row on the same key (adds `ttft_ms`), and no
+  longer turns Claude Code tool/hook/llm_request spans into `AgentTurn` rows (only
+  `claude_code.interaction` is a turn).  `AiRequest` never feeds cash math.  Read path:
+  `GET /api/ai-requests/performance?days=7` (session or `USAGE_READ_TOKEN`) and the Request
+  Performance table on the Agents page.  Retention `AI_REQUEST_RETENTION_DAYS` (default 180).
 - **Both routes are excluded from the dashboard-session middleware** (`src/middleware.ts`'s
   `api/otlp(?:/|$)` exclusion, alongside the pre-existing `api/ingest` one) — without this
   exclusion, even a request with a correct `USAGE_INGEST_TOKEN` gets a 401 from the middleware

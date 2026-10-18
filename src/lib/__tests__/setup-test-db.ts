@@ -481,6 +481,40 @@ CREATE INDEX "OtlpMetricState_updatedAt_idx" ON "OtlpMetricState"("updatedAt");
 CREATE INDEX "AgentTurn_platform_occurredAt_idx" ON "AgentTurn"("platform", "occurredAt");
 CREATE INDEX "AgentTurn_conversationId_occurredAt_idx" ON "AgentTurn"("conversationId", "occurredAt");
 CREATE INDEX "AgentTurn_model_occurredAt_idx" ON "AgentTurn"("model", "occurredAt");
+CREATE TABLE "AiRequest" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "dedupeKey" TEXT NOT NULL,
+  "harness" TEXT NOT NULL,
+  "seat" TEXT,
+  "project" TEXT,
+  "billingMode" TEXT,
+  "sessionId" TEXT,
+  "requestedModel" TEXT,
+  "servedModel" TEXT,
+  "durationMs" INTEGER,
+  "ttftMs" INTEGER,
+  "inputTokens" INTEGER,
+  "outputTokens" INTEGER,
+  "cacheReadTokens" INTEGER,
+  "cacheWriteTokens" INTEGER,
+  "cacheWrite5mTokens" INTEGER,
+  "cacheWrite1hTokens" INTEGER,
+  "reasoningTokens" INTEGER,
+  "costUsd" REAL,
+  "costSource" TEXT,
+  "speed" TEXT,
+  "effort" TEXT,
+  "querySource" TEXT,
+  "statusCode" INTEGER,
+  "error" TEXT,
+  "sources" TEXT NOT NULL,
+  "occurredAt" DATETIME NOT NULL,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX "AiRequest_dedupeKey_key" ON "AiRequest"("dedupeKey");
+CREATE INDEX "AiRequest_occurredAt_idx" ON "AiRequest"("occurredAt");
+CREATE INDEX "AiRequest_harness_occurredAt_idx" ON "AiRequest"("harness", "occurredAt");
+CREATE INDEX "AiRequest_sessionId_occurredAt_idx" ON "AiRequest"("sessionId", "occurredAt");
 CREATE UNIQUE INDEX "ProviderAlertNotification_stateKey_key" ON "ProviderAlertNotification"("stateKey");
 CREATE INDEX "ProviderAlertNotification_providerId_resolvedAt_idx" ON "ProviderAlertNotification"("providerId", "resolvedAt");
 CREATE INDEX "ProviderAlertNotification_lastSentAt_idx" ON "ProviderAlertNotification"("lastSentAt");

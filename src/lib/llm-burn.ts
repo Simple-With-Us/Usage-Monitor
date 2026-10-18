@@ -30,6 +30,8 @@
 // the tiny denominator makes it noise.
 
 import {
+  canonicalTokenType,
+  type CanonicalTokenType,
   deriveTokenCostUsd,
   getModelPricing,
   PRICING_SNAPSHOT_META,
@@ -45,8 +47,6 @@ const MIN_MONTH_FRACTION_FOR_PROJECTION = 0.02;
 /** paceRatio bands: <1.0 on pace, <WATCH over-budget drift, >= WATCH over. */
 export const PACE_WATCH_RATIO = 1.1;
 
-const TOKEN_TYPE_KEYS = ["input", "output", "cacheRead", "cacheCreation"] as const;
-type KnownTokenType = (typeof TOKEN_TYPE_KEYS)[number];
 
 export interface LlmBurnTokenGroup {
   provider: string;
@@ -156,17 +156,13 @@ function emptyTotals(): LlmBurnTokenTotals {
   return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, unknown: 0, total: 0 };
 }
 
-function isKnownTokenType(value: string): value is KnownTokenType {
-  return (TOKEN_TYPE_KEYS as readonly string[]).includes(value);
-}
-
 interface TokenAccumulator {
   tokens: LlmBurnTokenTotals;
   derivedCostUsd: number;
   derivationComplete: boolean;
   /** model -> token sums, so pricing resolves per model (provider prefixes
    * and date suffixes differ per model name). "" = producer reported none. */
-  models: Map<string, { typed: Record<KnownTokenType, number>; unknown: number }>;
+  models: Map<string, { typed: Record<CanonicalTokenType, number>; unknown: number }>;
 }
 
 /** Accumulates token groups into per-provider totals with per-model pricing. */
@@ -187,16 +183,19 @@ function aggregateTokens(
       };
       byProvider.set(group.provider, entry);
     }
-    const type: KnownTokenType | "unknown" = isKnownTokenType(group.tokenType)
-      ? group.tokenType
-      : "unknown";
-    entry.tokens[type] += group.quantity;
+    const type: CanonicalTokenType | "unknown" = canonicalTokenType(group.tokenType) ?? "unknown";
+    // 1h cache writes are shown in the cacheCreation display bucket but priced
+    // at the 1h rate (typed.cacheCreation1h below).
+    entry.tokens[type === "cacheCreation1h" ? "cacheCreation" : type] += group.quantity;
     entry.tokens.total += group.quantity;
 
     const modelKey = group.model?.trim() || "";
     let model = entry.models.get(modelKey);
     if (!model) {
-      model = { typed: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, unknown: 0 };
+      model = {
+        typed: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation1h: 0 },
+        unknown: 0,
+      };
       entry.models.set(modelKey, model);
     }
     if (type === "unknown") model.unknown += group.quantity;
@@ -208,7 +207,7 @@ function aggregateTokens(
     for (const [modelName, sums] of entry.models) {
       const priced =
         sums.typed.input + sums.typed.output + sums.typed.cacheRead + sums.typed.cacheCreation +
-          sums.unknown >
+          sums.typed.cacheCreation1h + sums.unknown >
         0;
       const resolved = modelName ? getModelPricing(modelName) : null;
       if (!resolved) {

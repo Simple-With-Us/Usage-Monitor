@@ -152,3 +152,97 @@ describe("buildApiEquivalentCost", () => {
     expect(report.totals.estimateUsd).toBeGreaterThan(3);
   });
 });
+
+describe("UM-1591 pricing resolution in the cost check", () => {
+  it("prices claude-opus-5-5[1m] at Opus 5.5 rates, not Opus 5 (was +69%)", () => {
+    const report = buildClaudeCostCheck(
+      [
+        { model: "claude-opus-5-5[1m]", tokenType: "input", quantity: 1_000_000 },
+        { model: "claude-opus-5-5[1m]", tokenType: "output", quantity: 1_000_000 },
+      ],
+      [{ model: "claude-opus-5-5[1m]", costUsd: 24 }]
+    );
+    expect(report.models[0].pricingKey).toBe("claude-opus-5-5");
+    expect(report.models[0].pricingStatus).toBe("priced");
+    expect(report.models[0].derivedCostUsd).toBeCloseTo(24, 6);
+    expect(report.models[0].deltaUsd).toBeCloseTo(0, 6);
+  });
+
+  it("reports an unknown version as unpriced instead of borrowing a shorter key's rates", () => {
+    const report = buildClaudeCostCheck(
+      [{ model: "claude-opus-5-9", tokenType: "input", quantity: 1_000_000 }],
+      []
+    );
+    expect(report.models[0].pricingKey).toBeNull();
+    expect(report.models[0].pricingStatus).toBe("unpriced");
+    expect(report.models[0].derivedCostUsd).toBe(0);
+    expect(report.totals.unpricedModelCount).toBe(1);
+  });
+
+  it("prices claude-fable-5-1 and claude-haiku-5-5 (were fuzzy-matched / unpriced)", () => {
+    const report = buildClaudeCostCheck(
+      [
+        { model: "claude-fable-5-1", tokenType: "cacheRead", quantity: 1_000_000 },
+        { model: "claude-haiku-5-5", tokenType: "output", quantity: 1_000_000 },
+      ],
+      []
+    );
+    const byModel = Object.fromEntries(report.models.map((m) => [m.model, m]));
+    expect(byModel["claude-fable-5-1"].pricingKey).toBe("claude-fable-5-1");
+    expect(byModel["claude-fable-5-1"].derivedCostUsd).toBeCloseTo(0.25, 6);
+    expect(byModel["claude-haiku-5-5"].derivedCostUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it("prices 1h cache writes at the 1h rate and brackets untyped writes between 5m and 1h", () => {
+    const report = buildClaudeCostCheck(
+      [
+        { model: "claude-sonnet-5-5", tokenType: "cacheCreation", quantity: 1_000_000 },
+        { model: "claude-sonnet-5-5", tokenType: "cacheCreation1h", quantity: 1_000_000 },
+      ],
+      []
+    );
+    const m = report.models[0];
+    expect(m.tokens.cacheCreation).toBe(1_000_000);
+    expect(m.tokens.cacheCreation1h).toBe(1_000_000);
+    expect(m.derivedCostUsd).toBeCloseTo(2.5 + 4, 6);
+    // Upper bound prices BOTH buckets at 1h.
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(8, 6);
+    expect(m.derivationComplete).toBe(true);
+  });
+
+  it("untyped cache writes: reported cost above the 5m derivation sits inside the 5m..1h band", () => {
+    const report = buildClaudeCostCheck(
+      [{ model: "claude-opus-5-5", tokenType: "cacheCreation", quantity: 1_000_000 }],
+      [{ model: "claude-opus-5-5", costUsd: 6.5 }]
+    );
+    const m = report.models[0];
+    expect(m.derivedCostUsd).toBeCloseTo(5, 6);
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(8, 6);
+    expect(m.reportedCostUsd).toBeGreaterThan(m.derivedCostUsd);
+    expect(m.reportedCostUsd).toBeLessThan(m.derivedCostUpperBoundUsd);
+  });
+
+  it("never guesses Haiku 5.5's long-prompt tier from grouped rows: standard point estimate, long tier only in the upper bound", () => {
+    const m = buildClaudeCostCheck(
+      [
+        { model: "claude-haiku-5-5", tokenType: "input", quantity: 1_000_000 },
+        { model: "claude-haiku-5-5", tokenType: "output", quantity: 1_000_000 },
+      ],
+      []
+    ).models[0];
+    expect(m.hasLongPromptTier).toBe(true);
+    expect(m.derivedCostUsd).toBeCloseTo(0.1 + 0.5, 6);
+    // Upper bound: everything at the >100k tier (0.50 + 2.50).
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(3, 6);
+  });
+
+  it("never applies a long-prompt tier to models that have none", () => {
+    const m = buildClaudeCostCheck(
+      [{ model: "claude-opus-5-5[1m]", tokenType: "cacheRead", quantity: 900_000_000 }],
+      []
+    ).models[0];
+    expect(m.hasLongPromptTier).toBe(false);
+    expect(m.derivedCostUpperBoundUsd).toBeCloseTo(180, 6);
+    expect(m.derivedCostUsd).toBeCloseTo(180, 6);
+  });
+});

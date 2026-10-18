@@ -494,6 +494,53 @@ model AgentTurn {
   @@index([model, occurredAt])
 }
 
+// One row per model API call (UM-1590).  Fed by /api/otlp/v1/logs
+// (claude_code.api_request, codex.api_request + codex.sse_event
+// response.completed) and by /api/otlp/v1/traces (claude_code.llm_request
+// spans); both upsert on dedupeKey and fill only columns still null, so a
+// request reported by logs AND traces stays one row.  Diagnostic and
+// performance analytics only, like AgentTurn: it never feeds cash budget math
+// (that stays on ExternalUsageEvent).  No prompt or response bodies, ever.
+// Field names follow the UM-1592 canonical `ai` block.
+// Token semantics: inputTokens excludes cache reads and writes (Anthropic
+// convention; OpenAI cached input is subtracted at ingest), outputTokens
+// includes reasoningTokens when the provider counts them inside output.
+// Rows expire after AI_REQUEST_RETENTION_DAYS (default 180).
+model AiRequest {
+  id                 String   @id @default(uuid())
+  dedupeKey          String   @unique
+  harness            String
+  seat               String?
+  project            String?
+  billingMode        String?
+  sessionId          String?
+  requestedModel     String?
+  servedModel        String?
+  durationMs         Int?
+  ttftMs             Int?
+  inputTokens        Int?
+  outputTokens       Int?
+  cacheReadTokens    Int?
+  cacheWriteTokens   Int?
+  cacheWrite5mTokens Int?
+  cacheWrite1hTokens Int?
+  reasoningTokens    Int?
+  costUsd            Float?
+  costSource         String?
+  speed              String?
+  effort             String?
+  querySource        String?
+  statusCode         Int?
+  error              String?
+  sources            String
+  occurredAt         DateTime
+  createdAt          DateTime @default(now())
+
+  @@index([occurredAt])
+  @@index([harness, occurredAt])
+  @@index([sessionId, occurredAt])
+}
+
 model ProviderAlertNotification {
   id                               String                         @id @default(uuid())
   providerId                       String

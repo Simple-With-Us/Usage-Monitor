@@ -31,6 +31,8 @@
     "copilot:collect": "node scripts/copilot-usage-collector.mjs",
     "deepseek:collect": "node scripts/deepseek-usage-collector.mjs",
     "minimax:collect": "node scripts/minimax-usage-collector.mjs",
+    "opencode:collect": "node scripts/opencode-usage-collector.mjs",
+    "fx:collect": "node scripts/fx-usage-collector.mjs",
     "import:receipt-screenshots": "node scripts/add-user-billing-receipts.mjs",
     "import:billing-receipts": "node scripts/import-private-billing-receipts.mjs",
     "receipt-inbox:verify-lifecycle": "node scripts/verify-receipt-inbox-lifecycle.mjs",
@@ -65,7 +67,7 @@
   "dependencies": {
     "@datadog/browser-logs": "^7.15.0",
     "@datadog/browser-rum": "^7.9.0",
-    "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.7.1",
+    "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.8.1",
     "@prisma/client": "^7.0.0",
     "@sentry/nextjs": "^11.3.0",
     "dd-trace": "^6.19.0",
