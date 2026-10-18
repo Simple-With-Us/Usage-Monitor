@@ -105,7 +105,7 @@ describe("resolvePricingKey", () => {
 
   it("prices Claude Opus 5.5 explicitly instead of fuzzy-matching Opus 5", () => {
     expect(resolvePricingKey("claude-opus-5-5")).toBe("claude-opus-5-5");
-    expect(resolvePricingKey("claude-opus-5.5")).toBe("claude-opus-5.5");
+    expect(resolvePricingKey("claude-opus-5.5")).toBe("claude-opus-5-5");
     const pricing = getModelPricing("claude-opus-5-5")?.pricing;
     expect(pricing?.input_cost_per_token).toBeCloseTo(4e-6, 12);
     expect(pricing?.output_cost_per_token).toBeCloseTo(20e-6, 12);
@@ -192,11 +192,15 @@ describe("deriveTokenCostUsd", () => {
   });
 
   it("uses >200k-context rates only when explicitly requested", () => {
-    const base = deriveTokenCostUsd(sonnet.pricing, { input: 1_000_000 });
-    const longCtx = deriveTokenCostUsd(sonnet.pricing, { input: 1_000_000 }, { above200k: true });
-    expect(base.costUsd).toBeCloseTo(3, 6);
-    // Sonnet doubles input price above 200k context ($3 -> $6 per 1M).
-    expect(longCtx.costUsd).toBeCloseTo(6, 6);
+    // Claude 4.6+ bills 1M context at the standard rate, so use a model with a
+    // real long-context tier: Grok 4.6 doubles input above 200k ($2 -> $4 per 1M).
+    const grok = getModelPricing("grok-4.6")!;
+    const base = deriveTokenCostUsd(grok.pricing, { input: 1_000_000 });
+    const longCtx = deriveTokenCostUsd(grok.pricing, { input: 1_000_000 }, { above200k: true });
+    const viaNewName = deriveTokenCostUsd(grok.pricing, { input: 1_000_000 }, { longContext: true });
+    expect(base.costUsd).toBeCloseTo(2, 6);
+    expect(longCtx.costUsd).toBeCloseTo(4, 6);
+    expect(viaNewName.costUsd).toBeCloseTo(4, 6);
   });
 
   it("treats zero/negative counts as absent rather than incomplete", () => {
