@@ -11,8 +11,8 @@ import { createHash, createHmac } from "node:crypto";
  *   - Class A ops: 1,000,000 / month
  *   - Class B ops: 10,000,000 / month
  *
- * Hard policy at {@link R2_THRESHOLD_PCT} (70%):
- *   - **Storage:** max(current snapshot, GB-month so far) ≥ 70% of the
+ * Hard policy at {@link R2_THRESHOLD_PCT} (90%):
+ *   - **Storage:** max(current snapshot, GB-month so far) ≥ 90% of the
  *     10 GiB free tier → stop.  Cloudflare bills GB-month, not the latest
  *     ListObjects total.  A prune that drops the live card to a few hundred
  *     MB does not erase a 20+ GiB day earlier in the month.  Month-peak
@@ -49,7 +49,7 @@ export const DEFAULT_R2_FREE_TIER_LIMITS: R2UsageLimits = {
   classBOps: 10_000_000,
 };
 
-export const R2_THRESHOLD_PCT = 70;
+export const R2_THRESHOLD_PCT = 90;
 
 export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
 /**
@@ -175,7 +175,7 @@ export const R2_STORAGE_GRAPHQL_DAY_LIMIT = 400;
 export const R2_PREVIOUS_WEEK_DAYS = 7;
 
 /** Auto-resume hysteresis: clear kill switch when live storage is below this. */
-export const R2_RESUME_STORAGE_PCT = 65;
+export const R2_RESUME_STORAGE_PCT = 85;
 
 /**
  * Soft tip-prune threshold: when live storage reaches this absolute share of the

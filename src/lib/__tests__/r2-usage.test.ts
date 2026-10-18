@@ -110,7 +110,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(statusLow.projectedPct).toBeLessThan(70);
 
     const statusHigh = calculatePaceProjection(
-      400_000,
+      450_000,
       limit,
       testDate,
       70,
@@ -144,7 +144,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(withPace.onTrackToExceed).toBe(true);
 
     const over = calculatePaceProjection(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
       70,
@@ -184,7 +184,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(plan.delete.reduce((s, o) => s + o.size, 0)).toBe(100);
   });
 
-  it("assesses storage absolute + ops absolute/pace at 70%", () => {
+  it("assesses storage absolute + ops absolute/pace at 90%", () => {
     const testDate = new Date("2026-07-15T12:00:00.000Z");
 
     const lowAssessment = assessR2Usage(
@@ -199,7 +199,7 @@ describe("R2 usage monitoring & auto-disable", () => {
 
     const highAssessment = assessR2Usage(
       1 * 1024 * 1024 * 1024,
-      400_000,
+      450_000,
       500_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
       testDate
@@ -208,7 +208,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(highAssessment.exceededMetric).toBe("classA");
 
     const storageBreach = assessR2Usage(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       1_000,
       1_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
