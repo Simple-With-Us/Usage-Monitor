@@ -40,6 +40,13 @@ const METADATA_ALLOWLIST = new Set([
   "deployment.environment",
   "project",
   "project.name",
+  // Claude Code repository identity (OTEL_METRICS_INCLUDE_REPOSITORY=1, v2.1.269+),
+  // derived from the origin remote.  Public repo coordinates only: credentials,
+  // query strings and fragments are stripped by Claude Code.  UM-1599.
+  "vcs.repository.name",
+  "vcs.repository.url.full",
+  "vcs.owner.name",
+  "vcs.provider.name",
   "session.id",
   "host.name",
   "model",

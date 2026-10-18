@@ -228,4 +228,25 @@ describe("POST /api/otlp/v1/logs", () => {
       delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
     }
   });
+  it("accepts the scoped openai-codex token for Codex rows but not for Claude rows (UM-1599)", async () => {
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "openai-codex:codex-scoped-token";
+    process.env.USAGE_INGEST_REQUIRE_SCOPED_TOKENS = "true";
+    try {
+      const headers = { authorization: "Bearer codex-scoped-token" };
+      const ok = await POST(jsonRequest(codexCompletionPayload(), headers));
+      expect(ok.status).toBe(202);
+      const rows = await prisma.aiRequest.findMany();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ harness: "codex", seat: "CODEX", servedModel: "gpt-6.1-sol" });
+
+      const denied = await POST(jsonRequest(claudeLogsPayload(), headers));
+      expect(denied.status).toBe(403);
+      // The unscoped token is refused once scoped tokens are required.
+      const unscoped = await POST(jsonRequest(codexCompletionPayload(), AUTH));
+      expect(unscoped.status).toBe(401);
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+      delete process.env.USAGE_INGEST_REQUIRE_SCOPED_TOKENS;
+    }
+  });
 });
