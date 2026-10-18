@@ -1528,6 +1528,26 @@ describe("R2 usage monitoring & auto-disable", () => {
     ).toBe(false);
   });
 
+  it("ignores orphan buckets with no current sample in the freshness check", () => {
+    const now = new Date("2026-08-05T00:30:00.000Z");
+    const fresh = {
+      bucketName: "usage-monitor-bucket",
+      bytes: 15 * 1024 ** 3,
+      objectCount: 600,
+      asOf: "2026-08-05T00:00:00.000Z",
+    };
+    const orphan = {
+      bucketName: "deleted-ghost-bucket",
+      bytes: 2 * 1024 ** 3,
+      objectCount: 40,
+      asOf: null,
+    };
+    // Ghost bucket alone must not flip a fresh set to stale (Seer #1706).
+    expect(graphqlStorageSamplesAreFresh([fresh, orphan], now)).toBe(true);
+    // But with no sampled bucket at all there is no fresh data.
+    expect(graphqlStorageSamplesAreFresh([orphan], now)).toBe(false);
+  });
+
   it("does not kill on stale GraphQL storage when live S3 list is unavailable", async () => {
     process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
     process.env.R2_USAGE_API_TOKEN = "tok-test";

@@ -1916,9 +1916,14 @@ export function graphqlStorageSamplesAreFresh(
   maxAgeMs: number = R2_GRAPHQL_STORAGE_MAX_AGE_MS
 ): boolean {
   if (buckets.length === 0) return false;
-  return buckets.every((b) => {
-    if (!b.asOf) return false;
-    const t = Date.parse(b.asOf);
+  // Orphan buckets (deleted or renamed) can linger in the month-window
+  // r2StorageByBucket series with no 24-hour sample (asOf null).  They must
+  // not poison the freshness check and block GraphQL-based auto-resume.
+  // Only buckets with a current sample count; zero sampled buckets is stale.
+  const sampled = buckets.filter((b) => b.asOf);
+  if (sampled.length === 0) return false;
+  return sampled.every((b) => {
+    const t = Date.parse(b.asOf as string);
     return Number.isFinite(t) && now.getTime() - t <= maxAgeMs;
   });
 }
