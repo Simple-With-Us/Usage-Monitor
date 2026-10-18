@@ -641,25 +641,82 @@ export async function postUsageBatches({
   let received = 0;
   let persisted = 0;
   let rejected = 0;
+  let conflicted = 0;
   const batches = chunkEvents(events);
   for (let i = 0; i < batches.length; i += 1) {
     const batch = batches[i];
-    const parsed = await postUsageBatchWithRetry({
+    const parsed = await postBatchIsolatingConflicts({
       ingestUrl,
       ingestToken,
-      body: bodyFor(batch),
+      bodyFor,
+      events: batch,
       log,
     });
     received += parsed.received;
     persisted += parsed.persisted;
     rejected += parsed.rejected;
+    conflicted += parsed.conflicted;
     // Authenticated ingest allows 10 req / 1s.  A 400-day backfill is 100+
     // batches; blasting them trips 429 and aborts the rest of history.
     if (i < batches.length - 1) {
       await sleep(120);
     }
   }
-  return { received, persisted, rejected };
+  if (conflicted > 0) {
+    log(`WARNING: ${conflicted} event(s) skipped as idempotency conflicts (already stored with different content)`);
+  }
+  return { received, persisted, rejected, conflicted };
+}
+
+/**
+ * The ingest endpoint answers 409 idempotency_conflict for the WHOLE batch when
+ * any one event collides with a stored row that has different content (UM-1469:
+ * a hostname rename did this to every replayed event, and the collector, which
+ * only advances its checkpoint after a clean ack, re-sent the same poisoned
+ * batch for a month).  A conflict means the row is already stored, so the right
+ * response is to isolate the colliding event(s) by halving the batch, log each
+ * key loudly, and let everything else land.
+ */
+async function postBatchIsolatingConflicts({ ingestUrl, ingestToken, bodyFor, events, log }) {
+  try {
+    const parsed = await postUsageBatchWithRetry({
+      ingestUrl,
+      ingestToken,
+      body: bodyFor(events),
+      log,
+    });
+    return {
+      received: parsed.received,
+      persisted: parsed.persisted,
+      rejected: parsed.rejected,
+      conflicted: 0,
+    };
+  } catch (error) {
+    if (error?.code !== "idempotency_conflict") throw error;
+    if (events.length === 1) {
+      log(
+        `skipping event ${events[0].eventId} (${events[0].label ?? events[0].metricType}): ${error.message}`
+      );
+      return { received: 1, persisted: 0, rejected: 0, conflicted: 1 };
+    }
+    const mid = Math.ceil(events.length / 2);
+    const total = { received: 0, persisted: 0, rejected: 0, conflicted: 0 };
+    for (const half of [events.slice(0, mid), events.slice(mid)]) {
+      const part = await postBatchIsolatingConflicts({
+        ingestUrl,
+        ingestToken,
+        bodyFor,
+        events: half,
+        log,
+      });
+      total.received += part.received;
+      total.persisted += part.persisted;
+      total.rejected += part.rejected;
+      total.conflicted += part.conflicted;
+      await sleep(120);
+    }
+    return total;
+  }
 }
 
 function sleep(ms) {
@@ -718,7 +775,11 @@ async function postUsageBatchWithRetry({ ingestUrl, ingestToken, body, log }) {
       continue;
     }
     if (!response.ok && response.status !== 202) {
-      throw new Error(`Ingest rejected the batch (HTTP ${response.status})`);
+      const detail = parsed?.error?.message ? `: ${String(parsed.error.message).slice(0, 300)}` : "";
+      const failure = new Error(`Ingest rejected the batch (HTTP ${response.status})${detail}`);
+      failure.status = response.status;
+      failure.code = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
+      throw failure;
     }
     if (!isCompleteUsageIngestAck(parsed, body.events.length)) {
       const waitMs = Math.min(60_000, Math.pow(2, attempt) * 1000);

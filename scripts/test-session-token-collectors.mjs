@@ -17,6 +17,7 @@ import {
   GROK_COST_USD_TICKS,
   GROK_PRODUCER_ID,
   chunkEvents,
+  postUsageBatches,
   isCompleteUsageIngestAck,
   parseAntigravityStatuslineJsonl,
   parseClaudeSessionJsonl,
@@ -992,5 +993,64 @@ assert(
   guardOffenders.length === 0,
   `fragile main guard(s) -- use import.meta.url === pathToFileURL(process.argv[1]).href:\n  ${guardOffenders.join("\n  ")}`
 );
+
+// UM-1469: one idempotency_conflict event must not poison the whole batch.
+{
+  const poisonId = "evt-poison";
+  const events = Array.from({ length: 7 }, (_, i) => ({
+    eventId: i === 4 ? poisonId : `evt-${i}`,
+    metricType: "usage",
+    label: "token:input",
+  }));
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body.events.length);
+    if (body.events.some((e) => e.eventId === poisonId)) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: { code: "idempotency_conflict", message: 'Idempotency key collision for "abc".' },
+        }),
+        { status: 409 }
+      );
+    }
+    const n = body.events.length;
+    return new Response(
+      JSON.stringify({ ok: true, received: n, persisted: n, duplicates: 0, pruned: 0, rejected: 0 }),
+      { status: 200 }
+    );
+  };
+  const logs = [];
+  try {
+    const ack = await postUsageBatches({
+      events,
+      ingestUrl: "http://localhost/ingest",
+      ingestToken: "t",
+      producerId: "test",
+      log: (m) => logs.push(m),
+    });
+    assert(ack.received === 7 && ack.persisted === 6 && ack.conflicted === 1 && ack.rejected === 0,
+      `conflict isolation ack ${JSON.stringify(ack)}`);
+    assert(logs.some((m) => m.includes(poisonId)), "skipped conflicting eventId is logged");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // A non-conflict 4xx must still fail the run, with the server message attached.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: false, error: { code: "unauthorized", message: "bad token" } }), { status: 401 });
+  try {
+    let message = "";
+    try {
+      await postUsageBatches({ events, ingestUrl: "http://localhost/ingest", ingestToken: "t", producerId: "test", log: () => {} });
+    } catch (e) {
+      message = e.message;
+    }
+    assert(message.includes("HTTP 401") && message.includes("bad token"), `4xx keeps failing loudly: ${message}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 console.log("ok session-token-collectors");
