@@ -87,8 +87,11 @@
 set -euo pipefail
 
 # LaunchAgents inherit a tiny PATH (no Homebrew). Node is required for
-# ensure-tf-ready. Keep this before any `node` / `xcodegen` call.
-export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+# ensure-tf-ready. Prioritize /usr/bin and /bin so Apple distribution tools (rsync -E) use native macOS binaries.
+# Homebrew rsync 3.5.1 first on PATH shadows the system rsync that `xcodebuild
+# -exportArchive` spawns for the server half, and the IPA step then fails with
+# "rsync: --extended-attributes: unknown option" / "exportArchive Copy failed".
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 APPS_JSON="${FLEET_DIR}/apps.json"

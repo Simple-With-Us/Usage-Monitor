@@ -281,14 +281,30 @@ function stringProjectMetadata(value: unknown): string | null {
     : null;
 }
 
-function metadataWithoutStringProject(value: unknown): unknown {
+// UM-1469: `_producerInstanceId` records WHICH HOST sent an event, not what
+// the event is.  macOS renamed the Mac's hostname (`jays.services` ->
+// `Mac.Jays.Services`) and every collector replay of a pre-rename event then
+// failed with idempotency_conflict, because the stored row and the replay
+// differed only in that host label.  Quota enrichment copies the same label
+// into `machine`, so drop that too when it merely echoes the instance id.
+// A producer that sets `machine` to something else still collides.
+function metadataComparableForReplay(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return value;
   }
   const record = value as Record<string, unknown>;
-  if (typeof record.project !== "string") return value;
   const rest = { ...record };
-  delete rest.project;
+  let changed = false;
+  if (typeof record.project === "string") {
+    delete rest.project;
+    changed = true;
+  }
+  if ("_producerInstanceId" in record) {
+    if (record.machine === record._producerInstanceId) delete rest.machine;
+    delete rest._producerInstanceId;
+    changed = true;
+  }
+  if (!changed) return value;
   return Object.keys(rest).length > 0 ? rest : null;
 }
 
@@ -335,7 +351,7 @@ function comparableEvent(
     // basis. Compare it separately so an old event can gain attribution on a
     // replay without weakening collision checks for every other metadata
     // field (or allowing one project name to be replaced by another).
-    metadata: stableJson(metadataWithoutStringProject(metadata)),
+    metadata: stableJson(metadataComparableForReplay(metadata)),
   };
 }
 

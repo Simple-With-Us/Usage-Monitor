@@ -26,8 +26,10 @@ const REQUIRED_SCRIPTS = [
   "codex-usage-collector.mjs",
   "copilot-usage-collector.mjs",
   "deepseek-usage-collector.mjs",
+  "fx-usage-collector.mjs",
   "grok-usage-collector.mjs",
   "minimax-usage-collector.mjs",
+  "opencode-usage-collector.mjs",
 ];
 
 function fail(message) {

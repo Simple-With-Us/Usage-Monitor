@@ -31,6 +31,8 @@
     "copilot:collect": "node scripts/copilot-usage-collector.mjs",
     "deepseek:collect": "node scripts/deepseek-usage-collector.mjs",
     "minimax:collect": "node scripts/minimax-usage-collector.mjs",
+    "opencode:collect": "node scripts/opencode-usage-collector.mjs",
+    "fx:collect": "node scripts/fx-usage-collector.mjs",
     "import:receipt-screenshots": "node scripts/add-user-billing-receipts.mjs",
     "import:billing-receipts": "node scripts/import-private-billing-receipts.mjs",
     "receipt-inbox:verify-lifecycle": "node scripts/verify-receipt-inbox-lifecycle.mjs",

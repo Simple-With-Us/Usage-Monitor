@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,18 +14,27 @@ import {
   CODEX_PRODUCER_ID,
   COPILOT_PRODUCER_ID,
   DEEPSEEK_PRODUCER_ID,
+  DSH_LEGACY_EVENT_CUTOFF_MS,
+  FX_PRODUCER_ID,
   GROK_COST_USD_TICKS,
   GROK_PRODUCER_ID,
+  OPENCODE_PRODUCER_ID,
   chunkEvents,
+  postUsageBatches,
   isCompleteUsageIngestAck,
   parseAntigravityStatuslineJsonl,
   parseClaudeSessionJsonl,
   parseCodexJsonl,
   parseCopilotEventsJsonl,
   parseDeepSeekSessionJsonl,
+  parseFxUsageJsonl,
   parseGrokUpdatesJsonl,
+  parseOpencodeMessageRows,
   splitInclusiveCache,
 } from "./lib/session-token-collectors.mjs";
+import { collectDeepSeekEvents } from "./deepseek-usage-collector.mjs";
+import { collectFxEvents } from "./fx-usage-collector.mjs";
+import { collectOpencodeEvents } from "./opencode-usage-collector.mjs";
 import {
   DEFAULT_COLLECTOR_LOOKBACK_DAYS,
   COLLECTOR_STATE_OVERLAP_MINUTES,
@@ -886,6 +895,300 @@ const dsBatch = {
 };
 assert(UsageTelemetryV2BatchSchema.safeParse(dsBatch).success, "deepseek batch schema valid");
 
+// DSH v3 / Clutch: provider mapping, duration, legacy shape, v1/v3 twins.
+const dshV3Lines = [
+  JSON.stringify({ type: "session", version: 3, id: "session-a" }),
+  JSON.stringify({ type: "step/start", seq: 1, time: 1791774702972, data: { turn: 1, step: 1 } }),
+  JSON.stringify({
+    type: "assistant/message",
+    seq: 2,
+    time: 1791774709466,
+    data: {
+      turn: 1,
+      step: 1,
+      message: { id: "msg-meta", source: { kind: "model", provider: "meta", model: "muse-spark-1.3-contributor" } },
+      usage: { inputTokens: 3029, outputTokens: 284, totalTokens: 24930, cacheReadTokens: 21617 },
+    },
+  }),
+  JSON.stringify({
+    type: "assistant/message",
+    seq: 3,
+    time: 1791774719466,
+    data: {
+      turn: 1,
+      step: 2,
+      stream: [{ type: "chunk", time: 1791774717466, chunk: { type: "block-start" } }],
+      message: { id: "msg-mm", source: { provider: "minimax", model: "MiniMax-M3" } },
+      usage: { inputTokens: 10, outputTokens: 20, reasoningTokens: 5 },
+    },
+  }),
+  JSON.stringify({
+    type: "assistant/message",
+    seq: 4,
+    time: 1791774729466,
+    data: {
+      turn: 1,
+      step: 3,
+      message: { id: "msg-ds", source: { provider: "deepseek-official", model: "deepseek-v4-flash" } },
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 400 },
+    },
+  }),
+].join("\n");
+const dshV3Events = parseDeepSeekSessionJsonl(dshV3Lines, {
+  sessionKey: "proj/session-a",
+  harness: "clutch",
+});
+const metaInput = dshV3Events.find((e) => e.metadata.model === "muse-spark-1.3-contributor" && e.label === "token:input");
+assert(metaInput?.provider === "muse-code", "DSH maps meta to muse-code");
+assert(metaInput.metadata.billingMode === "subscription", "DSH meta is subscription");
+assert(metaInput.metadata.harness === "clutch", "DSH records the harness");
+assert(metaInput.metadata.durationMs === 6494, `DSH step duration ${metaInput.metadata.durationMs}`);
+const mmOut = dshV3Events.find((e) => e.metadata.model === "MiniMax-M3" && e.label === "token:output");
+assert(mmOut?.provider === "minimax", "DSH maps minimax");
+assert(mmOut.metadata.durationMs === 2000, "DSH falls back to stream start for duration");
+assert(mmOut.metadata.reasoningTokens === 5, "DSH keeps reasoning detail");
+const dsNew = dshV3Events.find((e) => e.metadata.model === "deepseek-v4-flash" && e.label === "token:cacheRead");
+assert(dsNew?.provider === "deepseek" && dsNew.metadata.billingMode === "payg", "DSH deepseek is payg");
+assert(
+  new Set(dshV3Events.map((e) => e.eventId)).size === dshV3Events.length,
+  "DSH event ids are distinct per message and token type",
+);
+const dshV3Again = parseDeepSeekSessionJsonl(dshV3Lines, { sessionKey: "proj/session-a", harness: "clutch" });
+assert(
+  JSON.stringify(dshV3Again) === JSON.stringify(dshV3Events),
+  "DSH events are deterministic across replays",
+);
+assert(
+  UsageTelemetryV2BatchSchema.safeParse({
+    schemaVersion: 2,
+    producerId: DEEPSEEK_PRODUCER_ID,
+    producerInstanceId: "test-host",
+    events: dshV3Events,
+  }).success,
+  "DSH v3 batch schema valid",
+);
+
+// A pre-cutoff DeepSeek message keeps the exact pre-v3 shape under the file key.
+const legacyLine = JSON.stringify({
+  type: "assistant/message",
+  time: DSH_LEGACY_EVENT_CUTOFF_MS - 1000,
+  data: {
+    message: { id: "msg-old", source: { provider: "deepseek-official", model: "deepseek-v4-pro" } },
+    usage: { inputTokens: 5, outputTokens: 6, reasoningTokens: 2 },
+  },
+});
+const legacyOpts = { sessionKey: "dir/session-x", legacySessionKey: "dir/session-x/session.jsonl.zstd" };
+const legacyEvents = parseDeepSeekSessionJsonl(legacyLine, legacyOpts);
+const preV3Events = parseDeepSeekSessionJsonl(legacyLine, { sessionKey: "dir/session-x/session.jsonl.zstd" });
+assert(
+  legacyEvents.length === 2 &&
+    legacyEvents.every((e, i) => e.eventId === preV3Events[i].eventId) &&
+    JSON.stringify(legacyEvents.map((e) => e.metadata)) ===
+      JSON.stringify([
+        { tokenType: "input", model: "deepseek-v4-pro" },
+        { tokenType: "output", model: "deepseek-v4-pro", reasoningTokens: 2 },
+      ]),
+  "pre-cutoff DeepSeek messages keep the legacy event shape and ids",
+);
+const seen = new Set();
+const first = parseDeepSeekSessionJsonl(legacyLine, { ...legacyOpts, seenMessageIds: seen });
+const twin = parseDeepSeekSessionJsonl(legacyLine, { sessionKey: "dir/session-x", seenMessageIds: seen });
+assert(first.length === 2 && twin.length === 0, "v1/v3 twin messages are emitted once");
+
+// opencode parser.
+const ocRow = (id, data) => ({ id, session_id: "ses_1", data: JSON.stringify(data) });
+const ocRows = [
+  ocRow("msg_1", {
+    time: { created: 1792198576061, streamed: 1792198591257, completed: 1792198591279 },
+    agent: "build",
+    model: { id: "muse-spark-1.3-contributor", providerID: "meta", variant: "xhigh" },
+    finish: "stop",
+    cost: 0.000513474,
+    tokens: { input: 436, output: 162, reasoning: 59, cache: { read: 218737, write: 7 } },
+  }),
+  ocRow("msg_2", {
+    time: { created: 1792198500000, completed: 1792198510000 },
+    model: { id: "MiniMax-M3", providerID: "minimax-coding-plan" },
+    cost: 0,
+    tokens: { input: 10, output: 20, reasoning: 30, cache: { read: 0, write: 0 } },
+  }),
+  ocRow("msg_streaming", {
+    time: { created: 1792198500000 },
+    model: { id: "MiniMax-M3", providerID: "minimax-coding-plan" },
+    tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+  }),
+  ocRow("msg_empty", {
+    time: { created: 1, completed: 2 },
+    model: { id: "x", providerID: "opencode" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }),
+  { id: "msg_bad", session_id: "ses_1", data: "{not json" },
+];
+const ocEvents = parseOpencodeMessageRows(ocRows);
+assert(ocEvents.length === 6, `opencode event count ${ocEvents.length}`);
+const ocOut1 = ocEvents.find((e) => e.label === "token:output" && e.metadata.model === "muse-spark-1.3-contributor");
+assert(ocOut1.quantity === 221, "opencode folds reasoning into output");
+assert(
+  ocOut1.metadata.reasoningTokens === 59 && ocOut1.metadata.outputTokensExcludingReasoning === 162,
+  "opencode keeps the reasoning split in metadata",
+);
+assert(ocOut1.metadata.durationMs === 15218, "opencode durationMs is completed minus created");
+assert(ocOut1.metadata.reportedCostUsd === 0.000513474, "opencode keeps non-zero reported cost in metadata");
+assert(ocOut1.provider === "muse-code" && ocOut1.metadata.billingMode === "subscription", "opencode meta provider");
+assert(ocOut1.occurredAt === new Date(1792198591279).toISOString(), "opencode occurredAt is completion time");
+assert(
+  ocEvents.find((e) => e.label === "token:cacheCreation")?.quantity === 7 &&
+    ocEvents.find((e) => e.label === "token:cacheRead")?.quantity === 218737 &&
+    ocEvents.find((e) => e.label === "token:input")?.quantity === 436,
+  "opencode input is uncached and cache rows are separate",
+);
+const ocMini = ocEvents.filter((e) => e.metadata.model === "MiniMax-M3");
+assert(
+  ocMini.length === 2 && ocMini.every((e) => e.provider === "minimax" && !("reportedCostUsd" in e.metadata)),
+  "opencode minimax rows carry no cost",
+);
+assert(ocEvents.every((e) => e.costUsd === undefined && e.confidence === "actual"), "opencode sends no costUsd");
+assert(new Set(ocEvents.map((e) => e.eventId)).size === ocEvents.length, "opencode ids distinct");
+assert(
+  JSON.stringify(parseOpencodeMessageRows(ocRows)) === JSON.stringify(ocEvents),
+  "opencode events are deterministic across replays",
+);
+assert(
+  UsageTelemetryV2BatchSchema.safeParse({
+    schemaVersion: 2,
+    producerId: OPENCODE_PRODUCER_ID,
+    producerInstanceId: "test-host",
+    events: ocEvents,
+  }).success,
+  "opencode batch schema valid",
+);
+
+// fx parser.
+const fxText = [
+  JSON.stringify({ schema_version: 1, kind: "pending", id: "gen_1", observed_at_ms: 1789227260258 }),
+  JSON.stringify({
+    schema_version: 1,
+    kind: "generation",
+    fact: {
+      id: "gen_1",
+      created_at_ms: 1789227260258,
+      model: "grok/grok-4.6",
+      input_tokens: 15820,
+      output_tokens: 403,
+      cache_read_tokens: 128,
+      cache_write_tokens: 0,
+      reasoning_tokens: 193,
+      billable_web_search_calls: 2,
+      total_cost: 0,
+    },
+  }),
+  JSON.stringify({
+    schema_version: 1,
+    kind: "generation",
+    fact: { id: "gen_2", created_at_ms: 1789227266992, model: "xai/grok-4.1-fast-reasoning", input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, billable_web_search_calls: 0, total_cost: 0 },
+  }),
+  JSON.stringify({ schema_version: 1, kind: "incident" }),
+  "not json",
+].join("\n");
+const fxEvents = parseFxUsageJsonl(fxText);
+assert(fxEvents.length === 3, `fx event count ${fxEvents.length}`);
+assert(
+  fxEvents.find((e) => e.label === "token:input")?.quantity === 15692,
+  "fx input excludes cache reads",
+);
+assert(fxEvents.every((e) => e.producerKeyRef === "grok-4.6" && e.provider === "xai"), "fx strips the vendor prefix");
+const fxOut = fxEvents.find((e) => e.label === "token:output");
+assert(fxOut.quantity === 403 && fxOut.metadata.reasoningTokens === 193, "fx keeps reasoning inside output");
+assert(fxOut.metadata.billableWebSearchCalls === 2 && fxOut.metadata.rawModel === "grok/grok-4.6", "fx diagnostic metadata");
+assert(fxEvents.every((e) => e.costUsd === undefined), "fx sends no cost");
+assert(
+  JSON.stringify(parseFxUsageJsonl(fxText)) === JSON.stringify(fxEvents),
+  "fx events are deterministic across replays",
+);
+assert(
+  UsageTelemetryV2BatchSchema.safeParse({
+    schemaVersion: 2,
+    producerId: FX_PRODUCER_ID,
+    producerInstanceId: "test-host",
+    events: fxEvents,
+  }).success,
+  "fx batch schema valid",
+);
+
+// Collector entry points over real files.
+const harnessRoot = await mkdtemp(join(tmpdir(), "harness-collectors-"));
+try {
+  await writeFile(join(harnessRoot, "usage.jsonl"), fxText);
+  const fxCollected = await collectFxEvents({ fxHome: harnessRoot, since: new Date(0) });
+  assert(fxCollected.length === 3, "fx collector reads usage.jsonl");
+  assert(
+    (await collectFxEvents({ fxHome: join(harnessRoot, "missing"), since: new Date(0) })).length === 0,
+    "fx collector tolerates a missing home",
+  );
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const dbPath = join(harnessRoot, "opencode.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec(
+    "CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, seq integer NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+  );
+  const insert = db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)");
+  insert.run("msg_1", "ses_1", "assistant", 1, 1792198576061, 1792198591288, ocRows[0].data);
+  insert.run("msg_2", "ses_1", "assistant", 2, 1792198500000, 1792198510000, ocRows[1].data);
+  insert.run("msg_u", "ses_1", "user", 3, 1792198500000, 1792198510000, JSON.stringify({ time: { created: 1 } }));
+  db.close();
+  const ocCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
+  assert(ocCollected.length === 6, `opencode collector reads assistant rows (${ocCollected.length})`);
+  const ocRecent = await collectOpencodeEvents({ dbPath, since: new Date(1792198590000) });
+  assert(
+    ocRecent.length === 4 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
+    "opencode collector honours the since watermark",
+  );
+  assert(
+    (await collectOpencodeEvents({ dbPath: join(harnessRoot, "none.db"), since: new Date(0) })).length === 0,
+    "opencode collector tolerates a missing database",
+  );
+
+  const zstdBin = process.env.ZSTD_BIN || "/opt/homebrew/bin/zstd";
+  if (existsSync(zstdBin)) {
+    process.env.ZSTD_BIN = zstdBin;
+    const dshHome = join(harnessRoot, "dsh");
+    const clutchHome = join(harnessRoot, "clutch");
+    for (const [home, name, text] of [
+      [dshHome, "sess-1/session.jsonl.zstd", legacyLine],
+      [dshHome, "sess-1/session.v3.jsonl.zstd", legacyLine],
+      [clutchHome, "sess-2/session.v3.jsonl.zstd", dshV3Lines],
+    ]) {
+      const dir = join(home, "sessions", name.split("/")[0]);
+      mkdirSync(dir, { recursive: true });
+      const plain = join(dir, "plain.jsonl");
+      await writeFile(plain, text);
+      execFileSync(zstdBin, ["-q", "-f", plain, "-o", join(home, "sessions", name)]);
+      await rm(plain);
+    }
+    const dshCollected = await collectDeepSeekEvents({
+      homes: [
+        { home: dshHome, harness: "dsh" },
+        { home: clutchHome, harness: "clutch" },
+      ],
+      since: new Date(0),
+    });
+    // 2 legacy rows (v1/v3 twins collapse) plus the Clutch archive's token rows.
+    assert(dshCollected.length === 2 + dshV3Events.length, `dsh collector event count ${dshCollected.length}`);
+    assert(
+      dshCollected.some((e) => e.metadata.harness === "clutch") &&
+        new Set(dshCollected.map((e) => e.eventId)).size === dshCollected.length,
+      "dsh collector reads the Clutch store with distinct ids",
+    );
+    assert(
+      dshCollected.filter((e) => !e.metadata.harness).length === 2,
+      "dsh collector keeps the legacy shape for pre-cutoff v1 messages and drops their v3 twins",
+    );
+  }
+} finally {
+  await rm(harnessRoot, { recursive: true, force: true });
+}
+
 const quotaEvent = {
   eventId: "agy-quota:gemini-weekly:2026-08-26T00:00:00Z",
   provider: "google-antigravity",
@@ -992,5 +1295,64 @@ assert(
   guardOffenders.length === 0,
   `fragile main guard(s) -- use import.meta.url === pathToFileURL(process.argv[1]).href:\n  ${guardOffenders.join("\n  ")}`
 );
+
+// UM-1469: one idempotency_conflict event must not poison the whole batch.
+{
+  const poisonId = "evt-poison";
+  const events = Array.from({ length: 7 }, (_, i) => ({
+    eventId: i === 4 ? poisonId : `evt-${i}`,
+    metricType: "usage",
+    label: "token:input",
+  }));
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body.events.length);
+    if (body.events.some((e) => e.eventId === poisonId)) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: { code: "idempotency_conflict", message: 'Idempotency key collision for "abc".' },
+        }),
+        { status: 409 }
+      );
+    }
+    const n = body.events.length;
+    return new Response(
+      JSON.stringify({ ok: true, received: n, persisted: n, duplicates: 0, pruned: 0, rejected: 0 }),
+      { status: 200 }
+    );
+  };
+  const logs = [];
+  try {
+    const ack = await postUsageBatches({
+      events,
+      ingestUrl: "http://localhost/ingest",
+      ingestToken: "t",
+      producerId: "test",
+      log: (m) => logs.push(m),
+    });
+    assert(ack.received === 7 && ack.persisted === 6 && ack.conflicted === 1 && ack.rejected === 0,
+      `conflict isolation ack ${JSON.stringify(ack)}`);
+    assert(logs.some((m) => m.includes(poisonId)), "skipped conflicting eventId is logged");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // A non-conflict 4xx must still fail the run, with the server message attached.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: false, error: { code: "unauthorized", message: "bad token" } }), { status: 401 });
+  try {
+    let message = "";
+    try {
+      await postUsageBatches({ events, ingestUrl: "http://localhost/ingest", ingestToken: "t", producerId: "test", log: () => {} });
+    } catch (e) {
+      message = e.message;
+    }
+    assert(message.includes("HTTP 401") && message.includes("bad token"), `4xx keeps failing loudly: ${message}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 console.log("ok session-token-collectors");
