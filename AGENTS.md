@@ -92,6 +92,8 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   (see `docs/rollouts/2026-09-12-subscription-quota-collector.md`).  All of them
   emit through `scripts/lib/quota-event.mjs`: `credits` = percent REMAINING,
   `limit` = 100, everything else in `metadata`.  Do not invent a second shape.
+  The Mac LaunchAgents run an installed copy (`scripts/install-collectors.sh`,
+  `docs/runbooks/mac-collectors-install.md`), never `~/Code/Usage-Monitor`.
 - `GET /api/budget-status` — dashboard session cookie OR Bearer `USAGE_READ_TOKEN`
   (required in production; falls back to `USAGE_INGEST_TOKEN` only outside
   production or with the explicit break-glass flag — see "Env vars").

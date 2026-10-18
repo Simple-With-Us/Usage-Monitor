@@ -39,6 +39,10 @@ import {
 import { runB2UsageCheck, type B2UsageCheckResult } from "@/lib/b2-app-usage";
 import { runR2UsageCheck, type R2UsageAssessment } from "@/lib/r2-usage";
 import { pauseGmailUnverifiedSeedSubscriptions } from "@/lib/gmail-ledger-ghosts";
+import {
+  runProducerStalenessCheck,
+  type ProducerStalenessResult,
+} from "@/lib/producer-staleness";
 
 export interface UsageMaintenanceResult {
   subscriptionAdoption: SubscriptionAdoptionMaintenanceResult;
@@ -55,6 +59,7 @@ export interface UsageMaintenanceResult {
   budgetControls?: BudgetControlsResult;
   r2UsageCheck?: R2UsageAssessment;
   b2UsageCheck?: B2UsageCheckResult;
+  producerStaleness?: ProducerStalenessResult;
 }
 
 export interface SubscriptionAdoptionMaintenanceError {
@@ -305,6 +310,14 @@ export async function runUsageMaintenance(
       console.error("[usage-maintenance] B2 app usage check failed:", error);
     }
 
+    // UM-1594: a quiet collector must page, not just leave a stale number.
+    let producerStaleness: ProducerStalenessResult | undefined;
+    try {
+      producerStaleness = await runProducerStalenessCheck();
+    } catch (error) {
+      console.error("[usage-maintenance] producer staleness check failed:", error);
+    }
+
     return {
       subscriptionAdoption,
       subscriptions,
@@ -316,6 +329,7 @@ export async function runUsageMaintenance(
       budgetControls,
       r2UsageCheck,
       b2UsageCheck,
+      producerStaleness,
     };
   })();
 
