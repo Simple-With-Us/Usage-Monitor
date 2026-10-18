@@ -47,9 +47,9 @@ export function withSentenceGaps(text: string): string {
  */
 export const REQUIRED_ENV_LEAD_IN = "Set the environment variables this card uses:";
 
-/** Color the R2 fill bar by closeness to the 10 GB free-tier cap (70% is the guard). */
+/** Color the R2 fill bar by closeness to the 10 GB free-tier cap (90% is the guard). */
 export function usageBarTone(pct: number): "ok" | "watch" | "over" {
-  if (pct >= 70) return "over";
+  if (pct >= 90) return "over";
   if (pct >= 50) return "watch";
   return "ok";
 }

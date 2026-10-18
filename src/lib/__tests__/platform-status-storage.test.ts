@@ -316,7 +316,7 @@ describe("STORAGE_PROBES", () => {
 
       expect(result.state).toBe("healthy");
       expect(result.error).toBeUndefined();
-      expect(result.headline).toBe("Every R2 account is under the 70% free-tier guard.");
+      expect(result.headline).toBe("Every R2 account is under the 90% free-tier guard.");
       expect(result.metrics).toEqual([
         {
           label: "Socratic Trade",
@@ -349,20 +349,20 @@ describe("STORAGE_PROBES", () => {
       vi.stubEnv("CLOUDFLARE_ST_ACCOUNT_ID", "aaaabbbbccccdddd");
       vi.stubEnv("CLOUDFLARE_ST_API_TOKEN", "st-analytics-token");
 
-      // 8 GiB of the 10 GiB free tier is 80%, past the 70% guard.
-      fetchJson.mockResolvedValue(jsonResponse(200, graphqlUsage(8 * 1024 * 1024 * 1024)));
+      // 9.5 GiB of the 10 GiB free tier is 95%, past the 90% guard.
+      fetchJson.mockResolvedValue(jsonResponse(200, graphqlUsage(9.5 * 1024 * 1024 * 1024)));
 
       const result = await probeById("cloudflare-r2").probe();
 
       expect(result.state).toBe("degraded");
       expect(result.error).toBe("free_tier_pressure");
       expect(result.headline).toBe(
-        "Socratic Trade is past the 70% R2 free-tier guard.  Cut storage or operations now."
+        "Socratic Trade is past the 90% R2 free-tier guard.  Cut storage or operations now."
       );
       expect(result.metrics[0]).toEqual({
         label: "Socratic Trade",
-        value: "8.0 GB / 10 GB Free Tier",
-        usagePct: 80,
+        value: "9.5 GB / 10 GB Free Tier",
+        usagePct: 95,
       });
     });
 

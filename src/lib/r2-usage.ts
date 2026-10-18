@@ -11,15 +11,15 @@ import { createHash, createHmac } from "node:crypto";
  *   - Class A ops: 1,000,000 / month
  *   - Class B ops: 10,000,000 / month
  *
- * Hard policy at {@link R2_THRESHOLD_PCT} (70%):
- *   - **Storage:** max(current snapshot, GB-month so far) ≥ 70% of the
+ * Hard policy at {@link R2_THRESHOLD_PCT} (90%):
+ *   - **Storage:** max(current snapshot, GB-month so far) ≥ 90% of the
  *     10 GiB free tier → stop.  Cloudflare bills GB-month, not the latest
  *     ListObjects total.  A prune that drops the live card to a few hundred
  *     MB does not erase a 20+ GiB day earlier in the month.  Month-peak
  *     alone is not the kill input (that false-killed after the 2026-08-04
  *     / 2026-08-12 prune).  No pace projection for storage.
- *   - **Class A / Class B (flows):** absolute MTD ≥ 70% **or** linear
- *     month-end pace projects ≥ 70% → stop.
+ *   - **Class A / Class B (flows):** absolute MTD ≥ 90% **or** linear
+ *     month-end pace projects ≥ 90% → stop.
  *
  * On trip we:
  *   1. Persist `/data/r2-disabled-70pct.flag` (and set env)
@@ -49,8 +49,10 @@ export const DEFAULT_R2_FREE_TIER_LIMITS: R2UsageLimits = {
   classBOps: 10_000_000,
 };
 
-export const R2_THRESHOLD_PCT = 70;
+export const R2_THRESHOLD_PCT = 90;
 
+// Keep this legacy filename shared with startup/runtime watchers so existing flags
+// remain readable and clearR2AutoDisable() can remove them after a policy change.
 export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
 /**
  * Durable record that auto-resume decided the kill switch should be off.
@@ -175,11 +177,11 @@ export const R2_STORAGE_GRAPHQL_DAY_LIMIT = 400;
 export const R2_PREVIOUS_WEEK_DAYS = 7;
 
 /** Auto-resume hysteresis: clear kill switch when live storage is below this. */
-export const R2_RESUME_STORAGE_PCT = 65;
+export const R2_RESUME_STORAGE_PCT = 85;
 
 /**
  * Soft tip-prune threshold: when live storage reaches this absolute share of the
- * free tier, delete non-tip LTX per level (latest max-txid kept) before the 70%
+ * free tier, delete non-tip LTX per level (latest max-txid kept) before the 90%
  * kill. Disaster recovery only needs the tip chain; multi-level LTX history is
  * what re-breaches free tier every day (2026-08-04 / 2026-08-06).
  */
@@ -437,7 +439,7 @@ export function assessR2Usage(
     previousWeekPeakBytes?: number | null;
   } = {}
 ): R2UsageAssessment {
-  // Storage: absolute 70% of free tier only (stock). Ops: absolute or pace.
+  // Storage: absolute 90% of free tier only (stock). Ops: absolute or pace.
   const storage = calculatePaceProjection(
     actualStorageBytes,
     limits.storageBytes,
@@ -768,12 +770,12 @@ export function formatDailyPushoverMessage(
   const title = "📊 Cloudflare R2 Free Tier Status";
 
   const statusStr = disabled
-    ? "🛑 DISABLED (Auto-killed at 70% threshold)"
+    ? `🛑 DISABLED (Auto-killed at ${R2_THRESHOLD_PCT}% threshold)`
     : assessment.metricsSource === "unavailable"
       ? "❓ METRICS UNAVAILABLE (no auto-disable)"
       : assessment.overallOnTrackToExceed70Pct
-        ? "⚠️ WARNING (Pace/MTD >= 70%)"
-        : "✅ OK (Under 70% free-tier pace)";
+        ? `⚠️ WARNING (Pace/MTD >= ${R2_THRESHOLD_PCT}%)`
+        : `✅ OK (Under ${R2_THRESHOLD_PCT}% free-tier pace)`;
 
   const topBuckets = (assessment.buckets ?? [])
     .slice()
@@ -2461,7 +2463,7 @@ export async function runR2UsageCheck(
           buckets: liveStorage.buckets,
         }
       );
-      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 70%.
+      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 90%.
       storageIsLive = true;
       console.warn(
         "[r2-usage] GraphQL credentials missing; enforcing storage from live S3 list only"

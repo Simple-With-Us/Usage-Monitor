@@ -38,6 +38,7 @@ import {
   DEFAULT_R2_FREE_TIER_LIMITS,
   R2_DISABLED_FLAG_FILENAME,
   R2_SOFT_PRUNE_STORAGE_PCT,
+  R2_THRESHOLD_PCT,
   __getR2FlagFilePathForTests,
   __resetR2UsageStateForTests,
 } from "../r2-usage";
@@ -103,55 +104,74 @@ describe("R2 usage monitoring & auto-disable", () => {
       300_000,
       limit,
       testDate,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(statusLow.onTrackToExceed).toBe(false);
-    expect(statusLow.projectedPct).toBeLessThan(70);
+    expect(statusLow.projectedPct).toBeLessThan(R2_THRESHOLD_PCT);
 
     const statusHigh = calculatePaceProjection(
-      400_000,
+      450_000,
       limit,
       testDate,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(statusHigh.onTrackToExceed).toBe(true);
-    expect(statusHigh.projectedPct).toBeGreaterThanOrEqual(70);
+    expect(statusHigh.projectedPct).toBeGreaterThanOrEqual(R2_THRESHOLD_PCT);
   });
 
-  it("storage absolute mode trips only on MTD ≥ 70%, not early-month pace alone", () => {
+  it("storage absolute mode trips only on MTD ≥ 90%, not early-month pace alone", () => {
     const earlyMonth = new Date("2026-08-02T12:00:00.000Z");
     const threeGib = 3 * 1024 * 1024 * 1024;
     const absoluteOnly = calculatePaceProjection(
       threeGib,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute"
     );
-    expect(absoluteOnly.mtdPct).toBeLessThan(70);
-    expect(absoluteOnly.projectedPct).toBeGreaterThan(70);
+    expect(absoluteOnly.mtdPct).toBeLessThan(R2_THRESHOLD_PCT);
+    expect(absoluteOnly.projectedPct).toBeGreaterThan(R2_THRESHOLD_PCT);
     expect(absoluteOnly.onTrackToExceed).toBe(false);
 
     const withPace = calculatePaceProjection(
       threeGib,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(withPace.onTrackToExceed).toBe(true);
 
     const over = calculatePaceProjection(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute"
     );
-    expect(over.mtdPct).toBeGreaterThanOrEqual(70);
+    expect(over.mtdPct).toBeGreaterThanOrEqual(R2_THRESHOLD_PCT);
     expect(over.onTrackToExceed).toBe(true);
+  });
+
+  it.each([
+    [70, false],
+    [85, false],
+    [89.9, false],
+    [90, true],
+    [95, true],
+  ])("applies the storage pause boundary at %s%%", (pct, shouldPause) => {
+    expect(R2_THRESHOLD_PCT).toBe(90);
+    const assessment = assessR2Usage(
+      DEFAULT_R2_FREE_TIER_LIMITS.storageBytes * pct / 100,
+      0,
+      0,
+      DEFAULT_R2_FREE_TIER_LIMITS,
+      new Date("2026-08-02T12:00:00.000Z")
+    );
+    expect(assessment.storage.onTrackToExceed).toBe(shouldPause);
+    expect(assessment.overallOnTrackToExceed70Pct).toBe(shouldPause);
   });
 
   it("planLtxTipPrune keeps highest max-txid tip per level", () => {
@@ -184,7 +204,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(plan.delete.reduce((s, o) => s + o.size, 0)).toBe(100);
   });
 
-  it("assesses storage absolute + ops absolute/pace at 70%", () => {
+  it("assesses storage absolute + ops absolute/pace at 90%", () => {
     const testDate = new Date("2026-07-15T12:00:00.000Z");
 
     const lowAssessment = assessR2Usage(
@@ -199,7 +219,7 @@ describe("R2 usage monitoring & auto-disable", () => {
 
     const highAssessment = assessR2Usage(
       1 * 1024 * 1024 * 1024,
-      400_000,
+      450_000,
       500_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
       testDate
@@ -208,7 +228,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(highAssessment.exceededMetric).toBe("classA");
 
     const storageBreach = assessR2Usage(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       1_000,
       1_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
@@ -1092,7 +1112,7 @@ describe("R2 usage monitoring & auto-disable", () => {
   it("enforces R2 auto-disable when emergency flag or env is set", () => {
     expect(isR2AutoDisabled()).toBe(false);
 
-    enforceR2AutoDisable("Test 70% breach");
+    enforceR2AutoDisable("Test 90% breach");
     expect(isR2AutoDisabled()).toBe(true);
     expect(process.env.LITESTREAM_EMERGENCY_DISABLE).toBe("true");
     expect(process.env.R2_WRITES_DISABLED).toBe("true");
@@ -1128,7 +1148,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       process.env.R2_WRITES_DISABLED = "true";
       expect(isR2AutoDisabled()).toBe(true);
 
-      clearR2AutoDisable("storage 4.4% < 65% resume threshold");
+      clearR2AutoDisable("storage 4.4% < 85% resume threshold");
       expect(hasR2AutoResumeMarker()).toBe(true);
       expect(isR2AutoDisabled()).toBe(false);
 
@@ -1144,7 +1164,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       clearR2AutoDisable("first resume");
       expect(isR2AutoDisabled()).toBe(false);
 
-      enforceR2AutoDisable("storage back over 70%");
+      enforceR2AutoDisable("storage back over 90%");
       expect(hasR2AutoResumeMarker()).toBe(false);
       expect(isR2AutoDisabled()).toBe(true);
 
@@ -1173,14 +1193,14 @@ describe("R2 usage monitoring & auto-disable", () => {
     it.skipIf(hasDataVolume)(
       "writes the resume marker owner-only, with the reason and how to undo it",
       () => {
-        clearR2AutoDisable("storage 4.4% < 65% resume threshold");
+        clearR2AutoDisable("storage 4.4% < 85% resume threshold");
 
         const markerPath = __getR2FlagFilePathForTests(R2_AUTO_RESUMED_FLAG_FILENAME);
         const fd = fs.openSync(markerPath, "r");
         try {
           expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600);
           const body = fs.readFileSync(fd, "utf8");
-          expect(body).toContain("storage 4.4% < 65% resume threshold");
+          expect(body).toContain("storage 4.4% < 85% resume threshold");
           expect(body).toContain("LITESTREAM_EMERGENCY_DISABLE");
           expect(body).toContain("Delete this file");
         } finally {
@@ -1276,6 +1296,23 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(body).not.toContain("month peak:");
   });
 
+  it.each([
+    [false, false, "✅ OK (Under 90% free-tier pace)"],
+    [true, false, "🛑 DISABLED (Auto-killed at 90% threshold)"],
+    [false, true, "⚠️ WARNING (Pace/MTD >= 90%)"],
+  ])("uses the current policy in Pushover status (disabled=%s, breached=%s)", (disabled, breached, status) => {
+    const assessment = assessR2Usage(
+      DEFAULT_R2_FREE_TIER_LIMITS.storageBytes * (breached ? 0.95 : 0.8),
+      0,
+      0,
+      DEFAULT_R2_FREE_TIER_LIMITS,
+      new Date("2026-08-15T12:00:00.000Z")
+    );
+    const { body } = formatDailyPushoverMessage(assessment, disabled);
+    expect(body).toContain(status);
+    expect(body).not.toContain("70%");
+  });
+
   it("formats daily Pushover with current snapshot, month peak, and last 7 days", () => {
     const gib = 1024 * 1024 * 1024;
     const testDate = new Date("2026-08-25T12:00:00.000Z");
@@ -1328,7 +1365,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     ).toBe(false);
   });
 
-  it("auto-disables from real GraphQL metrics when storage is over 70%", async () => {
+  it("auto-disables from real GraphQL metrics when storage is over 90%", async () => {
     process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
     process.env.R2_USAGE_API_TOKEN = "tok-test";
     process.env.PUSHOVER_USER_KEY = "test_user_key";
@@ -1450,7 +1487,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       text: async () => JSON.stringify(graphqlBody),
     });
 
-    // Mid-month, low storage → under 70% projected and MTD
+    // Mid-month, low storage → under 90% projected and MTD
     const assessment = await runR2UsageCheck(
       mockFetch as unknown as typeof fetch,
       new Date("2026-08-15T12:00:00.000Z")
