@@ -1,4 +1,5 @@
 import { nanosToDate, type FlatAttributes } from "./types";
+import { aiRequestFromSpan, type AiRequestInput } from "./ai-request-mapper";
 
 // ---------------------------------------------------------------------------
 // OTLP traces -> AgentTurn mapping (POST /api/otlp/v1/traces)
@@ -49,6 +50,8 @@ export interface AgentTurnInput {
 
 export interface MapTracesResult {
   turns: AgentTurnInput[];
+  /** Per-request rows from claude_code.llm_request spans (UM-1590). */
+  aiRequests: AiRequestInput[];
   ignored: number;
 }
 
@@ -124,6 +127,8 @@ function spanDurationMs(startNano: unknown, endNano: unknown): number | undefine
 
 interface OtlpSpan {
   name?: unknown;
+  traceId?: unknown;
+  spanId?: unknown;
   startTimeUnixNano?: unknown;
   endTimeUnixNano?: unknown;
   attributes?: Array<{ key: string; value?: Record<string, unknown> }>;
@@ -239,9 +244,10 @@ function turnFromSpanAttrs(
 /** Map a parsed OTLP-JSON `{ resourceSpans: [...] }` body to turn inputs. */
 export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
   const turns: AgentTurnInput[] = [];
+  const aiRequests: AiRequestInput[] = [];
   let ignored = 0;
   const resourceSpans = (body as { resourceSpans?: unknown })?.resourceSpans;
-  if (!Array.isArray(resourceSpans)) return { turns, ignored };
+  if (!Array.isArray(resourceSpans)) return { turns, aiRequests, ignored };
   for (const resource of resourceSpans) {
     const r = resource as {
       resource?: { attributes?: OtlpSpan["attributes"] };
@@ -255,6 +261,17 @@ export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
           continue;
         }
         const merged = { ...resourceAttrs, ...flattenSpanAttributes(span.attributes) };
+        const spanName = typeof span.name === "string" ? span.name : undefined;
+        // Claude Code's traces beta: llm_request spans are model calls, not
+        // turns, so they feed AiRequest (deduped against the api_request log
+        // event on request_id).  Its tool/hook spans are not turns either;
+        // only claude_code.interaction is.
+        const aiRequest = aiRequestFromSpan(spanName, merged, span);
+        if (aiRequest && aiRequests.length < MAX_TURNS_PER_REQUEST) aiRequests.push(aiRequest);
+        if (spanName?.startsWith("claude_code.") && spanName !== "claude_code.interaction") {
+          if (!aiRequest) ignored += 1;
+          continue;
+        }
         const turn = turnFromSpanAttrs(merged, span);
         if (!turn) {
           ignored += 1;
@@ -265,15 +282,16 @@ export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
       }
     }
   }
-  return { turns, ignored };
+  return { turns, aiRequests, ignored };
 }
 
 /** Map a direct relay payload `{ turns: [...] }` to validated turn inputs. */
 export function mapDirectTurnsRequest(body: unknown): MapTracesResult {
   const turns: AgentTurnInput[] = [];
+  const aiRequests: AiRequestInput[] = [];
   let ignored = 0;
   const rawTurns = (body as { turns?: unknown })?.turns;
-  if (!Array.isArray(rawTurns)) return { turns, ignored };
+  if (!Array.isArray(rawTurns)) return { turns, aiRequests, ignored };
   for (const raw of rawTurns.slice(0, MAX_TURNS_PER_REQUEST + 100)) {
     if (turns.length >= MAX_TURNS_PER_REQUEST) {
       ignored += 1;
@@ -337,7 +355,7 @@ export function mapDirectTurnsRequest(body: unknown): MapTracesResult {
     }
     turns.push(turn);
   }
-  return { turns, ignored };
+  return { turns, aiRequests, ignored };
 }
 
 export const _internal = { turnFromSpanAttrs, truncate };

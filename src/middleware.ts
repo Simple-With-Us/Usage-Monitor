@@ -64,6 +64,8 @@ export const isPublicPath = (pathname: string) => {
     // Per-turn AgentTurn listing for the Agents tab. Same dual-auth as
     // agents-overview (session cookie or USAGE_READ_TOKEN).
     "/api/agent-turns",
+    // Per-request AI performance (AiRequest, UM-1590). Same dual-auth.
+    "/api/ai-requests",
     // Owner-recorded expense ledger. GET self-authenticates via dashboard
     // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
     // own session/OWNER_EXPENSE_TOKEN check in the route.

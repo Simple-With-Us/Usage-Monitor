@@ -122,6 +122,8 @@ export interface DataRetentionResult {
   tombstonesPruned: number;
   /** Prompt/response expiry + row purge for AgentTurn (never cash/ledger). */
   agentTurns: AgentTurnRetentionResult;
+  /** Row purge for AiRequest (UM-1590; never cash/ledger). */
+  aiRequests: { rowsDeleted: number };
   compacted: boolean;
   compactionError?: string;
   /** True when ANALYZE ran after prune to refresh planner stats (no exclusive rewrite). */
@@ -957,6 +959,19 @@ export async function purgeAgentTurns(
   return { contentCleared: cleared.count, rowsDeleted: deleted.count };
 }
 
+/**
+ * AiRequest is per-model-call diagnostics (never cash).  Delete rows older
+ * than AI_REQUEST_RETENTION_DAYS (default 180).  The table holds no prompt or
+ * response content, so there is no separate content-expiry layer.
+ */
+export async function purgeAiRequests(now = new Date()): Promise<{ rowsDeleted: number }> {
+  const days = readPositiveIntEnv(["AI_REQUEST_RETENTION_DAYS"], 180);
+  const deleted = await prisma.aiRequest.deleteMany({
+    where: { occurredAt: { lt: retentionCutoff(now, days) } },
+  });
+  return { rowsDeleted: deleted.count };
+}
+
 export async function runDataRetentionMaintenance(now = new Date()): Promise<DataRetentionResult> {
   const startedAt = new Date();
   const snapshotRetentionDays = readPositiveIntEnv(
@@ -997,6 +1012,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     batchSize
   );
   const agentTurns = await purgeAgentTurns(now);
+  const aiRequests = await purgeAiRequests(now);
 
   // Tombstones are the only durable proof that an already-rolled-up event was
   // consumed. Expiring one permits an arbitrarily late producer retry to be
@@ -1051,6 +1067,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
     tombstoneCount,
     tombstonesPruned,
     agentTurns,
+    aiRequests,
     compacted,
     compactionError,
     analyzed,

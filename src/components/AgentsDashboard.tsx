@@ -31,11 +31,31 @@ type RecentAgentTurn = {
   occurredAt: string;
 };
 
+type RequestPerformanceRow = {
+  harness: string;
+  model: string;
+  requests: number;
+  errors: number;
+  durationMsP50: number | null;
+  durationMsP95: number | null;
+  ttftMsP50: number | null;
+  ttftMsP95: number | null;
+  outputTokensPerSecP50: number | null;
+  cacheHitRatio: number | null;
+  costUsd: number;
+};
+
+function formatMs(ms: number | null): string {
+  if (ms == null) return "—";
+  return ms >= 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
+}
+
 export function AgentsDashboard() {
   const [data, setData] = useState<AgentsOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
   const [recentTurns, setRecentTurns] = useState<RecentAgentTurn[]>([]);
+  const [requestPerf, setRequestPerf] = useState<RequestPerformanceRow[]>([]);
 
   // Fixed 30-day overview — no 5h/24h/7d/30d/All lookback strip. Agent Bar
   // parity for remaining quota lives in FleetQuotaMatrixCard (/api/quota-windows).
@@ -69,11 +89,26 @@ export function AgentsDashboard() {
       }
     };
 
+    const fetchRequestPerf = async () => {
+      try {
+        const res = await fetch("/api/ai-requests/performance?days=7");
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!unmounted && Array.isArray(json.rows)) {
+          setRequestPerf(json.rows);
+        }
+      } catch {
+        // Keep the empty list so Request Performance stays hidden.
+      }
+    };
+
     fetchOverview();
     fetchTurns();
+    fetchRequestPerf();
     const interval = setInterval(() => {
       fetchOverview();
       fetchTurns();
+      fetchRequestPerf();
     }, 30_000);
     return () => {
       unmounted = true;
@@ -408,6 +443,65 @@ export function AgentsDashboard() {
               })}
             </div>
           </div>
+
+          {/* Request Performance — per model call (AiRequest, UM-1590), last
+              7 days.  Hidden until the logs/traces ingest has rows, so the
+              visual baselines are unchanged on an empty table. */}
+          {requestPerf.length > 0 && (
+            <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+              <h2 className="text-base font-bold text-foreground mb-1">Request Performance</h2>
+              <p className="text-xs text-muted-foreground mb-3">
+                Per model call, last 7 days.{SENTENCE_GAP}Cost is the harness&apos;s PAYG-equivalent estimate.
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-border text-muted-foreground">
+                    <tr>
+                      <th className="pb-2 font-medium">Harness</th>
+                      <th className="pb-2 font-medium">Model</th>
+                      <th className="pb-2 font-medium text-right">Requests</th>
+                      <th className="pb-2 font-medium text-right">Duration p50 / p95</th>
+                      <th className="pb-2 font-medium text-right">TTFT p50 / p95</th>
+                      <th className="pb-2 font-medium text-right">Tokens/s p50</th>
+                      <th className="pb-2 font-medium text-right">Cache Hit</th>
+                      <th className="pb-2 font-medium text-right">PAYG Equivalent</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/50 font-mono">
+                    {requestPerf.map((row) => (
+                      <tr key={`${row.harness}:${row.model}`} className="hover:bg-muted/30">
+                        <td className="py-2.5 text-foreground font-semibold">{row.harness}</td>
+                        <td className="py-2.5 text-foreground">{row.model}</td>
+                        <td className="py-2.5 text-right text-foreground">
+                          {row.requests.toLocaleString()}
+                          {row.errors > 0 ? (
+                            <span className="block text-[10px] text-amber-700 dark:text-amber-300">
+                              {row.errors} failed
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="py-2.5 text-right text-muted-foreground">
+                          {formatMs(row.durationMsP50)} / {formatMs(row.durationMsP95)}
+                        </td>
+                        <td className="py-2.5 text-right text-muted-foreground">
+                          {formatMs(row.ttftMsP50)} / {formatMs(row.ttftMsP95)}
+                        </td>
+                        <td className="py-2.5 text-right text-foreground">
+                          {row.outputTokensPerSecP50 == null ? "—" : row.outputTokensPerSecP50.toFixed(1)}
+                        </td>
+                        <td className="py-2.5 text-right text-foreground">
+                          {row.cacheHitRatio == null ? "—" : `${(row.cacheHitRatio * 100).toFixed(1)}%`}
+                        </td>
+                        <td className="py-2.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
+                          {row.costUsd > 0 ? formatCurrency(row.costUsd) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Recent Turns — only when the traces ingest has rows. Hidden when
               empty so Playwright visual baselines stay unchanged. */}
