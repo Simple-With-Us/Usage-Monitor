@@ -27,6 +27,7 @@ const REFRESH_INTERVAL_MS = 60_000;
 import B2AppUsageBreakdownCard from "@/components/B2AppUsageBreakdownCard";
 import { MacHealthCard } from "@/components/MacHealthCard";
 import SentryHealthCard from "@/components/SentryHealthCard";
+import FleetAlertsCard from "@/components/FleetAlertsCard";
 
 export function markOperationsStale(previous: OperationsHealthSummary): OperationsHealthSummary {
   return {
@@ -1372,6 +1373,9 @@ export default function OperationsOverview() {
           <MacHealthCard />
           <HostStatsCard data={hostMetrics} />
           <SentryHealthCard />
+          {/* Same state the Zulip #alerts channel shows, read from the shared
+              alert ingress so the two cannot drift apart. */}
+          <FleetAlertsCard />
           <R2FleetCard data={data.r2Fleet} />
           <FleetBackupsCard data={data.fleetBackups} />
           <B2AppUsageBreakdownCard />
