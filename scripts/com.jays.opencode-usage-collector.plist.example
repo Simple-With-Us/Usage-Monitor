@@ -7,8 +7,8 @@
   database is opened read-only, so opencode can keep running.  Needs Node 24
   (node:sqlite).
 
-  Run it from the installed collector runtime, never from ~/Code:
-    /opt/homebrew/opt/node@24/bin/node scripts/update-local-collector-runtime.mjs --sha <40-char origin/main SHA>
+  Run it from the installed collector copy, never from ~/Code:
+    scripts/install-collectors.sh        (see docs/runbooks/mac-collectors-install.md)
 
   Uninstall:
     launchctl bootout gui/$(id -u)/com.jays.opencode-usage-collector
@@ -20,7 +20,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/opt/node@24/bin/node</string>
-    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collector-runtime/current/scripts/opencode-usage-collector.mjs</string>
+    <string>/ABSOLUTE/PATH/TO/HOME/apps/usage-monitor-collectors/scripts/opencode-usage-collector.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

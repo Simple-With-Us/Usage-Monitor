@@ -403,6 +403,12 @@ export async function POST(request: NextRequest) {
       throw error;
     }
 
+    // UM-1592: events that carried the typed `ai` block also land one row each
+    // in the per-request AiRequest store (UM-1590).  Best effort:  the usage
+    // event above is the record of truth and is already persisted, so a store
+    // failure is logged rather than failing the ACK.  Replays are duplicates.
+    await persistIngestAiRequests(persistenceEvents);
+
     // Wave F / E7: soft-stale budget SWR after new rows (keep last-good; force
     // background refresh). Skip pure idempotent replays with zero inserts.
     if (persistResult.persisted > 0) {
@@ -486,5 +492,31 @@ export async function POST(request: NextRequest) {
     // This lease starts before parsing, so it covers every early validation
     // response as well as all SQLite failures.
     releaseAdmission();
+  }
+}
+
+async function persistIngestAiRequests(
+  events: Array<{
+    idempotencyKey: string;
+    sourceApp: string;
+    project?: string;
+    costUsd?: number;
+    occurredAt: Date;
+    metadata?: Record<string, string | number | boolean | null>;
+  }>
+): Promise<void> {
+  const { aiRequestFromUsageEvent } = await import("@/lib/ai-usage-metadata");
+  const requests = events
+    .map((event) => aiRequestFromUsageEvent(event))
+    .filter((request): request is NonNullable<typeof request> => request !== null);
+  if (requests.length === 0) return;
+  try {
+    const { persistAiRequests } = await import("@/lib/ai-requests");
+    await persistAiRequests(requests);
+  } catch (error) {
+    console.error(
+      "[ingest/usage] failed to persist AI requests:",
+      error instanceof Error ? error.message : error
+    );
   }
 }

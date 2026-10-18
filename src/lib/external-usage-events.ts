@@ -19,6 +19,7 @@ import {
   ingestCostDerivationEnabled,
 } from "@/lib/pricing/derive-ingest-cost";
 import {
+  canonicalTokenType,
   deriveTokenCostUsd,
   getModelPricing,
 } from "@/lib/pricing/model-pricing";
@@ -832,7 +833,14 @@ function deriveAnalyticsTokenUsdByProvider(
 ): Map<string, number> {
   const byModel = new Map<
     string,
-    { input: number; output: number; cacheRead: number; cacheCreation: number; unknown: number }
+    {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheCreation: number;
+      cacheCreation1h: number;
+      unknown: number;
+    }
   >();
   for (const row of rows) {
     if (!shouldDeriveAnalyticsTokenEstimate(row)) continue;
@@ -841,14 +849,9 @@ function deriveAnalyticsTokenUsdByProvider(
     const key = `${canonicalProviderKey(row.provider)}|${model}`;
     const bucket =
       byModel.get(key) ??
-      { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, unknown: 0 };
-    const tokenType = tokenTypeFromUsageLabel(row.label);
-    if (
-      tokenType === "input" ||
-      tokenType === "output" ||
-      tokenType === "cacheRead" ||
-      tokenType === "cacheCreation"
-    ) {
+      { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation1h: 0, unknown: 0 };
+    const tokenType = canonicalTokenType(tokenTypeFromUsageLabel(row.label));
+    if (tokenType) {
       bucket[tokenType] += row.quantity;
     } else {
       bucket.unknown += row.quantity;

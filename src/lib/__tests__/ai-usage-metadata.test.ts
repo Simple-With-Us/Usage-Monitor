@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AI_METADATA_KEYS,
   aiBlockMetadata,
+  aiRequestFromUsageEvent,
   canonicalAiMetadata,
   hasCanonicalAiMetadata,
   legacyAiTokens,
@@ -75,6 +76,13 @@ describe("legacyAiTokens", () => {
       .toEqual({ output: 7 });
     expect(legacyAiTokens({ unit: "token", quantity: 9, label: "token:cacheCreation" }))
       .toEqual({ cacheWrite5m: 9 });
+  });
+
+  it("routes 1-hour cache-write slices to cacheWrite1h", () => {
+    expect(legacyAiTokens({ unit: "token", quantity: 4, metadata: { tokenType: "cacheWrite1h" } }))
+      .toEqual({ cacheWrite1h: 4 });
+    expect(legacyAiTokens({ unit: "token", quantity: 4, metadata: { tokenType: "cacheCreation", cacheTtl: "1h" } }))
+      .toEqual({ cacheWrite1h: 4 });
   });
 
   it("ignores unknown or empty slices and events without token data", () => {
@@ -159,5 +167,38 @@ describe("reading persisted canonical metadata", () => {
     expect(withoutCanonicalAiMetadata({ promptTokens: 1, _aiTokensInput: 1, _aiSource: "legacy" }))
       .toEqual({ promptTokens: 1 });
     expect(withoutCanonicalAiMetadata({ _aiSource: "legacy" })).toBeNull();
+  });
+});
+
+describe("aiRequestFromUsageEvent", () => {
+  const occurredAt = new Date("2026-10-17T00:00:00.000Z");
+
+  it("builds a per-request row from block metadata", () => {
+    expect(aiRequestFromUsageEvent({
+      idempotencyKey: "k1",
+      sourceApp: "socratic-trade",
+      project: "st",
+      costUsd: 0.5,
+      occurredAt,
+      metadata: { _aiSource: "block", _aiTokensInput: 3, _aiTokensCacheWrite1h: 2, _aiTtftMs: 10.6 },
+    })).toMatchObject({
+      dedupeKey: "ingest:k1",
+      source: "ingest",
+      harness: "socratic-trade",
+      project: "st",
+      inputTokens: 3,
+      cacheWriteTokens: 2,
+      cacheWrite1hTokens: 2,
+      ttftMs: 11,
+      costUsd: 0.5,
+      occurredAt,
+    });
+  });
+
+  it("skips legacy-mapped and non-AI events", () => {
+    expect(aiRequestFromUsageEvent({
+      idempotencyKey: "k2", sourceApp: "x", occurredAt, metadata: { _aiSource: "legacy", _aiTokensInput: 1 },
+    })).toBeNull();
+    expect(aiRequestFromUsageEvent({ idempotencyKey: "k3", sourceApp: "x", occurredAt })).toBeNull();
   });
 });

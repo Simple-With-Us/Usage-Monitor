@@ -31,14 +31,18 @@
 //     cache writes included, by `_aiModelServed`, then `_aiModelRequested`,
 //     then keyRef.  Reasoning tokens are inside output and never priced twice.
 //   - Fallback: unit="token" events with a keyRef.  When the producer supplies
-//     a metadata.tokenType (input/output/cacheRead/cacheCreation) the matching
-//     rate is used; otherwise the INPUT rate is used as a floor and the event
-//     is flagged `_derivedCostIncomplete` (output-side tokens usually cost
-//     more, so the floor under-estimates — never over).
+//     a metadata.tokenType (input/output/cacheRead/cacheCreation, plus the 1h
+//     cache write names cacheCreation1h / cacheWrite1h, or cacheCreation with
+//     metadata.cacheTtl = "1h") the matching rate is used; otherwise the INPUT
+//     rate is used as a floor and the event is flagged
+//     `_derivedCostIncomplete` (output-side tokens usually cost more, so the
+//     floor under-estimates — never over).
 
 import {
+  canonicalTokenType,
   deriveTokenCostUsd,
   getModelPricing,
+  isOneHourCacheTtl,
   PRICING_SNAPSHOT_META,
 } from "./model-pricing";
 import { appSettings } from "@/lib/app-settings";
@@ -55,8 +59,6 @@ export function ingestCostDerivationEnabled(): boolean {
   const raw = appSettings.get("INGEST_COST_DERIVATION_ENABLED")?.trim().toLowerCase();
   return raw === "true" || raw === "1" || raw === "yes";
 }
-
-const TOKEN_TYPES = new Set(["input", "output", "cacheRead", "cacheCreation"]);
 
 /** Minimal event shape the derivation reads (satisfied by
  * ParsedUsageTelemetryEvent and by the route's persistence-event mapping). */
@@ -120,8 +122,14 @@ export function deriveEventCostEstimate(
   if (!resolved) return null;
 
   const rawType = event.metadata?.tokenType;
-  const tokenType =
-    typeof rawType === "string" && TOKEN_TYPES.has(rawType) ? rawType : undefined;
+  let tokenType =
+    typeof rawType === "string" ? canonicalTokenType(rawType) ?? undefined : undefined;
+  if (
+    tokenType === "cacheCreation" &&
+    (isOneHourCacheTtl(event.metadata?.cacheTtl) || isOneHourCacheTtl(event.metadata?.ttl))
+  ) {
+    tokenType = "cacheCreation1h";
+  }
   const breakdown = tokenType ? { [tokenType]: quantity } : { input: quantity };
   const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
   return {

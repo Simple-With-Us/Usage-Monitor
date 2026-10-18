@@ -63,3 +63,22 @@ Fixes now in place:
   `codecaps` since Sep 21 2026.
 * `com.jays.mac-server-watchdog` still runs from the checkout; it is a host
   heartbeat, not a collector, and is not covered by the installer.
+
+## Harness feeds: DSH, opencode, fx (UM-1594)
+
+Three LaunchAgents feed the harnesses that have no vendor billing API.  Create
+each from its template (`scripts/com.jays.<name>-usage-collector.plist.example`),
+replacing `/ABSOLUTE/PATH/TO/HOME` with `$HOME`, then `launchctl bootstrap`:
+
+| Label | Source | Producer |
+|---|---|---|
+| `com.jays.deepseek-usage-collector` | `~/.dsh/sessions` and `~/.clutch/dsh/sessions` (`session.jsonl.zstd` and `session.v3.jsonl.zstd`) | `deepseek-dsh` |
+| `com.jays.opencode-usage-collector` | `~/.local/share/opencode/opencode.db`, opened read-only | `opencode` |
+| `com.jays.fx-usage-collector` | `~/.fx/usage.jsonl` | `fx` |
+
+All three run on `/opt/homebrew/opt/node@24/bin/node` (opencode needs
+`node:sqlite`) and use `USAGE_INGEST_TOKEN` until scoped tokens for `opencode`
+and `fx` are added to `USAGE_INGEST_PRODUCER_TOKENS`.  The DSH agent sets
+`USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1`, because BotFleet already reports
+its own workspaces.  A first run backfills 180 days and then keeps a watermark
+in `~/.cache/usage-monitor/collector-state/`.

@@ -231,3 +231,47 @@ describe("deriveEventCostEstimate with canonical AI tokens (UM-1592)", () => {
     })).toBeNull();
   });
 });
+
+describe("deriveEventCostEstimate: 1h cache writes and [1m] models (UM-1591)", () => {
+  const base = { metricType: "usage", unit: "token", quantity: 1_000_000 } as const;
+
+  it("prices tokenType cacheCreation1h (and aliases) at the 1h rate", () => {
+    for (const tokenType of ["cacheCreation1h", "cacheWrite1h", "cacheWriteOneHour"]) {
+      const estimate = deriveEventCostEstimate({
+        ...base,
+        keyRef: "claude-sonnet-5-5",
+        metadata: { tokenType },
+      });
+      expect(estimate?.costUsd, tokenType).toBeCloseTo(4, 6);
+      expect(estimate?.incomplete, tokenType).toBe(false);
+    }
+  });
+
+  it("keeps plain cacheCreation at the 5m rate unless metadata.cacheTtl says 1h", () => {
+    const five = deriveEventCostEstimate({
+      ...base,
+      keyRef: "claude-sonnet-5-5",
+      metadata: { tokenType: "cacheCreation" },
+    });
+    const hour = deriveEventCostEstimate({
+      ...base,
+      keyRef: "claude-sonnet-5-5",
+      metadata: { tokenType: "cacheCreation", cacheTtl: "1h" },
+    });
+    expect(five?.costUsd).toBeCloseTo(2.5, 6);
+    expect(hour?.costUsd).toBeCloseTo(4, 6);
+  });
+
+  it("resolves [1m] models and reports unknown versions as unpriced (null)", () => {
+    const priced = deriveEventCostEstimate({
+      ...base,
+      keyRef: "claude-opus-5-5[1m]",
+      metadata: { tokenType: "output" },
+    });
+    expect(priced?.pricingKey).toBe("claude-opus-5-5");
+    expect(priced?.costUsd).toBeCloseTo(20, 6);
+    expect(
+      deriveEventCostEstimate({ ...base, keyRef: "claude-opus-5-9", metadata: { tokenType: "input" } })
+    ).toBeNull();
+  });
+});

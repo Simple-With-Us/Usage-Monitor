@@ -21,6 +21,7 @@ const prismaMock = vi.hoisted(() => {
       count: vi.fn(),
     },
     agentTurn: { updateMany: vi.fn(), deleteMany: vi.fn() },
+    aiRequest: { deleteMany: vi.fn() },
     $executeRawUnsafe: vi.fn(),
   };
   client.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
@@ -68,6 +69,7 @@ describe("usage-retention wrapper", () => {
     prismaMock.externalUsageEventTombstone.count.mockResolvedValue(0);
     prismaMock.agentTurn.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.agentTurn.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.aiRequest.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   afterEach(() => {

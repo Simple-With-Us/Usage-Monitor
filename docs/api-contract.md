@@ -100,8 +100,14 @@ cannot set:  `_aiModelRequested`, `_aiModelServed`, `_aiHarness`, `_aiSeat`,
 from the pre-UM-1592 metadata (`promptTokens`, `completionTokens`,
 `cachedTokens`, `cacheWriteTokens`, `cacheWriteOneHourTokens`, `inputTokens`,
 `outputTokens`, `cachedInputTokens`, and `tokenType` / `label: token:<type>`
-slices), so every producer aggregates the same way.  Ingest cost derivation
-prices the canonical tokens, 1-hour cache writes included.
+slices, plus collector `harness`, `seat`, `billingMode`, `durationMs`, `ttftMs`
+and the output slice's `reasoningTokens`), so every producer aggregates the
+same way.  Ingest cost derivation prices the canonical tokens, 1-hour cache
+writes included, by served model, then requested model, then `producerKeyRef`.
+Each event that carried the typed block also gets one `AiRequest` row
+(UM-1590 per-request store, `sources: ingest`, dedupe key
+`ingest:<idempotencyKey>`).  Legacy-mapped events do not, because collector
+rows are token slices or window totals rather than single requests.
 
 **Response `202` (v2 ACK):** counts satisfy
 `persisted + duplicates + pruned + rejected === received`.

@@ -25,7 +25,8 @@ import { fanoutAgentTurns } from "@/lib/usage-fanout";
 // Accepts standard OTLP-JSON `{ resourceSpans: [...] }` (gen_ai semconv span
 // attributes) or a direct relay payload `{ turns: [...] }` for producers
 // without an OTLP span pipeline (e.g. the hook shim v2). Persists per-turn
-// rows to AgentTurn — diagnostic/per-turn analytics ONLY. This route never
+// rows to AgentTurn — diagnostic/per-turn analytics ONLY — and Claude Code
+// claude_code.llm_request spans to AiRequest (per model call, UM-1590). This route never
 // writes ExternalUsageEvent, so token/cost ledger math (budgets, rollups,
 // llm-burn) cannot double count against /api/otlp/v1/metrics or the local
 // JSONL collectors that already feed the ledger.
@@ -133,6 +134,15 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
+      const unauthorizedRequest = mapped.aiRequests.find(
+        (r) => !credential.allowedSourceApps!.has(r.harness)
+      );
+      if (unauthorizedRequest) {
+        return NextResponse.json(
+          { error: `Credential is not authorized for harness "${unauthorizedRequest.harness}"` },
+          { status: 403 }
+        );
+      }
     }
 
     let persisted = 0;
@@ -163,10 +173,21 @@ export async function POST(request: NextRequest) {
       void fanoutAgentTurns(mapped.turns);
     }
 
+    // claude_code.llm_request spans -> AiRequest (UM-1590).  Upserts on the
+    // same request_id key as the api_request log event, so a request reported
+    // by both signals stays one row and the span adds ttft_ms.
+    let aiRequests: number | undefined;
+    if (mapped.aiRequests.length > 0) {
+      const { persistAiRequests } = await import("@/lib/ai-requests");
+      const result = await persistAiRequests(mapped.aiRequests);
+      aiRequests = result.inserted + result.merged;
+    }
+
     return NextResponse.json(
       {
         ok: true,
         accepted: persisted,
+        aiRequests,
         ignored: mapped.ignored || undefined,
       },
       { status: 202 }

@@ -23,6 +23,9 @@
 
 import type { AiUsage } from "@jaywedgeworth22/congress-trading-shared";
 
+import type { AiRequestInput } from "@/lib/otlp/ai-request-mapper";
+import { canonicalTokenType, isOneHourCacheTtl } from "@/lib/pricing/model-pricing";
+
 type MetadataValue = string | number | boolean | null;
 type Metadata = Record<string, MetadataValue>;
 
@@ -65,14 +68,27 @@ const TOKEN_KEY_BY_FIELD: Record<keyof CanonicalAiTokens, string> = {
   reasoning: AI_METADATA_KEYS.tokensReasoning,
 };
 
-/** Collector / OTLP `tokenType` slice names -> canonical token field. */
-const LEGACY_TOKEN_TYPES: Record<string, keyof CanonicalAiTokens> = {
-  input: "input",
-  output: "output",
-  cacheRead: "cacheRead",
-  // Collectors cannot see the cache TTL; the provider default is 5 minutes.
-  cacheCreation: "cacheWrite5m",
-};
+/**
+ * Collector / OTLP `tokenType` slice name -> canonical token field.  Names
+ * resolve through the pricing module's `canonicalTokenType` (UM-1591), so
+ * `cacheWrite1h`, `cacheCreation1h` and friends land in the 1-hour bucket and
+ * a plain `cacheCreation` is a 5-minute (TTL unknown) write unless metadata
+ * `cacheTtl` / `ttl` says 1 hour.
+ */
+function legacyTokenField(
+  tokenType: string,
+  metadata: Metadata
+): keyof CanonicalAiTokens | null {
+  const canonical = canonicalTokenType(tokenType);
+  if (canonical === "input" || canonical === "output" || canonical === "cacheRead") return canonical;
+  if (canonical === "cacheCreation1h") return "cacheWrite1h";
+  if (canonical === "cacheCreation") {
+    return isOneHourCacheTtl(metadata.cacheTtl) || isOneHourCacheTtl(metadata.ttl)
+      ? "cacheWrite1h"
+      : "cacheWrite5m";
+  }
+  return null;
+}
 
 function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -143,7 +159,7 @@ export function legacyAiTokens(event: LegacyAiMappingEvent): CanonicalAiTokens |
   const metadata = event.metadata ?? {};
   const tokenType = legacyTokenType(event);
   if (tokenType !== undefined) {
-    const field = LEGACY_TOKEN_TYPES[tokenType];
+    const field = legacyTokenField(tokenType, metadata);
     const quantity = nonNegativeNumber(event.quantity);
     if (!field || event.unit !== "token" || quantity == null || quantity <= 0) return null;
     const slice: CanonicalAiTokens = { [field]: quantity };
@@ -273,4 +289,61 @@ export function readCanonicalAiModelCandidates(metadata: Metadata | undefined | 
     if (model && !out.includes(model)) out.push(model);
   }
   return out;
+}
+
+const INT_MAX = 2_147_483_647;
+
+function intColumn(value: unknown): number | undefined {
+  const n = nonNegativeNumber(value);
+  return n == null ? undefined : Math.min(Math.round(n), INT_MAX);
+}
+
+export interface AiRequestSourceEvent {
+  idempotencyKey: string;
+  sourceApp: string;
+  project?: string;
+  costUsd?: number;
+  occurredAt: Date;
+  metadata?: Metadata;
+}
+
+/**
+ * The per-request AiRequest row (UM-1590 store) for one ingested usage event
+ * that carried the typed `ai` block.  Legacy-mapped rows are not per-request
+ * (collectors post token slices and window totals), so they get none.  The
+ * dedupe key is the event's own idempotency key, so a replay is a duplicate.
+ */
+export function aiRequestFromUsageEvent(event: AiRequestSourceEvent): AiRequestInput | null {
+  const metadata = event.metadata;
+  if (!metadata || metadata[AI_METADATA_KEYS.source] !== "block") return null;
+  const str = (key: string) => nonEmptyString(metadata[key], 200);
+  const cacheWrite5m = intColumn(metadata[AI_METADATA_KEYS.tokensCacheWrite5m]);
+  const cacheWrite1h = intColumn(metadata[AI_METADATA_KEYS.tokensCacheWrite1h]);
+  const cacheWrite =
+    cacheWrite5m == null && cacheWrite1h == null
+      ? undefined
+      : Math.min((cacheWrite5m ?? 0) + (cacheWrite1h ?? 0), INT_MAX);
+  return {
+    dedupeKey: `ingest:${event.idempotencyKey}`,
+    kind: "complete",
+    source: "ingest",
+    harness: str(AI_METADATA_KEYS.harness) ?? event.sourceApp,
+    seat: str(AI_METADATA_KEYS.seat),
+    project: event.project,
+    billingMode: str(AI_METADATA_KEYS.billingMode),
+    requestedModel: str(AI_METADATA_KEYS.modelRequested),
+    servedModel: str(AI_METADATA_KEYS.modelServed),
+    durationMs: intColumn(metadata[AI_METADATA_KEYS.durationMs]),
+    ttftMs: intColumn(metadata[AI_METADATA_KEYS.ttftMs]),
+    inputTokens: intColumn(metadata[AI_METADATA_KEYS.tokensInput]),
+    outputTokens: intColumn(metadata[AI_METADATA_KEYS.tokensOutput]),
+    cacheReadTokens: intColumn(metadata[AI_METADATA_KEYS.tokensCacheRead]),
+    cacheWriteTokens: cacheWrite,
+    cacheWrite5mTokens: cacheWrite5m,
+    cacheWrite1hTokens: cacheWrite1h,
+    reasoningTokens: intColumn(metadata[AI_METADATA_KEYS.tokensReasoning]),
+    costUsd: event.costUsd != null && Number.isFinite(event.costUsd) ? event.costUsd : undefined,
+    costSource: str(AI_METADATA_KEYS.costSource),
+    occurredAt: event.occurredAt,
+  };
 }
