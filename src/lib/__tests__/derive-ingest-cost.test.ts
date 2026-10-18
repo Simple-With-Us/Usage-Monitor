@@ -184,6 +184,22 @@ describe("deriveEventCostEstimate with canonical AI tokens (UM-1592)", () => {
     })?.costUsd).toBeCloseTo(3, 6);
   });
 
+  it("falls back past a served model the catalog does not know", () => {
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      metadata: {
+        _aiModelServed: "no-such-model-xyz",
+        _aiModelRequested: "claude-sonnet-4-5",
+        _aiTokensInput: 1_000_000,
+      },
+    })?.pricingKey).toBe("claude-sonnet-4-5");
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      keyRef: "claude-sonnet-4-5",
+      metadata: { _aiModelServed: "no-such-model-xyz", _aiTokensInput: 1_000_000 },
+    })?.pricingKey).toBe("claude-sonnet-4-5");
+  });
+
   it("does not require unit token once canonical tokens exist", () => {
     expect(deriveEventCostEstimate({
       metricType: "usage",

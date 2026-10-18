@@ -56,6 +56,17 @@ describe("ExternalUsageEvent canonical AI metadata replay (integration)", () => 
     expect(await prisma.externalUsageEvent.count()).toBe(1);
   });
 
+  it("dedupes a replay whose derived cost stamp differs", async () => {
+    await persistExternalUsageEvents([
+      { ...base, metadata: { ...legacy, _derivedCostUsd: 0.0003, _derivedCostIncomplete: true } },
+    ]);
+    const result = await persistExternalUsageEvents([
+      { ...base, metadata: { ...projected, _derivedCostUsd: 0.00105 } },
+    ]);
+    expect(result.persisted).toBe(0);
+    expect(await prisma.externalUsageEvent.count()).toBe(1);
+  });
+
   it("still collides when the producer metadata itself changed", async () => {
     await persistExternalUsageEvents([{ ...base, metadata: legacy }]);
     await expect(

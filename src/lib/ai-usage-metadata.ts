@@ -263,3 +263,14 @@ export function withoutCanonicalAiMetadata(metadata: unknown): unknown {
   }
   return Object.keys(rest).length > 0 ? rest : null;
 }
+
+/** Every model to try pricing a canonical AI event by, in order: served, then requested. */
+export function readCanonicalAiModelCandidates(metadata: Metadata | undefined | null): string[] {
+  if (!metadata) return [];
+  const out: string[] = [];
+  for (const key of [AI_METADATA_KEYS.modelServed, AI_METADATA_KEYS.modelRequested]) {
+    const model = nonEmptyString(metadata[key]);
+    if (model && !out.includes(model)) out.push(model);
+  }
+  return out;
+}

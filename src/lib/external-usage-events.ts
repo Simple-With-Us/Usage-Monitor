@@ -14,7 +14,10 @@ import {
   receiptCashProviderId,
 } from "@/lib/receipt-cash";
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
-import { ingestCostDerivationEnabled } from "@/lib/pricing/derive-ingest-cost";
+import {
+  DERIVED_COST_METADATA_KEYS,
+  ingestCostDerivationEnabled,
+} from "@/lib/pricing/derive-ingest-cost";
 import {
   deriveTokenCostUsd,
   getModelPricing,
@@ -308,6 +311,19 @@ function metadataComparableForReplay(value: unknown): unknown {
   return Object.keys(rest).length > 0 ? rest : null;
 }
 
+// `_derivedCost*` stamps are computed server-side at ingest from fields that
+// are already compared (tokens, model) plus the bundled pricing snapshot.  A
+// replay derived under a newer snapshot, or with canonical tokens a pre-UM-1592
+// row lacked, would otherwise read as a producer change and return 409.
+function withoutDerivedCostMetadata(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!DERIVED_COST_METADATA_KEYS.some((key) => key in record)) return value;
+  const rest = { ...record };
+  for (const key of DERIVED_COST_METADATA_KEYS) delete rest[key];
+  return Object.keys(rest).length > 0 ? rest : null;
+}
+
 // NOTE: providerRequestId is deliberately NOT a field here (see its doc
 // comment on ExternalUsageEventInput above) — a replay with a different
 // providerRequestId under the same idempotencyKey must still dedupe, not
@@ -317,9 +333,10 @@ function comparableEvent(
   options: { ignoreCanonicalAi?: boolean } = {}
 ) {
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
+  const serverComparable = withoutDerivedCostMetadata(value.metadata ?? null);
   const metadata = options.ignoreCanonicalAi
-    ? withoutCanonicalAiMetadata(value.metadata ?? null)
-    : value.metadata ?? null;
+    ? withoutCanonicalAiMetadata(serverComparable)
+    : serverComparable;
   const iso = (date: Date | undefined | null) => date?.toISOString() ?? null;
   return {
     sourceApp: value.sourceApp,

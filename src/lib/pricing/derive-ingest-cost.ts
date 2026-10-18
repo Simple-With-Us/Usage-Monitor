@@ -42,7 +42,7 @@ import {
   PRICING_SNAPSHOT_META,
 } from "./model-pricing";
 import { appSettings } from "@/lib/app-settings";
-import { readCanonicalAiModel, readCanonicalAiTokens } from "@/lib/ai-usage-metadata";
+import { readCanonicalAiModelCandidates, readCanonicalAiTokens } from "@/lib/ai-usage-metadata";
 
 export const DERIVED_COST_METADATA_KEYS = [
   "_derivedCostUsd",
@@ -94,9 +94,15 @@ export function deriveEventCostEstimate(
     };
     const billed = Object.values(breakdown).reduce<number>((sum, value) => sum + (value ?? 0), 0);
     if (billed <= 0) return null;
-    const model = readCanonicalAiModel(event.metadata) ?? event.keyRef;
-    if (!model) return null;
-    const resolved = getModelPricing(model);
+    // Served model first, then requested, then keyRef:  a served id the
+    // catalog does not know must not hide a priceable requested model.
+    const candidates = readCanonicalAiModelCandidates(event.metadata);
+    if (event.keyRef && !candidates.includes(event.keyRef)) candidates.push(event.keyRef);
+    let resolved: ReturnType<typeof getModelPricing> = null;
+    for (const candidate of candidates) {
+      resolved = getModelPricing(candidate);
+      if (resolved) break;
+    }
     if (!resolved) return null;
     const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
     return {
