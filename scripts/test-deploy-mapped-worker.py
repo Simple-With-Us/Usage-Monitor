@@ -34,6 +34,19 @@ class Checks(unittest.TestCase):
   with patch.dict(os.environ,{"GITHUB_REPOSITORY":"o/r","GH_TOKEN":"t"}),patch("urllib.request.urlopen") as urlopen:
    urlopen.return_value.__enter__.return_value=io.BytesIO(b'{"message":"Not Found"}')
    with self.assertRaises(KeyError):m.current_main()
+ def test_worker_changed_path_relevance(self):
+  import subprocess,tempfile
+  with tempfile.TemporaryDirectory() as d:
+   def git(*a):subprocess.run(["git",*a],cwd=d,check=True,capture_output=True)
+   def head():return subprocess.check_output(["git","rev-parse","HEAD"],cwd=d,text=True).strip()
+   git("init","-q");git("config","user.email","t@t");git("config","user.name","t")
+   open(os.path.join(d,"package.json"),"w").write("{}");git("add",".");git("commit","-qm","init");old=head()
+   os.mkdir(os.path.join(d,"ios"));open(os.path.join(d,"ios","x"),"w").write("x");git("add",".");git("commit","-qm","ios")
+   self.assertFalse(m.worker_changed(old,head(),cwd=d))
+   os.makedirs(os.path.join(d,"workers","receipt-inbox"));open(os.path.join(d,"workers","receipt-inbox","x.mjs"),"w").write("x");git("add",".");git("commit","-qm","w")
+   self.assertTrue(m.worker_changed(old,head(),cwd=d))
+   self.assertTrue(m.worker_changed("0"*40,head(),cwd=d))
+   self.assertTrue(m.worker_changed("",head(),cwd=d))
  def test_superseded_main_skips_before_any_mutation(self):
   with patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
    patch.object(m.subprocess,"check_output",return_value="old\n"),\
