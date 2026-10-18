@@ -403,8 +403,8 @@ export async function POST(request: NextRequest) {
       throw error;
     }
 
-    // UM-1592: events that carried the typed `ai` block also land one row each
-    // in the per-request AiRequest store (UM-1590).  Best effort:  the usage
+    // UM-1592: single-call events that carried the typed `ai` block also land
+    // one row each in the per-request AiRequest store (UM-1590).  Best effort:  the usage
     // event above is the record of truth and is already persisted, so a store
     // failure is logged rather than failing the ACK.  Replays are duplicates.
     await persistIngestAiRequests(persistenceEvents);
@@ -501,6 +501,9 @@ async function persistIngestAiRequests(
     sourceApp: string;
     project?: string;
     costUsd?: number;
+    requests?: number;
+    windowStart?: Date;
+    windowEnd?: Date;
     occurredAt: Date;
     metadata?: Record<string, string | number | boolean | null>;
   }>

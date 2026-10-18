@@ -195,6 +195,16 @@ describe("aiRequestFromUsageEvent", () => {
     });
   });
 
+  it("skips run and window summaries", () => {
+    const block = { _aiSource: "block", _aiTokensInput: 1 };
+    const base = { idempotencyKey: "k4", sourceApp: "x", occurredAt, metadata: block };
+    expect(aiRequestFromUsageEvent({ ...base, requests: 1 })).not.toBeNull();
+    expect(aiRequestFromUsageEvent({ ...base, requests: 0 })).toBeNull();
+    expect(aiRequestFromUsageEvent({ ...base, requests: 12 })).toBeNull();
+    expect(aiRequestFromUsageEvent({ ...base, windowStart: occurredAt })).toBeNull();
+    expect(aiRequestFromUsageEvent({ ...base, windowEnd: occurredAt })).toBeNull();
+  });
+
   it("skips legacy-mapped and non-AI events", () => {
     expect(aiRequestFromUsageEvent({
       idempotencyKey: "k2", sourceApp: "x", occurredAt, metadata: { _aiSource: "legacy", _aiTokensInput: 1 },

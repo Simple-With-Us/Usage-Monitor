@@ -303,19 +303,27 @@ export interface AiRequestSourceEvent {
   sourceApp: string;
   project?: string;
   costUsd?: number;
+  requests?: number;
+  windowStart?: Date;
+  windowEnd?: Date;
   occurredAt: Date;
   metadata?: Metadata;
 }
 
 /**
  * The per-request AiRequest row (UM-1590 store) for one ingested usage event
- * that carried the typed `ai` block.  Legacy-mapped rows are not per-request
+ * that carried the typed `ai` block and describes a single model call.  Legacy-mapped rows are not per-request
  * (collectors post token slices and window totals), so they get none.  The
  * dedupe key is the event's own idempotency key, so a replay is a duplicate.
  */
 export function aiRequestFromUsageEvent(event: AiRequestSourceEvent): AiRequestInput | null {
   const metadata = event.metadata;
   if (!metadata || metadata[AI_METADATA_KEYS.source] !== "block") return null;
+  // Only a single model call belongs in the per-request store.  A run or
+  // window summary (requests other than 1, or a window) is still aggregated
+  // and priced, but one run's total duration must not read as one request.
+  if (event.requests != null && event.requests !== 1) return null;
+  if (event.windowStart || event.windowEnd) return null;
   const str = (key: string) => nonEmptyString(metadata[key], 200);
   const cacheWrite5m = intColumn(metadata[AI_METADATA_KEYS.tokensCacheWrite5m]);
   const cacheWrite1h = intColumn(metadata[AI_METADATA_KEYS.tokensCacheWrite1h]);
