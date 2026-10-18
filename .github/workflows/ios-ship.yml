@@ -96,8 +96,15 @@ jobs:
           # range uncomputable and the gate would degrade to skipping forever.
           fetch-depth: 0
 
+      # Restore and save are separate steps (not the single actions/cache step)
+      # because actions/cache only saves in its post step, and the post step is
+      # skipped when the job fails.  Client and Local are independent now, so
+      # one app can upload while the other fails; the successful app's
+      # last-ship-<app>.txt must still be saved or the next tick would see no
+      # state and re-upload it, which is exactly the TestFlight spam the rate
+      # gate exists to prevent.
       - name: Restore iOS ship state
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ios-fleet
           key: ios-fleet-usage-${{ github.run_id }}
@@ -276,3 +283,12 @@ jobs:
         env:
           IOS_TF_RELEASE_NOTES: "1"
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh"
+
+      # Saved even when a ship step failed or the run was cancelled, but only on
+      # ticks that actually tried to ship (a no-op tick changes no state).
+      - name: Save iOS ship state
+        if: ${{ always() && steps.gate.outputs.should_ship == '1' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ios-fleet
+          key: ios-fleet-usage-${{ github.run_id }}
