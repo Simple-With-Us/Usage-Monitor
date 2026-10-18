@@ -209,6 +209,20 @@ describe("POST /api/otlp/v1/logs", () => {
     expect(await prisma.aiRequest.count()).toBe(1);
   });
 
+  it("does not store a codex api_request that names no model (UM-1610)", async () => {
+    // Housekeeping HTTP calls carry no model and never get a response.completed,
+    // so they used to sit forever as zero-token rows grouped under "unknown".
+    const res = await POST(jsonRequest(codexApiRequestPayload({ withModel: false }), AUTH));
+    expect(res.status).toBe(202);
+    expect(await prisma.aiRequest.count()).toBe(0);
+
+    // An inference call that did name its model is still stored as pending.
+    await POST(jsonRequest(codexApiRequestPayload(), AUTH));
+    const rows = await prisma.aiRequest.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ requestedModel: "gpt-6.1-sol", inputTokens: null, outputTokens: null });
+  });
+
   it("stores a codex completion with no preceding api_request on its own", async () => {
     await POST(jsonRequest(codexCompletionPayload(), AUTH));
     const rows = await prisma.aiRequest.findMany();
