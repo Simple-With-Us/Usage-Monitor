@@ -208,10 +208,20 @@ load_sentry_auth() {
     return 0
   fi
   # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired flat file.
+  # Resolve the CLI the way scripts/lib/fleet-secrets.mjs does: an explicit
+  # FLEET_SECRETS_BIN override, else the installed ~/.local/bin copy, else PATH.
   # Try the root path, then /global-api-keys, like the sibling scripts do.
-  if command -v fleet-secrets >/dev/null 2>/dev/null; then
-    SENTRY_AUTH_TOKEN="$(fleet-secrets get SENTRY_AUTH_TOKEN --path / 2>/dev/null \
-      || fleet-secrets get SENTRY_AUTH_TOKEN --path /global-api-keys 2>/dev/null \
+  local fs_bin="${FLEET_SECRETS_BIN:-}"
+  if [[ -z "$fs_bin" ]]; then
+    if [[ -x "${HOME}/.local/bin/fleet-secrets" ]]; then
+      fs_bin="${HOME}/.local/bin/fleet-secrets"
+    elif command -v fleet-secrets >/dev/null 2>/dev/null; then
+      fs_bin="fleet-secrets"
+    fi
+  fi
+  if [[ -n "$fs_bin" ]]; then
+    SENTRY_AUTH_TOKEN="$("$fs_bin" get SENTRY_AUTH_TOKEN --path / 2>/dev/null \
+      || "$fs_bin" get SENTRY_AUTH_TOKEN --path /global-api-keys 2>/dev/null \
       || true)"
     SENTRY_AUTH_TOKEN="${SENTRY_AUTH_TOKEN//$'\r'/}"
     export SENTRY_AUTH_TOKEN
