@@ -1582,4 +1582,120 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(assessment.storageSampleStale).toBe(true);
     expect(isR2AutoDisabled()).toBe(false);
   });
+
+  describe("auto-resume via fresh GraphQL storage (UM-1609)", () => {
+    const freshGraphqlBody = (storageBytes: number, datetime: string) => ({
+      data: {
+        viewer: {
+          accounts: [
+            {
+              r2OperationsAdaptiveGroups: [
+                {
+                  sum: { requests: 50_000 },
+                  dimensions: { actionType: "PutObject" },
+                },
+                {
+                  sum: { requests: 2_000 },
+                  dimensions: { actionType: "GetObject" },
+                },
+              ],
+              r2StorageAdaptiveGroups: [
+                {
+                  max: {
+                    payloadSize: storageBytes,
+                    metadataSize: 0,
+                    objectCount: 1200,
+                  },
+                  dimensions: { datetime, bucketName: "usage-monitor-prod-v3" },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const graphqlFetch = (body: unknown) =>
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes("graphql")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify(body),
+          };
+        }
+        return { ok: true, status: 200, text: async () => '{"status":1}' };
+      });
+
+    beforeEach(() => {
+      for (const name of [R2_DISABLED_FLAG_FILENAME, R2_AUTO_RESUMED_FLAG_FILENAME]) {
+        try {
+          fs.unlinkSync(__getR2FlagFilePathForTests(name));
+        } catch {
+          // absent is fine
+        }
+      }
+    });
+
+    it("auto-resumes from fresh GraphQL storage when no live S3 list is configured", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+      // No LITESTREAM_S3_*/AWS_* env: post-B2-cutover deploy shape.
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const storageBytes = 4.6 * 1024 * 1024 * 1024; // ~46% of 10 GiB
+      const body = freshGraphqlBody(storageBytes, "2026-08-05T00:00:00Z");
+      const now = new Date("2026-08-05T00:30:00.000Z"); // sample 30 min old: fresh
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.metricsSource).toBe("cloudflare_graphql");
+      expect(assessment.storageSampleStale).toBe(false);
+      expect(assessment.storage.mtdPct).toBeLessThan(85);
+      expect(isR2AutoDisabled()).toBe(false);
+      expect(hasR2AutoResumeMarker()).toBe(true);
+    });
+
+    it("does not auto-resume on stale GraphQL storage without a live list", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const storageBytes = 4.6 * 1024 * 1024 * 1024;
+      const body = freshGraphqlBody(storageBytes, "2026-08-05T00:00:00Z");
+      const now = new Date("2026-08-05T03:30:00.000Z"); // 3.5h old: stale
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.storageSampleStale).toBe(true);
+      expect(isR2AutoDisabled()).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+
+    it("does not auto-resume when metrics are unavailable", async () => {
+      // No R2/Cloudflare creds at all.
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '{"status":1}',
+      });
+      const assessment = await runR2UsageCheck(
+        mockFetch as unknown as typeof fetch,
+        new Date("2026-08-05T00:30:00.000Z")
+      );
+
+      expect(assessment.metricsSource).toBe("unavailable");
+      expect(isR2AutoDisabled()).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+  });
 });

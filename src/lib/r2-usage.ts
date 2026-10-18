@@ -2663,20 +2663,30 @@ export async function runR2UsageCheck(
     enforceR2AutoDisable(reason);
   }
 
-  // Auto-resume when live storage is healthy (hysteresis) and ops are fine.
+  // Auto-resume when storage is healthy (hysteresis) and ops are fine.
   // Fixes sticky kill from stale GraphQL after a successful prune.
+  // UM-1609: after the litestream B2 cutover, deploy env carries no S3-list
+  // creds, so a live list can be impossible on every tick and the kill flag
+  // would stick forever. Accept a fresh GraphQL storage sample in that case -
+  // but never stale or unavailable metrics, the same trust bar kill
+  // decisions use.
+  const storageResumeSource = storageIsLive
+    ? "live"
+    : assessment.metricsSource === "cloudflare_graphql" && !storageSampleStale
+      ? "graphql"
+      : null;
   if (
     isR2AutoDisabled() &&
-    storageIsLive &&
+    storageResumeSource &&
     assessment.storage.mtdPct < R2_RESUME_STORAGE_PCT &&
     !assessment.classA.onTrackToExceed &&
     !assessment.classB.onTrackToExceed
   ) {
     console.warn(
-      `[r2-usage] auto-resume: live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
+      `[r2-usage] auto-resume: ${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
     );
     clearR2AutoDisable(
-      `live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
+      `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
     );
   }
 
