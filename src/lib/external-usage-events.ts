@@ -20,6 +20,10 @@ import {
   getModelPricing,
 } from "@/lib/pricing/model-pricing";
 import {
+  hasCanonicalAiMetadata,
+  withoutCanonicalAiMetadata,
+} from "@/lib/ai-usage-metadata";
+import {
   DERIVED_ANALYTICS_TOKEN_SOURCE_APPS,
   isSubscriptionAnalyticsTelemetry,
   shouldDeriveAnalyticsTokenEstimate,
@@ -292,8 +296,14 @@ function metadataWithoutStringProject(value: unknown): unknown {
 // comment on ExternalUsageEventInput above) — a replay with a different
 // providerRequestId under the same idempotencyKey must still dedupe, not
 // throw ExternalUsageIdempotencyCollisionError.
-function comparableEvent(event: ExternalUsageEventInput | ExistingExternalUsageEvent) {
+function comparableEvent(
+  event: ExternalUsageEventInput | ExistingExternalUsageEvent,
+  options: { ignoreCanonicalAi?: boolean } = {}
+) {
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
+  const metadata = options.ignoreCanonicalAi
+    ? withoutCanonicalAiMetadata(value.metadata ?? null)
+    : value.metadata ?? null;
   const iso = (date: Date | undefined | null) => date?.toISOString() ?? null;
   return {
     sourceApp: value.sourceApp,
@@ -325,7 +335,7 @@ function comparableEvent(event: ExternalUsageEventInput | ExistingExternalUsageE
     // basis. Compare it separately so an old event can gain attribution on a
     // replay without weakening collision checks for every other metadata
     // field (or allowing one project name to be replaced by another).
-    metadata: stableJson(metadataWithoutStringProject(value.metadata ?? null)),
+    metadata: stableJson(metadataWithoutStringProject(metadata)),
   };
 }
 
@@ -333,8 +343,14 @@ function sameEvent(
   left: ExternalUsageEventInput | ExistingExternalUsageEvent,
   right: ExternalUsageEventInput | ExistingExternalUsageEvent
 ): boolean {
-  const leftComp = comparableEvent(left);
-  const rightComp = comparableEvent(right);
+  // The `_ai*` keys are a server-side projection added at ingest (UM-1592).
+  // A row persisted before that projection existed has none, so a replay of
+  // it must not read as an idempotency collision just because the replay now
+  // carries the projection.  When both sides have it, it is compared as usual.
+  const ignoreCanonicalAi =
+    hasCanonicalAiMetadata(left.metadata) !== hasCanonicalAiMetadata(right.metadata);
+  const leftComp = comparableEvent(left, { ignoreCanonicalAi });
+  const rightComp = comparableEvent(right, { ignoreCanonicalAi });
   if (stableJson(leftComp) === stableJson(rightComp)) {
     return true;
   }

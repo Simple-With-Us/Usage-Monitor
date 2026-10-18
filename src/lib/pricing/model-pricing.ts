@@ -264,7 +264,11 @@ export interface TokenBreakdown {
   input?: number;
   output?: number;
   cacheRead?: number;
+  /** Cache writes at the default (5-minute) TTL, or TTL unknown. */
   cacheCreation?: number;
+  /** Cache writes at the 1-hour TTL (UM-1592), priced from
+   * `cache_creation_input_token_cost_above_1hr`. */
+  cacheCreation1h?: number;
 }
 
 export interface DerivedTokenCost {
@@ -430,6 +434,9 @@ export function deriveTokenCostUsd(
     tokens.cacheCreation,
     pickRate(pricing.cache_creation_input_token_cost, pricing.cache_creation_input_token_cost_above_200k_tokens, above200k)
   );
+  // The catalog has no long-context 1-hour rate, so the base 1-hour rate applies.
+  // A missing 1-hour rate leaves the estimate incomplete rather than guessing.
+  add(tokens.cacheCreation1h, pricing.cache_creation_input_token_cost_above_1hr);
 
   return { costUsd, complete };
 }

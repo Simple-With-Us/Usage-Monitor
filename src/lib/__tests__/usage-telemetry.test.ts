@@ -979,3 +979,118 @@ describe("reserved derived-cost metadata keys", () => {
     expect(events[0].metadata).toEqual({ legitimate: "kept" });
   });
 });
+
+describe("canonical AI usage (UM-1592)", () => {
+  it("persists the v2 ai block under the reserved _ai* keys", async () => {
+    const { events: [event], rejected } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "botfleet",
+      events: [{
+        eventId: "turn-1",
+        provider: "anthropic",
+        metricType: "usage",
+        unit: "token",
+        quantity: 100,
+        ai: {
+          model: { requested: "sonnet", served: "claude-sonnet-4-5" },
+          harness: "botfleet",
+          seat: "CLAUDE",
+          tokens: { input: 10, output: 20, cacheRead: 30, cacheWrite5m: 15, cacheWrite1h: 25, reasoning: 5 },
+          durationMs: 900,
+          ttftMs: 120,
+          billingMode: "subscription",
+          costSource: "estimated",
+        },
+        occurredAt: "2026-10-17T01:00:00.000Z",
+      }],
+    });
+    expect(rejected).toBe(0);
+    expect(event.metadata).toMatchObject({
+      _aiModelRequested: "sonnet",
+      _aiModelServed: "claude-sonnet-4-5",
+      _aiHarness: "botfleet",
+      _aiSeat: "CLAUDE",
+      _aiTokensInput: 10,
+      _aiTokensOutput: 20,
+      _aiTokensCacheRead: 30,
+      _aiTokensCacheWrite5m: 15,
+      _aiTokensCacheWrite1h: 25,
+      _aiTokensReasoning: 5,
+      _aiDurationMs: 900,
+      _aiTtftMs: 120,
+      _aiBillingMode: "subscription",
+      _aiCostSource: "estimated",
+      _aiSource: "block",
+    });
+  });
+
+  it("rejects an invalid ai block per event", async () => {
+    const { events, rejected, rejections } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "botfleet",
+      events: [
+        { eventId: "ok", provider: "anthropic" },
+        { eventId: "bad", provider: "anthropic", ai: { tokens: { input: -1 } } },
+      ],
+    });
+    expect(events).toHaveLength(1);
+    expect(rejected).toBe(1);
+    expect(rejections[0]?.eventId).toBe("bad");
+  });
+
+  it("maps legacy v2 metadata keys onto the canonical keys", async () => {
+    const { events: [event] } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "congress-trade",
+      events: [{
+        eventId: "ct-1",
+        provider: "anthropic",
+        unit: "token",
+        quantity: 1050,
+        metadata: {
+          promptTokens: 1000,
+          completionTokens: 50,
+          cachedTokens: 600,
+          cacheWriteTokens: 100,
+          cacheWriteOneHourTokens: 200,
+        },
+      }],
+    });
+    expect(event.metadata).toMatchObject({
+      promptTokens: 1000,
+      _aiTokensInput: 100,
+      _aiTokensOutput: 50,
+      _aiTokensCacheRead: 600,
+      _aiTokensCacheWrite5m: 100,
+      _aiTokensCacheWrite1h: 200,
+      _aiSource: "legacy",
+    });
+  });
+
+  it("does not let producer metadata forge canonical keys", async () => {
+    const { events: [event] } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      events: [{
+        eventId: "forge",
+        provider: "openai",
+        metadata: { _aiTokensOutput: 1_000_000_000, _aiSource: "block", _aiModelServed: "x" },
+      }],
+    });
+    expect(event.metadata?._aiTokensOutput).toBeUndefined();
+    expect(event.metadata?._aiSource).toBeUndefined();
+    expect(event.metadata?._aiModelServed).toBeUndefined();
+  });
+
+  it("maps legacy v1 token slices by label", () => {
+    const [event] = parseUsageTelemetryBatch({
+      sourceApp: "openai-codex",
+      provider: "openai",
+      unit: "token",
+      quantity: 42,
+      label: "token:cacheRead",
+      metadata: { session: "s1" },
+    });
+    expect(event.metadata).toMatchObject({ session: "s1", _aiTokensCacheRead: 42, _aiSource: "legacy" });
+  });
+});

@@ -6,6 +6,7 @@ import {
   type UsageTelemetryV2Batch,
 } from "@jaywedgeworth22/congress-trading-shared";
 
+import { AI_METADATA_KEY_LIST, canonicalAiMetadata } from "@/lib/ai-usage-metadata";
 import { enrichQuotaIngestMetadata } from "@/lib/quota-ingest-metadata";
 
 const MAX_EVENTS = 100;
@@ -31,6 +32,10 @@ const RESERVED_V2_METADATA_KEYS = new Set([
   "_derivedCostPricingKey",
   "_derivedCostSnapshot",
   "_derivedCostIncomplete",
+  // Canonical AI usage (ai-usage-metadata.ts, UM-1592).  Set only from the
+  // validated shared-contract `ai` block or the server-side legacy mapping,
+  // because cost derivation prices from them.
+  ...AI_METADATA_KEY_LIST,
 ]);
 // 100 events * 50 metadata entries * (80-byte key + 500-byte value), plus
 // event fields and JSON framing, fits below 4 MiB. The route enforces this
@@ -145,8 +150,16 @@ function v2Metadata(
   batch: UsageTelemetryV2Batch,
   event: UsageTelemetryV2Batch["events"][number]
 ): Record<string, string | number | boolean | null> | undefined {
+  const producerMetadata = cleanProducerMetadata(event.metadata ?? {}) ?? {};
   const metadata: Record<string, string | number | boolean | null> = {
-    ...(cleanProducerMetadata(event.metadata ?? {}) ?? {}),
+    ...producerMetadata,
+    ...(canonicalAiMetadata({
+      unit: event.unit,
+      quantity: event.quantity,
+      label: event.label,
+      metadata: producerMetadata,
+      ai: event.ai,
+    }) ?? {}),
     _usageTelemetrySchemaVersion: 2,
     _producerEventId: event.eventId,
   };
@@ -432,11 +445,17 @@ function readDate(record: Record<string, unknown>, key: string): Date | undefine
 }
 
 function readMetadata(
-  record: Record<string, unknown>
+  record: Record<string, unknown>,
+  event: { unit?: string; quantity?: number; label?: string } = {}
 ): Record<string, string | number | boolean | null> | undefined {
   const raw = record.metadata;
   if (raw == null) return undefined;
-  return cleanProducerMetadata(asRecord(raw));
+  const clean = cleanProducerMetadata(asRecord(raw));
+  if (!clean) return undefined;
+  // v1 events have no typed `ai` block; map their legacy token keys so they
+  // aggregate and price the same way as v2 (UM-1592).
+  const canonical = canonicalAiMetadata({ ...event, metadata: clean });
+  return canonical ? { ...clean, ...canonical } : clean;
 }
 
 // Length-prefixes each field before joining, so two fields that straddle a
@@ -533,6 +552,7 @@ function parseEvent(value: unknown): ParsedUsageTelemetryEvent {
   }
   const requests = readInteger(record, "requests");
   const credits = readNumber(record, "credits");
+  const unit = readOptionalEnum(record, "unit", units);
 
   return finalizeQuotaIngestEvent({
     sourceApp,
@@ -545,7 +565,7 @@ function parseEvent(value: unknown): ParsedUsageTelemetryEvent {
     billingMode: readEnum(record, "billingMode", billingModes, "estimated"),
     metricType,
     quantity,
-    unit: readOptionalEnum(record, "unit", units),
+    unit,
     costUsd,
     requests,
     credits,
@@ -556,7 +576,7 @@ function parseEvent(value: unknown): ParsedUsageTelemetryEvent {
     windowStart: readDate(record, "windowStart"),
     windowEnd: readDate(record, "windowEnd"),
     occurredAt,
-    metadata: readMetadata(record),
+    metadata: readMetadata(record, { unit, quantity, label }),
     // NOT included in the idempotency-key basis below — see the field's
     // CONTRACT comment on ParsedUsageTelemetryEvent and on
     // deriveIdempotencyKey. A producer resending the same logical event with

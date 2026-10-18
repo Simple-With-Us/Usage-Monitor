@@ -81,6 +81,28 @@ validated per event, so one poison event no longer fails the batch.
 }
 ```
 
+**Canonical AI usage (`ai` block, shared `v2.8.0`+, UM-1592):** an AI event may
+carry one optional, strict `ai` object:  `model.{requested,served}`, `harness`,
+`seat`, `tokens.{input,output,cacheRead,cacheWrite5m,cacheWrite1h,reasoning}`,
+`durationMs`, `ttftMs`, `billingMode` (`subscription`/`payg`/`free`) and
+`costSource` (`billed`/`estimated`).  `input` is uncached input only, `output`
+includes reasoning, and `reasoning` is an informational subset of `output`.
+Send `ai.tokens` on exactly one event per request.  Field semantics, SDK
+mappings and the per-producer migration live in the shared package's
+`docs/ai-usage-schema.md`.
+
+The monitor persists the block into metadata under reserved keys a producer
+cannot set:  `_aiModelRequested`, `_aiModelServed`, `_aiHarness`, `_aiSeat`,
+`_aiTokensInput`, `_aiTokensOutput`, `_aiTokensCacheRead`,
+`_aiTokensCacheWrite5m`, `_aiTokensCacheWrite1h`, `_aiTokensReasoning`,
+`_aiDurationMs`, `_aiTtftMs`, `_aiBillingMode`, `_aiCostSource` and `_aiSource`
+(`block` or `legacy`).  Events without the block are mapped onto the same keys
+from the pre-UM-1592 metadata (`promptTokens`, `completionTokens`,
+`cachedTokens`, `cacheWriteTokens`, `cacheWriteOneHourTokens`, `inputTokens`,
+`outputTokens`, `cachedInputTokens`, and `tokenType` / `label: token:<type>`
+slices), so every producer aggregates the same way.  Ingest cost derivation
+prices the canonical tokens, 1-hour cache writes included.
+
 **Response `202` (v2 ACK):** counts satisfy
 `persisted + duplicates + pruned + rejected === received`.
 

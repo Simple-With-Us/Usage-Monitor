@@ -147,3 +147,71 @@ describe("applyIngestCostDerivation", () => {
     expect(events[2].metadata).toBeUndefined();
   });
 });
+
+describe("deriveEventCostEstimate with canonical AI tokens (UM-1592)", () => {
+  it("prices every canonical bucket, 1-hour cache writes included", () => {
+    const estimate = deriveEventCostEstimate({
+      metricType: "usage",
+      unit: "token",
+      quantity: 5_000_000,
+      keyRef: "configured-key-not-a-model",
+      metadata: {
+        _aiModelServed: "claude-sonnet-4-5",
+        _aiTokensInput: 1_000_000,
+        _aiTokensOutput: 1_000_000,
+        _aiTokensCacheRead: 1_000_000,
+        _aiTokensCacheWrite5m: 1_000_000,
+        _aiTokensCacheWrite1h: 1_000_000,
+        _aiTokensReasoning: 900_000,
+      },
+    });
+    // Sonnet 4.5: $3 in + $15 out + $0.30 cache read + $3.75 5m write + $6 1h write.
+    // Reasoning is inside output and is not priced again.
+    expect(estimate?.costUsd).toBeCloseTo(28.05, 6);
+    expect(estimate?.pricingKey).toBe("claude-sonnet-4-5");
+    expect(estimate?.incomplete).toBe(false);
+  });
+
+  it("falls back to the requested model, then keyRef", () => {
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      metadata: { _aiModelRequested: "claude-sonnet-4-5", _aiTokensOutput: 1_000_000 },
+    })?.costUsd).toBeCloseTo(15, 6);
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      keyRef: "claude-sonnet-4-5",
+      metadata: { _aiTokensInput: 1_000_000 },
+    })?.costUsd).toBeCloseTo(3, 6);
+  });
+
+  it("does not require unit token once canonical tokens exist", () => {
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      unit: "request",
+      quantity: 1,
+      metadata: { _aiModelServed: "claude-sonnet-4-5", _aiTokensInput: 1_000_000 },
+    })?.costUsd).toBeCloseTo(3, 6);
+  });
+
+  it("flags incomplete when the catalog lacks the 1-hour rate", () => {
+    const estimate = deriveEventCostEstimate({
+      metricType: "usage",
+      metadata: { _aiModelServed: "gpt-4o", _aiTokensInput: 1_000_000, _aiTokensCacheWrite1h: 1_000 },
+    });
+    expect(estimate?.incomplete).toBe(true);
+  });
+
+  it("still skips producer-priced, non-usage, unknown-model and empty events", () => {
+    const metadata = { _aiModelServed: "claude-sonnet-4-5", _aiTokensInput: 10 };
+    expect(deriveEventCostEstimate({ metricType: "usage", costUsd: 1, metadata })).toBeNull();
+    expect(deriveEventCostEstimate({ metricType: "cost", metadata })).toBeNull();
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      metadata: { _aiModelServed: "no-such-model-xyz", _aiTokensInput: 10 },
+    })).toBeNull();
+    expect(deriveEventCostEstimate({
+      metricType: "usage",
+      metadata: { _aiModelServed: "claude-sonnet-4-5", _aiTokensInput: 0, _aiTokensReasoning: 50 },
+    })).toBeNull();
+  });
+});
