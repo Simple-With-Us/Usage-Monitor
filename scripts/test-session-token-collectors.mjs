@@ -990,6 +990,10 @@ assert(
       ]),
   "pre-cutoff DeepSeek messages keep the legacy event shape and ids",
 );
+assert(
+  legacyEvents.every((e) => e.confidence === "estimated"),
+  "pre-cutoff DeepSeek messages keep the stored estimated confidence",
+);
 const seen = new Set();
 const first = parseDeepSeekSessionJsonl(legacyLine, { ...legacyOpts, seenMessageIds: seen });
 const twin = parseDeepSeekSessionJsonl(legacyLine, { sessionKey: "dir/session-x", seenMessageIds: seen });
