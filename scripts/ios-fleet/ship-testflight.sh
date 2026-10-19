@@ -70,7 +70,7 @@
 # fleet runners).
 #
 # Secrets (never printed):
-#   Infisical Fleet-OPS via `fleet-secrets get` (AFC-359; nothing reads ~/.secrets):
+#   Infisical Fleet-OPS via `fleet-secrets get` (AFC-359; no handoff file is read):
 #     ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8   folder /asc  (ASC_KEY_P8 is the .p8 text;
 #                                 written to a 0600 temp dir for the life of the ship,
 #                                 pointed at by API_PRIVATE_KEYS_DIR, removed on exit)
@@ -208,7 +208,7 @@ trap ship_exit EXIT
 # Load ASC credentials into the CURRENT shell (must not run inside $(...) or the
 # exported ASC_* vars are discarded with the subshell). Sets AUTH_MODE to
 # "api_key" or "none". Never prints secret values.  AFC-359:  env first, then
-# Infisical (`fleet-secrets get`);  never a file under ~/.secrets.
+# Infisical (`fleet-secrets get`);  never a handoff file.
 load_secrets() {
   AUTH_MODE="none"
   local id issuer p8

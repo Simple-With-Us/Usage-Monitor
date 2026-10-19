@@ -17,7 +17,7 @@ require "optparse"
 
 # AFC-359: credentials come from the environment, else Infisical Fleet-OPS via
 # `fleet-secrets get` (folder /asc:  ASC_KEY_ID, ASC_ISSUER_ID,
-# ASC_KEY_P8 = the .p8 text).  Nothing is read from a file under ~/.secrets;  never printed.
+# ASC_KEY_P8 = the .p8 text).  No handoff file is read;  never printed.
 require "open3"
 FLEET_SECRETS_BIN = ENV.fetch("FLEET_SECRETS_BIN", File.expand_path("~/.local/bin/fleet-secrets"))
 def asc_value(name, folder)

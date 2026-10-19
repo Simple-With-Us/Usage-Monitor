@@ -67,7 +67,7 @@ infisical_token() {
   local id secret
   id="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${INFISICAL_SHARED_CLIENT_ID:-}}}}"
   secret="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${INFISICAL_SHARED_CLIENT_SECRET:-}}}}"
-  # OPS-818: the flat ~/.secrets file is gone as a source;  fall back to
+  # OPS-818: the retired flat key file is gone as a source;  fall back to
   # fleet-secrets (captured, never echoed) for the automation identity.
   [ -n "$id" ] || id="$(fleet_value INFISICAL_AUTOMATION_CLIENT_ID)"
   [ -n "$secret" ] || secret="$(fleet_value INFISICAL_AUTOMATION_CLIENT_SECRET)"
