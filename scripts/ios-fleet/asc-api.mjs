@@ -4,9 +4,9 @@
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
  * Auth (AFC-359; nothing reads ~/.secrets): ASC_KEY_ID / ASC_ISSUER_ID from the
- * environment, else Infisical Fleet-OPS /appstore-connect via `fleet-secrets get`.
+ * environment, else Infisical Fleet-OPS /asc via `fleet-secrets get`.
  * The private key is ASC_KEY_PATH (an existing .p8 file), else ASC_KEY_P8 (the .p8
- * text), else Infisical root AUTHKEY_<ASC_KEY_ID>.  Never prints values.
+ * text), else Infisical /asc ASC_KEY_P8.  Never prints values.
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -305,10 +305,10 @@ async function setWhatToTest({ api, buildId, appId, marketing }) {
 async function main() {
   const fromEnvOrInfisical = (name, paths) =>
     (process.env[name] || "").trim() || fleetSecretsGet(name, { paths }) || "";
-  const keyId = fromEnvOrInfisical("ASC_KEY_ID", ["/appstore-connect"]);
-  const issuerId = fromEnvOrInfisical("ASC_ISSUER_ID", ["/appstore-connect"]);
+  const keyId = fromEnvOrInfisical("ASC_KEY_ID", ["/asc"]);
+  const issuerId = fromEnvOrInfisical("ASC_ISSUER_ID", ["/asc"]);
   if (!keyId || !issuerId) {
-    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID (environment, or Infisical /appstore-connect)");
+    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID (environment, or Infisical /asc)");
     process.exit(1);
   }
   const keyPath = (process.env.ASC_KEY_PATH || "").trim().replace(/^~(?=\/)/, homedir());
@@ -318,11 +318,11 @@ async function main() {
   } else {
     privateKeyPem =
       (process.env.ASC_KEY_P8 || "").trim() ||
-      fleetSecretsGet(`AUTHKEY_${keyId}`, { paths: ["/"] }) ||
+      fleetSecretsGet("ASC_KEY_P8", { paths: ["/asc"] }) ||
       "";
   }
   if (!privateKeyPem) {
-    console.error(`Missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical root AUTHKEY_${keyId})`);
+    console.error(`Missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical /asc ASC_KEY_P8)`);
     process.exit(1);
   }
   const token = signJwt({ keyId, issuerId, privateKeyPem });
