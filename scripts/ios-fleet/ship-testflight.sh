@@ -24,9 +24,10 @@
 #   CURRENT_PROJECT_VERSION = <commit_count>
 # App Store Connect renders "<marketing> (<build>)", so a ship shows
 # "1.0.148 (148)".  Unified across macOS and iOS; timestamps permanently retired.
-# One exception:  a re-ship of a commit count that App Store Connect already
-# holds raises BOTH numbers to <floor + 1>,  so the pair stays consistent but
-# the build number no longer names that commit.  See the guard below.
+# One exception:  when the floor is at or above the commit count, the guard
+# raises BOTH numbers to <floor + 1>,  so the pair stays consistent but the
+# build number no longer names that commit.  The floor is
+# max(App Store Connect, project.pbxproj).  See the guard below.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS HOLDING BACK AUTOMATIC SHIPPING: THE MIN-INTERVAL RATE LIMIT
@@ -356,9 +357,9 @@ link_private_key() {
 # MARKETING_VERSION (CFBundleShortVersionString) is 1.0.<commit_count>.
 # CURRENT_PROJECT_VERSION (CFBundleVersion) is the same integer commit count.
 # ASC renders "<marketing> (<build>)", so a ship shows "1.0.259 (259)".
-# One exception, the guard below:  when App Store Connect already holds that
-# commit count, both numbers move up to <floor + 1> together, so the pair
-# still carries one number and that number no longer names a commit.
+# One exception, the guard below:  when the floor is at or above the commit
+# count, both numbers move up to <floor + 1> together, so the pair still
+# carries one number and that number no longer names a commit.
 #
 # The commit count replaces the UTC YYYYMMDDHHMM stamp for CFBundleVersion:
 #   - it names the EXACT commit a build came from, so a TestFlight or Sparkle
