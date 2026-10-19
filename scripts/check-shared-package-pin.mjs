@@ -107,7 +107,7 @@ export function comparePins(input) {
   const umSpec = input.umSpec;
   if (input.stUnreadable) {
     problems.push(
-      "cannot read public Socratic.Trade pin; set GITHUB_TOKEN / GH_TOKEN (read access to Simple-With-Us/Socratic-Trade or jaywedgeworth22/Socratic-Trade)"
+      "cannot read public Socratic.Trade pin; set GITHUB_TOKEN / GH_TOKEN (read access to Simple-With-Us/Socratic-Trade)"
     );
     return { problems, stV: "", umV: normVersion(umSpec), ctV: "" };
   }
@@ -120,7 +120,7 @@ export function comparePins(input) {
   }
   if (input.ctUnreadable) {
     problems.push(
-      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
+      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to Simple-With-Us/Congress.Trade)"
     );
     return { problems, stV, umV, ctV: "" };
   }
@@ -160,22 +160,10 @@ function main() {
   let stLockSha = "";
   let stUnreadable = false;
   try {
-    const stRepo = "jaywedgeworth22/Socratic-Trade";
-    let stPkgRaw = "";
-    try {
-      stPkgRaw = ghRaw(stRepo, "package.json", stToken);
-    } catch {
-      stPkgRaw = ghRaw("Simple-With-Us/Socratic-Trade", "package.json", stToken);
-    }
-    const stPkg = JSON.parse(stPkgRaw);
+    const stRepo = "Simple-With-Us/Socratic-Trade";
+    const stPkg = JSON.parse(ghRaw(stRepo, "package.json", stToken));
     stSpec = packageSpec(stPkg);
-    let stLockRaw = "";
-    try {
-      stLockRaw = ghRaw(stRepo, "package-lock.json", stToken);
-    } catch {
-      stLockRaw = ghRaw("Simple-With-Us/Socratic-Trade", "package-lock.json", stToken);
-    }
-    const stLock = JSON.parse(stLockRaw);
+    const stLock = JSON.parse(ghRaw(stRepo, "package-lock.json", stToken));
     stLockSha = lockResolvedSha(stLock);
     console.log(`ST spec: ${stSpec || "(missing)"}`);
     if (stLockSha) console.log(`ST lock SHA: ${stLockSha}`);
@@ -192,7 +180,7 @@ function main() {
   let ctNpm = false;
   try {
     const provenance = ghRaw(
-      "jaywedgeworth22/Congress.Trade",
+      "Simple-With-Us/Congress.Trade",
       "app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md",
       ctToken
     );
@@ -200,13 +188,13 @@ function main() {
     ctRelease = parsed.release;
     ctCommit = parsed.commit;
     const vendorPkg = JSON.parse(
-      ghRaw("jaywedgeworth22/Congress.Trade", "app/vendor/congress-trading-shared/package.json", ctToken)
+      ghRaw("Simple-With-Us/Congress.Trade", "app/vendor/congress-trading-shared/package.json", ctToken)
     );
     ctVendorVersion = String(vendorPkg.version || "");
-    const appPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "app/package.json", ctToken));
+    const appPkg = JSON.parse(ghRaw("Simple-With-Us/Congress.Trade", "app/package.json", ctToken));
     let rootPkg = null;
     try {
-      rootPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "package.json", ctToken));
+      rootPkg = JSON.parse(ghRaw("Simple-With-Us/Congress.Trade", "package.json", ctToken));
     } catch {
       rootPkg = null;
     }
