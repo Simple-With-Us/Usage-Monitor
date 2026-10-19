@@ -75,7 +75,10 @@ security delete-keychain "$KC_PATH" >/dev/null 2>&1 || true
 security create-keychain -p "$KC_PASS" "$KC_PATH"
 security set-keychain-settings -lut 21600 "$KC_PATH"
 security unlock-keychain -p "$KC_PASS" "$KC_PATH"
-security import "$P12_PATH" -k "$KC_PATH" -P "$IOS_DIST_P12_PASSWORD" \
+# -f pkcs12 is required:  security import infers the format from the file
+# extension, and the extensionless mktemp file above (AFC-359, #1719) made every
+# release fail with "SecKeychainItemImport: Unknown format in import".
+security import "$P12_PATH" -f pkcs12 -k "$KC_PATH" -P "$IOS_DIST_P12_PASSWORD" \
   -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild >/dev/null
 rm -f "$P12_PATH"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC_PATH" >/dev/null
