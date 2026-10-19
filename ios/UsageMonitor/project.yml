@@ -46,8 +46,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"                 # Swift 5 language mode (compiled by the Swift 6 toolchain)
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-    MARKETING_VERSION: "1.0.947"
-    CURRENT_PROJECT_VERSION: "947"
+    MARKETING_VERSION: "1.0.948"
+    CURRENT_PROJECT_VERSION: "948"
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: targeted
