@@ -1357,4 +1357,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     console.error(String(err && err.stack ? err.stack : err));
     process.exit(1);
   });
-                       }
+}
