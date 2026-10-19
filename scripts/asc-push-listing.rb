@@ -16,8 +16,8 @@ require "uri"
 require "optparse"
 
 # AFC-359: credentials come from the environment, else Infisical Fleet-OPS via
-# `fleet-secrets get` (folder /appstore-connect for the ids, root AUTHKEY_<key id>
-# for the .p8 text).  Nothing is read from a file under ~/.secrets;  never printed.
+# `fleet-secrets get` (folder /asc:  ASC_KEY_ID, ASC_ISSUER_ID,
+# ASC_KEY_P8 = the .p8 text).  Nothing is read from a file under ~/.secrets;  never printed.
 require "open3"
 FLEET_SECRETS_BIN = ENV.fetch("FLEET_SECRETS_BIN", File.expand_path("~/.local/bin/fleet-secrets"))
 def asc_value(name, folder)
@@ -28,16 +28,16 @@ def asc_value(name, folder)
 rescue Errno::ENOENT
   ""
 end
-ENV["ASC_KEY_ID"] = asc_value("ASC_KEY_ID", "/appstore-connect")
-ENV["ASC_ISSUER_ID"] = asc_value("ASC_ISSUER_ID", "/appstore-connect")
-abort "missing ASC_KEY_ID / ASC_ISSUER_ID (env, or Infisical /appstore-connect)" if ENV["ASC_KEY_ID"].empty? || ENV["ASC_ISSUER_ID"].empty?
+ENV["ASC_KEY_ID"] = asc_value("ASC_KEY_ID", "/asc")
+ENV["ASC_ISSUER_ID"] = asc_value("ASC_ISSUER_ID", "/asc")
+abort "missing ASC_KEY_ID / ASC_ISSUER_ID (env, or Infisical /asc)" if ENV["ASC_KEY_ID"].empty? || ENV["ASC_ISSUER_ID"].empty?
 
 def asc_private_key_pem
   path = ENV["ASC_KEY_PATH"].to_s
   return File.read(File.expand_path(path)) if !path.empty? && File.file?(File.expand_path(path))
   pem = ENV["ASC_KEY_P8"].to_s.strip
-  pem = asc_value("AUTHKEY_#{ENV['ASC_KEY_ID']}", "/") if pem.empty?
-  abort "missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical root AUTHKEY_#{ENV['ASC_KEY_ID']})" if pem.empty?
+  pem = asc_value("ASC_KEY_P8", "/asc") if pem.empty?
+  abort "missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical /asc ASC_KEY_P8)" if pem.empty?
   pem
 end
 
