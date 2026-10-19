@@ -35,7 +35,7 @@ command -v python3 >/dev/null 2>/dev/null || die "python3 not found on PATH."
 
 CID="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${CID:-}}}}"
 CSEC="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${CSEC:-}}}}"
-# OPS-818: the flat ~/.secrets file is no longer read.  Fall back to the
+# OPS-818: the retired flat key file is no longer read.  Fall back to the
 # Mac-side fleet-secrets CLI for the automation identity (captured, never echoed).
 fleet_value() {
   command -v fleet-secrets >/dev/null 2>/dev/null || return 0

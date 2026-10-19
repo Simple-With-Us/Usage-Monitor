@@ -3,7 +3,7 @@
  * Minimal App Store Connect API client. No dependencies beyond Node's
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
- * Auth (AFC-359; nothing reads ~/.secrets): ASC_KEY_ID / ASC_ISSUER_ID from the
+ * Auth (AFC-359; no handoff file is read): ASC_KEY_ID / ASC_ISSUER_ID from the
  * environment, else Infisical Fleet-OPS /asc via `fleet-secrets get`.
  * The private key is ASC_KEY_PATH (an existing .p8 file), else ASC_KEY_P8 (the .p8
  * text), else Infisical /asc ASC_KEY_P8.  Never prints values.

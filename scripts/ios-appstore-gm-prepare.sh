@@ -3,7 +3,7 @@
 # Stages the App Store Connect key from existing team secrets
 # (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, IOS_DIST_P12_BASE64,
 # IOS_DIST_P12_PASSWORD) and imports the iOS Distribution identity.  AFC-359:
-# nothing is written under ~/.secrets;  the key goes to the altool standard dir
+# no handoff file is written;  the key goes to the altool standard dir
 # and its path is handed to later steps through GITHUB_ENV (ASC_KEY_PATH).
 # Never prints secret values.  Never mint a new key.  Fail closed on a
 # beta macOS host.

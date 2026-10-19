@@ -6,7 +6,7 @@ import { fleetSecretsGet } from "./fleet-secrets.mjs";
 
 /**
  * Resolves an ingest token from the environment, then from the Mac-side
- * `fleet-secrets` CLI (OPS-818;  the flat ~/.secrets file is no longer read).
+ * `fleet-secrets` CLI (OPS-818;  the retired flat key file is no longer read).
  *
  * Names are tried strictly in order, each in the environment and then through
  * `fleet-secrets get`, so a producer-scoped name kept in Infisical still beats

@@ -12,7 +12,7 @@ FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-/Users/jay/.local/bin/fleet-secrets}"
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
 # refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
 #
-# OPS-818:  the flat ~/.secrets file is no longer read.  A name missing from
+# OPS-818:  the retired flat key file is no longer read.  A name missing from
 # the environment comes from `fleet-secrets get` (root, then the
 # /global-api-keys folder);  the value is captured, never echoed.
 read_secret() {

@@ -7,7 +7,7 @@ import { join } from "node:path";
  * Read one fleet secret through the Mac-side `fleet-secrets` CLI (OPS-818).
  *
  * Mac collectors and helper scripts call this AFTER checking their own
- * environment.  It replaces the old read of the flat ~/.secrets file, which
+ * environment.  It replaces the old read of the retired flat key file, which
  * nothing may read any more.  Never use it from cloud, CI or Vercel code:
  * those get their values from the environment only.
  *
