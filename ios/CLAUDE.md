@@ -77,4 +77,4 @@ Put shared UI and models in `UsageMonitorKit`. Put only the `@main` entry in `Ap
 - Two spaces between sentences in user-visible copy.
 - Device-local timestamps are correct in product UI (fleet timestamp exception).
 - Never hand-edit `.pbxproj`, `.entitlements`, `.xib`, `.storyboard`.
-- Secrets stay in `~/.secrets/` / Infisical. Never print them.
+- Secrets live in Infisical Fleet-OPS (`fleet-secrets get NAME [--path /folder]`); nothing reads `~/.secrets` (AFC-359). Never print them.

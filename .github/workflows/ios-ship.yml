@@ -5,7 +5,7 @@ name: iOS TestFlight ship (Mac runner)
 # ios-build.yml. Do not run xcodebuild locally. Do not restart a self-hosted
 # Mac runner or /Users/jay/apps/ios-fleet.
 #
-# Signing: scripts/ios-appstore-gm-prepare.sh writes ~/.secrets from Infisical prod
+# Signing: scripts/ios-appstore-gm-prepare.sh stages the ASC key (path handed on via GITHUB_ENV) from Infisical prod
 # (identity stays on GitHub; leftover GH ASC_/IOS_DIST_ for later cleanup) (same names as Congress.Trade / Socratic.Trade #3089:
 # ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, IOS_DIST_P12_BASE64,
 # IOS_DIST_P12_PASSWORD). Never mint a new App Store Connect key.

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 # Push App Store Connect listing metadata for Usage Client + Local Monitor.
-# Credentials: ~/.secrets/appstore-connect.env (never printed).
+# Credentials: environment, else Infisical Fleet-OPS via fleet-secrets (never printed).
 #
 # Usage:
 #   ruby scripts/asc-push-listing.rb --all
@@ -15,13 +15,30 @@ require "net/http"
 require "uri"
 require "optparse"
 
-ENV_PATH = File.expand_path("~/.secrets/appstore-connect.env")
-abort "missing #{ENV_PATH}" unless File.file?(ENV_PATH)
-File.readlines(ENV_PATH).each do |line|
-  line = line.strip
-  next if line.empty? || line.start_with?("#")
-  k, v = line.split("=", 2)
-  ENV[k] = v&.strip&.delete_prefix('"')&.delete_suffix('"') if k && v
+# AFC-359: credentials come from the environment, else Infisical Fleet-OPS via
+# `fleet-secrets get` (folder /appstore-connect for the ids, root AUTHKEY_<key id>
+# for the .p8 text).  Nothing is read from a file under ~/.secrets;  never printed.
+require "open3"
+FLEET_SECRETS_BIN = ENV.fetch("FLEET_SECRETS_BIN", File.expand_path("~/.local/bin/fleet-secrets"))
+def asc_value(name, folder)
+  v = ENV[name].to_s.strip
+  return v unless v.empty?
+  out, _err, st = Open3.capture3(FLEET_SECRETS_BIN, "get", name, "--path", folder)
+  st.success? ? out.strip : ""
+rescue Errno::ENOENT
+  ""
+end
+ENV["ASC_KEY_ID"] = asc_value("ASC_KEY_ID", "/appstore-connect")
+ENV["ASC_ISSUER_ID"] = asc_value("ASC_ISSUER_ID", "/appstore-connect")
+abort "missing ASC_KEY_ID / ASC_ISSUER_ID (env, or Infisical /appstore-connect)" if ENV["ASC_KEY_ID"].empty? || ENV["ASC_ISSUER_ID"].empty?
+
+def asc_private_key_pem
+  path = ENV["ASC_KEY_PATH"].to_s
+  return File.read(File.expand_path(path)) if !path.empty? && File.file?(File.expand_path(path))
+  pem = ENV["ASC_KEY_P8"].to_s.strip
+  pem = asc_value("AUTHKEY_#{ENV['ASC_KEY_ID']}", "/") if pem.empty?
+  abort "missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical root AUTHKEY_#{ENV['ASC_KEY_ID']})" if pem.empty?
+  pem
 end
 
 APPS = {
@@ -142,7 +159,7 @@ def b64(h)
 end
 
 def jwt_token
-  key = OpenSSL::PKey::EC.new(File.read(File.expand_path(ENV.fetch("ASC_KEY_PATH"))))
+  key = OpenSSL::PKey::EC.new(asc_private_key_pem)
   now = Time.now.to_i
   seg = "#{b64({ alg: "ES256", kid: ENV.fetch("ASC_KEY_ID"), typ: "JWT" })}.#{b64({ iss: ENV.fetch("ASC_ISSUER_ID"), iat: now, exp: now + 1200, aud: "appstoreconnect-v1" })}"
   der = key.dsa_sign_asn1(OpenSSL::Digest::SHA256.digest(seg))
