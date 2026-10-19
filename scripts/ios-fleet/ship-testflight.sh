@@ -100,6 +100,7 @@ FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 APPS_JSON="${FLEET_DIR}/apps.json"
 TEAM_ID="CC8UTF7ATG"
 FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-${HOME}/.local/bin/fleet-secrets}"
+ARCHIVE_LOCK_DIR=""
 ASC_TMP_DIR=""        # 0700 temp dir holding the .p8 for this run (removed by asc_cleanup)
 ASC_LINKED_KEY=""     # AuthKey_<id>.p8 this run copied into ~/.appstoreconnect/private_keys
 # 1 hour — owner 2026-08-14: ship unbuilt iOS updates as often as once per hour.
@@ -170,6 +171,17 @@ resolve_project() {
   return 1
 }
 
+# Script-level EXIT handler (installed once, below): release the archive lock only if THIS
+# run took it, then remove the temp ASC key.  Never rmdir a lock another ship holds.
+ARCHIVE_LOCK_HELD=0
+ship_exit() {
+  if [[ "$ARCHIVE_LOCK_HELD" == 1 ]]; then
+    rmdir "$ARCHIVE_LOCK_DIR" 2>/dev/null || true
+    ARCHIVE_LOCK_HELD=0
+  fi
+  asc_cleanup
+}
+
 # Remove the temp .p8 and the altool key copy this run created.  Safe to call twice.
 asc_cleanup() {
   if [[ -n "$ASC_LINKED_KEY" ]]; then
@@ -192,13 +204,14 @@ asc_secret() {
   printf '%s' "$v"
 }
 
+trap ship_exit EXIT
+
 # Load ASC credentials into the CURRENT shell (must not run inside $(...) or the
 # exported ASC_* vars are discarded with the subshell). Sets AUTH_MODE to
 # "api_key" or "none". Never prints secret values.  AFC-359:  env first, then
 # Infisical (`fleet-secrets get`);  never a file under ~/.secrets.
 load_secrets() {
   AUTH_MODE="none"
-  trap asc_cleanup EXIT
   local id issuer p8
   id="$(asc_secret ASC_KEY_ID /appstore-connect)"
   issuer="$(asc_secret ASC_ISSUER_ID /appstore-connect)"
@@ -406,14 +419,22 @@ asc_latest_seq() {
     logerr "asc-seq: node not on PATH; cannot verify against App Store Connect"
     return 1
   fi
+  # resolve_seq_floor runs this in a command-substitution subshell BEFORE the main
+  # load_secrets, so load here (AFC-359) and remove any temp key before returning.
+  local loaded_here=0
   if [[ "${AUTH_MODE:-none}" != "api_key" ]]; then
-    logerr "asc-seq: no App Store Connect API key loaded; cannot verify against App Store Connect"
+    load_secrets
+    loaded_here=1
+  fi
+  if [[ "${AUTH_MODE:-none}" != "api_key" ]]; then
+    logerr "asc-seq: no App Store Connect API key available; cannot verify against App Store Connect"
     return 1
   fi
   set +e
   out=$(node "${FLEET_DIR}/asc-api.mjs" latest-build-seq "$BUNDLE_ID" "$prefix" "$plat" 2>/dev/null)
   rc=$?
   set -e
+  if [[ "$loaded_here" == 1 ]]; then asc_cleanup; fi
   if [[ $rc -ne 0 || ! "$out" =~ ^[0-9]+$ ]]; then
     logerr "asc-seq: query failed (rc=${rc}); cannot verify against App Store Connect"
     return 1
@@ -501,7 +522,7 @@ next_build_seq() {
     sleep 0.1
   done
   # Release on ANY exit path, not just the happy one.
-  trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true; asc_cleanup' EXIT
+  trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' EXIT
   # Re-read under the lock: a concurrent ship may have advanced it since the
   # floor was computed.
   local n
@@ -511,7 +532,7 @@ next_build_seq() {
   n=$((n + 1))
   printf '%s' "$n" > "$seq_file"
   rmdir "$lock_dir" 2>/dev/null || true
-  trap asc_cleanup EXIT
+  trap - EXIT
   printf '%s' "$n"
 }
 
@@ -981,11 +1002,11 @@ acquire_archive_lock() {
     log "archive lock busy; waiting (${tries})"
     sleep 10
   done
-  # shellcheck disable=SC2064
-  trap "rmdir '$ARCHIVE_LOCK_DIR' 2>/dev/null || true; asc_cleanup" EXIT
+  ARCHIVE_LOCK_HELD=1
 }
 release_archive_lock() {
   rmdir "$ARCHIVE_LOCK_DIR" 2>/dev/null || true
+  ARCHIVE_LOCK_HELD=0
 }
 
 # After a successful upload, declare export compliance if the IPA omitted
