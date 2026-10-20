@@ -318,6 +318,8 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
       return {
         ok: true,
         status: 200,
+        // Real fetch exposes a web ReadableStream; the archiver streams it.
+        body: new Response(body).body,
         async arrayBuffer() { return body.buffer.slice(body.byteOffset, body.byteOffset + body.length); },
         async text() { return ""; },
       };
