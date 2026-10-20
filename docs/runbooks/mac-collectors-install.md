@@ -73,7 +73,12 @@ Fixes now in place:
      **Always Allow**.  Click it on the first prompt; a Deny or a timeout just
      repeats the one-line log on the next 15 minute pass.
   3. Within one pass `claude-code` `quota` rows resume and the
-     "no Claude Code OAuth credential found" line stops.
+     "no Claude Code OAuth credential found" line stops.  If the symptom is
+     instead "Claude Code access token is expired; skipping this tick", the
+     read succeeded but the stored token's `expiresAt` has passed.  The
+     collector deliberately never refreshes it (that would race Claude Code's
+     own refresh), so rows resume only once the CLI refreshes that token — run
+     Claude Code once.  Clicking "Always Allow" does not address this case.
 * `fx` usage: unwatched.  No rows since Sep 16 while the collector stays
   installed; `PRODUCER_STREAM_RULES` has no fx rule until usage resumes.
 * `agent-bar` quota: retired.  The app was renamed CodeCaps and reports as
