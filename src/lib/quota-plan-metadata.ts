@@ -25,12 +25,15 @@ export const PLAN_METADATA_STRING_LIMITS: Record<string, number> = {
  * the entire quota response rather than just this optional field.
  */
 export function truncatePlanText(value: string, limit: number): string {
-  const truncated = value.length <= limit ? value : value.slice(0, limit);
-  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1);
-  // A trailing high surrogate means its low surrogate was cut off; drop it.
-  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff
-    ? truncated.slice(0, -1)
-    : truncated;
+  let result = "";
+  for (const point of value) {
+    const code = point.charCodeAt(0);
+    // Iteration combines valid pairs; single surrogate units are invalid legacy input.
+    if (point.length === 1 && code >= 0xd800 && code <= 0xdfff) continue;
+    if (result.length + point.length > limit) break;
+    result += point;
+  }
+  return result;
 }
 
 export function projectQuotaPlanMetadata(meta: Record<string, unknown>): QuotaPlanMetadata | undefined {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { truncatePlanText } from "../quota-plan-metadata";
 import { projectQuotaWindows } from "../quota-windows";
 import { quotaWindowsClientResponseSchema } from "../quota-windows-client-schema";
 import { parseUsageTelemetryV2Batch } from "../usage-telemetry";
@@ -86,6 +87,21 @@ describe("CodeCaps plan metadata", () => {
     expect(parsed.events[0].metadata).not.toHaveProperty("planUserSubtitle");
     expect(parsed.events[1].metadata?.planUserSubtitle).toBeNull();
     expect(parsed.events[1].metadata?.arbitrary).toHaveLength(500);
+  });
+
+  it("sanitizes pre-existing lone surrogates below the new bound", async () => {
+    const legacy = "x".repeat(499) + "\ud83d";
+    expect(truncatePlanText(legacy, 1024)).toBe("x".repeat(499));
+    expect(truncatePlanText("a\udc00b\ud800c😀", 1024)).toBe("abc😀");
+    const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
+      metadata: { planUserSubtitle: legacy },
+    }], now);
+    expect(response.windows[0].planMetadata?.userSubtitle).toBe("x".repeat(499));
+    const parsed = await parseUsageTelemetryV2Batch({ schemaVersion: 2, producerId: "codecaps", events: [{
+      eventId: "legacy-surrogate", provider: "claude", metricType: "quota",
+      occurredAt: now.toISOString(), metadata: { planUserSubtitle: legacy },
+    }] });
+    expect(parsed.events[0].metadata?.planUserSubtitle).toBe("x".repeat(499));
   });
 
   it("never emits a lone surrogate when truncating astral characters", () => {
