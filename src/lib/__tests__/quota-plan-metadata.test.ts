@@ -118,4 +118,39 @@ describe("CodeCaps plan metadata", () => {
     expect(projectQuotaPlanMetadata({ planUserSubtitle: "\u{1F600}" })?.userSubtitle).toBe("\u{1F600}");
   });
 
+  it("sanitizes the legacy detected-plan fallback, not just projected metadata", async () => {
+    // A row stored by the old value.slice(0, 500) can end in a lone surrogate.
+    // The legacy planType/planName fallback publishes it as planName, which would
+    // make Foundation's JSONDecoder reject the whole quota response.
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const legacyPlanType = "x".repeat(499) + "\ud83d";
+    const legacyPlanName = "a\udc00b\ud800c";
+
+    // Direct projection of the unsanitized stored value, as the DB would hand it over.
+    const direct = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
+      metadata: { source: "codecaps", planType: legacyPlanType },
+    }], now);
+    expect(direct.windows[0].planName).toBe("x".repeat(256));
+    expect(direct.windows[0].planName).not.toMatch(loneSurrogate);
+
+    for (const plan of [{ planType: legacyPlanType }, { planName: legacyPlanName }]) {
+      const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
+        metadata: { source: "codecaps", ...plan },
+      }], now);
+      const row = response.windows[0];
+      expect(row.planName).toBeDefined();
+      expect(row.planName).not.toMatch(loneSurrogate);
+      const primary = response.quotaGroups?.find((g) => g.provider === row.providerKey)?.windows[0].primary;
+      expect(primary?.planName).toBe(row.planName);
+      expect(JSON.parse(JSON.stringify(response))).toEqual(response);
+    }
+  });
+
+  it("prefers the projected detected plan over the sanitized legacy fallback", () => {
+    const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
+      metadata: { source: "codecaps", planDetectedName: "Detected", planType: "x".repeat(499) + "\ud83d" },
+    }], now);
+    expect(response.windows[0].planName).toBe("Detected");
+  });
+
 });

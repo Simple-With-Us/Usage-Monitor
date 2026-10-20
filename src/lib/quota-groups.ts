@@ -1,4 +1,4 @@
-import { projectQuotaPlanMetadata, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
+import { projectQuotaPlanMetadata, quotaDetectedPlanName, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
 import {
   antigravityPlatformCardTitle,
   antigravityQuotaPool,
@@ -187,7 +187,7 @@ function eventToCandidate(
 ): QuotaSourceCandidate | null {
   const meta = asRecord(event.metadata);
   const planMetadata = projectQuotaPlanMetadata(meta);
-  const detectedPlanName = planMetadata?.detectedPlanName ?? asString(meta.planType) ?? asString(meta.planName);
+  const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
   const modelId = asString(meta.modelId);
   const bucketId = asString(meta.bucketId);
   const label =

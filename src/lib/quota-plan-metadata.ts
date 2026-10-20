@@ -36,6 +36,27 @@ export function truncatePlanText(value: string, limit: number): string {
   return result;
 }
 
+/**
+ * Detected plan name for the public `planName` field, falling back to the legacy
+ * `planType` / `planName` metadata keys when the typed field is absent.
+ *
+ * Rows stored before the code-point-safe truncation existed were cut with
+ * `String.prototype.slice`, so a legacy value can still hold a lone surrogate.
+ * The fallback must go through `truncatePlanText` too: it is published in the
+ * same payload as the projected metadata, and one lone surrogate makes
+ * Foundation's `JSONDecoder` reject the entire quota response.
+ */
+export function quotaDetectedPlanName(
+  planMetadata: QuotaPlanMetadata | undefined,
+  meta: Record<string, unknown>,
+): string | null {
+  const projected = planMetadata?.detectedPlanName;
+  if (projected) return projected;
+  const legacy = meta.planType ?? meta.planName;
+  if (typeof legacy !== "string" || !legacy.trim()) return null;
+  return truncatePlanText(legacy, PLAN_METADATA_STRING_LIMITS.planDetectedName);
+}
+
 export function projectQuotaPlanMetadata(meta: Record<string, unknown>): QuotaPlanMetadata | undefined {
   const result: QuotaPlanMetadata = { hasMismatch: meta.planHasMismatch === true };
   let present = typeof meta.planHasMismatch === "boolean";

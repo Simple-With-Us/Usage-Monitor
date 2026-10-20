@@ -1,4 +1,4 @@
-import { projectQuotaPlanMetadata, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
+import { projectQuotaPlanMetadata, quotaDetectedPlanName, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
 import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
 import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
 import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
@@ -271,7 +271,7 @@ export function projectQuotaWindows(
   for (const event of events) {
     const meta = asRecord(event.metadata);
     const planMetadata = projectQuotaPlanMetadata(meta);
-    const detectedPlanName = planMetadata?.detectedPlanName ?? asString(meta.planType) ?? asString(meta.planName);
+    const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
