@@ -4,9 +4,16 @@
 // NOT leave the Mac.  A canary string stands in for any producer content:
 // if the canary shows up anywhere in the output, a prompt, a response, a
 // tool argument or a tool result would have leaked to Sentry.
+//
+// This suite runs under Vitest, not node:test.  The repository's Vitest
+// include is the default (`**/*.test.mjs`), so it collects every file in
+// this directory.  A node:test suite collected this way is imported by
+// Vitest, registers zero tests there, and fails the run with "No test suite
+// found in file".  Vitest is a dev dependency only -- the hub itself runs on
+// Node builtins alone, with no third-party package.
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 
 import {
   PRODUCER_CONTENT_FIELDS,

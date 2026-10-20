@@ -3,12 +3,19 @@
 // The journal is the audit trail and the queue.  These tests cover the
 // ordering, the per-destination offsets, the sent set that stops a resend,
 // and the file modes that keep the content readable only by the user.
+//
+// This suite runs under Vitest, not node:test.  The repository's Vitest
+// include is the default (`**/*.test.mjs`), so it collects every file in
+// this directory.  A node:test suite collected this way is imported by
+// Vitest, registers zero tests there, and fails the run with "No test suite
+// found in file".  Vitest is a dev dependency only -- the hub itself runs on
+// Node builtins alone, with no third-party package.
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, describe, it } from "vitest";
 
 import { Journal } from "../journal.mjs";
 import { createUmSender } from "../um-sender.mjs";
