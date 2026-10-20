@@ -1,3 +1,4 @@
+import { projectQuotaPlanMetadata, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
 import {
   antigravityPlatformCardTitle,
   antigravityQuotaPool,
@@ -21,6 +22,8 @@ export const QUOTA_EXPIRED_MS = 48 * 60 * 60 * 1000;
 export type QuotaSourceFreshness = "fresh" | "stale" | "old";
 
 export interface QuotaSourceReading {
+  planMetadata?: QuotaPlanMetadata;
+  planName?: string;
   source: string;
   sourceLabel: string;
   machine: string | null;
@@ -183,6 +186,7 @@ function eventToCandidate(
   rawKey: string,
 ): QuotaSourceCandidate | null {
   const meta = asRecord(event.metadata);
+  const planMetadata = projectQuotaPlanMetadata(meta);
   const modelId = asString(meta.modelId);
   const bucketId = asString(meta.bucketId);
   const label =
@@ -207,6 +211,8 @@ function eventToCandidate(
   const sourceId = normalizeSourceId(source, collector);
 
   return {
+    ...(planMetadata ? { planMetadata } : {}),
+    ...(asString(meta.planName) ? { planName: asString(meta.planName)! } : {}),
     source: sourceId,
     sourceLabel: humanSourceLabel(source, collector),
     machine,
@@ -293,6 +299,8 @@ export function buildQuotaGroups(
   }
 
   const toReading = (row: QuotaSourceCandidate): QuotaSourceReading => ({
+    ...(row.planMetadata ? { planMetadata: row.planMetadata } : {}),
+    ...(row.planName ? { planName: row.planName } : {}),
     source: row.source,
     sourceLabel: row.sourceLabel,
     machine: row.machine,

@@ -1,3 +1,4 @@
+import { projectQuotaPlanMetadata, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
 import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
 import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
 import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
@@ -28,6 +29,8 @@ export interface SkipModelType {
 }
 
 export interface QuotaWindow {
+  planMetadata?: QuotaPlanMetadata;
+  planName?: string;
   id: string;
   provider: string;
   /** Canonical provider key the window is grouped under (see ResolvedProviderManifest.aliasToKey). */
@@ -267,6 +270,7 @@ export function projectQuotaWindows(
   const latest = new Map<string, { window: QuotaWindow; series: string }>();
   for (const event of events) {
     const meta = asRecord(event.metadata);
+    const planMetadata = projectQuotaPlanMetadata(meta);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
@@ -341,6 +345,8 @@ export function projectQuotaWindows(
         sourceApp: event.service ?? null,
         ...(producerInstanceId ? { producerInstanceId } : {}),
         ...(machine ? { machine } : {}),
+        ...(planMetadata ? { planMetadata } : {}),
+        ...(asString(meta.planName) ? { planName: asString(meta.planName)! } : {}),
         modelId,
         modelType: modelId,
         label: label ?? modelId ?? event.provider,
