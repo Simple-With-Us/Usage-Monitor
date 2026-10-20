@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /**
  * Fleet alert status for the Usage Monitor ops UI (`/ops`).
  *
@@ -77,6 +79,29 @@ function normalizePhase(value: unknown): FleetAlertPhase {
   return value === "alerting" || value === "pending" ? value : "ok";
 }
 
+/**
+ * Zod boundary for the alert-ingress `GET /status` response (rules 2/18/29:
+ * external data is Zod-validated before any downstream use).  `topics` is
+ * required, so a 2xx with a missing or non-record topics block fails closed
+ * instead of rendering a false "All Clear".  Alert entries stay
+ * `z.unknown()` here: per-alert normalization below already drops malformed
+ * entries one at a time, so one bad alert degrades a topic, not the page.
+ */
+const IngressTopicSchema = z.looseObject({
+  firing: z.number().optional(),
+  total: z.number().optional(),
+  alerts: z.array(z.unknown()).optional(),
+});
+
+const FleetAlertsIngressSchema = z.strictObject({
+  generatedAt: z.string().nullish(),
+  channel: z.string().optional(),
+  summary: z
+    .looseObject({ topics: z.number(), alerts: z.number(), firing: z.number() })
+    .optional(),
+  topics: z.record(z.string(), IngressTopicSchema),
+});
+
 function parseAlert(raw: unknown): FleetAlert | null {
   if (!isRecord(raw)) return null;
   const key = readText(raw.key);
@@ -125,8 +150,10 @@ export function parseFleetAlertsPayload(raw: unknown): FleetAlertsPayload {
     reason: "malformed payload",
   };
   if (!isRecord(raw)) return empty;
+  // A 2xx without a real topics block is not "All Clear"; it is malformed.
+  if (!isRecord(raw.topics)) return empty;
 
-  const rawTopics = isRecord(raw.topics) ? raw.topics : {};
+  const rawTopics = raw.topics;
   const collected: Array<[string, FleetAlertTopic]> = [];
   let alerts = 0;
   let firing = 0;
@@ -209,7 +236,11 @@ async function fetchOnce(): Promise<FleetAlertsPayload> {
     if (!response.ok) {
       return { ...notConfigured(`ingress HTTP ${response.status}`), configured: true };
     }
-    return parseFleetAlertsPayload(await response.json());
+    const parsed = FleetAlertsIngressSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      return { ...notConfigured("malformed ingress payload"), configured: true };
+    }
+    return parseFleetAlertsPayload(parsed.data);
   } catch (error) {
     return {
       ...notConfigured(error instanceof Error ? error.message : "ingress unreachable"),
@@ -227,9 +258,12 @@ export async function getFleetAlerts(): Promise<FleetAlertsPayload> {
   if (runtime.cache && runtime.cache.expiresAt > now) return runtime.cache.payload;
   if (runtime.inFlight) return runtime.inFlight;
 
-  const ttl = runtime.cache?.payload.ok === false ? FLEET_ALERTS_FAILURE_RETRY_MS : FLEET_ALERTS_CACHE_TTL_MS;
   const inflight = fetchOnce()
     .then((payload) => {
+      // TTL follows the fresh payload: a failure retries after 15s, a success
+      // is good for 30s - never the other way around because a stale entry
+      // happened to be sitting in the cache when the fetch started.
+      const ttl = payload.ok === false ? FLEET_ALERTS_FAILURE_RETRY_MS : FLEET_ALERTS_CACHE_TTL_MS;
       runtime.cache = { payload, expiresAt: Date.now() + ttl };
       return payload;
     })

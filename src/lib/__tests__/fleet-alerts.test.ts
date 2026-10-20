@@ -67,7 +67,7 @@ const sample = {
 };
 
 function stubFetch(body: unknown, ok = true, status = 200) {
-  const fn = vi.fn(async () => ({
+  const fn = vi.fn(async (_url: string) => ({
     ok,
     status,
     json: async () => body,
@@ -232,5 +232,48 @@ describe("topic ordering", () => {
       },
     });
     expect(Object.keys(p.topics)).toEqual(["Alpha", "Zulu"]);
+  });
+});
+
+describe("review regressions", () => {
+  it("fails closed when a 2xx payload is missing its topics block", () => {
+    // A missing/non-record topics must not render as a false "All Clear".
+    expect(parseFleetAlertsPayload({ generatedAt: "2026-10-20T00:00:00Z" }).ok).toBe(false);
+    expect(parseFleetAlertsPayload({ topics: null }).ok).toBe(false);
+  });
+
+  it("rejects a 2xx with a malformed envelope at the fetch boundary", async () => {
+    process.env.FLEET_ALERTS_URL = "https://alert-ingress.example.workers.dev";
+    stubFetch({ generatedAt: "2026-10-20T00:00:00Z" });
+    const p = await getFleetAlerts();
+    expect(p.ok).toBe(false);
+    expect(p.reason).toContain("malformed");
+  });
+
+  it("caches each payload under its own ttl, not the previous payload's", async () => {
+    vi.useFakeTimers();
+    try {
+      process.env.FLEET_ALERTS_URL = "https://alert-ingress.example.workers.dev";
+      const fn = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+        .mockResolvedValue({ ok: true, status: 200, json: async () => sample });
+      vi.stubGlobal("fetch", fn);
+
+      await getFleetAlerts(); // failure cached under the 15s retry TTL
+      vi.setSystemTime(Date.now() + 16_000);
+      await getFleetAlerts(); // past 15s: refetches, success now cached 30s
+      expect(fn).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(Date.now() + 16_000);
+      await getFleetAlerts(); // still inside the success TTL: no refetch
+      expect(fn).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(Date.now() + 15_001);
+      await getFleetAlerts(); // past 30s: refetch
+      expect(fn).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
