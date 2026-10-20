@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /** Selective authenticated quota-response projection of CodeCaps scalar plan metadata. */
 export interface QuotaPlanMetadata {
   detectedPlanName?: string;
@@ -45,6 +47,9 @@ export function truncatePlanText(value: string, limit: number): string {
   return result;
 }
 
+/** Untrusted metadata at the trust boundary: a plain record, anything else fails. */
+export const quotaMetadataRecordSchema = z.record(z.string(), z.unknown());
+
 /**
  * Read a quota event's `metadata` as a record.
  *
@@ -54,22 +59,22 @@ export function truncatePlanText(value: string, limit: number): string {
  * query does not, so `metadata` arrives as a JSON string there and as an object
  * on the `findMany` fallback.  A plain object check therefore yields `{}` on
  * the primary path and silently drops `planMetadata` / `planName` — the whole
- * point of this projection.  Parse the string shape and pass objects through.
+ * point of this projection.  Parse the string shape and pass objects through,
+ * validated by `quotaMetadataRecordSchema` instead of a type assertion.
  */
 export function quotaMetadataRecord(value: unknown): Record<string, unknown> {
   if (typeof value === "string") {
     try {
-      const parsed: unknown = JSON.parse(value);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
+      // Malformed JSON or a non-record shape is an empty record, never a
+      // thrown quota response.
+      const parsed = quotaMetadataRecordSchema.safeParse(JSON.parse(value));
+      return parsed.success ? parsed.data : {};
     } catch {
-      /* Malformed JSON is an empty record, never a thrown quota response. */
+      return {};
     }
-    return {};
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
+  const parsed = quotaMetadataRecordSchema.safeParse(value);
+  return parsed.success ? parsed.data : {};
 }
 
 /**
