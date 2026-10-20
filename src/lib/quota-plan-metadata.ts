@@ -37,6 +37,33 @@ export function truncatePlanText(value: string, limit: number): string {
 }
 
 /**
+ * Read a quota event's `metadata` as a record.
+ *
+ * The primary read path is `prisma.$queryRaw`, which returns the SQLite JSON
+ * column as raw TEXT, not as a deserialized object (verified against Prisma
+ * 6.19 on SQLite).  Prisma's query builder deserializes `Json?`, but a raw
+ * query does not, so `metadata` arrives as a JSON string there and as an object
+ * on the `findMany` fallback.  A plain object check therefore yields `{}` on
+ * the primary path and silently drops `planMetadata` / `planName` — the whole
+ * point of this projection.  Parse the string shape and pass objects through.
+ */
+export function quotaMetadataRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* Malformed JSON is an empty record, never a thrown quota response. */
+    }
+    return {};
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+/**
  * Detected plan name for the public `planName` field, falling back to the legacy
  * `planType` / `planName` metadata keys when the typed field is absent.
  *

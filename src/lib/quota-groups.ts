@@ -1,4 +1,9 @@
-import { projectQuotaPlanMetadata, quotaDetectedPlanName, type QuotaPlanMetadata } from "@/lib/quota-plan-metadata";
+import {
+  projectQuotaPlanMetadata,
+  quotaDetectedPlanName,
+  quotaMetadataRecord,
+  type QuotaPlanMetadata,
+} from "@/lib/quota-plan-metadata";
 import {
   antigravityPlatformCardTitle,
   antigravityQuotaPool,
@@ -52,11 +57,6 @@ export interface QuotaProviderQuotaGroup {
   provider: string;
   providerLabel: string;
   windows: QuotaGroupWindow[];
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
 }
 
 function asString(value: unknown): string | null {
@@ -185,7 +185,7 @@ function eventToCandidate(
   via: string | null,
   rawKey: string,
 ): QuotaSourceCandidate | null {
-  const meta = asRecord(event.metadata);
+  const meta = quotaMetadataRecord(event.metadata);
   const planMetadata = projectQuotaPlanMetadata(meta);
   const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
   const modelId = asString(meta.modelId);
@@ -260,7 +260,7 @@ export function buildQuotaGroups(
   const byProviderWindow = new Map<string, WindowBucket>();
 
   for (const event of events) {
-    const meta = asRecord(event.metadata);
+    const meta = quotaMetadataRecord(event.metadata);
     const providerKey = normalizeProviderKey(event.provider, resolved);
     const via =
       resolved.byKey.get(providerKey)?.terms?.via ??

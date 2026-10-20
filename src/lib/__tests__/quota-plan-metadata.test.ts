@@ -41,6 +41,36 @@ describe("CodeCaps plan metadata", () => {
     expect(quotaWindowsClientResponseSchema.parse(response).quotaGroups?.find((g) => g.provider === row.providerKey)?.windows[0].primary.planMetadata).toEqual(row.planMetadata);
   });
 
+  it("reads plan metadata from the raw-query JSON-string shape", () => {
+    // `loadLatestQuotaWindowEvents` uses `prisma.$queryRaw`, which returns the
+    // SQLite JSON column as TEXT rather than a deserialized object.  Projecting
+    // that shape must still surface planMetadata/planName, on the primary path
+    // and on the object-shaped `findMany` fallback alike.
+    const plan = { planDetectedName: "Max 20x", planUserName: "Team", planType: "Max 20x" };
+    const response = projectQuotaWindows([
+      { provider: "claude", occurredAt: now, credits: 50, metadata: JSON.stringify({ source: "codecaps", ...plan }) },
+      { provider: "anthropic", occurredAt: now, credits: 50, metadata: { source: "codecaps", ...plan } },
+    ], now);
+
+    for (const row of response.windows) {
+      expect(row.planName).toBe("Max 20x");
+      expect(row.planMetadata).toEqual({
+        detectedPlanName: "Max 20x", userPlanName: "Team", hasMismatch: false,
+      });
+      const group = response.quotaGroups?.find((g) => g.provider === row.providerKey);
+      expect(group?.windows[0].primary.planMetadata).toEqual(row.planMetadata);
+    }
+  });
+
+  it("treats malformed and non-object quota metadata as an empty record", () => {
+    for (const metadata of ["{not json", "[]", '"a string"', "null", 42, null, undefined]) {
+      const response = projectQuotaWindows(
+        [{ provider: "claude", occurredAt: now, credits: 50, metadata }], now);
+      expect(response.windows[0].planName).toBeFalsy();
+      expect(response.windows[0].planMetadata).toBeUndefined();
+    }
+  });
+
   it.each([
     [{ planDetectedName: "Detected", planType: "Type", planName: "Legacy", planUserName: "User" }, "Detected"],
     [{ planType: "Type", planName: "Legacy", planUserName: "User" }, "Type"],
