@@ -1,3 +1,4 @@
+import { PLAN_METADATA_STRING_LIMITS } from "@/lib/quota-plan-metadata";
 import crypto from "crypto";
 import {
   deriveUsageTelemetryV2IdempotencyKey,
@@ -38,7 +39,8 @@ const RESERVED_V2_METADATA_KEYS = new Set([
   ...AI_METADATA_KEY_LIST,
 ]);
 // 100 events * 50 metadata entries * (80-byte key + 500-byte value), plus
-// event fields and JSON framing, fits below 4 MiB. The route enforces this
+// the bounded plan-field exceptions, event fields and JSON framing, fits
+// below 4 MiB.  The route enforces this
 // before decoding so the parser's field limits cannot be bypassed with a huge
 // body that is mostly discarded after allocation.
 export const MAX_USAGE_TELEMETRY_BODY_BYTES = 4 * 1024 * 1024;
@@ -101,7 +103,9 @@ function cleanProducerMetadata(
     } else if (typeof value === "number" && Number.isFinite(value)) {
       clean[cleanKey] = value;
     } else if (typeof value === "string") {
-      clean[cleanKey] = value.slice(0, MAX_METADATA_STRING_LENGTH);
+      const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, cleanKey)
+        ? PLAN_METADATA_STRING_LIMITS[cleanKey] : MAX_METADATA_STRING_LENGTH;
+      clean[cleanKey] = value.slice(0, bound);
     }
   }
 
@@ -237,11 +241,35 @@ function finalizeQuotaIngestEvent(
   };
 }
 
+// The shared v2 schema validates scalars but truncates every string at 500.
+// Retain only the typed CodeCaps extension after that event passes validation.
+// Match the shared first-50/key-normalization behavior, including collisions.
+function restoreBoundedPlanMetadata(
+  event: UsageTelemetryV2Batch["events"][number],
+  raw: unknown,
+): UsageTelemetryV2Batch["events"][number] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return event;
+  const metadata = (raw as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return event;
+  const extension: Record<string, string> = {};
+  for (const [rawKey, value] of Object.entries(metadata).slice(0, MAX_METADATA_KEYS)) {
+    const key = rawKey.trim().slice(0, 80);
+    const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, key)
+      ? PLAN_METADATA_STRING_LIMITS[key] : undefined;
+    if (bound === undefined) continue;
+    if (typeof value === "string") extension[key] = value.slice(0, bound);
+    else delete extension[key];
+  }
+  return { ...event, metadata: { ...event.metadata, ...extension } };
+}
+
 async function mapV2Event(
   batch: UsageTelemetryV2Batch,
   event: UsageTelemetryV2Batch["events"][number],
   ingestTime = new Date(),
+  rawEvent?: unknown,
 ): Promise<ParsedUsageTelemetryEvent> {
+  event = restoreBoundedPlanMetadata(event, rawEvent);
   const occurredAt = event.occurredAt ? new Date(event.occurredAt) : ingestTime;
   return finalizeQuotaIngestEvent(
     {
@@ -300,7 +328,9 @@ export async function parseUsageTelemetryV2Batch(
   if (whole.success && !whole.data.events.some((e) => isFutureOccurredAt(e.occurredAt, now))) {
     return {
       events: await Promise.all(
-        whole.data.events.map((event) => mapV2Event(whole.data, event))
+        whole.data.events.map((event, index) => mapV2Event(
+          whole.data, event, new Date(now), (value as { events: unknown[] }).events[index],
+        ))
       ),
       rejected: 0,
       rejections: [],
@@ -356,7 +386,7 @@ export async function parseUsageTelemetryV2Batch(
       }
       continue;
     }
-    events.push(await mapV2Event(probe.data, result.data));
+    events.push(await mapV2Event(probe.data, result.data, new Date(now), raw));
   }
   return { events, rejected, rejections };
 }
