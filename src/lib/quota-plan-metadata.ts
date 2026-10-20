@@ -17,6 +17,22 @@ export const PLAN_METADATA_STRING_LIMITS: Record<string, number> = {
   planUserSubtitle: 1024,
 };
 
+/**
+ * Code-point-safe truncation.  `String.prototype.slice` cuts on UTF-16 code
+ * units, so an astral character (an emoji, say) straddling the boundary leaves
+ * a lone surrogate.  `JSON.stringify` then emits that as an invalid escape and
+ * Foundation's `JSONDecoder` rejects the whole payload, costing the iOS client
+ * the entire quota response rather than just this optional field.
+ */
+export function truncatePlanText(value: string, limit: number): string {
+  const truncated = value.length <= limit ? value : value.slice(0, limit);
+  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1);
+  // A trailing high surrogate means its low surrogate was cut off; drop it.
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff
+    ? truncated.slice(0, -1)
+    : truncated;
+}
+
 export function projectQuotaPlanMetadata(meta: Record<string, unknown>): QuotaPlanMetadata | undefined {
   const result: QuotaPlanMetadata = { hasMismatch: meta.planHasMismatch === true };
   let present = typeof meta.planHasMismatch === "boolean";
@@ -29,7 +45,7 @@ export function projectQuotaPlanMetadata(meta: Record<string, unknown>): QuotaPl
   ] as const) {
     const value = meta[key];
     if (typeof value !== "string" || !value.trim()) continue;
-    result[field] = value.slice(0, PLAN_METADATA_STRING_LIMITS[key]);
+    result[field] = truncatePlanText(value, PLAN_METADATA_STRING_LIMITS[key]);
     present = true;
   }
   if (typeof meta.planShowCostAndRenewal === "boolean") {

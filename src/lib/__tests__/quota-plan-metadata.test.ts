@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { projectQuotaWindows } from "../quota-windows";
 import { quotaWindowsClientResponseSchema } from "../quota-windows-client-schema";
 import { parseUsageTelemetryV2Batch } from "../usage-telemetry";
+import { projectQuotaPlanMetadata } from "../quota-plan-metadata";
 
 const now = new Date("2026-10-20T12:00:00.000Z");
 const metadata = {
@@ -71,6 +72,20 @@ describe("CodeCaps plan metadata", () => {
     expect(parsed.events[0].metadata).not.toHaveProperty("planUserSubtitle");
     expect(parsed.events[1].metadata?.planUserSubtitle).toBeNull();
     expect(parsed.events[1].metadata?.arbitrary).toHaveLength(500);
+  });
+
+  it("never emits a lone surrogate when truncating astral characters", () => {
+    // A lone surrogate survives JSON.parse in JS, but Foundation's JSONDecoder
+    // rejects it -- costing iOS the whole quota response, not just this field.
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // 1023 filler units put the emoji's leading surrogate exactly on the 1024 cut.
+    for (const value of ["s".repeat(1023) + "\u{1F600}", "\u{1F600}"]) {
+      const projected = projectQuotaPlanMetadata({ planUserSubtitle: value });
+      expect(projected?.userSubtitle).not.toMatch(loneSurrogate);
+      expect(projected?.userSubtitle).toHaveLength(Math.min(value.length, 1023));
+    }
+    // Under the bound an astral character is preserved intact.
+    expect(projectQuotaPlanMetadata({ planUserSubtitle: "\u{1F600}" })?.userSubtitle).toBe("\u{1F600}");
   });
 
 });

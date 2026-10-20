@@ -1,4 +1,4 @@
-import { PLAN_METADATA_STRING_LIMITS } from "@/lib/quota-plan-metadata";
+import { PLAN_METADATA_STRING_LIMITS, truncatePlanText } from "@/lib/quota-plan-metadata";
 import crypto from "crypto";
 import {
   deriveUsageTelemetryV2IdempotencyKey,
@@ -105,7 +105,7 @@ function cleanProducerMetadata(
     } else if (typeof value === "string") {
       const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, cleanKey)
         ? PLAN_METADATA_STRING_LIMITS[cleanKey] : MAX_METADATA_STRING_LENGTH;
-      clean[cleanKey] = value.slice(0, bound);
+      clean[cleanKey] = truncatePlanText(value, bound);
     }
   }
 
@@ -253,11 +253,11 @@ function restoreBoundedPlanMetadata(
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return event;
   const extension: Record<string, string> = {};
   for (const [rawKey, value] of Object.entries(metadata).slice(0, MAX_METADATA_KEYS)) {
-    const key = rawKey.trim().slice(0, 80);
+    const key = truncatePlanText(rawKey.trim(), 80);
     const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, key)
       ? PLAN_METADATA_STRING_LIMITS[key] : undefined;
     if (bound === undefined) continue;
-    if (typeof value === "string") extension[key] = value.slice(0, bound);
+    if (typeof value === "string") extension[key] = truncatePlanText(value, bound);
     else delete extension[key];
   }
   return { ...event, metadata: { ...event.metadata, ...extension } };
