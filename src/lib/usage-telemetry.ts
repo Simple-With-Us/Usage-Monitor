@@ -96,7 +96,11 @@ function cleanProducerMetadata(
   const clean: Record<string, string | number | boolean | null> = {};
 
   for (const [key, value] of entries) {
-    const cleanKey = key.trim().slice(0, 80);
+    // Code-point-safe like the values below: a producer key holding a lone
+    // surrogate is persisted verbatim and JSON.stringify then emits it as an
+    // escape Foundation's JSONDecoder rejects, costing the client the whole
+    // usage-event payload.
+    const cleanKey = truncatePlanText(key.trim(), 80);
     if (!cleanKey || RESERVED_V2_METADATA_KEYS.has(cleanKey)) continue;
     if (value == null || typeof value === "boolean") {
       clean[cleanKey] = value ?? null;

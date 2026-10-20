@@ -64,6 +64,28 @@ public struct QuotaPlanMetadata: Codable, Hashable, Sendable {
     public var showCostAndRenewal: Bool?
     public var hasMismatch: Bool
 
+    /// Declaring `init(from:)` suppresses Swift's implicit memberwise initializer,
+    /// which would be `internal` here anyway, so without this the public
+    /// `QuotaWindow.init(planMetadata:)` cannot be called with a plan from the
+    /// app target (previews, fixtures, synthesized rows).
+    public init(
+        detectedPlanName: String? = nil,
+        userPlanName: String? = nil,
+        userCostUsd: String? = nil,
+        userRenewalDateText: String? = nil,
+        userSubtitle: String? = nil,
+        showCostAndRenewal: Bool? = nil,
+        hasMismatch: Bool = false
+    ) {
+        self.detectedPlanName = detectedPlanName
+        self.userPlanName = userPlanName
+        self.userCostUsd = userCostUsd
+        self.userRenewalDateText = userRenewalDateText
+        self.userSubtitle = userSubtitle
+        self.showCostAndRenewal = showCostAndRenewal
+        self.hasMismatch = hasMismatch
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         detectedPlanName = try? container.decodeIfPresent(String.self, forKey: .detectedPlanName)

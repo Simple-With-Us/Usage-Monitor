@@ -52,9 +52,14 @@ export function quotaDetectedPlanName(
 ): string | null {
   const projected = planMetadata?.detectedPlanName;
   if (projected) return projected;
-  const legacy = meta.planType ?? meta.planName;
-  if (typeof legacy !== "string" || !legacy.trim()) return null;
-  return truncatePlanText(legacy, PLAN_METADATA_STRING_LIMITS.planDetectedName);
+  // Pick the first *usable* candidate, not the first present one: a legacy row
+  // can carry a blank or non-string `planType` ("" or 42), which `??` would
+  // short-circuit on and silently drop a perfectly good `planName` behind it.
+  for (const candidate of [meta.planType, meta.planName]) {
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    return truncatePlanText(candidate, PLAN_METADATA_STRING_LIMITS.planDetectedName);
+  }
+  return null;
 }
 
 export function projectQuotaPlanMetadata(meta: Record<string, unknown>): QuotaPlanMetadata | undefined {

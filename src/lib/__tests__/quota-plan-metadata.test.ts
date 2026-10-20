@@ -45,6 +45,10 @@ describe("CodeCaps plan metadata", () => {
     [{ planDetectedName: "Detected", planType: "Type", planName: "Legacy", planUserName: "User" }, "Detected"],
     [{ planType: "Type", planName: "Legacy", planUserName: "User" }, "Type"],
     [{ planName: "Legacy", planUserName: "User" }, "Legacy"],
+    // A present-but-unusable planType must not shadow a usable planName behind it.
+    [{ planType: "   ", planName: "Legacy", planUserName: "User" }, "Legacy"],
+    [{ planType: 42, planName: "Legacy", planUserName: "User" }, "Legacy"],
+    [{ planType: "", planName: "Legacy" }, "Legacy"],
     [{ planUserName: "User" }, undefined],
   ])("projects legacy detected plan without substituting user entry: %j", (plan, expected) => {
     const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
@@ -116,6 +120,21 @@ describe("CodeCaps plan metadata", () => {
     }
     // Under the bound an astral character is preserved intact.
     expect(projectQuotaPlanMetadata({ planUserSubtitle: "\u{1F600}" })?.userSubtitle).toBe("\u{1F600}");
+  });
+
+  it("sanitizes metadata keys, not just metadata values", async () => {
+    // A lone surrogate in a producer key is persisted as an object key;
+    // JSON.stringify then emits it as an escape Foundation's JSONDecoder
+    // rejects, costing the client the whole usage-event payload.
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const parsed = await parseUsageTelemetryV2Batch({ schemaVersion: 2, producerId: "codecaps", events: [{
+      eventId: "lone-surrogate-key", provider: "claude", metricType: "quota",
+      occurredAt: now.toISOString(),
+      metadata: { [`planUserSubtitle\ud83d`]: "value", planUserName: "Team" },
+    }] });
+    const parsedMetadata = parsed.events[0].metadata ?? {};
+    for (const key of Object.keys(parsedMetadata)) expect(key).not.toMatch(loneSurrogate);
+    expect(JSON.parse(JSON.stringify(parsedMetadata))).toEqual(parsedMetadata);
   });
 
   it("sanitizes the legacy detected-plan fallback, not just projected metadata", async () => {
