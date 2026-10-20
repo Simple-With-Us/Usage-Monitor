@@ -253,9 +253,31 @@ describe("fanOutApnsAlert", () => {
 });
 
 describe("buildApnsPayload", () => {
-  it("keeps the alert body inside aps and uses the iOS category", () => {
+  it("keeps the alert body inside aps and preserves the default channel sound", () => {
     expect(buildApnsPayload({ title: "T", body: "B" })).toMatchObject({
-      aps: { alert: { title: "T", body: "B" }, category: "USAGE_ALERT" },
+      aps: { alert: { title: "T", body: "B" }, category: "USAGE_ALERT", sound: "default" },
     });
+  });
+
+  it("supports app-specific sounds and interruption levels", () => {
+    expect(buildApnsPayload({
+      title: "T",
+      body: "B",
+      sound: "alarm-glass.wav",
+      category: "CODECAPS_ALERT",
+      interruptionLevel: "passive",
+    })).toMatchObject({
+      aps: {
+        alert: { title: "T", body: "B" },
+        category: "CODECAPS_ALERT",
+        sound: "alarm-glass.wav",
+        "interruption-level": "passive",
+      },
+    });
+  });
+
+  it("omits aps.sound when the requested sound is silent", () => {
+    const payload = buildApnsPayload({ title: "T", body: "B", sound: null });
+    expect(payload.aps).not.toHaveProperty("sound");
   });
 });
