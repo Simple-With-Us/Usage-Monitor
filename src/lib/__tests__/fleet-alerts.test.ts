@@ -250,6 +250,16 @@ describe("review regressions", () => {
     expect(p.reason).toContain("malformed");
   });
 
+  it("tolerates additive top-level fields from the ingress", async () => {
+    // The ingress contract lives in AI-Fleet-Coordinator, so a routine field
+    // addition there must not blank the whole card to "malformed".
+    process.env.FLEET_ALERTS_URL = "https://alert-ingress.example.workers.dev";
+    stubFetch({ ...sample, statusPageUrl: "https://status.example" });
+    const p = await getFleetAlerts();
+    expect(p.ok).toBe(true);
+    expect(p.summary.alerts).toBeGreaterThan(0);
+  });
+
   it("caches each payload under its own ttl, not the previous payload's", async () => {
     vi.useFakeTimers();
     try {

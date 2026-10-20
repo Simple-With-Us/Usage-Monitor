@@ -93,7 +93,7 @@ const IngressTopicSchema = z.looseObject({
   alerts: z.array(z.unknown()).optional(),
 });
 
-const FleetAlertsIngressSchema = z.strictObject({
+const FleetAlertsIngressSchema = z.looseObject({
   generatedAt: z.string().nullish(),
   channel: z.string().optional(),
   summary: z
