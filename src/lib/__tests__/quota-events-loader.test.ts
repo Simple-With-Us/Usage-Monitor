@@ -99,12 +99,36 @@ describe("loadLatestQuotaWindowEvents", () => {
     expect(mocks.captureException).toHaveBeenCalledWith(queryError);
     expect(mocks.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        take: 400,
         orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
         where: { metricType: "quota", occurredAt: { gte: since } },
       }),
     );
+    // A flat row cap is taken before the revision tie-break, so it can drop the
+    // winner and make this path disagree with the raw window query.
+    expect(mocks.findMany.mock.calls[0][0]).not.toHaveProperty("take");
     errorSpy.mockRestore();
+  });
+
+  it("keeps the highest-revision row per partition in the fallback", async () => {
+    mocks.queryRaw.mockRejectedValue(new Error("sqlite busy"));
+    const occurredAt = new Date(2000);
+    mocks.findMany.mockResolvedValue([
+      // Newest receipt, lowest revision — must lose to the revision winner.
+      { id: "late-old", occurredAt, createdAt: new Date(9000),
+        metadata: { bucketId: "anthropic:five_hour", _producerInstanceId: "mac-a", planUserUpdatedAt: 10 } },
+      { id: "winner", occurredAt, createdAt: new Date(3000),
+        metadata: { bucketId: "anthropic:five_hour", _producerInstanceId: "mac-a", planUserUpdatedAt: 20 } },
+      // A different partition is independent and must survive.
+      { id: "other", occurredAt, createdAt: new Date(3000),
+        metadata: { bucketId: "anthropic:seven_day", _producerInstanceId: "mac-a", planUserUpdatedAt: 1 } },
+    ]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const rows = await loadLatestQuotaWindowEvents(new Date(0));
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => (r.metadata as Record<string, unknown>).planUserUpdatedAt).sort())
+        .toEqual([1, 20]);
+    } finally { errorSpy.mockRestore(); }
   });
 
   it("orders equal-observation fallback rows by valid producer revision", async () => {

@@ -17,14 +17,23 @@ export const PLAN_METADATA_STRING_LIMITS: Record<string, number> = {
   planUserSubtitle: 1024,
 };
 
+/** Matches a surrogate code unit that is not part of a valid pair. */
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
  * Code-point-safe truncation.  `String.prototype.slice` cuts on UTF-16 code
  * units, so an astral character (an emoji, say) straddling the boundary leaves
  * a lone surrogate.  `JSON.stringify` then emits that as an invalid escape and
  * Foundation's `JSONDecoder` rejects the whole payload, costing the iOS client
  * the entire quota response rather than just this optional field.
+ *
+ * This runs for every metadata string of every ingested event, so the common
+ * case — already bounded, already well-formed — returns the input untouched
+ * and only the walk pays for the sanitizing case.
  */
 export function truncatePlanText(value: string, limit: number): string {
+  if (value.length <= limit && !LONE_SURROGATE.test(value)) return value;
   let result = "";
   for (const point of value) {
     const code = point.charCodeAt(0);

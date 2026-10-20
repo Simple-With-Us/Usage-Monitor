@@ -52,13 +52,28 @@ describe("CodeCaps plan metadata", () => {
       { provider: "anthropic", occurredAt: now, credits: 50, metadata: { source: "codecaps", ...plan } },
     ], now);
 
+    const expected = {
+      detectedPlanName: "Max 20x", userPlanName: "Team", hasMismatch: false,
+    };
+    // Both fixtures must actually reach `windows`; without the length assertion
+    // a row that failed to project would be skipped by the loop below and the
+    // test would still pass.
+    expect(response.windows).toHaveLength(2);
     for (const row of response.windows) {
       expect(row.planName).toBe("Max 20x");
-      expect(row.planMetadata).toEqual({
-        detectedPlanName: "Max 20x", userPlanName: "Team", hasMismatch: false,
-      });
-      const group = response.quotaGroups?.find((g) => g.provider === row.providerKey);
-      expect(group?.windows[0].primary.planMetadata).toEqual(row.planMetadata);
+      expect(row.planMetadata).toEqual(expected);
+    }
+    // "claude" normalizes to the canonical "anthropic" key and neither fixture
+    // carries a label/modelId/bucketId, so both land in ONE window bucket: one
+    // becomes `primary` and the other a `source`.  Asserting `primary` alone
+    // would compare identical fixture data and pass whichever candidate won,
+    // leaving the other shape's grouped metadata unasserted.
+    const group = response.quotaGroups?.find((g) => g.provider === response.windows[0].providerKey);
+    const readings = [group!.windows[0].primary, ...group!.windows[0].sources];
+    expect(readings).toHaveLength(2);
+    for (const reading of readings) {
+      expect(reading.planMetadata).toEqual(expected);
+      expect(reading.planName).toBe("Max 20x");
     }
   });
 

@@ -184,8 +184,8 @@ function eventToCandidate(
   nowMs: number,
   via: string | null,
   rawKey: string,
+  meta: Record<string, unknown>,
 ): QuotaSourceCandidate | null {
-  const meta = quotaMetadataRecord(event.metadata);
   const planMetadata = projectQuotaPlanMetadata(meta);
   const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
   const modelId = asString(meta.modelId);
@@ -285,7 +285,7 @@ export function buildQuotaGroups(
             modelGroup: asString(meta.modelGroup),
           })
         : null;
-    const candidate = eventToCandidate(event, nowMs, via, rawKey);
+    const candidate = eventToCandidate(event, nowMs, via, rawKey, meta);
     if (!candidate) continue;
 
     const groupKey = pool
