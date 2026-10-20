@@ -73,6 +73,7 @@ Two delivery paths, one source of truth:
    `DASHBOARD_PASSWORD`, `CRON_SECRET`, `SESSION_SECRET`,
    `USAGE_INGEST_TOKEN`, `USAGE_READ_TOKEN`, `USAGE_INGEST_PRODUCER_TOKENS`,
    `BILLING_RECEIPT_*`, `RECEIPT_INBOX_*`, `OWNER_EXPENSE_TOKEN`,
+   `CODECAPS_PUSH_REGISTRATION_TOKEN`,
    `BILLS_CALENDAR_TOKEN`, `CURSOR_ADMIN_API_KEY` (optional; only with `CURSOR_ADMIN_POLLER_ENABLED=true` on a Cursor team plan — leave both unset to keep the poller off), `*_API_KEY` / `*_API_TOKEN` provider credentials,
    `SENTRY_*`, `DD_*`, `NEXT_PUBLIC_*`, APNS/PagerDuty/Pushover/Slack/Resend
    credentials.  The full inventory is `.env.example` (local-dev names and
