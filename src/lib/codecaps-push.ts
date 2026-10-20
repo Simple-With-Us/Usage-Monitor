@@ -36,9 +36,20 @@ const optionSchema = z.object({
   popup: z.boolean(),
   sound: soundSchema,
 }).strict();
+const resetProvidersSchema = z.object({
+  all: z.boolean(),
+  providerIDs: z.array(z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,99}$/)).max(100)
+    .refine((providerIDs) => new Set(providerIDs).size === providerIDs.length),
+}).strict();
+const resetProviderPools: Readonly<Record<string, ReadonlySet<string>>> = {
+  "google-antigravity": new Set(["gemini", "third-party"]),
+};
 
 export const CodeCapsPushPreferencesSchema = z.object({
   options: z.record(alertKindSchema, optionSchema),
+  // Older registrations remain valid and continue receiving resets for all providers.
+  resetProviders: resetProvidersSchema.optional(),
+  sourceInstanceId: z.string().uuid().optional(),
 }).strict();
 
 export const CodeCapsPushAlertSchema = z.object({
@@ -67,6 +78,36 @@ export const CodeCapsPushDeviceRemovalSchema = z.object({
 export type CodeCapsPushPreferences = z.infer<typeof CodeCapsPushPreferencesSchema>;
 export type CodeCapsPushAlert = z.infer<typeof CodeCapsPushAlertSchema>;
 export type CodeCapsPushSound = (typeof CODECAPS_PUSH_SOUNDS)[number];
+
+export function codeCapsPushSourceInstanceId(alertId: string): string | null {
+  const separator = alertId.indexOf("|");
+  if (separator <= 0) return null;
+  const sourceInstanceId = alertId.slice(0, separator);
+  const occurrenceHash = alertId.slice(separator + 1);
+  if (!/^[a-f\d]{64}$/i.test(occurrenceHash)) return null;
+  const parsed = z.string().uuid().safeParse(sourceInstanceId);
+  return parsed.success ? parsed.data.toLowerCase() : null;
+}
+
+export function codeCapsPushPreferenceAllowsAlert(
+  preferences: CodeCapsPushPreferences,
+  alert: Pick<CodeCapsPushAlert, "id" | "kind" | "providerKey">,
+): boolean {
+  if (preferences.sourceInstanceId) {
+    const sourceInstanceId = codeCapsPushSourceInstanceId(alert.id);
+    if (!sourceInstanceId || sourceInstanceId !== preferences.sourceInstanceId.toLowerCase()) return false;
+  }
+
+  if (alert.kind === "quotaReset" || alert.kind === "vendorReset") {
+    const resetProviders = preferences.resetProviders ?? { all: true, providerIDs: [] };
+    const [providerID, poolKey, ...extra] = alert.providerKey.split(":");
+    const knownPoolProviderID = poolKey && extra.length === 0 && resetProviderPools[providerID]?.has(poolKey)
+      ? providerID
+      : alert.providerKey;
+    if (!resetProviders.all && !resetProviders.providerIDs.includes(knownPoolProviderID)) return false;
+  }
+  return true;
+}
 
 export function isCodeCapsPushRegistrationAuthorized(request: NextRequest): boolean {
   const expected = appSettings.settingsEnv().CODECAPS_PUSH_REGISTRATION_TOKEN?.trim() ?? "";
