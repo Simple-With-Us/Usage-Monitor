@@ -1,5 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+
+// Boundary rows are untrusted input too: validate the stored metadata shape
+// with a Zod schema before asserting on its fields.
+const storedMetadataSchema = z.record(z.string(), z.unknown());
 
 const mocks = vi.hoisted(() => ({
   queryRaw: vi.fn(),
@@ -68,16 +73,16 @@ describe("loadLatestQuotaWindowEvents", () => {
     try {
       const rows = await loadLatestQuotaWindowEvents(new Date(0));
       expect(rows).toHaveLength(1);
-      expect(JSON.parse(rows[0].metadata as string).planUserName).toBe("New");
+      expect(storedMetadataSchema.parse(JSON.parse(rows[0].metadata as string)).planUserName).toBe("New");
       insert.run("z-tie", 2000, 4000, JSON.stringify({ planUserName: "Stable tie" }));
       const tied = await loadLatestQuotaWindowEvents(new Date(0));
-      expect(JSON.parse(tied[0].metadata as string).planUserName).toBe("Stable tie");
+      expect(storedMetadataSchema.parse(JSON.parse(tied[0].metadata as string)).planUserName).toBe("Stable tie");
       insert.run("revision-b", 2000, 6000, JSON.stringify({ planUserName: "B", planUserUpdatedAt: 10 }));
       insert.run("revert-a", 2000, 7000, JSON.stringify({ planUserName: "A", planUserUpdatedAt: 20 }));
       insert.run("delayed-b", 2000, 8000, JSON.stringify({ planUserName: "B", planUserUpdatedAt: 10 }));
       insert.run("invalid", 2000, 9000, JSON.stringify({ planUserName: "Invalid", planUserUpdatedAt: "999999" }));
       const reverted = await loadLatestQuotaWindowEvents(new Date(0));
-      expect(JSON.parse(reverted[0].metadata as string).planUserName).toBe("A");
+      expect(storedMetadataSchema.parse(JSON.parse(reverted[0].metadata as string)).planUserName).toBe("A");
     } finally {
       db.close();
     }
