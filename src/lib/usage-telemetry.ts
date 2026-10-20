@@ -1,4 +1,10 @@
-import { PLAN_METADATA_STRING_LIMITS, truncatePlanText } from "@/lib/quota-plan-metadata";
+import { z } from "zod";
+
+import {
+  PLAN_METADATA_STRING_LIMITS,
+  quotaMetadataRecordSchema,
+  truncatePlanText,
+} from "@/lib/quota-plan-metadata";
 import crypto from "crypto";
 import {
   deriveUsageTelemetryV2IdempotencyKey,
@@ -248,13 +254,37 @@ function finalizeQuotaIngestEvent(
 // The shared v2 schema validates scalars but truncates every string at 500.
 // Retain only the typed CodeCaps extension after that event passes validation.
 // Match the shared first-50/key-normalization behavior, including collisions.
+
+/** Raw inbound event carrying a validated record-shaped `metadata` field. */
+const rawEventMetadataSchema = z
+  .object({ metadata: quotaMetadataRecordSchema })
+  .partial();
+
+/**
+ * The bounded plan-metadata extension that may merge back into the parsed
+ * event.  Only these keys, as bounded strings, cross the boundary — anything
+ * else fails validation and the optional extension is dropped, never the event.
+ */
+const planMetadataExtensionSchema = z
+  .object({
+    planDetectedName: z.string().max(PLAN_METADATA_STRING_LIMITS.planDetectedName),
+    planUserName: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserName),
+    planUserCostUsd: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserCostUsd),
+    planUserRenewalDateText: z
+      .string()
+      .max(PLAN_METADATA_STRING_LIMITS.planUserRenewalDateText),
+    planUserSubtitle: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserSubtitle),
+  })
+  .partial();
+
 function restoreBoundedPlanMetadata(
   event: UsageTelemetryV2Batch["events"][number],
   raw: unknown,
 ): UsageTelemetryV2Batch["events"][number] {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return event;
-  const metadata = (raw as { metadata?: unknown }).metadata;
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return event;
+  const rawParsed = rawEventMetadataSchema.safeParse(raw);
+  if (!rawParsed.success) return event;
+  const metadata = rawParsed.data.metadata;
+  if (!metadata) return event;
   const extension: Record<string, string> = {};
   for (const [rawKey, value] of Object.entries(metadata).slice(0, MAX_METADATA_KEYS)) {
     const key = truncatePlanText(rawKey.trim(), 80);
@@ -264,7 +294,10 @@ function restoreBoundedPlanMetadata(
     if (typeof value === "string") extension[key] = truncatePlanText(value, bound);
     else delete extension[key];
   }
-  return { ...event, metadata: { ...event.metadata, ...extension } };
+  // Only schema-validated values reach the persisted event.
+  const parsed = planMetadataExtensionSchema.safeParse(extension);
+  if (!parsed.success) return event;
+  return { ...event, metadata: { ...event.metadata, ...parsed.data } };
 }
 
 async function mapV2Event(
