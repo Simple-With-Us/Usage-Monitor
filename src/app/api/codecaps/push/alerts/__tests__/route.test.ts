@@ -124,7 +124,7 @@ describe("POST /api/codecaps/push/alerts", () => {
     expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({
       title: "Codex · 5h",
       sound: "alarm-glass.wav",
-      interruptionLevel: "passive",
+      interruptionLevel: "active",
     }), expect.objectContaining({ config: expect.objectContaining({
       bundleId: "com.simplewithus.codecaps.ios",
     }) }));
