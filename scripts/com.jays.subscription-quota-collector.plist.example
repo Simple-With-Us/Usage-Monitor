@@ -14,13 +14,14 @@
   Replace /ABSOLUTE/PATH/TO/HOME below with the owner's home directory.
 
   Claude Code OAuth (modern macOS Keychain): the collector reads
-  CLAUDE_CODE_OAUTH_CREDENTIALS_JSON only — not Keychain directly.  Either set
-  that key in EnvironmentVariables (value from a one-time export), or wrap the
-  node invocation in a shell that runs:
-    export CLAUDE_CODE_OAUTH_CREDENTIALS_JSON="$(
-      /ABSOLUTE/PATH/TO/Usage-Monitor/scripts/claude-code-oauth-credentials-from-keychain.sh
-    )"
-  See docs/rollouts/2026-09-12-subscription-quota-collector.md.
+  CLAUDE_CODE_OAUTH_CREDENTIALS_JSON only, never the Keychain directly.  This job
+  therefore runs scripts/run-subscription-quota-collector.sh, which reads the
+  "Claude Code-credentials" login Keychain item with /usr/bin/security, exports
+  the variable and execs the collector (and picks node itself: node@24 under
+  /opt/homebrew, else PATH).  macOS shows one prompt the first time; click
+  Always Allow.  A failed read logs one line and the other providers still run.
+  scripts/install-collectors.sh --plists applies the same wiring to an installed
+  copy.  See docs/rollouts/2026-09-12-subscription-quota-collector.md.
 
   Install:
     cp scripts/com.jays.subscription-quota-collector.plist.example \
@@ -46,8 +47,7 @@
   <string>com.jays.subscription-quota-collector</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/ABSOLUTE/PATH/TO/node</string>
-    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/subscription-quota-collector.mjs</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/run-subscription-quota-collector.sh</string>
     <string>--provider</string>
     <string>all</string>
   </array>

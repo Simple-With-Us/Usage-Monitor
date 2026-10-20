@@ -7,7 +7,8 @@
 # `zod` package, so this copies exactly that to
 #
 #   ${UM_COLLECTORS_HOME:-$HOME/apps/usage-monitor-collectors}
-#     scripts/             collector entry points + scripts/lib
+#     scripts/             collector entry points + scripts/lib, plus
+#                          run-subscription-quota-collector.sh (UM-1616)
 #     node_modules/zod     the only third-party import the collectors have
 #     VERSION              git sha and install time
 #
@@ -20,6 +21,11 @@
 # in ~/Library/LaunchAgents and that still reference a Usage-Monitor checkout;
 # it also repoints the Antigravity CLI statusLine hook.  Re-run this script
 # after merging collector changes to refresh the copy.
+#
+# --plists also runs the subscription-quota LaunchAgent through
+# run-subscription-quota-collector.sh, which reads the Claude Code OAuth
+# credential from the login Keychain and passes it to the collector (UM-1616).
+# The first pass after that shows one macOS prompt: click Always Allow.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +43,7 @@ mkdir -p "$DEST/scripts"
 rsync -a --delete --delete-excluded \
   --include='/lib/' --include='/lib/*.mjs' \
   --include='/*-collector.mjs' \
+  --include='/run-subscription-quota-collector.sh' \
   --include='/antigravity-statusline-telemetry.mjs' \
   --exclude='*' \
   "$SRC/scripts/" "$DEST/scripts/"
@@ -55,6 +62,7 @@ printf 'sha=%s\ninstalled=%s\nsource=%s\n' "$SHA" "$(date -u +%FT%TZ)" "$SRC" > 
 for f in "$DEST"/scripts/*-collector.mjs; do
   node --check "$f"
 done
+bash -n "$DEST/scripts/run-subscription-quota-collector.sh"
 echo "installed $SHA -> $DEST"
 
 [[ "$APPLY_PLISTS" == 1 ]] || { echo "LaunchAgents untouched (pass --plists to repoint them)."; exit 0; }
@@ -74,6 +82,21 @@ for plist in "$AGENTS_DIR"/com.jays.*collector.plist; do
   launchctl bootstrap "gui/$UID_N" "$plist"
   echo "repointed + reloaded $label"
 done
+
+# subscription-quota LaunchAgent: run it through the Keychain wrapper.  The
+# installed plist points at $DEST already, so the loop above skips it.
+QUOTA_LABEL="com.jays.subscription-quota-collector"
+QUOTA_PLIST="$AGENTS_DIR/$QUOTA_LABEL.plist"
+if [[ -f "$QUOTA_PLIST" ]]; then
+  wired="$("$SRC/scripts/wire-quota-wrapper-plist.sh" "$QUOTA_PLIST" "$DEST/scripts/run-subscription-quota-collector.sh")"
+  if [[ "$wired" == "wired" ]]; then
+    launchctl bootout "gui/$UID_N/$QUOTA_LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$UID_N" "$QUOTA_PLIST"
+    echo "wired + reloaded $QUOTA_LABEL (click Always Allow on the Keychain prompt)"
+  else
+    echo "$QUOTA_LABEL: $wired"
+  fi
+fi
 
 # agy statusLine hook (Antigravity CLI settings).
 AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
