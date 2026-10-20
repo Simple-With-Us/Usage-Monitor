@@ -39,6 +39,20 @@ describe("CodeCaps plan metadata", () => {
     expect(quotaWindowsClientResponseSchema.parse(response).quotaGroups?.find((g) => g.provider === row.providerKey)?.windows[0].primary.planMetadata).toEqual(row.planMetadata);
   });
 
+  it.each([
+    [{ planDetectedName: "Detected", planType: "Type", planName: "Legacy", planUserName: "User" }, "Detected"],
+    [{ planType: "Type", planName: "Legacy", planUserName: "User" }, "Type"],
+    [{ planName: "Legacy", planUserName: "User" }, "Legacy"],
+    [{ planUserName: "User" }, undefined],
+  ])("projects legacy detected plan without substituting user entry: %j", (plan, expected) => {
+    const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
+      metadata: { source: "codecaps", ...plan },
+    }], now);
+    expect(response.windows[0].planName).toBe(expected);
+    const group = response.quotaGroups?.find((g) => g.provider === response.windows[0].providerKey);
+    expect(group?.windows[0].primary.planName).toBe(expected);
+  });
+
   it("keeps legacy events additive and bounds only selected fields", () => {
     const response = projectQuotaWindows([{ provider: "claude", occurredAt: now, credits: 50,
       metadata: { planName: "Pro", planUserSubtitle: "x".repeat(1200), privateToken: "secret" },

@@ -271,6 +271,7 @@ export function projectQuotaWindows(
   for (const event of events) {
     const meta = asRecord(event.metadata);
     const planMetadata = projectQuotaPlanMetadata(meta);
+    const detectedPlanName = planMetadata?.detectedPlanName ?? asString(meta.planType) ?? asString(meta.planName);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
@@ -346,7 +347,7 @@ export function projectQuotaWindows(
         ...(producerInstanceId ? { producerInstanceId } : {}),
         ...(machine ? { machine } : {}),
         ...(planMetadata ? { planMetadata } : {}),
-        ...(asString(meta.planName) ? { planName: asString(meta.planName)! } : {}),
+        ...(detectedPlanName ? { planName: detectedPlanName } : {}),
         modelId,
         modelType: modelId,
         label: label ?? modelId ?? event.provider,

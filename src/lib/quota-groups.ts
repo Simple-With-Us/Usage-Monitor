@@ -187,6 +187,7 @@ function eventToCandidate(
 ): QuotaSourceCandidate | null {
   const meta = asRecord(event.metadata);
   const planMetadata = projectQuotaPlanMetadata(meta);
+  const detectedPlanName = planMetadata?.detectedPlanName ?? asString(meta.planType) ?? asString(meta.planName);
   const modelId = asString(meta.modelId);
   const bucketId = asString(meta.bucketId);
   const label =
@@ -212,7 +213,7 @@ function eventToCandidate(
 
   return {
     ...(planMetadata ? { planMetadata } : {}),
-    ...(asString(meta.planName) ? { planName: asString(meta.planName)! } : {}),
+    ...(detectedPlanName ? { planName: detectedPlanName } : {}),
     source: sourceId,
     sourceLabel: humanSourceLabel(source, collector),
     machine,
