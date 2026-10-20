@@ -207,7 +207,9 @@ export async function POST(request: NextRequest) {
           collapseId: `cc-${collisionSafeId}`,
           category: "CODECAPS_ALERT",
           sound: apnsSoundForCodeCapsPreference(currentOption.sound),
-          interruptionLevel: currentOption.popup ? "active" : "passive",
+          // Popup is a Mac window preference.  Passive APNs would also mute
+          // the iPhone's explicitly selected sound, so use ordinary active alerts.
+          interruptionLevel: "active",
           data: {
             alertId: alert.id,
             kind: alert.kind,
