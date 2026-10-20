@@ -1528,6 +1528,26 @@ describe("R2 usage monitoring & auto-disable", () => {
     ).toBe(false);
   });
 
+  it("ignores orphan buckets with no current sample in the freshness check", () => {
+    const now = new Date("2026-08-05T00:30:00.000Z");
+    const fresh = {
+      bucketName: "usage-monitor-bucket",
+      bytes: 15 * 1024 ** 3,
+      objectCount: 600,
+      asOf: "2026-08-05T00:00:00.000Z",
+    };
+    const orphan = {
+      bucketName: "deleted-ghost-bucket",
+      bytes: 2 * 1024 ** 3,
+      objectCount: 40,
+      asOf: null,
+    };
+    // Ghost bucket alone must not flip a fresh set to stale (Seer #1706).
+    expect(graphqlStorageSamplesAreFresh([fresh, orphan], now)).toBe(true);
+    // But with no sampled bucket at all there is no fresh data.
+    expect(graphqlStorageSamplesAreFresh([orphan], now)).toBe(false);
+  });
+
   it("does not kill on stale GraphQL storage when live S3 list is unavailable", async () => {
     process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
     process.env.R2_USAGE_API_TOKEN = "tok-test";
@@ -1676,6 +1696,76 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(assessment.storageSampleStale).toBe(true);
       expect(isR2AutoDisabled()).toBe(true);
       expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+
+    it("drops an orphan bucket's stale size instead of killing on it", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+
+      // Live bucket is small; the deleted ghost alone would exceed the kill
+      // threshold, and it has no 24h sample (asOf null).
+      const liveBytes = 2 * 1024 * 1024 * 1024;
+      const body = {
+        data: {
+          viewer: {
+            accounts: [
+              {
+                r2OperationsAdaptiveGroups: [
+                  {
+                    sum: { requests: 50_000 },
+                    dimensions: { actionType: "PutObject" },
+                  },
+                ],
+                r2StorageAdaptiveGroups: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: {
+                      datetime: "2026-08-05T00:00:00Z",
+                      bucketName: "usage-monitor-prod-v3",
+                    },
+                  },
+                ],
+                // Month-window row for a deleted bucket: no datetime
+                // dimension, so asOf is null (the orphan shape).
+                r2StorageByBucket: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: { bucketName: "usage-monitor-prod-v3" },
+                  },
+                  {
+                    max: {
+                      payloadSize: 9 * 1024 * 1024 * 1024,
+                      metadataSize: 0,
+                      objectCount: 900,
+                    },
+                    dimensions: { bucketName: "deleted-ghost-bucket" },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      };
+      const now = new Date("2026-08-05T00:30:00.000Z");
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.storageSampleStale).toBe(false);
+      expect(assessment.buckets?.map((b) => b.bucketName)).toEqual([
+        "usage-monitor-prod-v3",
+      ]);
+      expect(assessment.storage.mtdPct).toBeLessThan(R2_THRESHOLD_PCT);
+      expect(isR2AutoDisabled()).toBe(false);
     });
 
     it("does not auto-resume when metrics are unavailable", async () => {
