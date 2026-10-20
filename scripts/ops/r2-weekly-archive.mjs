@@ -42,6 +42,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -72,6 +73,12 @@ const DEFAULTS = {
   statusPath: "/data/.r2-archive-status.json",
   // Pages per sqlite3_backup_step(); matches the pre-migration backup default.
   backupRatePages: 100,
+  // A SIGKILLed run skips the `finally` cleanup and leaves its whole work dir
+  // behind — multi-GB on the volume the app gates on for free space. The next
+  // run reclaims those leftovers, but only ones old enough that no run can
+  // still be using them (an overlapping invocation's dir is still being
+  // written to).
+  staleWorkDirMs: 24 * 60 * 60 * 1000,
 };
 
 function log(message) {
@@ -244,6 +251,21 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
   }
 
   mkdirSync(config.workDirBase, { recursive: true });
+  // Reclaim work dirs abandoned by a killed run before claiming a new one. The
+  // age guard keeps this from deleting the dir of an overlapping invocation,
+  // which is still being written to.
+  const staleCutoff = Date.now() - DEFAULTS.staleWorkDirMs;
+  for (const entry of readdirSync(config.workDirBase, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("run-")) continue;
+    const stalePath = join(config.workDirBase, entry.name);
+    try {
+      if (statSync(stalePath).mtimeMs >= staleCutoff) continue;
+    } catch {
+      continue; // vanished underneath us; nothing to reclaim
+    }
+    log(`reclaiming stale work dir from a previous run: ${entry.name}`);
+    rmSync(stalePath, { recursive: true, force: true });
+  }
   const workDir = mkdtempSync(join(config.workDirBase, "run-"));
   const snapshotPath = join(workDir, "snapshot.db");
   const compressedPath = join(workDir, "snapshot.db.gz");
@@ -257,11 +279,17 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     log(`snapshot verified (${snapshotBytes} bytes)`);
 
     await gzipFile(snapshotPath, compressedPath);
+    // The snapshot is spent the moment it is gzipped — only `snapshotBytes` is
+    // read after this. Drop it rather than carry a second full-size copy
+    // through the rest of the run on a volume with a free-space floor.
+    rmSync(snapshotPath, { force: true });
     // Read once, then derive size, hash, and the upload body from those exact
     // bytes. A stat-then-hash-then-read sequence is a genuine TOCTOU race: the
     // file could change between steps and we would advertise a hash that does
     // not describe what we actually uploaded.
     const compressedBuffer = readFileSync(compressedPath);
+    // The upload body now lives in memory; the on-disk copy is redundant.
+    rmSync(compressedPath, { force: true });
     const compressedBytes = compressedBuffer.length;
     const localHash = createHash("sha256").update(compressedBuffer).digest("hex");
     log(`compressed to ${compressedBytes} bytes (sha256 ${localHash.slice(0, 12)}...)`);
@@ -330,6 +358,9 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
       },
     });
     await pipeline(createReadStream(downloadedPath), createGunzip(), countTap, createWriteStream(restoredPath, { mode: 0o600 }));
+    // The compressed copy is spent once gunzipped — free it before the
+    // multi-GB restore lands next to it.
+    rmSync(downloadedPath, { force: true });
     if (restoredBytes !== snapshotBytes) {
       throw new Error(
         `restored size mismatch: ${restoredBytes} vs ${snapshotBytes} — keeping all existing archives`
