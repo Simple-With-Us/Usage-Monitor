@@ -15,7 +15,23 @@ import { sendPushoverNotification } from "@/lib/r2-usage";
  * occurredAt.  Allowances are deliberately generous for token-usage streams,
  * which are legitimately silent when nobody is using that tool, and tight for
  * quota streams, which are polled on a timer and should never go quiet.
- * Streams that were retired or renamed (agent-bar -> codecaps) are not listed.
+ * Streams that were retired or renamed are not listed:
+ *  - agent-bar -> codecaps (renamed).
+ *  - github-copilot: retired.  No ~/.copilot directory or LaunchAgent on the
+ *    Mac, and no rows since Sep 24.
+ *  - fx: unwatched.  No rows since Sep 16 (the newest event time seen in prod
+ *    on Oct 20), collector installed, not watched until usage resumes.  A rule
+ *    now would page every day forever.  Add `{ sourceApp: "fx", metricType:
+ *    "usage", maxAgeHours: 96 }` when the owner starts using fx again.
+ *
+ * Allowances for the newer usage streams were measured against prod on
+ * 2026-10-20 (UM-1616), as the longest silence between consecutive rows over
+ * the weeks the stream has existed:
+ *  - deepseek-dsh: used on 36 of the last 60 days.  Longest silences since
+ *    Sep 9 are about 108h (Sep 9 to Sep 13) and 88h (Oct 6 to Oct 9), so 120h.
+ *  - opencode: first rows Oct 10, so only 10 days of history.  Longest silence
+ *    is about 50h over the Oct 17-18 weekend.  96h leaves room for a long
+ *    weekend and still fires within four days of a dead collector.
  */
 export interface ProducerStreamRule {
   sourceApp: string;
@@ -30,6 +46,8 @@ export const PRODUCER_STREAM_RULES: readonly ProducerStreamRule[] = [
   { sourceApp: "grok-build", metricType: "usage", maxAgeHours: 96 },
   { sourceApp: "claude-code", metricType: "usage", maxAgeHours: 48 },
   { sourceApp: "botfleet", metricType: "usage", maxAgeHours: 96 },
+  { sourceApp: "deepseek-dsh", metricType: "usage", maxAgeHours: 120 },
+  { sourceApp: "opencode", metricType: "usage", maxAgeHours: 96 },
   // Timer-driven quota collectors: a gap here is always a broken collector.
   { sourceApp: "openai-codex", metricType: "quota", maxAgeHours: 6 },
   { sourceApp: "grok-build", metricType: "quota", maxAgeHours: 6 },

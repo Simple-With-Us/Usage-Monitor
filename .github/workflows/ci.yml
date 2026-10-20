@@ -349,6 +349,11 @@ jobs:
       - name: Test replica-status probe
         run: npm run test:replica-status-probe
 
+      # Offline: stub `security` and `node` in a mktemp dir, so the real
+      # Keychain, the network and every LaunchAgent are untouched (UM-1616).
+      - name: Test subscription-quota Keychain wrapper
+        run: npm run test:quota-wrapper
+
       - name: Audit high-severity dependencies
         # Full lockfile via audit-ci; GHSA-vfj7-8cjw-p6xm is allowlisted in audit-ci.jsonc (2026-10-05).
         run: npm run test:audit-ci
