@@ -1,9 +1,21 @@
 import { z } from "zod";
 
+export const quotaPlanMetadataSchema = z.object({
+  detectedPlanName: z.string().max(256).optional(),
+  userPlanName: z.string().max(256).optional(),
+  userCostUsd: z.string().max(128).optional(),
+  userRenewalDateText: z.string().max(512).optional(),
+  userSubtitle: z.string().max(1024).optional(),
+  showCostAndRenewal: z.boolean().optional(),
+  hasMismatch: z.boolean(),
+});
+
 export const quotaSourceFreshnessSchema = z.enum(["fresh", "stale", "old"]);
 
 /** Client-side validation for `/api/quota-windows` source rows (quotaGroups + legacy). */
 export const quotaSourceReadingSchema = z.object({
+  planMetadata: quotaPlanMetadataSchema.optional(),
+  planName: z.string().optional(),
   source: z.string(),
   sourceLabel: z.string(),
   machine: z.string().nullable(),
@@ -36,7 +48,10 @@ const quotaProviderQuotaGroupSchema = z
   })
   .passthrough();
 
-const quotaWindowRowSchema = z.record(z.string(), z.unknown());
+const quotaWindowRowSchema = z.object({
+  planMetadata: quotaPlanMetadataSchema.optional(),
+  planName: z.string().optional(),
+}).passthrough();
 
 const quotaProviderGroupRowSchema = z.record(z.string(), z.unknown());
 

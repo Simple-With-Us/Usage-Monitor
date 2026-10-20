@@ -1,4 +1,10 @@
 import {
+  projectQuotaPlanMetadata,
+  quotaDetectedPlanName,
+  quotaMetadataRecord,
+  type QuotaPlanMetadata,
+} from "@/lib/quota-plan-metadata";
+import {
   antigravityPlatformCardTitle,
   antigravityQuotaPool,
   normalizeQuotaWindowKey,
@@ -21,6 +27,8 @@ export const QUOTA_EXPIRED_MS = 48 * 60 * 60 * 1000;
 export type QuotaSourceFreshness = "fresh" | "stale" | "old";
 
 export interface QuotaSourceReading {
+  planMetadata?: QuotaPlanMetadata;
+  planName?: string;
   source: string;
   sourceLabel: string;
   machine: string | null;
@@ -49,11 +57,6 @@ export interface QuotaProviderQuotaGroup {
   provider: string;
   providerLabel: string;
   windows: QuotaGroupWindow[];
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
 }
 
 function asString(value: unknown): string | null {
@@ -182,7 +185,9 @@ function eventToCandidate(
   via: string | null,
   rawKey: string,
 ): QuotaSourceCandidate | null {
-  const meta = asRecord(event.metadata);
+  const meta = quotaMetadataRecord(event.metadata);
+  const planMetadata = projectQuotaPlanMetadata(meta);
+  const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
   const modelId = asString(meta.modelId);
   const bucketId = asString(meta.bucketId);
   const label =
@@ -207,6 +212,8 @@ function eventToCandidate(
   const sourceId = normalizeSourceId(source, collector);
 
   return {
+    ...(planMetadata ? { planMetadata } : {}),
+    ...(detectedPlanName ? { planName: detectedPlanName } : {}),
     source: sourceId,
     sourceLabel: humanSourceLabel(source, collector),
     machine,
@@ -253,7 +260,7 @@ export function buildQuotaGroups(
   const byProviderWindow = new Map<string, WindowBucket>();
 
   for (const event of events) {
-    const meta = asRecord(event.metadata);
+    const meta = quotaMetadataRecord(event.metadata);
     const providerKey = normalizeProviderKey(event.provider, resolved);
     const via =
       resolved.byKey.get(providerKey)?.terms?.via ??
@@ -293,6 +300,8 @@ export function buildQuotaGroups(
   }
 
   const toReading = (row: QuotaSourceCandidate): QuotaSourceReading => ({
+    ...(row.planMetadata ? { planMetadata: row.planMetadata } : {}),
+    ...(row.planName ? { planName: row.planName } : {}),
     source: row.source,
     sourceLabel: row.sourceLabel,
     machine: row.machine,

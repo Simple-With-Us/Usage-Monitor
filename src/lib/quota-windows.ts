@@ -1,3 +1,9 @@
+import {
+  projectQuotaPlanMetadata,
+  quotaDetectedPlanName,
+  quotaMetadataRecord,
+  type QuotaPlanMetadata,
+} from "@/lib/quota-plan-metadata";
 import { buildQuotaGroups, type QuotaProviderQuotaGroup } from "@/lib/quota-groups";
 import { quotaEventReportedAtIso } from "@/lib/quota-ingest-metadata";
 import { normalizeQuotaWindowKey, rollupQuotaWindowKey } from "@/lib/quota-window-display";
@@ -28,6 +34,8 @@ export interface SkipModelType {
 }
 
 export interface QuotaWindow {
+  planMetadata?: QuotaPlanMetadata;
+  planName?: string;
   id: string;
   provider: string;
   /** Canonical provider key the window is grouped under (see ResolvedProviderManifest.aliasToKey). */
@@ -153,11 +161,6 @@ const GEMINI_MODELS = [
   "gemini-3-flash",
 ];
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
-}
-
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -266,7 +269,9 @@ export function projectQuotaWindows(
 
   const latest = new Map<string, { window: QuotaWindow; series: string }>();
   for (const event of events) {
-    const meta = asRecord(event.metadata);
+    const meta = quotaMetadataRecord(event.metadata);
+    const planMetadata = projectQuotaPlanMetadata(meta);
+    const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
     const modelId = asString(meta.modelId);
     const bucketId = asString(meta.bucketId);
     const producerInstanceId = asString(meta._producerInstanceId);
@@ -341,6 +346,8 @@ export function projectQuotaWindows(
         sourceApp: event.service ?? null,
         ...(producerInstanceId ? { producerInstanceId } : {}),
         ...(machine ? { machine } : {}),
+        ...(planMetadata ? { planMetadata } : {}),
+        ...(detectedPlanName ? { planName: detectedPlanName } : {}),
         modelId,
         modelType: modelId,
         label: label ?? modelId ?? event.provider,
