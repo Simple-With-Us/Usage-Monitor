@@ -17,6 +17,8 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -201,6 +203,138 @@ try {
   const directoryResult = run(`file:${directoryPath}`);
   expectStatus("non-file database path", directoryResult, 1);
   assert.match(directoryResult.stderr, /is not a regular file/);
+
+  // VACUUM INTO must work from the same read-only source connection used by
+  // the production backup and keep making progress while another connection
+  // commits.  The worker and both database files are confined to this temp
+  // directory; production data is never opened by this test.
+  const vacuumSourcePath = join(temp, "vacuum-source.db");
+  const vacuumSnapshotPath = join(temp, "vacuum-snapshot.db");
+  const vacuumSeed = new DatabaseSync(vacuumSourcePath);
+  vacuumSeed.exec("PRAGMA journal_mode = WAL; CREATE TABLE ballast (value TEXT NOT NULL); CREATE TABLE writes (value TEXT NOT NULL);");
+  const insertBallast = vacuumSeed.prepare("INSERT INTO ballast (value) VALUES (?)");
+  vacuumSeed.exec("BEGIN");
+  for (let index = 0; index < 60_000; index += 1) {
+    insertBallast.run("x".repeat(1024));
+  }
+  vacuumSeed.exec("COMMIT");
+  vacuumSeed.close();
+
+  const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const stats = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const writer = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { DatabaseSync } = require("node:sqlite");
+    const control = new Int32Array(workerData.control);
+    const stats = new Int32Array(workerData.stats);
+    const database = new DatabaseSync(workerData.databasePath);
+    const insert = database.prepare("INSERT INTO writes (value) VALUES (?)");
+    let index = 0;
+    parentPort.postMessage("ready");
+    while (Atomics.load(control, 0) === 0) {
+      database.exec("BEGIN IMMEDIATE");
+      for (let batch = 0; batch < 100; batch += 1) insert.run(String(index++));
+      database.exec("COMMIT");
+      Atomics.add(stats, 0, 1);
+      Atomics.wait(control, 1, 0, 1);
+    }
+    database.close();
+  `, {
+    eval: true,
+    workerData: { databasePath: vacuumSourcePath, control, stats },
+  });
+  try {
+    await once(writer, "message");
+    const writeStats = new Int32Array(stats);
+    const deadline = Date.now() + 5_000;
+    while (Atomics.load(writeStats, 0) < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(Atomics.load(writeStats, 0) >= 3, "independent writer must commit before snapshot starts");
+    const commitsBeforeSnapshot = Atomics.load(writeStats, 0);
+
+    const readOnlySource = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+    try {
+      readOnlySource.exec(`VACUUM INTO '${vacuumSnapshotPath}'`);
+    } finally {
+      readOnlySource.close();
+    }
+
+    assert.ok(
+      Atomics.load(writeStats, 0) > commitsBeforeSnapshot,
+      "independent writer must continue committing during VACUUM INTO"
+    );
+    const vacuumSnapshot = new DatabaseSync(vacuumSnapshotPath, { readOnly: true });
+    try {
+      assert.deepEqual(
+        vacuumSnapshot.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]),
+        ["ok"]
+      );
+      const copiedWrites = vacuumSnapshot.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+      const sourceWrites = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+      try {
+        const latestWrites = sourceWrites.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+        assert.ok(copiedWrites <= latestWrites, "snapshot must not contain uncommitted future rows");
+        assert.equal(copiedWrites % 100, 0, "snapshot must include only whole writer transactions");
+      } finally {
+        sourceWrites.close();
+      }
+    } finally {
+      vacuumSnapshot.close();
+    }
+
+    const commitsBeforeBackupScript = Atomics.load(writeStats, 0);
+    const concurrentBackup = run(`file:${vacuumSourcePath}`, {
+      SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS: "300000",
+    });
+    expectStatus("pre-migration backup with concurrent writer", concurrentBackup, 0);
+    assert.ok(
+      Atomics.load(writeStats, 0) > commitsBeforeBackupScript,
+      "production backup script must allow independent commits to progress"
+    );
+    const managedSnapshots = backupFiles(vacuumSourcePath);
+    assert.equal(managedSnapshots.length, 1);
+    const managedSnapshot = new DatabaseSync(managedSnapshots[0], { readOnly: true });
+    try {
+      assert.deepEqual(
+        managedSnapshot.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]),
+        ["ok"]
+      );
+      const copiedWrites = managedSnapshot.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+      const latestWritesDb = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+      try {
+        const latestWrites = latestWritesDb.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+        assert.ok(copiedWrites <= latestWrites, "managed snapshot must not include uncommitted future rows");
+        assert.equal(copiedWrites % 100, 0, "managed snapshot must contain complete writer transactions");
+      } finally {
+        latestWritesDb.close();
+      }
+    } finally {
+      managedSnapshot.close();
+    }
+  } finally {
+    Atomics.store(new Int32Array(control), 0, 1);
+    Atomics.notify(new Int32Array(control), 1);
+    await writer.terminate();
+  }
+
+  // An exclusive rollback-journal lock forces the snapshot child to wait on
+  // SQLite.  Its configured overall deadline must kill the child, fail closed,
+  // and remove the partial artifact without waiting for SQLite's lock timeout.
+  const blockedPath = join(temp, "blocked-source.db");
+  const blocker = new DatabaseSync(blockedPath);
+  blocker.exec("CREATE TABLE sample (value TEXT NOT NULL); BEGIN EXCLUSIVE; INSERT INTO sample VALUES ('held');");
+  const blockedStart = Date.now();
+  const blocked = run(`file:${blockedPath}`, {
+    SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS: "1000",
+  });
+  const blockedDuration = Date.now() - blockedStart;
+  blocker.exec("ROLLBACK");
+  blocker.close();
+  expectStatus("bounded snapshot timeout", blocked, 1);
+  assert.match(blocked.stderr, /exceeded 1000 ms/);
+  assert.ok(blockedDuration < 5_000, `timeout must be bounded, took ${blockedDuration} ms`);
+  assert.equal(backupFiles(blockedPath).length, 0, "a timed-out partial snapshot must not be retained");
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

@@ -92,9 +92,12 @@ Local pre-migration snapshots on `/data` still exist.
   preserve their exact schema and state; `migrate-safe.mjs` never retries with
   Prisma's broad `--accept-data-loss` flag.
 - `scripts/backup-sqlite-before-migrate.mjs` — transaction-consistent SQLite
-  Online Backup API snapshot plus `PRAGMA integrity_check`, private file modes,
-  atomic promotion, and bounded same-disk retention. It is the immediate schema
-  rollback layer; Litestream/B2 remains the off-disk disaster-recovery replica.
+  `VACUUM INTO` snapshot plus `PRAGMA integrity_check` inside a child process
+  with a bounded deadline, private file modes, atomic promotion, and bounded
+  same-disk retention.  `SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` is an Infisical
+  env-sync startup knob (default 300000 ms, maximum 900000 ms); timeout fails
+  startup closed.  It is the immediate schema rollback layer; Litestream/B2
+  remains the off-disk disaster-recovery replica.
 - `scripts/litestream-restore.sh` — manual disaster-recovery restore to a
   scratch path, run inside the production app container (see below).
 - `scripts/replica-status-heartbeat.sh` + `run-app-with-replica-heartbeat.sh` —

@@ -3,11 +3,10 @@
  * Create and verify a transaction-consistent backup of an existing SQLite
  * database before migrate-safe.mjs changes its schema.
  *
- * Node's sqlite.backup() wraps SQLite's Online Backup API. A completed backup
- * is a consistent snapshot even when the source uses WAL or receives a write
- * while the copy is running. The source is opened read-only, the destination
- * is written under a private directory beside the database, and only a backup
- * that passes PRAGMA integrity_check is promoted from .partial to .backup.db.
+ * VACUUM INTO creates a consistent snapshot without Online Backup API restarts
+ * when another process writes during the copy.  The source is opened read-only,
+ * and a bounded child performs the snapshot and integrity check before the
+ * private partial file is promoted to .backup.db.
  *
  * Existing databases fail closed on every backup/verification/retention error.
  * A missing database is the expected first-deploy case and needs no backup.
@@ -17,7 +16,8 @@
  * - https://nodejs.org/docs/latest-v24.x/api/sqlite.html
  */
 
-import { backup, DatabaseSync } from "node:sqlite";
+import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import {
   chmodSync,
   closeSync,
@@ -38,6 +38,12 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_RETENTION = 1; // free-tier disk: one pre-migrate snapshot is enough
 const MAX_RETENTION = 10;
 const BACKUP_DIRECTORY = ".pre-migration-backups";
+const BACKUP_TIMEOUT_MS = clampedIntEnv(
+  "SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS",
+  5 * 60_000,
+  1_000,
+  15 * 60_000
+);
 
 function log(message) {
   console.log(`[sqlite-pre-migration-backup] ${message}`);
@@ -68,14 +74,6 @@ function applySqliteMemoryPragmas(database) {
   database.exec(`PRAGMA cache_size = ${cacheSizeKib}`);
   database.exec(`PRAGMA mmap_size = ${mmapSizeBytes}`);
 }
-
-// Pages copied per sqlite3_backup_step() call. Node's own default is 100;
-// exposed so a smaller value can be set if the backup's per-step native
-// working set ever needs to shrink further. Node does not await the
-// `progress` callback between steps (verified empirically - it fires steps
-// back-to-back), so this does NOT add pacing/inter-step delays, only bounds
-// how many pages move in a single native step.
-const BACKUP_RATE_PAGES = clampedIntEnv("SQLITE_BACKUP_RATE_PAGES", 100, 1, 1000);
 
 function parseDatabasePath(databaseUrl) {
   if (!databaseUrl?.startsWith("file:")) {
@@ -211,6 +209,52 @@ function ensurePrivateBackupDirectory(path) {
   chmodSync(path, 0o700);
 }
 
+function snapshotChild(databasePath, snapshotPath) {
+  process.umask(0o077);
+  const source = new DatabaseSync(databasePath, {
+    readOnly: true,
+    timeout: 30_000,
+  });
+  try {
+    applySqliteMemoryPragmas(source);
+    // VACUUM INTO holds one consistent read transaction.  Unlike sqlite3_backup_step,
+    // concurrent commits from the old app cannot restart the copy from page one.
+    source.prepare("VACUUM INTO ?").run(snapshotPath);
+  } finally {
+    source.close();
+  }
+  assertIntegrity(snapshotPath);
+}
+
+function createSnapshotWithDeadline(databasePath, partialPath) {
+  log(`creating consistent snapshot with a ${BACKUP_TIMEOUT_MS} ms deadline`);
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(import.meta.url), "--snapshot-child", databasePath, partialPath],
+    {
+      // Preserve only the bounded SQLite memory knobs, without credentials.
+      env: {
+        PATH: process.env.PATH ?? "",
+        ...(process.env.SQLITE_CACHE_SIZE_KIB ? { SQLITE_CACHE_SIZE_KIB: process.env.SQLITE_CACHE_SIZE_KIB } : {}),
+        ...(process.env.SQLITE_MMAP_SIZE_BYTES ? { SQLITE_MMAP_SIZE_BYTES: process.env.SQLITE_MMAP_SIZE_BYTES } : {}),
+      },
+      timeout: BACKUP_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: "inherit",
+    }
+  );
+  if (result.error) {
+    const code = "code" in result.error ? result.error.code : undefined;
+    if (code === "ETIMEDOUT") {
+      throw new Error(`snapshot and integrity check exceeded ${BACKUP_TIMEOUT_MS} ms`);
+    }
+    throw new Error(`snapshot child could not run: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`snapshot child failed (exit ${result.status ?? result.signal ?? "unknown"})`);
+  }
+}
+
 async function main() {
   // Backups contain every credential and usage row in the database. Ensure a
   // newly-created directory/file is private even before the explicit chmod.
@@ -244,19 +288,8 @@ async function main() {
   const finalPath = join(backupDirectory, `${stem}.backup.db`);
 
   try {
-    const source = new DatabaseSync(databasePath, {
-      readOnly: true,
-      timeout: 30_000,
-    });
-    try {
-      applySqliteMemoryPragmas(source);
-      log(`creating consistent snapshot of ${databasePath}`);
-      await backup(source, partialPath, { rate: BACKUP_RATE_PAGES });
-    } finally {
-      source.close();
-    }
+    createSnapshotWithDeadline(databasePath, partialPath);
     chmodSync(partialPath, 0o600);
-    assertIntegrity(partialPath);
     fsyncFile(partialPath);
     renameSync(partialPath, finalPath);
     // The file fsync above persists its contents; fsyncing the containing
@@ -281,7 +314,17 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+const args = process.argv.slice(2);
+const execution = args[0] === "--snapshot-child"
+  ? Promise.resolve().then(() => {
+      if (args.length !== 3 || !isAbsolute(args[1]) || !isAbsolute(args[2])) {
+        throw new Error("internal snapshot child requires absolute source and destination paths");
+      }
+      snapshotChild(args[1], args[2]);
+    })
+  : main();
+
+execution.catch((error) => {
   console.error(
     `[sqlite-pre-migration-backup] ERROR: ${
       error instanceof Error ? error.message : "unknown backup failure"
