@@ -33,6 +33,9 @@ export const isPublicPath = (pathname: string) => {
     "/api/ingest",
     "/api/otlp",
     "/api/apns",
+    // Self-authenticates with the dedicated CodeCaps registration token or
+    // the existing scoped usage-ingest credential; no dashboard cookie.
+    "/api/codecaps/push",
     "/api/settings",
     "/api/budget-status",
     // Self-authenticates (session OR USAGE_READ_TOKEN) for BotFleet skip-model.
