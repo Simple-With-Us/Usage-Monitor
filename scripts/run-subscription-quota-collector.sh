@@ -30,6 +30,11 @@ set -uo pipefail
 
 KEYCHAIN_SERVICE="Claude Code-credentials"
 KEYCHAIN_ACCOUNT="${UM_KEYCHAIN_ACCOUNT:-}"
+# An empty account must not be passed as -a "": Keychain matches it exactly.
+# Omit -a instead so the lookup works whether Claude Code filed the item
+# under an empty account or the macOS username.
+ACCOUNT_ARGS=()
+[[ -n "$KEYCHAIN_ACCOUNT" ]] && ACCOUNT_ARGS=(-a "$KEYCHAIN_ACCOUNT")
 SECURITY_BIN="${UM_KEYCHAIN_SECURITY_BIN:-/usr/bin/security}"
 TIMEOUT_SECS="${UM_KEYCHAIN_TIMEOUT_SECS:-20}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,7 +65,7 @@ read_keychain_credential() {
   # account is always passed: without it a stale item under the same service
   # can be injected instead of Claude Code's own credential.
   cred="$(/usr/bin/perl -e 'alarm shift; exec @ARGV or exit 127' "$TIMEOUT_SECS" \
-    "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null)"
+    "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" "${ACCOUNT_ARGS[@]}" -w 2>/dev/null)"
   rc=$?
   if [[ $rc -ne 0 ]]; then
     case "$rc" in
