@@ -500,11 +500,15 @@ describe("opencode collector telemetry", () => {
         body: JSON.stringify({
           good: { models: { "m1": { limit: { context: 1000 } } } },
           bad: { models: { "m2": { limit: { context: "huge" } } } },
+          // One malformed model costs only itself, not its siblings.
+          mixed: { models: { "m3": { limit: { context: "huge" } }, "m4": { limit: { context: 2000 } } } },
         }),
       }),
     );
     expect(catalog.limitFor("good", "m1")).toBe(1000);
     expect(catalog.limitFor("bad", "m2")).toBeNull();
+    expect(catalog.limitFor("mixed", "m3")).toBeNull();
+    expect(catalog.limitFor("mixed", "m4")).toBe(2000);
   });
 
   it("keeps every event inside the shared v2 contract", async () => {
