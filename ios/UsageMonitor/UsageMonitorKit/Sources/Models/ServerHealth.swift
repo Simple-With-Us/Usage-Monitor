@@ -623,6 +623,10 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
             public var label: String
             public var ok: Bool?
             public var present: Bool?
+            /// True when the location was never observed (peer not probed,
+            /// check skipped offline): neither presence nor absence is known,
+            /// so the row must read neutral, never failed.
+            public var unknown: Bool?
             public var latestAgeSeconds: Double?
             public var bytes: Int64?
             public var fileCount: Int?
@@ -633,6 +637,7 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
                 label: String,
                 ok: Bool? = nil,
                 present: Bool? = nil,
+                unknown: Bool? = nil,
                 latestAgeSeconds: Double? = nil,
                 bytes: Int64? = nil,
                 fileCount: Int? = nil,
@@ -642,6 +647,7 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
                 self.label = label
                 self.ok = ok
                 self.present = present
+                self.unknown = unknown
                 self.latestAgeSeconds = latestAgeSeconds
                 self.bytes = bytes
                 self.fileCount = fileCount

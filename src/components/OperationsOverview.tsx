@@ -2,7 +2,7 @@
 
 import { ChevronDown, Cloud, Inbox, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import type { FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
+import type { FleetAppBackupStatus, FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
 import type {
   CongressInfrastructureSummary,
   CoolifyFleetSummary,
@@ -890,10 +890,15 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
         ? "healthy"
         : "degraded";
   const okApps = data.apps.filter((a) => a.ok).length;
-  // Per-app and per-location pills must not contradict the header pill: a
-  // skipped (offline) check observed nothing, so every row reads unavailable.
-  const appState = (appOk: boolean): OperationalState =>
-    data.offline ? "unavailable" : appOk ? "healthy" : "degraded";
+  // Per-app and per-location pills must not contradict each other: offline,
+  // an app with at least one really observed row derives its pill from those
+  // rows; an app whose rows were all skipped stays unavailable.
+  const appState = (app: FleetAppBackupStatus): OperationalState => {
+    if (!data.offline) return app.ok ? "healthy" : "degraded";
+    const anyObserved = app.locations.some((l) => l.ok != null);
+    if (!anyObserved) return "unavailable";
+    return app.ok ? "healthy" : "degraded";
+  };
   return (
     <section aria-labelledby="fleet-backups-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -933,14 +938,14 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
                     <span className="ml-1 font-normal text-gray-400">· this app</span>
                   ) : null}
                 </p>
-                <StatePill state={appState(app.ok)} />
+                <StatePill state={appState(app)} />
               </div>
               <ul className="mt-2 space-y-1.5">
                 {app.locations.map((loc) => (
                   <li key={`${app.id}-${loc.id}`} className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">{loc.label}</span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {data.offline
+                      {data.offline && loc.ok == null
                         ? "Unavailable"
                         : loc.ok === true
                           ? "OK"

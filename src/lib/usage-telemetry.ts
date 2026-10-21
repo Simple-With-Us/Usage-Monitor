@@ -1,3 +1,10 @@
+import { z } from "zod";
+
+import {
+  PLAN_METADATA_STRING_LIMITS,
+  quotaMetadataRecordSchema,
+  truncatePlanText,
+} from "@/lib/quota-plan-metadata";
 import crypto from "crypto";
 import {
   deriveUsageTelemetryV2IdempotencyKey,
@@ -38,7 +45,8 @@ const RESERVED_V2_METADATA_KEYS = new Set([
   ...AI_METADATA_KEY_LIST,
 ]);
 // 100 events * 50 metadata entries * (80-byte key + 500-byte value), plus
-// event fields and JSON framing, fits below 4 MiB. The route enforces this
+// the bounded plan-field exceptions, event fields and JSON framing, fits
+// below 4 MiB.  The route enforces this
 // before decoding so the parser's field limits cannot be bypassed with a huge
 // body that is mostly discarded after allocation.
 export const MAX_USAGE_TELEMETRY_BODY_BYTES = 4 * 1024 * 1024;
@@ -94,14 +102,20 @@ function cleanProducerMetadata(
   const clean: Record<string, string | number | boolean | null> = {};
 
   for (const [key, value] of entries) {
-    const cleanKey = key.trim().slice(0, 80);
+    // Code-point-safe like the values below: a producer key holding a lone
+    // surrogate is persisted verbatim and JSON.stringify then emits it as an
+    // escape Foundation's JSONDecoder rejects, costing the client the whole
+    // usage-event payload.
+    const cleanKey = truncatePlanText(key.trim(), 80);
     if (!cleanKey || RESERVED_V2_METADATA_KEYS.has(cleanKey)) continue;
     if (value == null || typeof value === "boolean") {
       clean[cleanKey] = value ?? null;
     } else if (typeof value === "number" && Number.isFinite(value)) {
       clean[cleanKey] = value;
     } else if (typeof value === "string") {
-      clean[cleanKey] = value.slice(0, MAX_METADATA_STRING_LENGTH);
+      const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, cleanKey)
+        ? PLAN_METADATA_STRING_LIMITS[cleanKey] : MAX_METADATA_STRING_LENGTH;
+      clean[cleanKey] = truncatePlanText(value, bound);
     }
   }
 
@@ -237,11 +251,68 @@ function finalizeQuotaIngestEvent(
   };
 }
 
+// The shared v2 schema validates scalars but truncates every string at 500.
+// Retain only the typed CodeCaps extension after that event passes validation.
+// Match the shared first-50/key-normalization behavior, including collisions.
+
+/** Raw inbound event carrying a validated record-shaped `metadata` field. */
+const rawEventMetadataSchema = z
+  .object({ metadata: quotaMetadataRecordSchema })
+  .partial();
+
+/**
+ * The bounded plan-metadata extension that may merge back into the parsed
+ * event.  Only these keys, as bounded strings, cross the boundary — anything
+ * else fails validation and the optional extension is dropped, never the event.
+ */
+const planMetadataExtensionSchema = z
+  .object({
+    planDetectedName: z.string().max(PLAN_METADATA_STRING_LIMITS.planDetectedName),
+    planUserName: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserName),
+    planUserCostUsd: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserCostUsd),
+    planUserRenewalDateText: z
+      .string()
+      .max(PLAN_METADATA_STRING_LIMITS.planUserRenewalDateText),
+    planUserSubtitle: z.string().max(PLAN_METADATA_STRING_LIMITS.planUserSubtitle),
+  })
+  .partial();
+
+// Not the trust boundary: `event` already passed UsageTelemetryV2EventSchema and
+// `raw` is that same event's input, so a failed safeParse below is a defensive
+// branch.  It degrades (the optional extension is dropped, the event is kept)
+// instead of throwing: a throw would turn one odd metadata blob into a 400 for
+// the whole batch and lose its billing events, and this module rejects bad
+// events one at a time (see `rejections`), never by failing the batch.
+function restoreBoundedPlanMetadata(
+  event: UsageTelemetryV2Batch["events"][number],
+  raw: unknown,
+): UsageTelemetryV2Batch["events"][number] {
+  const rawParsed = rawEventMetadataSchema.safeParse(raw);
+  if (!rawParsed.success) return event;
+  const metadata = rawParsed.data.metadata;
+  if (!metadata) return event;
+  const extension: Record<string, string> = {};
+  for (const [rawKey, value] of Object.entries(metadata).slice(0, MAX_METADATA_KEYS)) {
+    const key = truncatePlanText(rawKey.trim(), 80);
+    const bound = Object.hasOwn(PLAN_METADATA_STRING_LIMITS, key)
+      ? PLAN_METADATA_STRING_LIMITS[key] : undefined;
+    if (bound === undefined) continue;
+    if (typeof value === "string") extension[key] = truncatePlanText(value, bound);
+    else delete extension[key];
+  }
+  // Only schema-validated values reach the persisted event.
+  const parsed = planMetadataExtensionSchema.safeParse(extension);
+  if (!parsed.success) return event;
+  return { ...event, metadata: { ...event.metadata, ...parsed.data } };
+}
+
 async function mapV2Event(
   batch: UsageTelemetryV2Batch,
   event: UsageTelemetryV2Batch["events"][number],
   ingestTime = new Date(),
+  rawEvent?: unknown,
 ): Promise<ParsedUsageTelemetryEvent> {
+  event = restoreBoundedPlanMetadata(event, rawEvent);
   const occurredAt = event.occurredAt ? new Date(event.occurredAt) : ingestTime;
   return finalizeQuotaIngestEvent(
     {
@@ -300,7 +371,9 @@ export async function parseUsageTelemetryV2Batch(
   if (whole.success && !whole.data.events.some((e) => isFutureOccurredAt(e.occurredAt, now))) {
     return {
       events: await Promise.all(
-        whole.data.events.map((event) => mapV2Event(whole.data, event))
+        whole.data.events.map((event, index) => mapV2Event(
+          whole.data, event, new Date(now), (value as { events: unknown[] }).events[index],
+        ))
       ),
       rejected: 0,
       rejections: [],
@@ -356,7 +429,7 @@ export async function parseUsageTelemetryV2Batch(
       }
       continue;
     }
-    events.push(await mapV2Event(probe.data, result.data));
+    events.push(await mapV2Event(probe.data, result.data, new Date(now), raw));
   }
   return { events, rejected, rejections };
 }
