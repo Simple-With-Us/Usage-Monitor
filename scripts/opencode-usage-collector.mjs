@@ -44,6 +44,7 @@ import {
 import {
   buildOpencodeExtraEvents,
   buildOpencodeTokenEvents,
+  parseModelsDevCatalog,
   projectNamesBySession,
   readOpencodeTelemetry,
   OPENCODE_SESSION_ID_CUTOFF_MS,
@@ -106,6 +107,7 @@ export async function collectOpencodeEvents({
   since,
   scanStatus,
   sessionIdCutoffMs = OPENCODE_SESSION_ID_CUTOFF_MS,
+  onWarning,
 } = {}) {
   if (!existsSync(dbPath)) return [];
   try {
@@ -116,8 +118,33 @@ export async function collectOpencodeEvents({
       projectBySession,
       sessionIdCutoffMs,
     });
-    const extraEvents = buildOpencodeExtraEvents(telemetry);
-    return filterEventsSince([...tokenEvents, ...extraEvents], since);
+    const catalog = parseModelsDevCatalog(telemetry.catalogValue);
+    // A catalog that cannot be used is not a silent event: every context row
+    // would report a null limit and the context feature would disappear
+    // without a word, so the reason goes into the run log.
+    if (catalog.problem) {
+      onWarning?.(`models.dev catalog unusable: ${catalog.problem}`);
+    }
+    // A catalog that IS usable but is not the expected shape is reported the
+    // same way: the limits still work, so the run log has to say that the
+    // envelope changed instead of letting the change pass unnoticed.
+    if (catalog.warning) {
+      onWarning?.(`models.dev catalog warning: ${catalog.warning}`);
+    }
+    const extraEvents = buildOpencodeExtraEvents({ ...telemetry, catalog, onWarning });
+    // The session fact is dated at the session's creation instant, so the
+    // window filter would drop it for every session that was created before
+    // the window even though the session is still discovered through its
+    // in-window messages.  Its content never moves and its id is the
+    // session's, so the row is stored once and every later pass dedupes
+    // against it; only sessions seen in the window emit it.
+    const sessionFacts = [];
+    const windowedExtraEvents = [];
+    for (const event of extraEvents) {
+      if (event?.label === "session") sessionFacts.push(event);
+      else windowedExtraEvents.push(event);
+    }
+    return [...filterEventsSince([...tokenEvents, ...windowedExtraEvents], since), ...sessionFacts];
   } catch (error) {
     if (scanStatus) scanStatus.complete = false;
     if (DEBUG) log(`database read failed (${error instanceof Error ? error.message : "error"})`);
@@ -133,7 +160,7 @@ export function countEventKinds(events) {
     if (label.startsWith("token:")) counts.token += 1;
     else if (label.startsWith("context:")) counts.context += 1;
     else if (label.startsWith("lifecycle:")) counts.lifecycle += 1;
-    else if (label === "session") counts.session += 1;
+    else if (label === "session" || label === "session-snapshot") counts.session += 1;
     else if (event?.metricType === "cost") counts.cost += 1;
   }
   return counts;
@@ -150,7 +177,7 @@ export function sampleEventPerKind(events) {
         ? "context"
         : label.startsWith("lifecycle:")
           ? "lifecycle"
-          : label === "session"
+          : label === "session" || label === "session-snapshot"
             ? "session"
             : event?.metricType === "cost"
               ? "cost"
@@ -181,12 +208,27 @@ async function main() {
     since: args.since,
     scanStatus,
     sessionIdCutoffMs,
+    onWarning: (message) => log(message),
   });
   const kinds = countEventKinds(events);
   log(
     `parsed ${events.length} event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}: ` +
       `${JSON.stringify(kinds)}`,
   );
+  // A context row without a limit means the models.dev catalog has no window
+  // for that provider and model, so the utilization is unknown.  Say so when
+  // it happens instead of letting the context feature quietly go blank.
+  const contextWithoutLimit = events.filter(
+    (event) =>
+      typeof event?.label === "string" &&
+      event.label.startsWith("context:") &&
+      event.metadata?.contextLimit == null,
+  ).length;
+  if (contextWithoutLimit > 0) {
+    log(
+      `${contextWithoutLimit} context row(s) carry no context limit: the models.dev catalog has no window for that provider and model`,
+    );
+  }
   if (DEBUG) {
     const models = new Set(events.map((event) => event.producerKeyRef).filter(Boolean));
     log(`models: ${[...models].join(", ") || "(none)"}`);

@@ -9,6 +9,7 @@ import {
 } from "@/lib/anomaly-detection";
 import { loadMtdDailyVariableUsageByProviderId } from "@/lib/daily-usage-series";
 import { isSubscriptionAnalyticsTelemetry } from "@/lib/external-usage-events";
+import { isTotalRequestsGaugeProvider } from "@/lib/provider-definitions";
 import { resolveProviderIdentity } from "@/lib/provider-identity";
 import { isReceiptCashEvent } from "@/lib/receipt-cash";
 
@@ -196,7 +197,7 @@ export async function loadSpendAnomaliesByProviderId(
    * Optional already-loaded providers so budget-status does not pay a second
    * `provider.findMany` (cache-dedupe asserts a single call per compute).
    */
-  knownProviders?: readonly { id: string; name: string }[],
+  knownProviders?: readonly { id: string; name: string; type?: string }[],
   options?: LoadSpendAnomaliesOptions
 ): Promise<Map<string, AnomalyResult[]>> {
   const results = new Map<string, AnomalyResult[]>();
@@ -217,7 +218,7 @@ export async function loadSpendAnomaliesByProviderId(
   const resolvedProviders = knownProviders
     ? [...knownProviders]
     : await prisma.provider.findMany({
-        select: { id: true, name: true },
+        select: { id: true, name: true, type: true },
       });
 
   // S3: scan snapshots PER PROVIDER with a per-provider cap instead of one
@@ -274,6 +275,8 @@ export async function loadSpendAnomaliesByProviderId(
     }),
   ]);
 
+  const providerById = new Map(resolvedProviders.map((p) => [p.id, p]));
+
   for (const [providerId, days] of byProvider) {
     const dayKeys = [...days.keys()].sort();
     const anomalies: AnomalyResult[] = [];
@@ -290,9 +293,20 @@ export async function loadSpendAnomaliesByProviderId(
       if (anomaly) anomalies.push({ ...anomaly, providerId });
     }
 
-    const reqCumulative = dayKeys
-      .filter((day) => day !== todayKey && days.get(day)?.requests != null)
-      .map((day) => ({ day, cumulative: days.get(day)!.requests as number }));
+    // UM-1622: gauge totalRequests (Backblaze storage MB) is a stock at poll
+    // time, not a cumulative flow. Differencing it manufactures "request
+    // spikes" from inventory swings (PD #388/#447/#463), so skip the
+    // requests series for gauge providers. Cost detection still runs, and
+    // the gauge still drives request-limit soft caps in provider-alerts.
+    const provider = providerById.get(providerId);
+    const isGauge = provider
+      ? isTotalRequestsGaugeProvider(provider.name, provider.type ?? "builtin")
+      : false;
+    const reqCumulative = isGauge
+      ? []
+      : dayKeys
+          .filter((day) => day !== todayKey && days.get(day)?.requests != null)
+          .map((day) => ({ day, cumulative: days.get(day)!.requests as number }));
     if (reqCumulative.length >= 2) {
       const anomaly = detectSeriesAnomaly(
         dailyIncrementsFromCumulative(reqCumulative),
