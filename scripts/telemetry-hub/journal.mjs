@@ -414,8 +414,18 @@ export class Journal {
     const opened = await this.fileMutex(async () => {
       const base = this.base;
       const file = await open(this.journalPath, fsConstants.O_RDONLY);
-      const info = await file.stat();
-      return { base, file, size: info.size };
+      let size;
+      try {
+        size = (await file.stat()).size;
+      } catch (error) {
+        //  The handle is only closed by the `finally` below once it has
+        //  been handed out, so a failure here has to close it itself.
+        //  Otherwise every read that fails after the open leaks a
+        //  descriptor until the process runs out of them.
+        await file.close();
+        throw error;
+      }
+      return { base, file, size };
     });
     const { base, file, size } = opened;
     try {
@@ -517,8 +527,11 @@ export class Journal {
     //  when the rewrite actually brings the file back under the cap.  A
     //  file that stays over the cap would otherwise be rewritten on every
     //  append, which amplifies the writes and stalls the receiver.
+    //  The skip is NOT unbounded, though: a destination that lags past the
+    //  cap must not make the file grow for the life of the hub, so the
+    //  rewrite runs again once the file passes a hard multiple of the cap.
     const remaining = size - Math.min(target - this.base, size);
-    if (remaining >= this.maxJournalBytes) return false;
+    if (remaining >= this.maxJournalBytes && size < this.maxJournalBytes * 2) return false;
     await this.compactTo(target);
     return true;
   }

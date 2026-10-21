@@ -1,7 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Read one fleet secret through the Mac-side `fleet-secrets` CLI (OPS-818).
@@ -58,6 +61,47 @@ export function fleetSecretsGet(
 
 export function resetFleetSecretsCache() {
   cache.clear();
+}
+
+/**
+ * The promise-based twin of `fleetSecretsGet`.
+ *
+ * `fleetSecretsGet` spawns the helper with `execFileSync`, which blocks the
+ * event loop of the calling process for as long as the helper runs.  That is
+ * fine for a short-lived collector, and wrong for a long-running process
+ * that also serves requests, so a long-running caller uses this instead.
+ *
+ * The same paths are tried in the same order and the same value is returned:
+ * a missing binary, an absent key, a fetch failure or a timeout all mean
+ * "absent" and return null.  The value is never logged.  There is no cache
+ * here: a caller that needs one memoizes the result itself, which is what
+ * keeps a rotated secret visible to a running process.
+ */
+export async function fleetSecretsGetAsync(
+  name,
+  { exec = execFileAsync, binary = fleetSecretsBinary(), paths = FLEET_SECRETS_PATHS } = {},
+) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
+  let value = null;
+  for (const secretPath of paths) {
+    try {
+      const { stdout } = await exec(binary, ["get", name, "--path", secretPath], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      });
+      const trimmed = typeof stdout === "string" ? stdout.trim() : "";
+      if (trimmed) {
+        value = trimmed;
+        break;
+      }
+    } catch {
+      // Exit 3 (absent), 4 (fetch/auth failure), 5 (unresolved reference), a
+      // timeout or a missing binary: try the next path, then report absent.
+    }
+  }
+  return value;
 }
 
 /**

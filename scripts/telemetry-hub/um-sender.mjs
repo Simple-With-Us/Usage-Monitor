@@ -34,7 +34,7 @@
 // the pushed channel would count it twice.  The gate is the same policy the
 // monitor applies to its own generic gen_ai mapper.
 
-import { fleetSecretsGet } from "../lib/fleet-secrets.mjs";
+import { fleetSecretsGetAsync } from "../lib/fleet-secrets.mjs";
 
 import { NULL_LOGGER } from "./internal-event.mjs";
 
@@ -309,7 +309,9 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
       //  secret that appears later, or a token that is rotated, would
       //  never be seen again by a running hub.  The memo above keeps the
       //  helper process to one call per minute instead of one per pass.
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
+      //  The async twin is used so a slow or hung helper cannot block the
+      //  event loop of the hub, which also serves the OTLP receiver.
+      value = await fleetSecretsGetAsync("USAGE_INGEST_TOKEN");
     } catch {
       value = undefined;
     }

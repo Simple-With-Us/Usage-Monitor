@@ -33,8 +33,11 @@ import { eventIdOf } from "./journal.mjs";
  * the event that was rejected, so nothing else of it is used.
  */
 const SENTRY_ERROR_SCHEMA = z.looseObject({
-  error: z.looseObject({ code: z.string().optional() }).optional(),
-  detail: z.string().optional(),
+  //  A `code` that is not a string must not cost the `detail` fallback,
+  //  so both are taken as unknown here and the first string is chosen
+  //  below.  The rest of the body is never read.
+  error: z.looseObject({ code: z.unknown().optional() }).optional(),
+  detail: z.unknown().optional(),
 });
 
 /** The Sentry OTLP envelopes.  Sentry does not support OTLP metrics. */
@@ -256,8 +259,9 @@ export function createSentrySender({
       //  quote the event, so nothing else of it is used.
       const parsed = SENTRY_ERROR_SCHEMA.safeParse(JSON.parse(text));
       if (parsed.success) {
-        const candidate = parsed.data.error?.code ?? parsed.data.detail;
-        if (typeof candidate === "string") code = candidate.slice(0, 64);
+        const raw = parsed.data.error?.code ?? parsed.data.detail;
+        const candidate = typeof raw === "string" ? raw : "";
+        code = candidate.slice(0, 64);
       }
     } catch {
       code = "";
