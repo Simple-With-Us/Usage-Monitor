@@ -408,12 +408,15 @@ describe("opencode collector telemetry", () => {
     const warnings = [];
     const malformedId = "msg_assistant_malformed_tokens";
     const negativeId = "msg_assistant_negative_tokens";
+    const shapeId = "msg_assistant_token_shape";
     const db = new DatabaseSync(dbPath);
     const insert = db.prepare(
       "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
-    // The cache write is an object, so it is not a token count at all.
+    // The cache write is an object, so it is not a token count at all.  The
+    // token row counts it as zero, so the context row counts it as zero too:
+    // the context metric is not lost and the totals still match.
     insert.run(
       malformedId,
       SESSION_ID,
@@ -444,22 +447,71 @@ describe("opencode collector telemetry", () => {
         cost: 0,
       }),
     );
+    // A token payload that is not an object at all is not a payload the token
+    // parser can read either: the message gets no token rows, so it gets no
+    // context row, and the shape change is reported in the run log.
+    insert.run(
+      shapeId,
+      SESSION_ID,
+      "assistant",
+      10,
+      BASE_MS + 9_000,
+      BASE_MS + 9_500,
+      JSON.stringify({
+        time: { created: BASE_MS + 9_000, completed: BASE_MS + 9_500 },
+        model: { id: "demo-model-1", providerID: "opencode" },
+        tokens: "not-an-object",
+        cost: 0,
+      }),
+    );
+    // A second message with the same shape: the shape is reported once per
+    // run, so a systematic payload change cannot flood the run log.
+    insert.run(
+      `${shapeId}_again`,
+      SESSION_ID,
+      "assistant",
+      11,
+      BASE_MS + 10_000,
+      BASE_MS + 10_500,
+      JSON.stringify({
+        time: { created: BASE_MS + 10_000, completed: BASE_MS + 10_500 },
+        model: { id: "demo-model-1", providerID: "opencode" },
+        tokens: "not-an-object",
+        cost: 0,
+      }),
+    );
     db.close();
 
     try {
       const events = await collect({ onWarning: (message) => warnings.push(message) });
       const malformedIso = new Date(BASE_MS + 7_500).toISOString();
       const negativeIso = new Date(BASE_MS + 8_500).toISOString();
-      // The malformed payload produces NO context row: a guessed total would
-      // break the promise that the context row equals the token rows' total
-      // for the same message.
+      const shapeIso = new Date(BASE_MS + 9_500).toISOString();
+      // The malformed count is zero on both sides, so the context row is
+      // still sent and its total still matches the token rows' total.
+      const malformedContext = events.find(
+        (event) => event.label.startsWith("context:") && event.occurredAt === malformedIso,
+      );
+      expect(malformedContext.metadata.contextTokens).toBe(35);
+      const malformedTokens = events
+        .filter((event) => event.label.startsWith("token:") && event.occurredAt === malformedIso)
+        .reduce((total, event) => total + event.quantity, 0);
+      expect(malformedTokens).toBe(malformedContext.metadata.contextTokens);
+      // A payload that is not the expected shape produces NO context row: a
+      // guessed total would break the promise that the context row equals the
+      // token rows' total for the same message.
       expect(
         events.find(
-          (event) => event.label.startsWith("context:") && event.occurredAt === malformedIso,
+          (event) => event.label.startsWith("context:") && event.occurredAt === shapeIso,
         ),
       ).toBeUndefined();
       // ...and it is reported, so the gap is visible in the run log.
-      expect(warnings.some((message) => message.includes(malformedId))).toBe(true);
+      expect(warnings.some((message) => message.includes(shapeId))).toBe(true);
+      // The shape is reported once per run, not once per message.
+      const shapeWarnings = warnings.filter((message) =>
+        message.includes("not the expected shape"),
+      );
+      expect(shapeWarnings.length).toBe(1);
       // The negative count is zero on both sides, so the totals still match.
       const negativeContext = events.find(
         (event) => event.label.startsWith("context:") && event.occurredAt === negativeIso,
@@ -471,7 +523,9 @@ describe("opencode collector telemetry", () => {
       expect(negativeTokens).toBe(negativeContext.metadata.contextTokens);
     } finally {
       const cleanup = new DatabaseSync(dbPath);
-      cleanup.prepare("DELETE FROM session_message WHERE id IN (?, ?)").run(malformedId, negativeId);
+      cleanup
+        .prepare("DELETE FROM session_message WHERE id IN (?, ?, ?, ?)")
+        .run(malformedId, negativeId, shapeId, `${shapeId}_again`);
       cleanup.close();
     }
   });

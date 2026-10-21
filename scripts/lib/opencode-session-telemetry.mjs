@@ -1014,18 +1014,18 @@ export function opencodeLifecycleEvent({ row, project }) {
  * One token count from opencode's assistant payload.
  *
  * The payload is untrusted external input, so it is parsed with a schema
- * before any of it reaches telemetry.  A count is a finite number or a
- * numeric string; null and an absent count are zero.  Anything else is not a
- * count, so the payload is rejected instead of guessed at.
+ * before any of it reaches telemetry.
  *
- * The count itself is read with the TOKEN PARSER'S OWN RULE
+ * The count is read with the TOKEN PARSER'S OWN RULE
  * (session-token-collectors.mjs finiteCount: a finite number above zero is the
- * count and anything else counts as zero), so the context total is always
- * exactly the token rows' total for the same message.  A negative count is
- * therefore zero here, the same as it is on the token row.
+ * count and anything else counts as zero), so a count that is not a number at
+ * all is ZERO here, exactly as it is on the token row.  The context total is
+ * therefore always exactly the token rows' total for the same message, even
+ * when one count is malformed.  A negative count is zero here too, the same
+ * as it is on the token row.
  */
 const TokenCountSchema = z
-  .union([z.number().finite(), z.string(), z.null()])
+  .unknown()
   .optional()
   .transform((value) => {
     if (value === undefined || value === null) return 0;
@@ -1036,7 +1036,9 @@ const TokenCountSchema = z
 /**
  * The cache counts inside the token payload.  The object is stripped of the
  * keys the collector does not read (opencode may publish more than read and
- * write), and a missing or null cache counts as zero on both sides.
+ * write), a missing or null cache counts as zero on both sides, and a cache
+ * that is not an object at all counts as zero as well, the same as the token
+ * row reads it.
  */
 const TokenCacheSchema = z
   .object({
@@ -1044,22 +1046,60 @@ const TokenCacheSchema = z
     write: TokenCountSchema,
   })
   .nullable()
-  .optional();
+  .optional()
+  .catch({ read: 0, write: 0 });
 
 /**
  * The token payload of one assistant message.
  *
  * The object is stripped of the keys the collector does not read, so a new
  * opencode field cannot break the parse, and every key the collector DOES
- * read is validated.  A payload that does not match produces no context row
- * at all: a context row whose total is a guess would break the promise that
- * it equals the token rows' total for the same message.
+ * read is validated.  An array carries no counts at all, and the token parser
+ * reads it as an object of zero counts, so it is normalized to an empty
+ * object here too and both sides report zero.
  */
-const OpencodeTokensSchema = z.object({
-  input: TokenCountSchema,
-  output: TokenCountSchema,
-  reasoning: TokenCountSchema,
-  cache: TokenCacheSchema,
+const OpencodeTokensSchema = z.preprocess(
+  (value) => (Array.isArray(value) ? {} : value),
+  z.object({
+    input: TokenCountSchema,
+    output: TokenCountSchema,
+    reasoning: TokenCountSchema,
+    cache: TokenCacheSchema,
+  }),
+);
+
+/**
+ * The token payload of one assistant message, as it is read at the trust
+ * boundary.
+ *
+ * `present` is false when the message carries no token payload at all, which
+ * is normal.  `total` is null when a payload is there but is not the expected
+ * shape, so the caller can report the shape change instead of sending a wrong
+ * total.
+ */
+const OpencodeTokenPayloadSchema = z.unknown().transform((value) => {
+  if (value === undefined || value === null) return { present: false, total: null };
+  const parsed = OpencodeTokensSchema.safeParse(value);
+  if (!parsed.success) return { present: true, total: null };
+  const { input, output, reasoning, cache } = parsed.data;
+  return {
+    present: true,
+    total:
+      (input ?? 0) +
+      (cache?.read ?? 0) +
+      (cache?.write ?? 0) +
+      (output ?? 0) +
+      (reasoning ?? 0),
+  };
+});
+
+/**
+ * The assistant payload, validated at the trust boundary.  Only the token
+ * payload is read from it, and it is read from the PARSED value, so no field
+ * of the untrusted payload is read before it has been validated.
+ */
+const OpencodeAssistantSchema = z.object({
+  tokens: OpencodeTokenPayloadSchema.optional(),
 });
 
 /**
@@ -1070,21 +1110,24 @@ const OpencodeTokensSchema = z.object({
  * reasoning into the output row and reports the cache write as a cache
  * creation row.
  *
- * Returns null when the payload is not the expected shape, so the caller can
- * report it instead of sending a wrong total.
+ * `present` is false when the message carries no token payload at all, and
+ * `total` is null when a payload is there but is not the expected shape, so
+ * the caller can report it instead of sending a wrong total.
  */
 export function parseOpencodeContextTokens(data) {
-  const parsed = OpencodeTokensSchema.safeParse(data?.tokens);
-  if (!parsed.success) return null;
-  const { input, output, reasoning, cache } = parsed.data;
-  return (
-    input +
-    (cache?.read ?? 0) +
-    (cache?.write ?? 0) +
-    output +
-    reasoning
-  );
+  const parsed = OpencodeAssistantSchema.safeParse(data);
+  if (!parsed.success) return { present: false, total: null };
+  const tokens = parsed.data.tokens;
+  if (!tokens) return { present: false, total: null };
+  return tokens;
 }
+
+/**
+ * The shape key for the "token payload is not the expected shape" warning.
+ * One shape is reported once per run, so a systematic payload change cannot
+ * flood the run log.
+ */
+const TOKEN_PAYLOAD_SHAPE = "malformed-token-payload";
 
 /**
  * Every non-token event for one window: the reported cost, the context
@@ -1112,6 +1155,9 @@ export function buildOpencodeExtraEvents({
   const lastActivityBySession = new Map();
 
   const events = [];
+  // Every warning shape is reported once per run, so a systematic payload
+  // change cannot log one line per malformed message on every pass.
+  const warnedTokenShapes = new Set();
   for (const row of assistantRows) {
     const data = parseJson(row?.data);
     if (!data) continue;
@@ -1150,16 +1196,19 @@ export function buildOpencodeExtraEvents({
 
     // The token payload is untrusted external input, so the context total is
     // derived from the PARSED payload and not from the raw optional chaining.
-    // A payload that is not the expected shape produces no context row: a
-    // guessed total would break the promise that the context row equals the
-    // token rows' total for the same message.
-    const contextTokens = parseOpencodeContextTokens(data);
-    const hasTokenPayload = data?.tokens !== undefined && data?.tokens !== null;
+    // A count that is not a number is zero, exactly as it is on the token
+    // row, so the context total is always the token rows' total for the same
+    // message.  A payload that is not the expected shape produces no context
+    // row at all.
+    const { present: hasTokenPayload, total: contextTokens } =
+      parseOpencodeContextTokens(data);
     if (contextTokens === null) {
       // A message with no token payload at all is normal (opencode writes
       // assistant rows without tokens), so only a payload that is present and
-      // malformed is worth a word in the run log.
-      if (hasTokenPayload) {
+      // malformed is worth a word in the run log.  The shape is reported once
+      // per run, so a systematic payload change cannot flood the run log.
+      if (hasTokenPayload && !warnedTokenShapes.has(TOKEN_PAYLOAD_SHAPE)) {
+        warnedTokenShapes.add(TOKEN_PAYLOAD_SHAPE);
         onWarning?.(
           `opencode assistant message ${messageId} carries a token payload that is not the expected shape, so no context row was sent for it`,
         );
