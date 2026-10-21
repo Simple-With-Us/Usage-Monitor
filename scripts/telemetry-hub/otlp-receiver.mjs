@@ -100,35 +100,129 @@ const OtlpLogRecordSchema = z.looseObject({
   flags: z.number().optional(),
 });
 
+//  The spans and the log rows are held as unknown values here, because
+//  they are checked one by one below.  A whole array of rows is never
+//  rejected because of one bad row in it.
 const OtlpScopeSpansSchema = z.looseObject({
   scope: OtlpScopeSchema.optional(),
-  spans: z.array(OtlpSpanSchema).optional(),
+  spans: z.array(z.unknown()).optional(),
 });
 
 const OtlpScopeLogsSchema = z.looseObject({
   scope: OtlpScopeSchema.optional(),
-  logRecords: z.array(OtlpLogRecordSchema).optional(),
+  logRecords: z.array(z.unknown()).optional(),
 });
 
+//  The scope entries are held as unknown values here too, because they are
+//  checked one by one in the loops below.  A scope entry that does not
+//  match costs that entry only, and never its siblings in the same
+//  resource.
 const OtlpResourceSpansSchema = z.looseObject({
   resource: OtlpResourceSchema.optional(),
-  scopeSpans: z.array(OtlpScopeSpansSchema).optional(),
+  scopeSpans: z.array(z.unknown()).optional(),
 });
 
 const OtlpResourceLogsSchema = z.looseObject({
   resource: OtlpResourceSchema.optional(),
-  scopeLogs: z.array(OtlpScopeLogsSchema).optional(),
+  scopeLogs: z.array(z.unknown()).optional(),
 });
 
-/** The accepted shape of an OTLP traces payload. */
+/**
+ * The accepted shape of an OTLP traces envelope.
+ *
+ * The envelope is checked on its own: a payload that is not an OTLP
+ * payload at all is refused.  The rows inside it are checked one by one,
+ * so a single malformed span does not cost the whole batch.
+ */
 export const OTLP_TRACES_SCHEMA = z.looseObject({
-  resourceSpans: z.array(OtlpResourceSpansSchema).optional(),
+  resourceSpans: z.array(z.unknown()).optional(),
 });
 
-/** The accepted shape of an OTLP logs payload. */
+/** The accepted shape of an OTLP logs envelope. */
 export const OTLP_LOGS_SCHEMA = z.looseObject({
-  resourceLogs: z.array(OtlpResourceLogsSchema).optional(),
+  resourceLogs: z.array(z.unknown()).optional(),
 });
+
+/** The answer of the receiver, for a caller that wants to check it. */
+export const RECEIVER_RESPONSE_SCHEMA = z.looseObject({
+  ok: z.boolean().optional(),
+  received: z.number().int().nonnegative().optional(),
+  ignored: z.number().int().nonnegative().optional(),
+  written: z.number().int().nonnegative().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * Keep the resources, the scopes and the rows that are well formed.
+ *
+ * Every level is checked on its own, so one bad span or one bad log row
+ * costs that row only.  The count of the dropped rows is returned, and
+ * the caller reports it.
+ */
+function projectTraces(payload) {
+  const resources = [];
+  let dropped = 0;
+  for (const rawResource of payload.resourceSpans ?? []) {
+    const resource = OtlpResourceSpansSchema.safeParse(rawResource);
+    if (!resource.success) {
+      dropped += 1;
+      continue;
+    }
+    const scopeSpans = [];
+    for (const rawScope of resource.data.scopeSpans ?? []) {
+      const scope = OtlpScopeSpansSchema.safeParse(rawScope);
+      if (!scope.success) {
+        dropped += 1;
+        continue;
+      }
+      const spans = [];
+      for (const rawSpan of scope.data.spans ?? []) {
+        const span = OtlpSpanSchema.safeParse(rawSpan);
+        if (!span.success) {
+          dropped += 1;
+          continue;
+        }
+        spans.push(span.data);
+      }
+      if (spans.length > 0) scopeSpans.push({ scope: scope.data.scope, spans });
+    }
+    if (scopeSpans.length > 0) resources.push({ resource: resource.data.resource, scopeSpans });
+  }
+  return { payload: { resourceSpans: resources }, dropped };
+}
+
+/** Keep the log rows that are well formed.  See `projectTraces`. */
+function projectLogs(payload) {
+  const resources = [];
+  let dropped = 0;
+  for (const rawResource of payload.resourceLogs ?? []) {
+    const resource = OtlpResourceLogsSchema.safeParse(rawResource);
+    if (!resource.success) {
+      dropped += 1;
+      continue;
+    }
+    const scopeLogs = [];
+    for (const rawScope of resource.data.scopeLogs ?? []) {
+      const scope = OtlpScopeLogsSchema.safeParse(rawScope);
+      if (!scope.success) {
+        dropped += 1;
+        continue;
+      }
+      const logRecords = [];
+      for (const rawRecord of scope.data.logRecords ?? []) {
+        const record = OtlpLogRecordSchema.safeParse(rawRecord);
+        if (!record.success) {
+          dropped += 1;
+          continue;
+        }
+        logRecords.push(record.data);
+      }
+      if (logRecords.length > 0) scopeLogs.push({ scope: scope.data.scope, logRecords });
+    }
+    if (scopeLogs.length > 0) resources.push({ resource: resource.data.resource, scopeLogs });
+  }
+  return { payload: { resourceLogs: resources }, dropped };
+}
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -292,13 +386,15 @@ async function handleRequest(request, response, { journal, logger }) {
     return;
   }
 
-  //  The payload is validated before a normalizer sees it.  A payload that
-  //  does not match is refused with 400 and a fixed message: the answer
-  //  never quotes the payload.
-  const schema = path === "/v1/traces" ? OTLP_TRACES_SCHEMA : OTLP_LOGS_SCHEMA;
+  //  The envelope is validated before a normalizer sees it, and then the
+  //  rows inside it are validated one by one.  A payload that is not an
+  //  OTLP payload at all, or one that has no usable row left, is refused
+  //  with 400 and a fixed message: the answer never quotes the payload.
+  const isTraces = path === "/v1/traces";
+  const schema = isTraces ? OTLP_TRACES_SCHEMA : OTLP_LOGS_SCHEMA;
   const checked = schema.safeParse(payload);
   if (!checked.success) {
-    logger.warn("the otlp payload does not match the expected shape", {
+    logger.warn("the otlp payload is not an otlp envelope", {
       path,
       issues: checked.error.issues.length,
     });
@@ -306,8 +402,21 @@ async function handleRequest(request, response, { journal, logger }) {
     return;
   }
 
-  const normalized =
-    path === "/v1/traces" ? normalizeOtlpTraces(checked.data) : normalizeOtlpLogs(checked.data);
+  const projected = isTraces ? projectTraces(checked.data) : projectLogs(checked.data);
+  const normalized = isTraces
+    ? normalizeOtlpTraces(projected.payload)
+    : normalizeOtlpLogs(projected.payload);
+  const ignored = normalized.ignored + projected.dropped;
+  if (projected.dropped > 0) {
+    logger.warn("the otlp payload had rows that do not match the expected shape", {
+      path,
+      dropped: projected.dropped,
+    });
+  }
+  if (normalized.events.length === 0) {
+    sendJson(response, 400, { error: "The OTLP payload has no usable row" });
+    return;
+  }
 
   //  One write and one fsync for the whole batch: a flush per event delays
   //  the answer and invites the producer to retry the same spans.
@@ -315,14 +424,14 @@ async function handleRequest(request, response, { journal, logger }) {
   logger.info("receiver accepted a batch", {
     path,
     received: normalized.events.length,
-    ignored: normalized.ignored,
+    ignored,
     written: normalized.events.length,
     bytes: written,
   });
   sendJson(response, 200, {
     ok: true,
     received: normalized.events.length,
-    ignored: normalized.ignored,
+    ignored,
     written: normalized.events.length,
   });
 }

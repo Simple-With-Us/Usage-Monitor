@@ -111,6 +111,17 @@ function createMutex() {
   };
 }
 
+/**
+ * The id of an event, when the event carries a valid one.
+ *
+ * The journal validates every row before a sender can see it, so this is
+ * the second guard for a caller that maps ids out of an event.
+ */
+export function eventIdOf(event) {
+  const checked = JournalEventSchema.safeParse(event);
+  return checked.success ? checked.data.eventId : undefined;
+}
+
 /** A destination name becomes a file name, so it is restricted. */
 export function normalizeDestination(name) {
   const value = String(name ?? "").trim().toLowerCase();
@@ -395,21 +406,29 @@ export class Journal {
     if (!this.handle && !(await this.exists())) {
       return { events, endOffset: start };
     }
-    //  The base must belong to the file that is read.  A compaction that
-    //  renames the journal between the two would leave this read with the
-    //  OLD base and the NEW file, so `start - base` is too large by the
-    //  compacted bytes and the destination silently skips every event
-    //  between its offset and the compaction point.  Capturing the base
-    //  and opening the file together under the compaction mutex keeps the
-    //  two in step.  Once the descriptor is open the rename cannot change
-    //  the file it refers to, so the rest of the read runs unlocked.
-    const { base, file } = await this.fileMutex(async () => {
-      const opened = await open(this.journalPath, fsConstants.O_RDONLY);
-      return { base: this.base, file: opened };
+    //  The base and the file are taken together, under the file mutex, so
+    //  a compaction cannot slip between them.  A compaction that runs
+    //  after this point replaces the file, but the handle below still
+    //  points at the file this read belongs to, so the positions of this
+    //  read and the base of this read always belong together.
+    const opened = await this.fileMutex(async () => {
+      const base = this.base;
+      const file = await open(this.journalPath, fsConstants.O_RDONLY);
+      let size;
+      try {
+        size = (await file.stat()).size;
+      } catch (error) {
+        //  The handle is only closed by the `finally` below once it has
+        //  been handed out, so a failure here has to close it itself.
+        //  Otherwise every read that fails after the open leaks a
+        //  descriptor until the process runs out of them.
+        await file.close();
+        throw error;
+      }
+      return { base, file, size };
     });
+    const { base, file, size } = opened;
     try {
-      const info = await file.stat();
-      const size = info.size;
       const fileStart = Math.max(0, start - base);
       if (fileStart >= size) return { events, endOffset: start };
       const decoder = new StringDecoder("utf8");
@@ -504,6 +523,19 @@ export class Journal {
     if (target <= this.base) return false;
     const size = await this.fileSize();
     if (size <= this.maxJournalBytes) return false;
+    //  The compaction rewrites the whole remaining file, so it is only
+    //  worth its copy when the consumed prefix is a real part of the file.
+    //  While the unconsumed backlog is still over the cap the rewrite
+    //  cannot bring the file under it, so skipping keeps the write
+    //  amplification at 2x instead of copying the whole file for every
+    //  byte a slow destination consumes.
+    //  The skip is NOT unbounded, though: once the consumed prefix is at
+    //  least half the file the copy pays for itself, so the file still
+    //  shrinks.  That bounds the file at 2x the unconsumed backlog, which
+    //  is the smallest it can ever be while that backlog is retained.
+    const prefix = Math.min(target - this.base, size);
+    const remaining = size - prefix;
+    if (remaining >= this.maxJournalBytes && prefix * 2 < size) return false;
     await this.compactTo(target);
     return true;
   }

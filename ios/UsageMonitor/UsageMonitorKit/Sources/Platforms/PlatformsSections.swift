@@ -296,6 +296,7 @@ struct FleetBackupsSection: View {
     }
 
     private func locationTitle(_ location: ServerMetrics.FleetBackups.Location) -> String {
+        if location.unknown == true { return "Unknown" }
         if location.ok == true { return "OK" }
         if location.ok == false {
             return location.present == true ? "Lagging" : "Missing"
@@ -310,6 +311,7 @@ struct FleetBackupsSection: View {
     private func locationStatus(
         _ location: ServerMetrics.FleetBackups.Location
     ) -> Theme.SemanticStatus {
+        if location.unknown == true { return .neutral }
         if location.present == false { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }

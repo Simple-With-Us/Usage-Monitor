@@ -20,9 +20,25 @@
 // it is still read from the environment.
 
 import { gzipSync } from "node:zlib";
+import { z } from "zod";
 
 import { scrubInternalEvent } from "./allowlist.mjs";
 import { NULL_LOGGER } from "./internal-event.mjs";
+import { eventIdOf } from "./journal.mjs";
+
+/**
+ * The shape of the answer of Sentry to a rejected batch.
+ *
+ * Only the error code is read out of it.  The rest of the body can quote
+ * the event that was rejected, so nothing else of it is used.
+ */
+const SENTRY_ERROR_SCHEMA = z.looseObject({
+  //  A `code` that is not a string must not cost the `detail` fallback,
+  //  so both are taken as unknown here and the first string is chosen
+  //  below.  The rest of the body is never read.
+  error: z.looseObject({ code: z.unknown().optional() }).optional(),
+  detail: z.unknown().optional(),
+});
 
 /** The Sentry OTLP envelopes.  Sentry does not support OTLP metrics. */
 export const SENTRY_TRACES_PATH = "/v1/traces";
@@ -238,9 +254,15 @@ export function createSentrySender({
     let code = "";
     try {
       const text = await response.text();
-      const parsed = JSON.parse(text);
-      const candidate = parsed?.error?.code ?? parsed?.detail;
-      if (typeof candidate === "string") code = candidate.slice(0, 64);
+      //  The body of a rejected batch is checked before it is read, and
+      //  only the error code is kept.  The body of a Sentry answer can
+      //  quote the event, so nothing else of it is used.
+      const parsed = SENTRY_ERROR_SCHEMA.safeParse(JSON.parse(text));
+      if (parsed.success) {
+        const raw = parsed.data.error?.code ?? parsed.data.detail;
+        const candidate = typeof raw === "string" ? raw : "";
+        code = candidate.slice(0, 64);
+      }
     } catch {
       code = "";
     }
@@ -367,7 +389,7 @@ export function createSentrySender({
         //  of the failed chunk that the isolation split delivered before
         //  the failure: they reached Sentry, so they must be marked.
         const partial = [...outcome.delivered, ...outcome.quarantined]
-          .map((event) => event?.eventId)
+          .map((event) => eventIdOf(event))
           .filter((id) => typeof id === "string" && id);
         await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
         logger.warn("sentry is not accepting the batch", {
@@ -396,7 +418,7 @@ export function createSentrySender({
         //  The same rule as the span chunks: the events of the failed
         //  chunk that were delivered before the failure stay delivered.
         const partial = [...outcome.delivered, ...outcome.quarantined]
-          .map((event) => event?.eventId)
+          .map((event) => eventIdOf(event))
           .filter((id) => typeof id === "string" && id);
         await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
         logger.warn("sentry is not accepting the batch", {
