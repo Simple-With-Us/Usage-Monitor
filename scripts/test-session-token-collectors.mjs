@@ -1143,19 +1143,31 @@ try {
   db.close();
   const ocCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
   // Six token rows (msg_1 has four token types, msg_2 has two) plus the cost
-  // row for msg_1, which reported a real cost.  The fixture database has no
-  // session_v2 / project / kv tables, so no session, context or lifecycle
-  // rows are produced.
-  assert(ocCollected.length === 7, `opencode collector reads assistant rows (${ocCollected.length})`);
+  // row for msg_1, which reported a real cost, plus one context row per
+  // assistant message.  The fixture database has no session_v2 / project / kv
+  // tables, so there is no models.dev catalog: the context rows report the
+  // used tokens and leave the limit null, and no session or lifecycle rows
+  // are produced.
+  assert(
+    ocCollected.length === 9,
+    `opencode collector reads assistant rows (${ocCollected.length})`,
+  );
   assert(
     ocCollected.filter((e) => e.label.startsWith("token:")).length === 6 &&
       ocCollected.filter((e) => e.metricType === "cost").length === 1 &&
       ocCollected.filter((e) => e.metricType === "cost")[0]?.costUsd === 0.000513474,
     "opencode collector adds one cost row for the reported cost",
   );
+  assert(
+    ocCollected.filter((e) => e.label.startsWith("context:")).length === 2 &&
+      ocCollected
+        .filter((e) => e.label.startsWith("context:"))
+        .every((e) => e.metricType === "limit" && e.metadata.contextLimit === null),
+    "opencode collector reports the used tokens with a null limit when no catalog exists",
+  );
   const ocRecent = await collectOpencodeEvents({ dbPath, since: new Date(1792198590000) });
   assert(
-    ocRecent.length === 5 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
+    ocRecent.length === 6 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
     "opencode collector honours the since watermark",
   );
   assert(

@@ -17,6 +17,7 @@ import {
 const SESSION_ID = "ses_fixture";
 const MESSAGE_ID = "msg_assistant_paid";
 const FREE_MESSAGE_ID = "msg_assistant_free";
+const NO_LIMIT_MESSAGE_ID = "msg_assistant_no_limit";
 const CONTEXT_LIMIT = 1_000_000;
 const BASE_MS = 1_792_000_000_000;
 
@@ -33,6 +34,16 @@ const FREE_MESSAGE = {
   time: { created: BASE_MS + 2_000, completed: BASE_MS + 3_000 },
   model: { id: "demo-model-1", providerID: "opencode", variant: "max" },
   tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+  cost: 0,
+};
+
+// The catalog publishes demo-model-1 under two providers, but NOT under the
+// provider this message used, so the collector has no limit for it.  The row
+// still reports the used tokens and leaves the limit null.
+const NO_LIMIT_MESSAGE = {
+  time: { created: BASE_MS + 6_000, completed: BASE_MS + 6_500 },
+  model: { id: "demo-model-1", providerID: "meta" },
+  tokens: { input: 20, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   cost: 0,
 };
 
@@ -193,6 +204,15 @@ beforeAll(async () => {
     BASE_MS + 5_000,
     JSON.stringify(MODEL_SWITCH_MESSAGE),
   );
+  insertMessage.run(
+    NO_LIMIT_MESSAGE_ID,
+    SESSION_ID,
+    "assistant",
+    7,
+    BASE_MS + 6_000,
+    BASE_MS + 6_500,
+    JSON.stringify(NO_LIMIT_MESSAGE),
+  );
 
   db.prepare("INSERT INTO kv (key, value) VALUES (?, ?)").run(
     "models-dev:catalog",
@@ -247,27 +267,63 @@ describe("opencode collector telemetry", () => {
     expect(freeCostEvents).toHaveLength(0);
   });
 
-  it("reports context utilization with the catalog limit, remaining credits and token quantity", async () => {
+  it("reports context utilization with the catalog limit, remaining percent and token quantity", async () => {
     const events = await collect();
     const contextEvents = byLabel(events, "context:");
-    expect(contextEvents).toHaveLength(2);
+    expect(contextEvents).toHaveLength(3);
 
     const paid = contextEvents.find((event) => event.occurredAt === new Date(BASE_MS + 1_000).toISOString());
     expect(paid).toBeDefined();
-    expect(paid.metricType).toBe("quota");
+    // metricType "limit" keeps the row out of the subscription quota panels
+    // (UM's quota loader filters metricType = 'quota') and out of every
+    // token total (UM sums metricType "usage" with unit "token").
+    expect(paid.metricType).toBe("limit");
+    expect(paid.metricType).not.toBe("quota");
     expect(paid.unit).toBe("token");
-    // input 100 + cache.read 200 + output 50
-    expect(paid.quantity).toBe(350);
-    expect(paid.metadata.contextTokens).toBe(350);
+    // input 100 + cache.read 200 + output 50 + reasoning 10, which is the
+    // same total the token rows report for this message.
+    expect(paid.quantity).toBe(360);
+    expect(paid.metadata.contextTokens).toBe(360);
     expect(paid.metadata.contextLimit).toBe(CONTEXT_LIMIT);
-    // UM reads a quota row's remaining percent as credits / limit * 100, so
-    // limit is the percent scale (100) and credits is the percent remaining.
-    expect(paid.limit).toBe(100);
-    expect(paid.credits).toBeCloseTo(99.97, 2);
-    expect(paid.metadata.contextUsedPercent).toBeCloseTo(0.03, 2);
-    expect(paid.metadata.contextRemainingPercent).toBeCloseTo(99.97, 2);
-    expect(paid.metadata.quotaWindow).toBe("context");
+    expect(paid.limit).toBe(CONTEXT_LIMIT);
+    expect(paid.metadata.contextUsedPercent).toBeCloseTo(0.04, 3);
+    expect(paid.metadata.contextRemainingPercent).toBeCloseTo(99.96, 3);
+    // No quota shape leaks into the row.
+    expect(paid.credits).toBeUndefined();
+    expect(paid.metadata.quotaWindow).toBeUndefined();
     expect(paid.metadata.sessionId).toBe(SESSION_ID);
+  });
+
+  it("keeps the context row out of the token totals and the quota windows", async () => {
+    const events = await collect();
+    for (const event of events) {
+      // UM sums tokens ONLY from metricType "usage" with unit "token".
+      if (event.label.startsWith("token:")) {
+        expect(event.metricType).toBe("usage");
+        expect(event.unit).toBe("token");
+      }
+      // UM builds the quota windows ONLY from metricType "quota".
+      if (event.label.startsWith("context:")) {
+        expect(event.metricType).not.toBe("quota");
+        expect(event.metricType).not.toBe("usage");
+      }
+    }
+    const contextEvents = byLabel(events, "context:");
+    expect(contextEvents.every((event) => event.metricType === "limit")).toBe(true);
+  });
+
+  it("reports the used tokens with a null limit when the catalog has no window for the provider", async () => {
+    const events = await collect();
+    const noLimit = byLabel(events, "context:").find(
+      (event) => event.occurredAt === new Date(BASE_MS + 6_500).toISOString(),
+    );
+    expect(noLimit).toBeDefined();
+    // The model is published under another provider in the catalog (424242),
+    // so that window must not be borrowed for this provider.
+    expect(noLimit.metadata.contextLimit).toBeNull();
+    expect(noLimit.limit).toBeUndefined();
+    expect(noLimit.metadata.contextUsedPercent).toBeNull();
+    expect(noLimit.quantity).toBe(20);
   });
 
   it("keeps the token rows byte-identical to the shared parser and adds no token rows", async () => {
@@ -331,33 +387,71 @@ describe("opencode collector telemetry", () => {
     }
   });
 
-  it("emits one session-fact row per session and does not duplicate it on a second pass", async () => {
+  it("emits one stable session-fact row per session and one snapshot row", async () => {
     const first = await collect();
     const second = await collect();
     const firstSessionRows = first.filter((event) => event.label === "session");
     const secondSessionRows = second.filter((event) => event.label === "session");
     expect(firstSessionRows).toHaveLength(1);
     expect(secondSessionRows).toHaveLength(1);
+    // The id is the session's, so a replay dedupes instead of storing the
+    // same fact again.
     expect(secondSessionRows[0].eventId).toBe(firstSessionRows[0].eventId);
 
     const sessionRow = firstSessionRows[0];
     expect(sessionRow.metricType).toBe("usage");
     expect(sessionRow.unit).toBe("row");
-    expect(sessionRow.metadata.sessionTitle).toBe("Fixture session");
+    // The row counts the session; it never re-reports the session's totals,
+    // so a pass can never inflate a usage rollup.
+    expect(sessionRow.quantity).toBe(1);
+    expect(sessionRow.metadata.sessionId).toBe(SESSION_ID);
     expect(sessionRow.metadata.sessionCreatedAt).toBe(new Date(BASE_MS).toISOString());
-    expect(sessionRow.metadata.sessionLastActivityAt).toBe(new Date(BASE_MS + 5_000).toISOString());
-    expect(sessionRow.metadata.messageCountAssistant).toBe(2);
-    expect(sessionRow.metadata.messageCountUser).toBe(1);
-    expect(sessionRow.metadata.messageCountSystem).toBe(1);
-    expect(sessionRow.metadata.messageCountCompaction).toBe(1);
-    expect(sessionRow.metadata.messageCountModelSwitched).toBe(1);
-    expect(sessionRow.metadata.filesChangedAdditions).toBe(3);
-    expect(sessionRow.metadata.filesChangedDeletions).toBe(1);
-    expect(sessionRow.metadata.filesChangedFiles).toBe(2);
-    expect(sessionRow.metadata.sessionCostUsd).toBeCloseTo(0.0123, 10);
+    expect(sessionRow.occurredAt).toBe(new Date(BASE_MS).toISOString());
+
+    const snapshots = first.filter((event) => event.label === "session-snapshot");
+    expect(snapshots).toHaveLength(1);
+    const snapshot = snapshots[0];
+    expect(snapshot.unit).toBe("row");
+    expect(snapshot.quantity).toBe(1);
+    expect(snapshot.metadata.sessionId).toBe(SESSION_ID);
+    expect(snapshot.metadata.sessionTitle).toBe("Fixture session");
+    expect(snapshot.metadata.sessionLastActivityAt).toBe(new Date(BASE_MS + 6_000).toISOString());
+    expect(snapshot.metadata.messageCountAssistant).toBe(3);
+    expect(snapshot.metadata.messageCountUser).toBe(1);
+    expect(snapshot.metadata.messageCountSystem).toBe(1);
+    expect(snapshot.metadata.messageCountCompaction).toBe(1);
+    expect(snapshot.metadata.messageCountModelSwitched).toBe(1);
+    expect(snapshot.metadata.filesChangedAdditions).toBe(3);
+    expect(snapshot.metadata.filesChangedDeletions).toBe(1);
+    expect(snapshot.metadata.filesChangedFiles).toBe(2);
+    expect(snapshot.metadata.sessionCostUsd).toBeCloseTo(0.0123, 10);
     // The session cost stays in metadata: the per-message cost event already
     // carries the cash, and a top-level costUsd would double count it.
-    expect(sessionRow.costUsd).toBeUndefined();
+    expect(snapshot.costUsd).toBeUndefined();
+  });
+
+  it("keeps the session-fact id stable when the session moves on", async () => {
+    const first = await collect();
+    const firstSession = first.find((event) => event.label === "session");
+    const firstSnapshot = first.find((event) => event.label === "session-snapshot");
+
+    // The session keeps working: its last activity and its counters move.
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE session_v2 SET time_updated = ? WHERE id = ?").run(BASE_MS + 9_000, SESSION_ID);
+    db.close();
+
+    const second = await collect();
+    const secondSession = second.find((event) => event.label === "session");
+    const secondSnapshot = second.find((event) => event.label === "session-snapshot");
+
+    // The session fact did not change, so its id did not change either: the
+    // replay dedupes against the stored row.
+    expect(secondSession.eventId).toBe(firstSession.eventId);
+    expect(secondSession.metadata).toEqual(firstSession.metadata);
+    // The moving state is reported by the snapshot row, whose id is the hash
+    // of the snapshot, so a changed snapshot is a new row and never a
+    // conflict against the stored one.
+    expect(secondSnapshot.eventId).not.toBe(firstSnapshot.eventId);
   });
 
   it("emits lifecycle rows for compaction and model switches", async () => {
@@ -374,6 +468,43 @@ describe("opencode collector telemetry", () => {
     expect(compaction.metadata.sessionId).toBe(SESSION_ID);
     expect(compaction.metadata.project).toBe("Demo-Project");
     expect(compaction.unit).toBe("row");
+  });
+
+  it("resolves the lifecycle provider from the row itself, not from the window", async () => {
+    const events = await collect();
+    const lifecycle = byLabel(events, "lifecycle:");
+    // The rows name their own model, so the provider does not move when the
+    // assistant rows of the current window age out.
+    const compaction = lifecycle.find((event) => event.label === "lifecycle:compaction");
+    expect(compaction.provider).toBe("opencode");
+    expect(compaction.metadata.providerId).toBe("opencode");
+    // The event id covers the content, so a replay of the same row dedupes.
+    const again = await collect();
+    const againCompaction = byLabel(again, "lifecycle:").find(
+      (event) => event.label === "lifecycle:compaction",
+    );
+    expect(againCompaction.eventId).toBe(compaction.eventId);
+  });
+
+  it("rejects a malformed models.dev catalog instead of guessing a limit", async () => {
+    const { parseModelsDevCatalog } = await import("../lib/opencode-session-telemetry.mjs");
+    // The envelope must match the documented shape.
+    expect(parseModelsDevCatalog("not json")).toBeNull();
+    expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: 5 }))).toBeNull();
+    expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: "{}" }))).not.toBeNull();
+    // A malformed vendor is skipped, the other vendors keep their limits.
+    const catalog = parseModelsDevCatalog(
+      JSON.stringify({
+        updatedAt: "2026-10-20T00:00:00.000Z",
+        digest: "fixture",
+        body: JSON.stringify({
+          good: { models: { "m1": { limit: { context: 1000 } } } },
+          bad: { models: { "m2": { limit: { context: "huge" } } } },
+        }),
+      }),
+    );
+    expect(catalog.limitFor("good", "m1")).toBe(1000);
+    expect(catalog.limitFor("bad", "m2")).toBeNull();
   });
 
   it("keeps every event inside the shared v2 contract", async () => {
@@ -412,7 +543,12 @@ describe("opencode collector telemetry", () => {
     const events = await collectOpencodeEvents({ dbPath: barePath, since: new Date(0) });
     expect(events.length).toBeGreaterThan(0);
     expect(events.every((event) => event.project === undefined)).toBe(true);
-    expect(byLabel(events, "context:")).toHaveLength(0);
+    // Without a catalog there is no context window, but the row still
+    // reports the tokens the turn used and leaves the limit null.
+    const contextEvents = byLabel(events, "context:");
+    expect(contextEvents).toHaveLength(1);
+    expect(contextEvents[0].metadata.contextLimit).toBeNull();
+    expect(contextEvents[0].limit).toBeUndefined();
     expect(events.filter((event) => event.label === "session")).toHaveLength(0);
   });
 });
