@@ -393,6 +393,49 @@ describe("the otlp receiver", () => {
     }
   });
 
+  it("keeps a good scope when a sibling scope is malformed", async () => {
+    const { journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [
+            {
+              scopeSpans: [
+                { scope: { name: "a-broken-scope" }, spans: "not an array" },
+                {
+                  scope: { name: "a-good-scope" },
+                  spans: [
+                    {
+                      traceId: "c".repeat(32),
+                      spanId: "d".repeat(16),
+                      name: "a-span",
+                      startTimeUnixNano: "1700000000000000000",
+                      endTimeUnixNano: "1700000001000000000",
+                      attributes: [{ key: "gen_ai.request.model", value: { stringValue: "a-model" } }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const body = RECEIVER_RESPONSE_SCHEMA.parse(await response.json());
+      assert.equal(body.written, 1);
+      assert.equal(body.ignored, 1);
+      const batch = await journal.readBatch("um-turns", 10);
+      assert.equal(batch.events.length, 1);
+      assert.equal(batch.events[0].model, "a-model");
+    } finally {
+      await receiver.close();
+    }
+  });
+
   it("refuses a payload that has no usable row", async () => {
     const { journal } = await openJournal();
     const receiver = createReceiver({ journal, port: 0 });

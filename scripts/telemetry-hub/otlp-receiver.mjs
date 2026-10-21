@@ -113,14 +113,18 @@ const OtlpScopeLogsSchema = z.looseObject({
   logRecords: z.array(z.unknown()).optional(),
 });
 
+//  The scope entries are held as unknown values here too, because they are
+//  checked one by one in the loops below.  A scope entry that does not
+//  match costs that entry only, and never its siblings in the same
+//  resource.
 const OtlpResourceSpansSchema = z.looseObject({
   resource: OtlpResourceSchema.optional(),
-  scopeSpans: z.array(OtlpScopeSpansSchema).optional(),
+  scopeSpans: z.array(z.unknown()).optional(),
 });
 
 const OtlpResourceLogsSchema = z.looseObject({
   resource: OtlpResourceSchema.optional(),
-  scopeLogs: z.array(OtlpScopeLogsSchema).optional(),
+  scopeLogs: z.array(z.unknown()).optional(),
 });
 
 /**
