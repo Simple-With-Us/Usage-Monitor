@@ -93,7 +93,9 @@ struct FleetBackupDetailView: View {
                 StatusBadge(
                     labelText,
                     status: locationStatus(location),
-                    systemImage: location.ok == true ? "checkmark" : "exclamationmark"
+                    systemImage: location.unknown == true
+                        ? "questionmark.circle"
+                        : location.ok == true ? "checkmark" : "exclamationmark"
                 )
             }
             if let detail = locationDetail(location) {
@@ -126,9 +128,13 @@ struct FleetBackupDetailView: View {
 
     private func locationStatus(_ location: ServerMetrics.FleetBackups.Location) -> Theme.SemanticStatus {
         if location.unknown == true { return .neutral }
+        // A deliberately skipped check observed nothing: every row is neutral,
+        // flag or no flag, so the two call sites never disagree.
+        if fleet.offline == true { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }
-        return .warning
+        // No probe result at all is unknown, never a failure.
+        return .neutral
     }
 
     private func locationDetail(_ location: ServerMetrics.FleetBackups.Location) -> String? {

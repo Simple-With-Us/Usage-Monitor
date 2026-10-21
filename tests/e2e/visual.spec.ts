@@ -472,27 +472,56 @@ test('visual: fleet alerts card with firing topic', async ({ page }) => {
   await expect(card).toHaveScreenshot('fleet-alerts-card.png', stableShot);
 });
 
-// Fleet Backups card offline state (#1715, Kody rule [4]): the e2e server
-// runs with OPERATIONS_HEALTH_OFFLINE=true, so /api/operations already
-// returns the skipped-check payload - pin exactly what a user sees then.
-// Relative times, backup ages and object counts are masked: they depend on
-// wall-clock and server state, not on the offline presentation under test.
+// Fleet Backups card offline state (#1715, Kody rule [4]): pin the card
+// against a FROZEN offline payload - the real e2e server's fleetBackups rows
+// derive from runner-local backup state (filesystem snapshots, litestream
+// side-channel), which would make the baseline machine-specific. The rest of
+// /api/operations still comes from the test server, so the page renders its
+// other cards normally. asOf is pinned to FROZEN_NOW_ISO and the page clock
+// is frozen, so the relative time renders deterministically.
 test('visual: fleet backups card offline', async ({ page }) => {
   test.setTimeout(90_000);
   await settle(page);
+  const offlineRow = (id: string, label: string) => ({
+    id, label,
+    ok: null, present: false, unknown: true,
+    latestAgeSeconds: null, bytes: null, fileCount: null,
+    reason: 'peer_health_offline',
+  });
+  // Registered after settle() so it wins over the catch-all /api/** route.
+  await page.route('**/api/operations', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.fleetBackups = {
+      configured: false,
+      offline: true,
+      ok: false,
+      asOf: FROZEN_NOW_ISO,
+      cacheAgeSeconds: 0,
+      apps: [
+        { id: 'usage-monitor', label: 'Usage Monitor', self: true, ok: false, locations: [
+          offlineRow('local-snapshots', 'Local Snapshots'),
+          offlineRow('b2-litestream', 'B2 Litestream'),
+        ]},
+        { id: 'socratic-trade', label: 'Socratic Trade', self: false, ok: false, locations: [
+          offlineRow('peer-litestream', 'Live Litestream'),
+          offlineRow('b2-litestream', 'B2 Litestream'),
+        ]},
+      ],
+      warnings: ['Backblaze monitor check skipped (offline mode); B2 dump and LTX inventory unavailable.'],
+    };
+    await route.fulfill({ response, json: body });
+  });
   await login(page);
   await page.goto('/ops');
   await pinFonts(page);
   const card = page.locator('section[aria-labelledby="fleet-backups-heading"]');
   await expect(card).toBeVisible({ timeout: 30_000 });
   await expect(card.getByText('Backup checks skipped (offline mode)')).toBeVisible();
-  await expect(card.getByText('Unavailable').first()).toBeVisible();
-  // Expand the details so the per-app and per-location offline rows are
-  // pinned too (unobserved rows read Unavailable, never Healthy).
+  // Expand the details and pin the per-location offline rows themselves:
+  // unobserved rows must read Unavailable, never Healthy or Missing.
   await card.getByRole('button', { name: 'Details' }).click();
   await expect(card.locator('#fleet-backups-detail')).toBeVisible();
-  await expect(card).toHaveScreenshot('fleet-backups-offline.png', {
-    ...stableShot,
-    mask: [card.locator('time'), card.getByText(/ago|object/)],
-  });
+  await expect(card.locator('#fleet-backups-detail li').filter({ hasText: 'Unavailable' }).first()).toBeVisible();
+  await expect(card).toHaveScreenshot('fleet-backups-offline.png', stableShot);
 });
