@@ -3,7 +3,7 @@ name: iOS App Store GM ship
 # Archive + upload on GitHub-hosted macos-26 (Tahoe GM + Xcode 26.6).
 # The owned Mac runner is macOS 27 beta; App Store review rejects those
 # binaries as INVALID_BINARY even when TestFlight accepts them.
-# Manual only — ships both Usage Client Monitor and Usage Local Monitor.
+# Manual only — ships both Usage Monitor Client and Usage Monitor Local.
 
 on:
   workflow_dispatch:
@@ -92,8 +92,8 @@ jobs:
       - name: Import signing + ASC key
         run: bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
 
-      - name: Ship Usage Client Monitor from GM host
+      - name: Ship Usage Monitor Client from GM host
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" --force-ship
 
-      - name: Ship Usage Local Monitor from GM host
+      - name: Ship Usage Monitor Local from GM host
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" --force-ship

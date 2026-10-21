@@ -32,7 +32,7 @@ let package = Package(
         .library(name: "AppLock", targets: ["AppLock"]),
         .library(name: "OfflineCache", targets: ["OfflineCache"]),
         .library(name: "PushScaffold", targets: ["PushScaffold"]),
-        // Usage Local Monitor (on-device product) — not linked by the remote client app.
+        // Usage Monitor Local (on-device product) — not linked by the remote client app.
         .library(name: "LocalStore", targets: ["LocalStore"]),
         .library(name: "LocalSecrets", targets: ["LocalSecrets"]),
         .library(name: "LocalAdapters", targets: ["LocalAdapters"]),
@@ -92,7 +92,7 @@ let package = Package(
         ),
         .target(name: "PushScaffold", dependencies: ["AppCore", "Models", "Networking"]),
 
-        // ---- Usage Local Monitor (on-device self-host product) -----------
+        // ---- Usage Monitor Local (on-device self-host product) -----------
         .target(name: "LocalStore"),
         .target(name: "LocalSecrets"),
         .target(name: "LocalAdapters", dependencies: ["LocalSecrets"]),

@@ -10,7 +10,7 @@ name: iOS TestFlight ship (Mac runner)
 # ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, IOS_DIST_P12_BASE64,
 # IOS_DIST_P12_PASSWORD). Never mint a new App Store Connect key.
 #
-# Ships Usage Client Monitor and LocalUsageMonitor (Import Package tap).
+# Ships Usage Monitor Client and LocalUsageMonitor (Import Package tap).
 #
 # RE-ENABLED 2026-10-17 (owner: bring every app up to date).  This workflow sat
 # `disabled_manually` after the 2026-09-27 failures ("no App Store Connect record

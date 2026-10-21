@@ -3,7 +3,7 @@ import LocalDataPlane
 import AppCore
 import AppLock
 
-/// Entry point for **Usage Local Monitor** — on-device self-host product.
+/// Entry point for **Usage Monitor Local** — on-device self-host product.
 /// App Lock + appearance without a remote API client (phone is the instance).
 @main
 struct LocalUsageMonitorApp: App {
