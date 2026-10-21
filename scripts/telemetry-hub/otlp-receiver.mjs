@@ -85,7 +85,23 @@ export function createReceiver({ journal, logger = NULL_LOGGER, host = RECEIVER_
   if (!journal) throw new Error("The receiver needs a journal");
 
   const server = createServer((request, response) => {
-    void handleRequest(request, response, { journal, logger });
+    //  A rejection here -- a malformed request URL, or a journaling failure
+    //  such as ENOSPC -- would otherwise become an UNHANDLED rejection, and
+    //  Node terminates the process on those by default.  Answer 500 (or drop
+    //  the socket if the response already started) so one bad request can
+    //  never take the whole hub down.  Only the error NAME is logged: the
+    //  message of a request error can quote the request.
+    void handleRequest(request, response, { journal, logger }).catch((error) => {
+      logger.error("the receiver failed to handle a request", {
+        errorName: error?.name ?? "Error",
+      });
+      try {
+        if (!response.headersSent) sendJson(response, 500, { error: "Could not journal the telemetry" });
+        else response.destroy();
+      } catch {
+        //  The socket is already gone; nothing left to answer.
+      }
+    });
   });
 
   server.on("clientError", (error, socket) => {
@@ -168,11 +184,11 @@ async function handleRequest(request, response, { journal, logger }) {
   }
 
   const normalized = path === "/v1/traces" ? normalizeOtlpTraces(payload) : normalizeOtlpLogs(payload);
-  let written = 0;
-  for (const event of normalized.events) {
-    await journal.append(event);
-    written += 1;
-  }
+  //  One write and one fsync for the whole batch, not one per event: a
+  //  per-event flush puts a device flush inside the producer's request for
+  //  every span of the export.
+  await journal.appendBatch(normalized.events);
+  const written = normalized.events.length;
   logger.info("receiver accepted a batch", {
     path,
     received: normalized.events.length,

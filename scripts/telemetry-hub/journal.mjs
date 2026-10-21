@@ -18,7 +18,7 @@
 // which is why that check is not optional.
 
 import { constants as fsConstants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
@@ -32,6 +32,9 @@ export const MAX_SENT_IDS = 10_000;
 
 /** Read chunk size when scanning the journal. */
 const READ_CHUNK_BYTES = 256 * 1024;
+
+/** Makes every state-file temp name unique within the process. */
+let writeCounter = 0;
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -121,6 +124,28 @@ export class Journal {
     return Buffer.byteLength(line, "utf8");
   }
 
+  /**
+   * Append a whole batch with ONE write and ONE fsync.
+   *
+   * A per-event fsync puts a device flush inside the producer's HTTP
+   * request for every span of an export, which can outlast the exporter's
+   * own timeout and make it retry the same spans.  The durability contract is
+   * unchanged: the batch is on disk before the receiver answers.
+   */
+  async appendBatch(events) {
+    if (!Array.isArray(events)) throw new Error("Journal appendBatch needs an array");
+    if (events.length === 0) return 0;
+    if (!this.handle) throw new Error("Journal is not open");
+    const lines = events.map((event) => {
+      if (!isPlainObject(event)) throw new Error("Journal append needs an object");
+      return `${JSON.stringify(event)}\n`;
+    });
+    const body = lines.join("");
+    await this.handle.write(body, null, "utf8");
+    await this.handle.sync();
+    return Buffer.byteLength(body, "utf8");
+  }
+
   /** The current read offset of one destination. */
   getOffset(destination) {
     const key = normalizeDestination(destination);
@@ -185,10 +210,20 @@ export class Journal {
 
   async writeStateFile(destination, fileName, payload) {
     const target = join(this.stateDir, fileName);
-    const temporary = `${target}.tmp`;
+    //  The temporary path is unique per write.  A shared `${target}.tmp`
+    //  would let a second writer truncate the file the first is about to
+    //  rename, so a rename could fail with ENOENT or persist a truncated
+    //  body -- and `readOffsetFile` answers a parse failure with 0, which
+    //  re-reads the whole journal and re-delivers every event.
+    const temporary = `${target}.${process.pid}.${writeCounter++}.tmp`;
     const body = `${JSON.stringify(payload)}\n`;
     await writeFile(temporary, body, { mode: FILE_MODE });
-    await rename(temporary, target);
+    try {
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => {});
+      throw error;
+    }
     await chmod(target, FILE_MODE);
   }
 
@@ -206,6 +241,7 @@ export class Journal {
     const key = normalizeDestination(destination);
     const start = this.getOffset(key);
     const sent = this.sentSets.get(key) ?? new Set();
+    const seenInBatch = new Set();
     const events = [];
     if (!this.handle && !(await this.exists())) {
       return { events, endOffset: start };
@@ -247,7 +283,13 @@ export class Journal {
             parsed = null;
           }
           if (!isPlainObject(parsed)) continue;
-          if (typeof parsed.eventId === "string" && sent.has(parsed.eventId)) continue;
+          if (typeof parsed.eventId === "string") {
+            //  Skip an id this destination already delivered, and skip a
+            //  repeat WITHIN this batch: the journal can hold the same signal
+            //  twice, and both copies would otherwise be delivered.
+            if (sent.has(parsed.eventId) || seenInBatch.has(parsed.eventId)) continue;
+            seenInBatch.add(parsed.eventId);
+          }
           events.push(parsed);
           if (events.length >= limit) break;
         }

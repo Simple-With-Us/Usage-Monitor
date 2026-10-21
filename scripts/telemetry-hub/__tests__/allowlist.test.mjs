@@ -28,6 +28,7 @@ import {
   scrubSpan,
   stripProducerContent,
 } from "../allowlist.mjs";
+import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
 
 const CANARY = "CANARY_SECRET_123";
 
@@ -267,5 +268,50 @@ describe("the sentry allowlist", () => {
     assert.ok(scrubbed);
     assert.equal(serialized(scrubbed).includes(CANARY), false);
     assert.deepEqual(scrubbed.status, { code: 2 });
+  });
+
+  it("never lets a producer span name become the operation", () => {
+    //  `operation` reaches Sentry as the span name AND as the allowlisted
+    //  gen_ai.operation.name attribute, so it must be sourced only from that
+    //  semconv attribute.  The span NAME is producer free text.
+    const normalized = normalizeSpan({
+      name: `chat ${CANARY}`,
+      traceId: "a".repeat(32),
+      spanId: "b".repeat(16),
+      startTimeUnixNano: "1700000000000000000",
+      endTimeUnixNano: "1700000000100000000",
+      attributes: [stringAttr("gen_ai.system", "opencode")],
+    });
+
+    assert.ok(normalized);
+    assert.equal(normalized.operation, "chat");
+    assert.equal(JSON.stringify(normalized).includes(CANARY), false);
+
+    const scrubbed = scrubInternalEvent(normalized);
+    assert.ok(scrubbed);
+    assert.equal(serialized(scrubbed).includes(CANARY), false);
+  });
+
+  it("gives two distinct log records distinct event ids", () => {
+    //  Same timestamp, same platform, no trace context: only the attributes
+    //  tell them apart, so they must not collide or one is dropped as sent.
+    const base = { timeUnixNano: "1700000000000000000", severityNumber: 9 };
+    const first = normalizeLogRecord({
+      ...base,
+      attributes: [stringAttr("gen_ai.system", "opencode"), stringAttr("gen_ai.request.model", "model-a")],
+    });
+    const second = normalizeLogRecord({
+      ...base,
+      attributes: [stringAttr("gen_ai.system", "opencode"), stringAttr("gen_ai.request.model", "model-b")],
+    });
+    assert.ok(first && second);
+    assert.notEqual(first.eventId, second.eventId);
+
+    //  A retry of the SAME record is still idempotent.
+    const retry = normalizeLogRecord({
+      ...base,
+      attributes: [stringAttr("gen_ai.system", "opencode"), stringAttr("gen_ai.request.model", "model-a")],
+    });
+    assert.equal(retry.eventId, first.eventId);
   });
 });

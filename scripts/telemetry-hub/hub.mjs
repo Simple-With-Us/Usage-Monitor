@@ -119,14 +119,18 @@ export async function main(argv = process.argv.slice(2)) {
 
   const umSender = createUmSender({
     journal,
-    baseUrl: options.umBaseUrl ?? process.env.UM_BASE_URL?.trim() ?? undefined,
+    //  `||` and not `??`: an empty env var must fall through so the sender's
+    //  own default applies.  With `??` an empty string reached `createUmSender`
+    //  as an explicit value, its default parameter never applied, and every
+    //  UM request used a relative URL that fetch cannot resolve.
+    baseUrl: options.umBaseUrl?.trim() || process.env.UM_BASE_URL?.trim() || undefined,
     dryRun: options.dryRun,
     logger,
   });
   const sentrySender = createSentrySender({
     journal,
-    endpoint: options.sentryEndpoint ?? process.env.SENTRY_OTLP_ENDPOINT?.trim() ?? undefined,
-    publicKey: process.env.SENTRY_PUBLIC_KEY?.trim() ?? undefined,
+    endpoint: options.sentryEndpoint?.trim() || process.env.SENTRY_OTLP_ENDPOINT?.trim() || undefined,
+    publicKey: process.env.SENTRY_PUBLIC_KEY?.trim() || undefined,
     dryRun: options.dryRun,
     logger,
   });
@@ -166,8 +170,19 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
+  //  A pass can take far longer than the tick (three attempts against a 20s
+  //  timeout, plus backoff, per chunk per destination), so a naive interval
+  //  would overlap passes: both would read the same journal offset and
+  //  deliver the same events twice, then race on the state files.  The flag
+  //  skips a tick whose previous pass has not settled, and is released in
+  //  `finally` so a rejected pass can never wedge the loop.
+  let deliveryInFlight = false;
   const timer = setInterval(() => {
-    void runDeliveryPass({ umSender, sentrySender, logger });
+    if (deliveryInFlight) return;
+    deliveryInFlight = true;
+    void runDeliveryPass({ umSender, sentrySender, logger }).finally(() => {
+      deliveryInFlight = false;
+    });
   }, DEFAULT_TICK_MS);
   timer.unref?.();
 

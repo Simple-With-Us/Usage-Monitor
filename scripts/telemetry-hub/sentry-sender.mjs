@@ -163,19 +163,47 @@ export function buildLogsEnvelope(events) {
  * Split a list into chunks that respect both a count cap and a body size
  * cap.  The body cap is checked on the serialized envelope, so a batch of
  * very large attribute values is split before it reaches the 12 MiB cap.
+ *
+ * Each event is serialized ONCE, and its size is accumulated as an UPPER
+ * BOUND on the chunk: it counts the shared envelope wrapper once per event,
+ * while the real envelope contains it once, so the running total never
+ * understates the chunk.  Rebuilding and re-serializing the whole candidate
+ * for every event made each pass quadratic in JSON bytes, which discarded
+ * large amounts of text purely to find the boundaries.
+ *
+ * The upper bound is loose, so when it says a chunk is full the CANDIDATE is
+ * measured EXACTLY before the boundary is drawn, which recovers the precise
+ * cut.  That exact measurement is the only place a whole chunk is serialized,
+ * so a pass stays linear in the events it accepts, and the cap is enforced
+ * rather than approximated.  A single event too large for the cap is emitted
+ * on its own, exactly as before, rather than dropped or looping forever.
  */
 export function chunkBySize(events, build, { maxCount, maxChars }) {
   const chunks = [];
+  const measure = (subset) => JSON.stringify(build(subset)).length;
+  const costs = events.map((event) => measure([event]));
+
   let current = [];
-  for (const event of events) {
-    const candidate = current.concat([event]);
-    const size = JSON.stringify(build(candidate)).length;
-    if (current.length > 0 && (candidate.length > maxCount || size > maxChars)) {
-      chunks.push(current);
-      current = [event];
-      continue;
+  let currentCost = 0;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const cost = costs[index];
+    const countFull = current.length + 1 > maxCount;
+    const boundFull = currentCost + cost > maxChars;
+    if (current.length > 0 && (countFull || boundFull)) {
+      const candidate = current.concat([event]);
+      if (countFull || measure(candidate) > maxChars) {
+        chunks.push(current);
+        current = [];
+        currentCost = 0;
+      } else {
+        current = candidate;
+        currentCost += cost;
+        continue;
+      }
     }
-    current = candidate;
+    current = current.concat([event]);
+    currentCost += cost;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
@@ -336,8 +364,14 @@ export function createSentrySender({
       const outcome = await deliverGroup(chunk, SENTRY_TRACES_PATH, buildTracesEnvelope);
       if (outcome.outcome !== "ok") {
         //  Whatever was delivered before the failure stays delivered, so
-        //  the next pass does not send it again.
-        await journal.markSentBatch(destination, deliveredIds);
+        //  the next pass does not send it again.  That includes the ids
+        //  delivered INSIDE the failing chunk, which the offset would
+        //  otherwise leave queued and the next pass would re-post.
+        await journal.markSentBatch(destination, [
+          ...deliveredIds,
+          ...outcome.delivered,
+          ...outcome.quarantined,
+        ]);
         logger.warn("sentry is not accepting the batch", {
           destination,
           path: SENTRY_TRACES_PATH,
@@ -361,7 +395,11 @@ export function createSentrySender({
     for (const chunk of logChunks) {
       const outcome = await deliverGroup(chunk, SENTRY_LOGS_PATH, buildLogsEnvelope);
       if (outcome.outcome !== "ok") {
-        await journal.markSentBatch(destination, deliveredIds);
+        await journal.markSentBatch(destination, [
+          ...deliveredIds,
+          ...outcome.delivered,
+          ...outcome.quarantined,
+        ]);
         logger.warn("sentry is not accepting the batch", {
           destination,
           path: SENTRY_LOGS_PATH,

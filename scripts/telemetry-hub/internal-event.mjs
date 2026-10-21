@@ -231,7 +231,12 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     flat["agent.platform"] ?? flat["gen_ai.system"] ?? flat["gen_ai.agent.name"],
   );
   const model = readString(flat["gen_ai.request.model"] ?? flat["model"], 160);
-  const operation = readString(flat["gen_ai.operation.name"] ?? span.name, 120) ?? "chat";
+  //  The operation label must come ONLY from the semconv attribute.  The
+  //  span NAME is producer free text, and `operation` reaches Sentry as the
+  //  span name and as the allowlisted `gen_ai.operation.name` attribute, so a
+  //  producer that puts prompt text in a span name would otherwise carry it
+  //  straight past this module's allowlist.
+  const operation = readString(flat["gen_ai.operation.name"], 120) ?? "chat";
   const statusCode = isPlainObject(span.status) ? span.status.code : undefined;
   const statusText = isPlainObject(span.status) ? span.status.message : undefined;
   const isError =
@@ -319,6 +324,13 @@ export function normalizeLogRecord(record, resourceAttributes = {}) {
     platform,
     record.spanId ?? "",
     record.traceId ?? "",
+    //  A discriminator, because the four fields above are not unique on
+    //  their own: two DIFFERENT log records with the same timestamp, the
+    //  same platform and no trace context would hash to one id, and the
+    //  journal would drop the second as already delivered.  Hashing the
+    //  attributes keeps a retry of the SAME record idempotent while letting
+    //  two distinct records through.
+    sha256Hex(JSON.stringify(flattenOtlpAttributes(record.attributes))),
   ]);
   return {
     eventId,

@@ -245,23 +245,23 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * store.  The value is held in memory only and is never written to disk.
  */
 export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
-  let memo = { value: undefined, at: 0 };
+  let memo = { value: undefined, at: Number.NEGATIVE_INFINITY };
   return async function resolveToken() {
     const fromEnv = env.USAGE_INGEST_TOKEN?.trim();
     if (fromEnv) return fromEnv;
     const stamp = now();
-    if (memo.value && stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
+    //  The memo is checked on the stamp alone, not on a truthy value, so a
+    //  MISS is memoized too.  Otherwise a missing token respawned the
+    //  `fleet-secrets` CLI (twice, at a 30s timeout each) on every pass.
+    if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
       value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
     } catch {
       value = undefined;
     }
-    if (typeof value === "string" && value.trim()) {
-      memo = { value: value.trim(), at: stamp };
-      return memo.value;
-    }
-    return undefined;
+    memo = { value: typeof value === "string" && value.trim() ? value.trim() : undefined, at: stamp };
+    return memo.value;
   };
 }
 
@@ -333,13 +333,25 @@ export function createUmSender({
   }
 
   async function runChannel({ destination, events, build, path, token, dryRunChannel }) {
-    if (events.length === 0) return { ok: true, delivered: 0, quarantined: 0 };
+    //  Every early return carries `dryRun`, because the caller advances the
+    //  destination offset whenever the result is `ok` and NOT dry-run.  An
+    //  empty batch that dropped the flag would advance the offset in
+    //  `--dry-run` mode and skip those events for every later real run.
+    if (events.length === 0) {
+      return { ok: true, delivered: 0, quarantined: 0, dryRun: dryRunChannel === true };
+    }
     const body = build(events);
     //  An event with no usage produces no ledger row, so a batch can be
     //  empty.  There is nothing to post then, and the offset still moves.
     const list = Array.isArray(body?.events) ? body.events : Array.isArray(body?.turns) ? body.turns : null;
     if (list && list.length === 0) {
-      return { ok: true, delivered: 0, quarantined: 0, skipped: events.length };
+      return {
+        ok: true,
+        delivered: 0,
+        quarantined: 0,
+        skipped: events.length,
+        dryRun: dryRunChannel === true,
+      };
     }
     if (dryRunChannel) {
       logger.info("um channel dry run", {
@@ -406,7 +418,7 @@ export function createUmSender({
 
     const turns = await runChannel({
       destination: UMBER_TURNS_DESTINATION,
-      events: turnBatch.events,
+      events: turnBatch.events.filter((event) => isPlainObject(event) && event.kind !== "log"),
       build: (events) => ({ turns: events.map((event) => buildUmTurn(event)).filter(Boolean) }),
       path: "/api/otlp/v1/traces",
       token,

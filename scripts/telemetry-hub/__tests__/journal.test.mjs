@@ -205,4 +205,95 @@ describe("the um sender", () => {
     //  The good events were delivered, so the offset moved past the poison.
     assert.ok(journal.getOffset("um-turns") > 0);
   });
+
+  it("never advances an offset in dry-run mode, even for an empty batch", async () => {
+    const { journal } = await openJournal();
+    //  A log record with no usage produces no ledger row, so the ledger batch
+    //  builds to an empty payload.  That early return must still carry the
+    //  dry-run flag, or the offset advances and the events are skipped for
+    //  every later real run.
+    await journal.append(event(1, { kind: "log", costUsd: undefined, tokens: {} }));
+
+    const sender = createUmSender({
+      journal,
+      dryRun: true,
+      resolveToken: async () => "a-test-token",
+      fetchImpl: async () => {
+        throw new Error("dry-run must not write to the network");
+      },
+    });
+
+    const outcome = await sender.runOnce();
+    assert.equal(outcome.ok, true);
+    assert.equal(journal.getOffset("um-turns"), 0);
+    assert.equal(journal.getOffset("um-ingest"), 0);
+  });
+
+  it("does not post a log record to the um turns channel as a turn", async () => {
+    const { journal } = await openJournal();
+    await journal.append(event(1, { kind: "log" }));
+
+    const posted = [];
+    const sender = createUmSender({
+      journal,
+      resolveToken: async () => "a-test-token",
+      retryDelayMs: 0,
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (Array.isArray(body.turns)) posted.push(...body.turns);
+        return fakeResponse(200, "{}");
+      },
+    });
+    await sender.runOnce();
+
+    assert.deepEqual(posted, []);
+  });
+
+  it("delivers a duplicate event id inside one batch only once", async () => {
+    const { journal } = await openJournal();
+    //  The journal can hold the same signal twice; both copies sit behind the
+    //  same offset, so readBatch itself has to drop the repeat.
+    await journal.append(event(1));
+    await journal.append(event(1));
+    await journal.append(event(2));
+
+    const batch = await journal.readBatch("sentry", 10);
+    assert.deepEqual(
+      batch.events.map((item) => item.eventId),
+      ["event-1", "event-2"],
+    );
+  });
+
+  it("writes the state file atomically when two writes overlap", async () => {
+    const { dir, journal } = await openJournal();
+    //  Two concurrent writers of the SAME state file used to share one
+    //  `.tmp` path, so the second truncated the body the first was about to
+    //  rename, and a truncated offset file reads back as offset 0 -- which
+    //  re-delivers the whole journal.
+    await Promise.all([
+      journal.setOffset("sentry", 111),
+      journal.setOffset("sentry", 222),
+      journal.setOffset("sentry", 333),
+    ]);
+    const persisted = JSON.parse(
+      await readFile(join(dir, "state", "sentry.offset.json"), "utf8"),
+    );
+    assert.equal(persisted.offset, journal.getOffset("sentry"));
+  });
+
+  it("appends a whole batch with one durable write", async () => {
+    const { dir, journal } = await openJournal();
+    const written = await journal.appendBatch([event(1), event(2), event(3)]);
+    await journal.close();
+
+    const raw = await readFile(join(dir, "journal.jsonl"), "utf8");
+    const lines = raw.split("\n").filter((line) => line.trim());
+    assert.equal(lines.length, 3);
+    assert.deepEqual(
+      lines.map((line) => JSON.parse(line).eventId),
+      ["event-1", "event-2", "event-3"],
+    );
+    assert.equal(written, Buffer.byteLength(raw, "utf8"));
+    assert.equal(await journal.appendBatch([]), 0);
+  });
 });
