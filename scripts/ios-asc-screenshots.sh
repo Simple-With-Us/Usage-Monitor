@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture App Store screenshots for Usage Client Monitor + Usage Local Monitor
+# Capture App Store screenshots for Usage Monitor Client + Usage Monitor Local
 # using simulator demo launch args (-ScreenshotDemo).
 set -euo pipefail
 

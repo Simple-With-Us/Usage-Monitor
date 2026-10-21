@@ -4,8 +4,8 @@ Two App Store products that share kit code but **not** money-truth or identity.
 
 | App (user-visible name) | Scheme | Bundle ID | Purpose |
 |---|---|---|---|
-| **Usage Client Monitor** | `UsageMonitor` | `com.simplewithus.usage.client.ios` | Live-sync **client** of a Usage Monitor **server** you host (or the owner fleet). Widget: `com.simplewithus.usage.client.widget`. |
-| **Usage Local Monitor** | `LocalUsageMonitor` | `com.simplewithus.usage.local.ios` | **Free App Store candidate** — on-device only. Keys in Keychain; budgets in local SQLite. **No server required.** |
+| **Usage Monitor Client** | `UsageMonitor` | `com.simplewithus.usage.client.ios` | Live-sync **client** of a Usage Monitor **server** you host (or the owner fleet). Widget: `com.simplewithus.usage.client.widget`. |
+| **Usage Monitor Local** | `LocalUsageMonitor` | `com.simplewithus.usage.local.ios` | **Free App Store candidate** — on-device only. Keys in Keychain; budgets in local SQLite. **No server required.** |
 
 User-facing copy uses the **plain app name** only. Show `name` + `bundle ID` together only on identity/debug surfaces.
 
@@ -14,12 +14,12 @@ Binding contract: [`UsageMonitor/ARCHITECTURE-CONTRACT.md`](UsageMonitor/ARCHITE
 
 ### Product identity (do not swap)
 
-| | Usage Client Monitor | Usage Local Monitor |
+| | Usage Monitor Client | Usage Monitor Local |
 |---|---|---|
 | Bundle ID | `com.simplewithus.usage.client.ios` | `com.simplewithus.usage.local.ios` |
 | App group | `group.com.simplewithus.usage` | `group.com.simplewithus.usage` |
 | Deep link | `usageclientmonitor://` | `usagelocalmonitor://` |
-| ASC name | Usage Client Monitor | Usage Local Monitor |
+| ASC name | Usage Monitor Client | Usage Monitor Local |
 | ASC SKU | `usage-client-monitor` | `usage-local-monitor` |
 | TestFlight ship | `bash scripts/ios-ship-testflight.sh` | `bash scripts/ios-ship-testflight-local.sh` |
 
@@ -27,8 +27,8 @@ Never reuse one app’s bundle ID for the other (App Store Connect, TestFlight, 
 
 ## Which one should I use?
 
-- Server + live sync → **Usage Client Monitor** (self-host the free server code, then point the app at your URL)
-- Phone is the whole product / free public App Store → **Usage Local Monitor**
+- Server + live sync → **Usage Monitor Client** (self-host the free server code, then point the app at your URL)
+- Phone is the whole product / free public App Store → **Usage Monitor Local**
 
 They do **not** share an app group, Keychain, or database.
 
@@ -76,10 +76,10 @@ It imports the existing team ASC/P12 GitHub secrets and execs in-repo
 `scripts/ios-fleet/`.  LocalUsageMonitor stays skipped on that workflow.
 
 ```bash
-# Usage Client Monitor (server-backed) -- what hosted ios-ship runs
+# Usage Monitor Client (server-backed) -- what hosted ios-ship runs
 bash scripts/ios-ship-testflight.sh
 
-# Usage Local Monitor (on-device only) -- not started by hosted ios-ship
+# Usage Monitor Local (on-device only) -- not started by hosted ios-ship
 bash scripts/ios-ship-testflight-local.sh
 ```
 
@@ -87,7 +87,7 @@ ASC: create apps with the **new** bundle IDs before first upload (API key cannot
 
 ## Local provider catalog
 
-**Usage Local Monitor** ships a fleet-aligned catalog (LLM, hosting, market data, infra).
+**Usage Monitor Local** ships a fleet-aligned catalog (LLM, hosting, market data, infra).
 
 - **Poll (API key):** OpenRouter, OpenAI org costs, DeepSeek balance, Anthropic Admin cost report
 - **API vs chat split:** OpenAI (API) + ChatGPT (subscription); Anthropic (API) + Claude (subscription); xAI + SuperGrok (subscription).

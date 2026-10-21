@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin wrapper: ship Usage Client Monitor to TestFlight (no Xcode UI).
+# Thin wrapper: ship Usage Monitor Client to TestFlight (no Xcode UI).
 # Canonical implementation: scripts/ios-fleet/ship-testflight.sh (in this repo).
 # Hosted macos-latest has no /Users/jay/apps/ios-fleet; that path is a local
 # fallback only. Do not restart a Mac runner or run xcodebuild locally to ship.
