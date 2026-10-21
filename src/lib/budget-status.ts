@@ -1274,7 +1274,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       anomaliesByProviderId = await loadSpendAnomaliesByProviderId(
         now,
         anomalyConfig,
-        providers.map((p) => ({ id: p.id, name: p.name }))
+        providers.map((p) => ({ id: p.id, name: p.name, type: p.type }))
       );
     } catch (error) {
       console.warn("[anomaly-detection] spend anomaly load failed; skipping", error);
