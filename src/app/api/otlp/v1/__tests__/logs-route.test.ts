@@ -209,6 +209,20 @@ describe("POST /api/otlp/v1/logs", () => {
     expect(await prisma.aiRequest.count()).toBe(1);
   });
 
+  it("does not store a codex api_request that names no model (UM-1610)", async () => {
+    // Housekeeping HTTP calls carry no model and never get a response.completed,
+    // so they used to sit forever as zero-token rows grouped under "unknown".
+    const res = await POST(jsonRequest(codexApiRequestPayload({ withModel: false }), AUTH));
+    expect(res.status).toBe(202);
+    expect(await prisma.aiRequest.count()).toBe(0);
+
+    // An inference call that did name its model is still stored as pending.
+    await POST(jsonRequest(codexApiRequestPayload(), AUTH));
+    const rows = await prisma.aiRequest.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ requestedModel: "gpt-6.1-sol", inputTokens: null, outputTokens: null });
+  });
+
   it("stores a codex completion with no preceding api_request on its own", async () => {
     await POST(jsonRequest(codexCompletionPayload(), AUTH));
     const rows = await prisma.aiRequest.findMany();
@@ -226,6 +240,27 @@ describe("POST /api/otlp/v1/logs", () => {
       expect(await prisma.aiRequest.count()).toBe(0);
     } finally {
       delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
+  it("accepts the scoped openai-codex token for Codex rows but not for Claude rows (UM-1599)", async () => {
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "openai-codex:codex-scoped-token";
+    process.env.USAGE_INGEST_REQUIRE_SCOPED_TOKENS = "true";
+    try {
+      const headers = { authorization: "Bearer codex-scoped-token" };
+      const ok = await POST(jsonRequest(codexCompletionPayload(), headers));
+      expect(ok.status).toBe(202);
+      const rows = await prisma.aiRequest.findMany();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ harness: "codex", seat: "CODEX", servedModel: "gpt-6.1-sol" });
+
+      const denied = await POST(jsonRequest(claudeLogsPayload(), headers));
+      expect(denied.status).toBe(403);
+      // The unscoped token is refused once scoped tokens are required.
+      const unscoped = await POST(jsonRequest(codexCompletionPayload(), AUTH));
+      expect(unscoped.status).toBe(401);
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+      delete process.env.USAGE_INGEST_REQUIRE_SCOPED_TOKENS;
     }
   });
 });

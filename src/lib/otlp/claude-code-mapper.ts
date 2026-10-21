@@ -95,7 +95,8 @@ export interface MappedUsageEvent {
   provider: string;
   service: string;
   environment?: string;
-  // Producer-supplied project name from the `project` (or `project.name`)
+  // Producer-supplied project name from the `project` (or `project.name`;
+  // else `vcs.repository.name`)
   // OTLP resource attribute, set via OTEL_RESOURCE_ATTRIBUTES on the Claude
   // Code side (e.g. `OTEL_RESOURCE_ATTRIBUTES=project=socratic-trade`, ideally
   // per-repo via direnv). Resolved to a Project.id at the ingest route. Claude
@@ -183,12 +184,17 @@ function mapDataPoint(
   const environment = asString(resourceAttrs["deployment.environment"]) ?? asString(pointAttrs["deployment.environment"]);
   // `project` is the canonical key; accept `project.name` too since operators
   // may follow OTel's dotted-namespace convention. A point-level attribute
-  // wins over the resource-level one if both are somehow present.
+  // wins over the resource-level one if both are somehow present.  When
+  // neither is set, fall back to the repository name Claude Code attaches to
+  // every datapoint under OTEL_METRICS_INCLUDE_REPOSITORY=1 (UM-1599); an
+  // explicit project always wins because it is the operator's own naming.
   const projectName =
     asString(pointAttrs.project) ??
     asString(pointAttrs["project.name"]) ??
     asString(resourceAttrs.project) ??
-    asString(resourceAttrs["project.name"]);
+    asString(resourceAttrs["project.name"]) ??
+    asString(pointAttrs["vcs.repository.name"]) ??
+    asString(resourceAttrs["vcs.repository.name"]);
 
   const base = {
     sourceApp: SOURCE_APP,

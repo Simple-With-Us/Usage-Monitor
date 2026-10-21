@@ -7,8 +7,8 @@
 # usage cap mid-script.  Finished 2026-08-14.
 #
 # Usage:
-#   set -a; . ~/.secrets/global-api-keys; set +a
 #   bash scripts/cf-token-map.sh
+#   (Infisical credentials come from the environment, else `fleet-secrets get`.)
 #
 # Env (all optional):
 #   INFISICAL_PROJECT_ID   (see fleet-ops:ATTACK-MAP.md)
@@ -35,9 +35,18 @@ command -v python3 >/dev/null 2>/dev/null || die "python3 not found on PATH."
 
 CID="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${CID:-}}}}"
 CSEC="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${CSEC:-}}}}"
+# OPS-818: the retired flat key file is no longer read.  Fall back to the
+# Mac-side fleet-secrets CLI for the automation identity (captured, never echoed).
+fleet_value() {
+  command -v fleet-secrets >/dev/null 2>/dev/null || return 0
+  fleet-secrets get "$1" --path / 2>/dev/null \
+    || fleet-secrets get "$1" --path /global-api-keys 2>/dev/null \
+    || true
+}
+[ -n "$CID" ] || CID="$(fleet_value INFISICAL_AUTOMATION_CLIENT_ID)"
+[ -n "$CSEC" ] || CSEC="$(fleet_value INFISICAL_AUTOMATION_CLIENT_SECRET)"
 [ -n "$CID" ] && [ -n "$CSEC" ] || die \
-  "No Infisical credentials. Load them first, e.g.:
-  set -a; . ~/.secrets/global-api-keys; set +a"
+  "No Infisical credentials. Export INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET, or install fleet-secrets."
 
 # Credentials via env, not argv (avoids `ps` / debug-echo leaks).
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CID"

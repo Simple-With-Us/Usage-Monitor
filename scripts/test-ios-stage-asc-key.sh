@@ -144,7 +144,7 @@ grep -q 'must be single-line' "$tmp_dir/multiline-stderr"
 python3 - "$repo_root/scripts/ios-appstore-gm-prepare.sh" "$tmp_dir/normalize-key.sh" <<'PYTHON'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-block = text.split('# Normalize into a separate file', 1)[1].split('# Compatibility alias', 1)[0]
+block = text.split('# Normalize into a separate file', 1)[1].split('# Later steps (ship-testflight.sh)', 1)[0]
 pathlib.Path(sys.argv[2]).write_text('set -euo pipefail\numask 077\ndie() { exit 1; }\n# Normalize into a separate file' + block)
 PYTHON
 mkdir "$tmp_dir/canonical"

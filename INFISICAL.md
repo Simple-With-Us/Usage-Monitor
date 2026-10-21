@@ -73,6 +73,7 @@ Two delivery paths, one source of truth:
    `DASHBOARD_PASSWORD`, `CRON_SECRET`, `SESSION_SECRET`,
    `USAGE_INGEST_TOKEN`, `USAGE_READ_TOKEN`, `USAGE_INGEST_PRODUCER_TOKENS`,
    `BILLING_RECEIPT_*`, `RECEIPT_INBOX_*`, `OWNER_EXPENSE_TOKEN`,
+   `CODECAPS_PUSH_REGISTRATION_TOKEN`,
    `BILLS_CALENDAR_TOKEN`, `CURSOR_ADMIN_API_KEY` (optional; only with `CURSOR_ADMIN_POLLER_ENABLED=true` on a Cursor team plan — leave both unset to keep the poller off), `*_API_KEY` / `*_API_TOKEN` provider credentials,
    `SENTRY_*`, `DD_*`, `NEXT_PUBLIC_*`, APNS/PagerDuty/Pushover/Slack/Resend
    credentials.  The full inventory is `.env.example` (local-dev names and
@@ -80,9 +81,11 @@ Two delivery paths, one source of truth:
 
 Deliberately NOT yet on the runtime loader (still env-sync, still Infisical
 as SOT): shell-read startup knobs (`LITESTREAM_REQUIRED`,
-`STARTUP_WRAPPER_REQUIRED`, `SQLITE_PRE_MIGRATION_BACKUP_RETENTION` — read by
-`scripts/start-with-litestream.sh` before Node boots, so they cannot go
-through the Node settings service), build-time `NEXT_PUBLIC_*` vars (Next.js
+`STARTUP_WRAPPER_REQUIRED`, `SQLITE_PRE_MIGRATION_BACKUP_RETENTION`,
+`SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` — read by the startup path before
+Node app boot, so they cannot go through the Node settings service).  The
+backup timeout defaults to 300000 ms (5 minutes) and is clamped to 1000-900000
+ms (15 minutes maximum).  Build-time `NEXT_PUBLIC_*` vars (Next.js
 inlines them at build; a runtime Infisical read cannot reach the client
 bundle), and further tunable knobs that are migration candidates for a
 follow-up (`OPENROUTER_CREDIT_CHECK_INTERVAL_MS`, `SCHEDULER_STALE_AFTER_MS`,

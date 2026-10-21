@@ -36,13 +36,15 @@
 //     GBU_INGEST_TOKEN (gbu).
 //   Each falls back to SUBSCRIPTION_QUOTA_INGEST_TOKEN, then USAGE_INGEST_TOKEN
 //     (unscoped; refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true).  Every
-//     name is read from the environment first, then ~/.secrets/global-api-keys
+//     name is read from the environment first, then `fleet-secrets get`
 //     via resolveCollectorToken.
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
 //   CLAUDE_CODE_OAUTH_CREDENTIALS_JSON — Claude Code OAuth credential JSON
-//     (same shape as ~/.claude/.credentials.json).  Inject via env or a
-//     launchd wrapper; see scripts/claude-code-oauth-credentials-from-keychain.sh
-//     and docs/rollouts/2026-09-12-subscription-quota-collector.md.
+//     (same shape as ~/.claude/.credentials.json).  The LaunchAgent injects it
+//     through scripts/run-subscription-quota-collector.sh, which reads the
+//     "Claude Code-credentials" Keychain item (UM-1616); one-off dry runs can
+//     use scripts/claude-code-oauth-credentials-from-keychain.sh.  See
+//     docs/rollouts/2026-09-12-subscription-quota-collector.md.
 //   CLAUDE_HOME / CODEX_HOME / GROK_HOME / MINIMAX_CONFIG_PATH / GBU_BIN to override
 //     credential locations or the gbu binary path
 //   PATH should include $HOME/.gbu/bin and $HOME/.local/bin so `gbu` resolves
@@ -316,7 +318,7 @@ const PROVIDERS = {
     async fetch() {
       // Env-injected JSON first (launchd wrapper or operator export), then the
       // legacy file path for older CLI releases.  Keychain is never read here;
-      // operators use scripts/claude-code-oauth-credentials-from-keychain.sh.
+      // scripts/run-subscription-quota-collector.sh does that and injects it.
       const credentials =
         readClaudeCredentialsFromEnv() ?? (await readClaudeCredentialsFromFile());
       const oauth = asRecord(asRecord(credentials).claudeAiOauth);

@@ -86,3 +86,34 @@ describe("resolveUsageIngestCredential producer scoping", () => {
     expect(cred?.credentialId).toBe("unscoped");
   });
 });
+
+describe("resolveUsageIngestCredential producer aliases (UM-1599)", () => {
+  beforeEach(() => {
+    vi.stubEnv("USAGE_INGEST_TOKEN", "shared-legacy-ingest-token");
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "openai-codex:tok-codex, socratic-trade:tok-socratic");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("lets the openai-codex producer token also write harness codex", () => {
+    const cred = resolveUsageIngestCredential(req("tok-codex"));
+    expect(cred?.credentialId).toBe("openai-codex");
+    expect(cred?.allowedSourceApps).toEqual(new Set(["openai-codex", "codex"]));
+  });
+
+  it("does not extend the alias to other producers or to wildcard names", () => {
+    const cred = resolveUsageIngestCredential(req("tok-socratic"));
+    expect(cred?.allowedSourceApps).toEqual(new Set(["socratic-trade"]));
+    expect(cred?.allowedSourceApps?.has("codex")).toBe(false);
+    expect(cred?.allowedSourceApps?.has("claude-code")).toBe(false);
+  });
+
+  it("keeps the alias when unscoped tokens are disabled", () => {
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    expect(resolveUsageIngestCredential(req("shared-legacy-ingest-token"))).toBeNull();
+    const cred = resolveUsageIngestCredential(req("tok-codex"));
+    expect(cred?.allowedSourceApps?.has("codex")).toBe(true);
+  });
+});

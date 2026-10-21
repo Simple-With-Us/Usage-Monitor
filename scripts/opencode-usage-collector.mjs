@@ -1,14 +1,27 @@
 #!/usr/bin/env node
 // Local collector for opencode session usage.
 //
-// Reads assistant rows from opencode's SQLite store
+// Reads opencode's SQLite store
 // (${OPENCODE_DB:-${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db},
 // table session_message, column data JSON) read-only, because opencode may be
 // running.  One usage event per token type per completed assistant message:
 // input, output (reasoning folded in; split kept in metadata), cacheRead and
 // cacheCreation.  opencode reports cost 0 for almost every row, so no cost
-// event is sent; UM derives cost from tokens.  A non-zero reported cost is
-// kept in metadata.reportedCostUsd.
+// event is sent for those; UM derives cost from tokens.  A non-zero reported
+// cost is kept in metadata.reportedCostUsd.
+//
+// On top of the token rows the collector sends (scripts/lib/opencode-session-telemetry.mjs):
+//   - the top-level `project` (session directory basename or project name) on
+//     every event, plus metadata.sessionId on a token row only when that row
+//     was completed after the one fixed shape boundary (see
+//     resolveOpencodeSessionIdCutoffMs), so a replay of a row Usage Monitor
+//     already stored still dedupes instead of answering HTTP 409,
+//   - a cost event for every assistant message that reported a real cost,
+//   - one context-window utilization row per assistant message (how full the
+//     context was on that turn), read from opencode's models-dev catalog,
+//   - one session-fact row per session (title, activity, message counts,
+//     files changed, session cost),
+//   - compaction / model-switch / agent-switch / location-switch lifecycle rows.
 //
 // Usage:
 //   node scripts/opencode-usage-collector.mjs [--dry-run] [--debug] [--days N] [--since ISO]
@@ -26,9 +39,17 @@ import { pathToFileURL } from "node:url";
 import {
   OPENCODE_PRODUCER_ID,
   filterEventsSince,
-  parseOpencodeMessageRows,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
+import {
+  buildOpencodeExtraEvents,
+  buildOpencodeTokenEvents,
+  parseModelsDevCatalog,
+  projectNamesBySession,
+  readOpencodeTelemetry,
+  OPENCODE_SESSION_ID_CUTOFF_MS,
+  resolveOpencodeSessionIdCutoffMs,
+} from "./lib/opencode-session-telemetry.mjs";
 import {
   canAdvanceCollectorCheckpoint,
   expandHome,
@@ -77,20 +98,94 @@ export async function readOpencodeRows(dbPath, since) {
   }
 }
 
+/**
+ * Every event for the window: the token rows (unchanged ids), the reported
+ * cost, the context utilization, the session facts and the lifecycle signals.
+ */
 export async function collectOpencodeEvents({
   dbPath = defaultOpencodeDbPath(),
   since,
   scanStatus,
+  sessionIdCutoffMs = OPENCODE_SESSION_ID_CUTOFF_MS,
+  onWarning,
 } = {}) {
   if (!existsSync(dbPath)) return [];
   try {
-    const rows = await readOpencodeRows(dbPath, since);
-    return filterEventsSince(parseOpencodeMessageRows(rows), since);
+    const telemetry = await readOpencodeTelemetry(dbPath, since);
+    const projectBySession = projectNamesBySession(telemetry.sessions, telemetry.projects);
+    const tokenEvents = buildOpencodeTokenEvents({
+      assistantRows: telemetry.assistantRows,
+      projectBySession,
+      sessionIdCutoffMs,
+    });
+    const catalog = parseModelsDevCatalog(telemetry.catalogValue);
+    // A catalog that cannot be used is not a silent event: every context row
+    // would report a null limit and the context feature would disappear
+    // without a word, so the reason goes into the run log.
+    if (catalog.problem) {
+      onWarning?.(`models.dev catalog unusable: ${catalog.problem}`);
+    }
+    // A catalog that IS usable but is not the expected shape is reported the
+    // same way: the limits still work, so the run log has to say that the
+    // envelope changed instead of letting the change pass unnoticed.
+    if (catalog.warning) {
+      onWarning?.(`models.dev catalog warning: ${catalog.warning}`);
+    }
+    const extraEvents = buildOpencodeExtraEvents({ ...telemetry, catalog, onWarning });
+    // The session fact is dated at the session's creation instant, so the
+    // window filter would drop it for every session that was created before
+    // the window even though the session is still discovered through its
+    // in-window messages.  Its content never moves and its id is the
+    // session's, so the row is stored once and every later pass dedupes
+    // against it; only sessions seen in the window emit it.
+    const sessionFacts = [];
+    const windowedExtraEvents = [];
+    for (const event of extraEvents) {
+      if (event?.label === "session") sessionFacts.push(event);
+      else windowedExtraEvents.push(event);
+    }
+    return [...filterEventsSince([...tokenEvents, ...windowedExtraEvents], since), ...sessionFacts];
   } catch (error) {
     if (scanStatus) scanStatus.complete = false;
     if (DEBUG) log(`database read failed (${error instanceof Error ? error.message : "error"})`);
     return [];
   }
+}
+
+/** Bucket the window's events by kind for the run log. */
+export function countEventKinds(events) {
+  const counts = { token: 0, cost: 0, context: 0, session: 0, lifecycle: 0 };
+  for (const event of events) {
+    const label = typeof event?.label === "string" ? event.label : "";
+    if (label.startsWith("token:")) counts.token += 1;
+    else if (label.startsWith("context:")) counts.context += 1;
+    else if (label.startsWith("lifecycle:")) counts.lifecycle += 1;
+    else if (label === "session" || label === "session-snapshot") counts.session += 1;
+    else if (event?.metricType === "cost") counts.cost += 1;
+  }
+  return counts;
+}
+
+/** One example event per kind, for --dry-run inspection. */
+export function sampleEventPerKind(events) {
+  const samples = new Map();
+  for (const event of events) {
+    const label = typeof event?.label === "string" ? event.label : "";
+    const kind = label.startsWith("token:")
+      ? "token"
+      : label.startsWith("context:")
+        ? "context"
+        : label.startsWith("lifecycle:")
+          ? "lifecycle"
+          : label === "session" || label === "session-snapshot"
+            ? "session"
+            : event?.metricType === "cost"
+              ? "cost"
+              : null;
+    if (!kind || samples.has(kind)) continue;
+    samples.set(kind, event);
+  }
+  return [...samples.entries()];
 }
 
 async function main() {
@@ -102,11 +197,44 @@ async function main() {
     fail(error instanceof Error ? error.message : String(error));
   }
   const scanStatus = { complete: true };
-  const events = await collectOpencodeEvents({ since: args.since, scanStatus });
-  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`);
+  const dryRun = DRY || args.dryRun;
+  // One fixed instant decides whether a token row carries the session id.  It
+  // is read from OPENCODE_SESSION_ID_CUTOFF_MS and defaults to "never", so the
+  // token rows keep exactly the shape Usage Monitor already stored unless an
+  // operator sets the boundary to the install moment on purpose.  A dry run
+  // previews the shape this run sends, not a different one.
+  const sessionIdCutoffMs = resolveOpencodeSessionIdCutoffMs(process.env);
+  const events = await collectOpencodeEvents({
+    since: args.since,
+    scanStatus,
+    sessionIdCutoffMs,
+    onWarning: (message) => log(message),
+  });
+  const kinds = countEventKinds(events);
+  log(
+    `parsed ${events.length} event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}: ` +
+      `${JSON.stringify(kinds)}`,
+  );
+  // A context row without a limit means the models.dev catalog has no window
+  // for that provider and model, so the utilization is unknown.  Say so when
+  // it happens instead of letting the context feature quietly go blank.
+  const contextWithoutLimit = events.filter(
+    (event) =>
+      typeof event?.label === "string" &&
+      event.label.startsWith("context:") &&
+      event.metadata?.contextLimit == null,
+  ).length;
+  if (contextWithoutLimit > 0) {
+    log(
+      `${contextWithoutLimit} context row(s) carry no context limit: the models.dev catalog has no window for that provider and model`,
+    );
+  }
   if (DEBUG) {
     const models = new Set(events.map((event) => event.producerKeyRef).filter(Boolean));
     log(`models: ${[...models].join(", ") || "(none)"}`);
+    for (const [kind, sample] of sampleEventPerKind(events)) {
+      log(`sample ${kind}: ${JSON.stringify(sample)}`);
+    }
   }
   if (events.length === 0) {
     log("nothing to send");
@@ -122,7 +250,7 @@ async function main() {
       ingestUrl: INGEST_URL,
       ingestToken: token,
       producerId: PRODUCER_ID,
-      dryRun: DRY || args.dryRun,
+      dryRun,
       log,
     });
     log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);

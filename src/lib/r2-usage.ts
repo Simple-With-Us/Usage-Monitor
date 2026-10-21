@@ -11,15 +11,15 @@ import { createHash, createHmac } from "node:crypto";
  *   - Class A ops: 1,000,000 / month
  *   - Class B ops: 10,000,000 / month
  *
- * Hard policy at {@link R2_THRESHOLD_PCT} (70%):
- *   - **Storage:** max(current snapshot, GB-month so far) ≥ 70% of the
+ * Hard policy at {@link R2_THRESHOLD_PCT} (90%):
+ *   - **Storage:** max(current snapshot, GB-month so far) ≥ 90% of the
  *     10 GiB free tier → stop.  Cloudflare bills GB-month, not the latest
  *     ListObjects total.  A prune that drops the live card to a few hundred
  *     MB does not erase a 20+ GiB day earlier in the month.  Month-peak
  *     alone is not the kill input (that false-killed after the 2026-08-04
  *     / 2026-08-12 prune).  No pace projection for storage.
- *   - **Class A / Class B (flows):** absolute MTD ≥ 70% **or** linear
- *     month-end pace projects ≥ 70% → stop.
+ *   - **Class A / Class B (flows):** absolute MTD ≥ 90% **or** linear
+ *     month-end pace projects ≥ 90% → stop.
  *
  * On trip we:
  *   1. Persist `/data/r2-disabled-70pct.flag` (and set env)
@@ -49,8 +49,10 @@ export const DEFAULT_R2_FREE_TIER_LIMITS: R2UsageLimits = {
   classBOps: 10_000_000,
 };
 
-export const R2_THRESHOLD_PCT = 70;
+export const R2_THRESHOLD_PCT = 90;
 
+// Keep this legacy filename shared with startup/runtime watchers so existing flags
+// remain readable and clearR2AutoDisable() can remove them after a policy change.
 export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
 /**
  * Durable record that auto-resume decided the kill switch should be off.
@@ -175,11 +177,11 @@ export const R2_STORAGE_GRAPHQL_DAY_LIMIT = 400;
 export const R2_PREVIOUS_WEEK_DAYS = 7;
 
 /** Auto-resume hysteresis: clear kill switch when live storage is below this. */
-export const R2_RESUME_STORAGE_PCT = 65;
+export const R2_RESUME_STORAGE_PCT = 85;
 
 /**
  * Soft tip-prune threshold: when live storage reaches this absolute share of the
- * free tier, delete non-tip LTX per level (latest max-txid kept) before the 70%
+ * free tier, delete non-tip LTX per level (latest max-txid kept) before the 90%
  * kill. Disaster recovery only needs the tip chain; multi-level LTX history is
  * what re-breaches free tier every day (2026-08-04 / 2026-08-06).
  */
@@ -437,7 +439,7 @@ export function assessR2Usage(
     previousWeekPeakBytes?: number | null;
   } = {}
 ): R2UsageAssessment {
-  // Storage: absolute 70% of free tier only (stock). Ops: absolute or pace.
+  // Storage: absolute 90% of free tier only (stock). Ops: absolute or pace.
   const storage = calculatePaceProjection(
     actualStorageBytes,
     limits.storageBytes,
@@ -768,12 +770,12 @@ export function formatDailyPushoverMessage(
   const title = "📊 Cloudflare R2 Free Tier Status";
 
   const statusStr = disabled
-    ? "🛑 DISABLED (Auto-killed at 70% threshold)"
+    ? `🛑 DISABLED (Auto-killed at ${R2_THRESHOLD_PCT}% threshold)`
     : assessment.metricsSource === "unavailable"
       ? "❓ METRICS UNAVAILABLE (no auto-disable)"
       : assessment.overallOnTrackToExceed70Pct
-        ? "⚠️ WARNING (Pace/MTD >= 70%)"
-        : "✅ OK (Under 70% free-tier pace)";
+        ? `⚠️ WARNING (Pace/MTD >= ${R2_THRESHOLD_PCT}%)`
+        : `✅ OK (Under ${R2_THRESHOLD_PCT}% free-tier pace)`;
 
   const topBuckets = (assessment.buckets ?? [])
     .slice()
@@ -1914,9 +1916,14 @@ export function graphqlStorageSamplesAreFresh(
   maxAgeMs: number = R2_GRAPHQL_STORAGE_MAX_AGE_MS
 ): boolean {
   if (buckets.length === 0) return false;
-  return buckets.every((b) => {
-    if (!b.asOf) return false;
-    const t = Date.parse(b.asOf);
+  // Orphan buckets (deleted or renamed) can linger in the month-window
+  // r2StorageByBucket series with no 24-hour sample (asOf null).  They must
+  // not poison the freshness check and block GraphQL-based auto-resume.
+  // Only buckets with a current sample count; zero sampled buckets is stale.
+  const sampled = buckets.filter((b) => b.asOf);
+  if (sampled.length === 0) return false;
+  return sampled.every((b) => {
+    const t = Date.parse(b.asOf as string);
     return Number.isFinite(t) && now.getTime() - t <= maxAgeMs;
   });
 }
@@ -2461,7 +2468,7 @@ export async function runR2UsageCheck(
           buckets: liveStorage.buckets,
         }
       );
-      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 70%.
+      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 90%.
       storageIsLive = true;
       console.warn(
         "[r2-usage] GraphQL credentials missing; enforcing storage from live S3 list only"
@@ -2514,6 +2521,27 @@ export async function runR2UsageCheck(
         console.warn(
           "[r2-usage] GraphQL storage samples are stale; ignoring storage for kill decisions (ops still enforced)"
         );
+      } else if (!liveStorage) {
+        // Samples are fresh, but an orphan bucket (deleted/renamed, asOf null)
+        // can still carry its stale month-max size into currentBytes and trip a
+        // false kill or block auto-resume.  Drop orphans from the CURRENT
+        // snapshot; GB-month stays untouched — the bucket's earlier residency
+        // this month really does bill (same rule as the fleet rollup).
+        const liveSamples = buckets.filter((b) => b.asOf);
+        if (liveSamples.length !== buckets.length) {
+          const orphans = buckets
+            .filter((b) => !b.asOf)
+            .map((b) => b.bucketName);
+          console.warn(
+            `[r2-usage] dropping ${orphans.length} orphan bucket(s) from current storage: ${orphans.join(", ")}`
+          );
+          buckets = liveSamples;
+          currentBytes = liveSamples.reduce((sum, b) => sum + b.bytes, 0);
+          billingBytes = resolveBillingStorageBytes(
+            currentBytes,
+            metrics.gbMonthBytes
+          );
+        }
       }
 
       assessment = assessR2Usage(
@@ -2661,20 +2689,30 @@ export async function runR2UsageCheck(
     enforceR2AutoDisable(reason);
   }
 
-  // Auto-resume when live storage is healthy (hysteresis) and ops are fine.
+  // Auto-resume when storage is healthy (hysteresis) and ops are fine.
   // Fixes sticky kill from stale GraphQL after a successful prune.
+  // UM-1609: after the litestream B2 cutover, deploy env carries no S3-list
+  // creds, so a live list can be impossible on every tick and the kill flag
+  // would stick forever. Accept a fresh GraphQL storage sample in that case -
+  // but never stale or unavailable metrics, the same trust bar kill
+  // decisions use.
+  const storageResumeSource = storageIsLive
+    ? "live"
+    : assessment.metricsSource === "cloudflare_graphql" && !storageSampleStale
+      ? "graphql"
+      : null;
   if (
     isR2AutoDisabled() &&
-    storageIsLive &&
+    storageResumeSource &&
     assessment.storage.mtdPct < R2_RESUME_STORAGE_PCT &&
     !assessment.classA.onTrackToExceed &&
     !assessment.classB.onTrackToExceed
   ) {
     console.warn(
-      `[r2-usage] auto-resume: live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
+      `[r2-usage] auto-resume: ${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
     );
     clearR2AutoDisable(
-      `live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
+      `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
     );
   }
 

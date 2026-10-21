@@ -87,7 +87,7 @@ const GITHUB_TOKEN_ENV = ["GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_PAT"] as c
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2026-03-10";
 const GITHUB_USER_AGENT = "usage-monitor-platform-probe/1.0";
-const GITHUB_REPO_OWNER = "jaywedgeworth22";
+const GITHUB_REPO_OWNER = "Simple-With-Us";
 const GITHUB_REPO_NAME = "Usage-Monitor";
 /** Below this much core-API headroom the card goes degraded. */
 const GITHUB_LOW_HEADROOM_PERCENT = 10;

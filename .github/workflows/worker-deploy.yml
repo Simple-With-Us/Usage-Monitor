@@ -2,6 +2,24 @@ name: Deploy mapped Workers
 on:
   push:
     branches: [main]
+    # Native-only (ios/, macos/) and web-app-only merges must not redeploy the
+    # Workers.  This list covers everything the pipeline needs (including
+    # test-only files, so test changes still run CI).  schedule and
+    # workflow_dispatch cannot filter by path, so worker_changed() in
+    # scripts/deploy-mapped-worker.py applies its narrower deploy-relevant
+    # subset to them; a unit test keeps that subset inside this list.
+    paths:
+      - 'workers/**'
+      - 'scripts/deploy-mapped-worker.py'
+      - 'scripts/test-deploy-mapped-worker.py'
+      - 'scripts/worker-targets.json'
+      - 'scripts/infisical-fetch.mjs'
+      - 'scripts/verify-receipt-inbox-lifecycle.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vitest.config.ts'
+      - 'vitest.setup.ts'
+      - '.github/workflows/worker-deploy.yml'
   schedule:
     - cron: '11,41 * * * *'
   workflow_dispatch:
@@ -25,6 +43,8 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+          # worker_changed() diffs the deployed tag against main.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24

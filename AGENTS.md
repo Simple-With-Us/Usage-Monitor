@@ -146,6 +146,13 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
   `claude_code.interaction` is a turn).  `AiRequest` never feeds cash math.  Read path:
   `GET /api/ai-requests/performance?days=7` (session or `USAGE_READ_TOKEN`) and the Request
   Performance table on the Agents page.  Retention `AI_REQUEST_RETENTION_DAYS` (default 180).
+  `costUsd` is only the harness-reported figure.  Rows with tokens but no reported cost (Codex,
+  Claude trace-only rows) are priced at READ time from the bundled LiteLLM snapshot by
+  `src/lib/ai-request-cost.ts` (UM-1610):  nothing is stored, a reported cost always wins, and the
+  summary returns `costUsd` and `derivedCostUsd` separately, with `costUsdKnownRequests`,
+  `derivedCostRequests`, `derivedCostIncompleteRequests` and `unpricedRequests`, so the UI shows
+  reported and estimated apart.  A Codex `api_request` with no `model` attribute is not stored
+  (a housekeeping HTTP call that never gets a completion).
 - **Both routes are excluded from the dashboard-session middleware** (`src/middleware.ts`'s
   `api/otlp(?:/|$)` exclusion, alongside the pre-existing `api/ingest` one) — without this
   exclusion, even a request with a correct `USAGE_INGEST_TOKEN` gets a 401 from the middleware
@@ -209,7 +216,7 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
 - As of 2026-09-23, Claude Code's own per-turn OTel **logs** (`api_request`,
   `user_prompt`, `tool_result`, `tool_decision`, `api_error`, etc.) no longer
   target this app at all — they go straight to a dedicated Sentry project
-  (`agent-sessions` in the `jays-services` org) via per-signal
+  (`agent-sessions` in the `simple-with-us` org) via per-signal
   `OTEL_EXPORTER_OTLP_LOGS_*` env vars in `~/.claude/settings.json` on the
   Mac.  Claude Code **metrics** keep targeting this app, unchanged, via
   `OTEL_EXPORTER_OTLP_METRICS_*` — but a production smoke test taken during
@@ -339,7 +346,7 @@ usage — no special-casing. Idempotent by `(subscriptionId, periodStart)` hash 
 
 `GET /api/sentry-health` (dashboard-session-gated like every non-ingest route) returns per-project
 unresolved-issue counts from Sentry's REST API when `SENTRY_READ_TOKEN` (+ optional `SENTRY_ORG`,
-default `jays-services`) are set; `{ configured: false }` otherwise, and the dashboard card
+default `simple-with-us`) are set; `{ configured: false }` otherwise, and the dashboard card
 (`src/components/SentryHealthCard.tsx`) renders nothing in that case. Tracked projects are a fixed
 list in `src/lib/sentry-health.ts` (`socratic-trade`, `congress-trade`, `fleet-infra`, `dealdex`, `botfleet`, `autorotate`, `contactlogo`).
 `SENTRY_READ_TOKEN` is never sent to the client. This is the "errors/health stay in Sentry" half of
@@ -484,7 +491,7 @@ The Infisical project `usage-monitor` (consult the authorized operations workspa
 - `node scripts/infisical-run.mjs --check` verifies project secret access.
 - `node scripts/infisical-run.mjs -- npm run start` runs the application with Infisical secrets.
 - `src/lib/infisical-provider-sync.ts` supports the `"um"` scope and falls back to `INFISICAL_AUTOMATION_CLIENT_ID` / `INFISICAL_AUTOMATION_CLIENT_SECRET` when scope-specific client credentials are omitted.
-- `bash scripts/cf-token-map.sh` (after `set -a; . ~/.secrets/global-api-keys; set +a`) prints which Cloudflare token *names* in UM Infisical can see which CF accounts.  Never prints a token value.  Use this before picking `CLOUDFLARE_*_API_TOKEN` / `R2_USAGE_API_TOKEN`.  Intended slots: fleet = all four accounts; JAY/R2_USAGE = Usage.Jays.Services; ST = Socratic.Trade; CT = Congress.Trade; OLD = Jay Old (often absent — fleet fallback).  Live 2026-08-14: fleet/CT/legacy/`R2_USAGE` share one token (all four accounts); JAY is a distinct all-accounts token; ST is scoped to SocraticTrade.com only.  Re-run the script; do not assume names stay distinct.
+- `bash scripts/cf-token-map.sh` (it takes its Infisical credentials from the environment, else `fleet-secrets get`) prints which Cloudflare token *names* in UM Infisical can see which CF accounts.  Never prints a token value.  Use this before picking `CLOUDFLARE_*_API_TOKEN` / `R2_USAGE_API_TOKEN`.  Intended slots: fleet = all four accounts; JAY/R2_USAGE = Usage.Jays.Services; ST = Socratic.Trade; CT = Congress.Trade; OLD = Jay Old (often absent — fleet fallback).  Live 2026-08-14: fleet/CT/legacy/`R2_USAGE` share one token (all four accounts); JAY is a distinct all-accounts token; ST is scoped to SocraticTrade.com only.  Re-run the script; do not assume names stay distinct.
 
 `SQLITE_PRE_MIGRATION_BACKUP_RETENTION` controls how many verified local SQLite
 Online Backup API snapshots are retained beside the production DB (default `3`,

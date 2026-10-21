@@ -564,6 +564,10 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
     public struct FleetBackups: Codable, Hashable, Sendable {
         public var configured: Bool?
         public var ok: Bool?
+        /// True when the check was deliberately skipped (offline e2e run):
+        /// nothing was observed, so `ok == false` here means "not checked",
+        /// never "backups failing".
+        public var offline: Bool?
         public var asOf: String?
         public var cacheAgeSeconds: Int?
         public var apps: [App]
@@ -572,6 +576,7 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
         public init(
             configured: Bool? = nil,
             ok: Bool? = nil,
+            offline: Bool? = nil,
             asOf: String? = nil,
             cacheAgeSeconds: Int? = nil,
             apps: [App] = [],
@@ -579,6 +584,7 @@ public struct ServerMetrics: Codable, Hashable, Sendable {
         ) {
             self.configured = configured
             self.ok = ok
+            self.offline = offline
             self.asOf = asOf
             self.cacheAgeSeconds = cacheAgeSeconds
             self.apps = apps

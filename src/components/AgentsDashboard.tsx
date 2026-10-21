@@ -42,7 +42,13 @@ type RequestPerformanceRow = {
   ttftMsP95: number | null;
   outputTokensPerSecP50: number | null;
   cacheHitRatio: number | null;
+  /** Harness-reported PAYG-equivalent cost. */
   costUsd: number;
+  /** Monitor estimate for requests with tokens but no reported cost (UM-1610). */
+  derivedCostUsd?: number;
+  derivedCostRequests?: number;
+  derivedCostIncompleteRequests?: number;
+  unpricedRequests?: number;
 };
 
 function formatMs(ms: number | null): string {
@@ -451,7 +457,7 @@ export function AgentsDashboard() {
             <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
               <h2 className="text-base font-bold text-foreground mb-1">Request Performance</h2>
               <p className="text-xs text-muted-foreground mb-3">
-                Per model call, last 7 days.{SENTENCE_GAP}Cost is the harness&apos;s PAYG-equivalent estimate.
+                Per model call, last 7 days.{SENTENCE_GAP}Reported is the harness&apos;s own PAYG-equivalent cost.{SENTENCE_GAP}Estimated is computed here from tokens at list prices for requests with no reported cost.
               </p>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
@@ -492,8 +498,35 @@ export function AgentsDashboard() {
                         <td className="py-2.5 text-right text-foreground">
                           {row.cacheHitRatio == null ? "—" : `${(row.cacheHitRatio * 100).toFixed(1)}%`}
                         </td>
-                        <td className="py-2.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
-                          {row.costUsd > 0 ? formatCurrency(row.costUsd) : "—"}
+                        <td className="py-2.5 text-right font-semibold">
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            {row.costUsd > 0 ? formatCurrency(row.costUsd) : "—"}
+                          </span>
+                          {row.costUsd > 0 ? (
+                            <span className="block text-[10px] font-normal text-muted-foreground">reported</span>
+                          ) : null}
+                          {(row.derivedCostRequests ?? 0) > 0 ? (
+                            <span
+                              className="block text-[10px] font-normal italic text-amber-700 dark:text-amber-300"
+                              title={`Estimate from tokens at list prices for ${row.derivedCostRequests} request${
+                                row.derivedCostRequests === 1 ? "" : "s"
+                              } with no reported cost${
+                                (row.derivedCostIncompleteRequests ?? 0) > 0
+                                  ? `; ${row.derivedCostIncompleteRequests} lack a catalog rate for some token type, so this is a floor`
+                                  : ""
+                              }.`}
+                            >
+                              {row.costUsd > 0 ? "+ " : ""}
+                              {formatCurrency(row.derivedCostUsd ?? 0)} est.
+                              {(row.derivedCostIncompleteRequests ?? 0) > 0 ? "+" : ""}
+                              {` (${row.derivedCostRequests} req)`}
+                            </span>
+                          ) : null}
+                          {(row.unpricedRequests ?? 0) > 0 ? (
+                            <span className="block text-[10px] font-normal text-muted-foreground">
+                              {row.unpricedRequests} unpriced
+                            </span>
+                          ) : null}
                         </td>
                       </tr>
                     ))}

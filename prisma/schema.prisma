@@ -835,6 +835,58 @@ model ApnsDeviceToken {
   updatedAt   DateTime @updatedAt
 }
 
+// CodeCaps has a separate APNs topic and preference contract from Usage Monitor.  Never mix these
+// tokens into ApnsDeviceToken: that table feeds the generic Usage Monitor alert channel and uses a
+// different bundle ID.
+model CodeCapsPushDevice {
+  id             String   @id @default(uuid())
+  installationId String   @unique
+  generation     BigInt   @default(0)
+  deviceToken    String?  @unique
+  environment    String?
+  preferences    Json?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deliveries     CodeCapsPushAlertDelivery[]
+
+  @@index([isActive, updatedAt])
+}
+
+// The Mac supplies stable occurrence IDs.  A retained receipt prevents a rewritten local snapshot
+// or an HTTP retry from re-alerting the same event.
+model CodeCapsPushAlert {
+  id           String   @id
+  kind         String
+  providerKey  String
+  providerTitle String
+  windowLabel  String
+  summary      String
+  occurredAt   DateTime
+  receivedAt   DateTime @default(now())
+  deliveries   CodeCapsPushAlertDelivery[]
+
+  @@index([receivedAt])
+  @@index([occurredAt])
+}
+
+// One receipt per alert and registered installation.  APNs result state is durable so delivery
+// evidence is separate from event deduplication.
+model CodeCapsPushAlertDelivery {
+  id          String            @id @default(uuid())
+  alertId     String
+  alert       CodeCapsPushAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  deviceId    String
+  device      CodeCapsPushDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  outcome     String
+  attemptCount Int               @default(0)
+  attemptedAt DateTime           @default(now())
+  deliveredAt DateTime?
+
+  @@unique([alertId, deviceId])
+  @@index([deviceId, attemptedAt])
+}
+
 // Singleton portfolio / "Global Budget" cap for Overview hero meter.
 // Null override means use suggested sum of project budgets (or none).
 // Freeform — may disagree with Σ project or provider budgets.

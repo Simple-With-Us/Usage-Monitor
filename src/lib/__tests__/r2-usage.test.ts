@@ -38,6 +38,7 @@ import {
   DEFAULT_R2_FREE_TIER_LIMITS,
   R2_DISABLED_FLAG_FILENAME,
   R2_SOFT_PRUNE_STORAGE_PCT,
+  R2_THRESHOLD_PCT,
   __getR2FlagFilePathForTests,
   __resetR2UsageStateForTests,
 } from "../r2-usage";
@@ -103,55 +104,74 @@ describe("R2 usage monitoring & auto-disable", () => {
       300_000,
       limit,
       testDate,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(statusLow.onTrackToExceed).toBe(false);
-    expect(statusLow.projectedPct).toBeLessThan(70);
+    expect(statusLow.projectedPct).toBeLessThan(R2_THRESHOLD_PCT);
 
     const statusHigh = calculatePaceProjection(
-      400_000,
+      450_000,
       limit,
       testDate,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(statusHigh.onTrackToExceed).toBe(true);
-    expect(statusHigh.projectedPct).toBeGreaterThanOrEqual(70);
+    expect(statusHigh.projectedPct).toBeGreaterThanOrEqual(R2_THRESHOLD_PCT);
   });
 
-  it("storage absolute mode trips only on MTD ≥ 70%, not early-month pace alone", () => {
+  it("storage absolute mode trips only on MTD ≥ 90%, not early-month pace alone", () => {
     const earlyMonth = new Date("2026-08-02T12:00:00.000Z");
     const threeGib = 3 * 1024 * 1024 * 1024;
     const absoluteOnly = calculatePaceProjection(
       threeGib,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute"
     );
-    expect(absoluteOnly.mtdPct).toBeLessThan(70);
-    expect(absoluteOnly.projectedPct).toBeGreaterThan(70);
+    expect(absoluteOnly.mtdPct).toBeLessThan(R2_THRESHOLD_PCT);
+    expect(absoluteOnly.projectedPct).toBeGreaterThan(R2_THRESHOLD_PCT);
     expect(absoluteOnly.onTrackToExceed).toBe(false);
 
     const withPace = calculatePaceProjection(
       threeGib,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute_or_pace"
     );
     expect(withPace.onTrackToExceed).toBe(true);
 
     const over = calculatePaceProjection(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       DEFAULT_R2_FREE_TIER_LIMITS.storageBytes,
       earlyMonth,
-      70,
+      R2_THRESHOLD_PCT,
       "absolute"
     );
-    expect(over.mtdPct).toBeGreaterThanOrEqual(70);
+    expect(over.mtdPct).toBeGreaterThanOrEqual(R2_THRESHOLD_PCT);
     expect(over.onTrackToExceed).toBe(true);
+  });
+
+  it.each([
+    [70, false],
+    [85, false],
+    [89.9, false],
+    [90, true],
+    [95, true],
+  ])("applies the storage pause boundary at %s%%", (pct, shouldPause) => {
+    expect(R2_THRESHOLD_PCT).toBe(90);
+    const assessment = assessR2Usage(
+      DEFAULT_R2_FREE_TIER_LIMITS.storageBytes * pct / 100,
+      0,
+      0,
+      DEFAULT_R2_FREE_TIER_LIMITS,
+      new Date("2026-08-02T12:00:00.000Z")
+    );
+    expect(assessment.storage.onTrackToExceed).toBe(shouldPause);
+    expect(assessment.overallOnTrackToExceed70Pct).toBe(shouldPause);
   });
 
   it("planLtxTipPrune keeps highest max-txid tip per level", () => {
@@ -184,7 +204,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(plan.delete.reduce((s, o) => s + o.size, 0)).toBe(100);
   });
 
-  it("assesses storage absolute + ops absolute/pace at 70%", () => {
+  it("assesses storage absolute + ops absolute/pace at 90%", () => {
     const testDate = new Date("2026-07-15T12:00:00.000Z");
 
     const lowAssessment = assessR2Usage(
@@ -199,7 +219,7 @@ describe("R2 usage monitoring & auto-disable", () => {
 
     const highAssessment = assessR2Usage(
       1 * 1024 * 1024 * 1024,
-      400_000,
+      450_000,
       500_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
       testDate
@@ -208,7 +228,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(highAssessment.exceededMetric).toBe("classA");
 
     const storageBreach = assessR2Usage(
-      7.5 * 1024 * 1024 * 1024,
+      9.5 * 1024 * 1024 * 1024,
       1_000,
       1_000,
       DEFAULT_R2_FREE_TIER_LIMITS,
@@ -1092,7 +1112,7 @@ describe("R2 usage monitoring & auto-disable", () => {
   it("enforces R2 auto-disable when emergency flag or env is set", () => {
     expect(isR2AutoDisabled()).toBe(false);
 
-    enforceR2AutoDisable("Test 70% breach");
+    enforceR2AutoDisable("Test 90% breach");
     expect(isR2AutoDisabled()).toBe(true);
     expect(process.env.LITESTREAM_EMERGENCY_DISABLE).toBe("true");
     expect(process.env.R2_WRITES_DISABLED).toBe("true");
@@ -1128,7 +1148,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       process.env.R2_WRITES_DISABLED = "true";
       expect(isR2AutoDisabled()).toBe(true);
 
-      clearR2AutoDisable("storage 4.4% < 65% resume threshold");
+      clearR2AutoDisable("storage 4.4% < 85% resume threshold");
       expect(hasR2AutoResumeMarker()).toBe(true);
       expect(isR2AutoDisabled()).toBe(false);
 
@@ -1144,7 +1164,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       clearR2AutoDisable("first resume");
       expect(isR2AutoDisabled()).toBe(false);
 
-      enforceR2AutoDisable("storage back over 70%");
+      enforceR2AutoDisable("storage back over 90%");
       expect(hasR2AutoResumeMarker()).toBe(false);
       expect(isR2AutoDisabled()).toBe(true);
 
@@ -1173,14 +1193,14 @@ describe("R2 usage monitoring & auto-disable", () => {
     it.skipIf(hasDataVolume)(
       "writes the resume marker owner-only, with the reason and how to undo it",
       () => {
-        clearR2AutoDisable("storage 4.4% < 65% resume threshold");
+        clearR2AutoDisable("storage 4.4% < 85% resume threshold");
 
         const markerPath = __getR2FlagFilePathForTests(R2_AUTO_RESUMED_FLAG_FILENAME);
         const fd = fs.openSync(markerPath, "r");
         try {
           expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600);
           const body = fs.readFileSync(fd, "utf8");
-          expect(body).toContain("storage 4.4% < 65% resume threshold");
+          expect(body).toContain("storage 4.4% < 85% resume threshold");
           expect(body).toContain("LITESTREAM_EMERGENCY_DISABLE");
           expect(body).toContain("Delete this file");
         } finally {
@@ -1276,6 +1296,23 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(body).not.toContain("month peak:");
   });
 
+  it.each([
+    [false, false, "✅ OK (Under 90% free-tier pace)"],
+    [true, false, "🛑 DISABLED (Auto-killed at 90% threshold)"],
+    [false, true, "⚠️ WARNING (Pace/MTD >= 90%)"],
+  ])("uses the current policy in Pushover status (disabled=%s, breached=%s)", (disabled, breached, status) => {
+    const assessment = assessR2Usage(
+      DEFAULT_R2_FREE_TIER_LIMITS.storageBytes * (breached ? 0.95 : 0.8),
+      0,
+      0,
+      DEFAULT_R2_FREE_TIER_LIMITS,
+      new Date("2026-08-15T12:00:00.000Z")
+    );
+    const { body } = formatDailyPushoverMessage(assessment, disabled);
+    expect(body).toContain(status);
+    expect(body).not.toContain("70%");
+  });
+
   it("formats daily Pushover with current snapshot, month peak, and last 7 days", () => {
     const gib = 1024 * 1024 * 1024;
     const testDate = new Date("2026-08-25T12:00:00.000Z");
@@ -1328,7 +1365,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     ).toBe(false);
   });
 
-  it("auto-disables from real GraphQL metrics when storage is over 70%", async () => {
+  it("auto-disables from real GraphQL metrics when storage is over 90%", async () => {
     process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
     process.env.R2_USAGE_API_TOKEN = "tok-test";
     process.env.PUSHOVER_USER_KEY = "test_user_key";
@@ -1450,7 +1487,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       text: async () => JSON.stringify(graphqlBody),
     });
 
-    // Mid-month, low storage → under 70% projected and MTD
+    // Mid-month, low storage → under 90% projected and MTD
     const assessment = await runR2UsageCheck(
       mockFetch as unknown as typeof fetch,
       new Date("2026-08-15T12:00:00.000Z")
@@ -1489,6 +1526,26 @@ describe("R2 usage monitoring & auto-disable", () => {
         now
       )
     ).toBe(false);
+  });
+
+  it("ignores orphan buckets with no current sample in the freshness check", () => {
+    const now = new Date("2026-08-05T00:30:00.000Z");
+    const fresh = {
+      bucketName: "usage-monitor-bucket",
+      bytes: 15 * 1024 ** 3,
+      objectCount: 600,
+      asOf: "2026-08-05T00:00:00.000Z",
+    };
+    const orphan = {
+      bucketName: "deleted-ghost-bucket",
+      bytes: 2 * 1024 ** 3,
+      objectCount: 40,
+      asOf: null,
+    };
+    // Ghost bucket alone must not flip a fresh set to stale (Seer #1706).
+    expect(graphqlStorageSamplesAreFresh([fresh, orphan], now)).toBe(true);
+    // But with no sampled bucket at all there is no fresh data.
+    expect(graphqlStorageSamplesAreFresh([orphan], now)).toBe(false);
   });
 
   it("does not kill on stale GraphQL storage when live S3 list is unavailable", async () => {
@@ -1544,5 +1601,191 @@ describe("R2 usage monitoring & auto-disable", () => {
 
     expect(assessment.storageSampleStale).toBe(true);
     expect(isR2AutoDisabled()).toBe(false);
+  });
+
+  describe("auto-resume via fresh GraphQL storage (UM-1609)", () => {
+    const freshGraphqlBody = (storageBytes: number, datetime: string) => ({
+      data: {
+        viewer: {
+          accounts: [
+            {
+              r2OperationsAdaptiveGroups: [
+                {
+                  sum: { requests: 50_000 },
+                  dimensions: { actionType: "PutObject" },
+                },
+                {
+                  sum: { requests: 2_000 },
+                  dimensions: { actionType: "GetObject" },
+                },
+              ],
+              r2StorageAdaptiveGroups: [
+                {
+                  max: {
+                    payloadSize: storageBytes,
+                    metadataSize: 0,
+                    objectCount: 1200,
+                  },
+                  dimensions: { datetime, bucketName: "usage-monitor-prod-v3" },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const graphqlFetch = (body: unknown) =>
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes("graphql")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify(body),
+          };
+        }
+        return { ok: true, status: 200, text: async () => '{"status":1}' };
+      });
+
+    beforeEach(() => {
+      for (const name of [R2_DISABLED_FLAG_FILENAME, R2_AUTO_RESUMED_FLAG_FILENAME]) {
+        try {
+          fs.unlinkSync(__getR2FlagFilePathForTests(name));
+        } catch {
+          // absent is fine
+        }
+      }
+    });
+
+    it("auto-resumes from fresh GraphQL storage when no live S3 list is configured", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+      // No LITESTREAM_S3_*/AWS_* env: post-B2-cutover deploy shape.
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const storageBytes = 4.6 * 1024 * 1024 * 1024; // ~46% of 10 GiB
+      const body = freshGraphqlBody(storageBytes, "2026-08-05T00:00:00Z");
+      const now = new Date("2026-08-05T00:30:00.000Z"); // sample 30 min old: fresh
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.metricsSource).toBe("cloudflare_graphql");
+      expect(assessment.storageSampleStale).toBe(false);
+      expect(assessment.storage.mtdPct).toBeLessThan(85);
+      expect(isR2AutoDisabled()).toBe(false);
+      expect(hasR2AutoResumeMarker()).toBe(true);
+    });
+
+    it("does not auto-resume on stale GraphQL storage without a live list", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const storageBytes = 4.6 * 1024 * 1024 * 1024;
+      const body = freshGraphqlBody(storageBytes, "2026-08-05T00:00:00Z");
+      const now = new Date("2026-08-05T03:30:00.000Z"); // 3.5h old: stale
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.storageSampleStale).toBe(true);
+      expect(isR2AutoDisabled()).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+
+    it("drops an orphan bucket's stale size instead of killing on it", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+
+      // Live bucket is small; the deleted ghost alone would exceed the kill
+      // threshold, and it has no 24h sample (asOf null).
+      const liveBytes = 2 * 1024 * 1024 * 1024;
+      const body = {
+        data: {
+          viewer: {
+            accounts: [
+              {
+                r2OperationsAdaptiveGroups: [
+                  {
+                    sum: { requests: 50_000 },
+                    dimensions: { actionType: "PutObject" },
+                  },
+                ],
+                r2StorageAdaptiveGroups: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: {
+                      datetime: "2026-08-05T00:00:00Z",
+                      bucketName: "usage-monitor-prod-v3",
+                    },
+                  },
+                ],
+                // Month-window row for a deleted bucket: no datetime
+                // dimension, so asOf is null (the orphan shape).
+                r2StorageByBucket: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: { bucketName: "usage-monitor-prod-v3" },
+                  },
+                  {
+                    max: {
+                      payloadSize: 9 * 1024 * 1024 * 1024,
+                      metadataSize: 0,
+                      objectCount: 900,
+                    },
+                    dimensions: { bucketName: "deleted-ghost-bucket" },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      };
+      const now = new Date("2026-08-05T00:30:00.000Z");
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.storageSampleStale).toBe(false);
+      expect(assessment.buckets?.map((b) => b.bucketName)).toEqual([
+        "usage-monitor-prod-v3",
+      ]);
+      expect(assessment.storage.mtdPct).toBeLessThan(R2_THRESHOLD_PCT);
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("does not auto-resume when metrics are unavailable", async () => {
+      // No R2/Cloudflare creds at all.
+      enforceR2AutoDisable("test kill");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '{"status":1}',
+      });
+      const assessment = await runR2UsageCheck(
+        mockFetch as unknown as typeof fetch,
+        new Date("2026-08-05T00:30:00.000Z")
+      );
+
+      expect(assessment.metricsSource).toBe("unavailable");
+      expect(isR2AutoDisabled()).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+    });
   });
 });
