@@ -1133,7 +1133,7 @@ ensure_tf_ready() {
 
 acquire_archive_lock
 log "archiving..."
-# Usage Client and Usage Monitor Local: both targets in
+# Usage Client and Usage Local Monitor: both targets in
 # ios/UsageMonitor/UsageMonitor.xcodeproj default to
 # CODE_SIGN_IDENTITY=iPhone Developer, which makes Xcode ask ASC for
 # IOS_APP_DEVELOPMENT profiles.  On GH-hosted runners that path bearer-fails
