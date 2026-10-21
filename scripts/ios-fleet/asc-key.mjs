@@ -34,8 +34,9 @@
  * handoff keeps the key out of the places a process listing is read for (the
  * command line) and out of every log, and it does not claim more than that.
  */
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 // Normalizes a PEM private key and refuses anything that is not one.
 //
@@ -147,6 +148,18 @@ async function main() {
   return 1;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("asc-key.mjs")) {
+// The main guard is the one this repo uses everywhere else:  comparing
+// resolved URLs.  A `process.argv[1].endsWith("asc-key.mjs")` guard fires
+// while a test file whose name ends that way is running, and an
+// `import.meta.url.endsWith(...)` guard is false for a checkout whose path
+// contains a space, #, ? or %.
+//
+// The path is resolved first, because a lane is reached through a symlink
+// (~/apps/lanes -> /Volumes/External/Lanes) and node resolves the module to
+// its real path.  scripts/ios-fleet/asc-api.mjs compares it the same way.
+//
+// scripts/test-session-token-collectors.mjs audits every .mjs under scripts/
+// for the fragile forms, so this file has to use the resolved-URL comparison.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().then((code) => { process.exitCode = code; });
 }
