@@ -354,7 +354,9 @@ const ModelsDevModelSchema = z
 
 const ModelsDevProviderSchema = z
   .object({
-    models: z.record(z.string(), ModelsDevModelSchema).optional(),
+    // Each model entry is validated on its own below, so one malformed model
+    // costs only itself and not every other model the vendor publishes.
+    models: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 
@@ -392,8 +394,10 @@ export function parseModelsDevCatalog(rawValue) {
     if (!provider.success) continue;
     const models = provider.data.models;
     if (!models) continue;
-    for (const [modelId, model] of Object.entries(models)) {
-      const context = model.limit?.context;
+    for (const [modelId, rawModel] of Object.entries(models)) {
+      const model = ModelsDevModelSchema.safeParse(rawModel);
+      if (!model.success) continue;
+      const context = model.data.limit?.context;
       if (!Number.isFinite(context) || context <= 0) continue;
       limits.set(`${providerId}\u0000${modelId}`, context);
     }
