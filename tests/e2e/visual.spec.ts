@@ -427,3 +427,47 @@ test('visual: receipt inbox held duplicates panel', async ({ page }) => {
   await expect(card.getByRole('button', { name: 'Discard' })).toBeVisible();
   await expect(card).toHaveScreenshot('receipt-inbox-held-duplicates.png', stableShot);
 });
+
+// Fleet Alerts card on /ops (#1715, Kody rule [4]): new visible UI element gets
+// a pinned screenshot.  /api/fleet-alerts is stubbed with a fixed two-topic
+// payload (one firing, one clear); every other card keeps its test-server shape.
+test('visual: fleet alerts card with firing topic', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  const frozenEpoch = Date.parse(FROZEN_NOW_ISO) / 1000;
+  await page.route('**/api/fleet-alerts', (route) => json(route, {
+    configured: true,
+    generatedAt: FROZEN_NOW_ISO,
+    ok: true,
+    summary: { topics: 2, alerts: 3, firing: 1 },
+    topics: {
+      'quota-burn': {
+        firing: 1,
+        total: 2,
+        alerts: [
+          { key: 'runaway|openai|5h', service: 'OpenAI', phase: 'alerting', severity: 'SEVERE', text: '5h window at 92% (burn 3.1x)', link: '', since: frozenEpoch - 900, updated: frozenEpoch - 60, prodDown: false },
+          { key: 'watch|anthropic|7d', service: 'Anthropic', phase: 'pending', severity: 'MODERATE', text: '7d window trending to cap', link: '', since: frozenEpoch - 3600, updated: frozenEpoch - 120, prodDown: false },
+        ],
+      },
+      'ship-pipeline': {
+        firing: 0,
+        total: 1,
+        alerts: [
+          { key: 'ship|ios|testflight', service: 'TestFlight', phase: 'ok', severity: 'INFO', text: 'Last ship green', link: '', since: frozenEpoch - 7200, updated: frozenEpoch - 300, prodDown: false },
+        ],
+      },
+    },
+  }));
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.getByTestId('fleet-alerts-card');
+  // The card only mounts once the /ops payload resolves, so wait for it
+  // instead of asserting on its contents straight after navigation.
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('5h window at 92% (burn 3.1x)')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Refresh Fleet Alerts' })).toBeVisible();
+  await expect(card.getByText('quota-burn')).toBeVisible();
+  await expect(card.getByText('ship-pipeline')).toBeVisible();
+  await expect(card).toHaveScreenshot('fleet-alerts-card.png', stableShot);
+});

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.28
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:24.22.0-bookworm-slim AS build
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl \
@@ -35,7 +35,7 @@ RUN npm run build \
   && test -x bin/litestream \
   && ./bin/litestream version
 
-FROM node:24.21.0-bookworm-slim AS runtime
+FROM node:24.22.0-bookworm-slim AS runtime
 
 # Coolify / CI pass the git SHA as SOURCE_COMMIT (or COOLIFY_CONTAINER_NAME alone).
 # Bake it into the image so /api/health revision is correct even when a stale

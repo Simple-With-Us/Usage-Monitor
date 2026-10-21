@@ -1,0 +1,328 @@
+// The local OTLP receiver.
+//
+// Producers on this Mac post OTLP-JSON to 127.0.0.1:4318.  The receiver
+// normalizes each signal into the hub's internal form and appends it to the
+// journal.  It never talks to the network itself and it never answers with
+// anything derived from a producer value.
+//
+// The listener is bound to 127.0.0.1 only.  It is never bound to 0.0.0.0:
+// this receiver accepts unauthenticated local telemetry, so it must not be
+// reachable from the network.
+//
+// The body cap is 12 MiB, the same as Sentry's container cap, so a malformed
+// or hostile producer cannot exhaust memory.  `/v1/metrics` is refused with
+// 501: Sentry has no OTLP metrics path and the plan does not either, so
+// accepting metrics would only create a sink that can never be delivered.
+//
+// The payload is validated with Zod before it reaches a normalizer.  The
+// inbound boundary is the last place where an unknown field can be refused,
+// so the normalizers and the journal only ever see a shape that was
+// checked.  A payload that does not match is answered with 400 and a fixed
+// message: the answer never quotes the payload, because the payload holds
+// the producer content.
+
+import { createServer } from "node:http";
+import { z } from "zod";
+
+import { normalizeOtlpLogs, normalizeOtlpTraces, NULL_LOGGER } from "./internal-event.mjs";
+
+/** The largest body the receiver will read.  Matches Sentry's container cap. */
+export const MAX_BODY_BYTES = 12 * 1024 * 1024;
+
+const RECEIVER_HOST = "127.0.0.1";
+const RECEIVER_PORT = 4318;
+
+//  An OTLP timestamp is a 64 bit number.  The JSON mapping of the OTLP
+//  specification sends it as a string, but producers send both, so both are
+//  accepted and the normalizer reads them the same way.
+const OtlpTimestampSchema = z.union([z.string(), z.number()]);
+
+//  An OTLP AnyValue.  The nested shapes are accepted and ignored: they are
+//  the shapes a producer uses to smuggle content, and the scrubber refuses
+//  them anyway.
+const OtlpAnyValueSchema = z.looseObject({
+  stringValue: z.string().optional(),
+  boolValue: z.boolean().optional(),
+  intValue: z.union([z.string(), z.number()]).optional(),
+  doubleValue: z.union([z.string(), z.number()]).optional(),
+  arrayValue: z.unknown().optional(),
+  kvlistValue: z.unknown().optional(),
+  bytesValue: z.union([z.string(), z.number()]).optional(),
+});
+
+const OtlpAttributeSchema = z.looseObject({
+  key: z.string(),
+  value: OtlpAnyValueSchema,
+});
+
+const OtlpScopeSchema = z.looseObject({
+  name: z.string().optional(),
+  version: z.string().optional(),
+  attributes: z.array(OtlpAttributeSchema).optional(),
+  droppedAttributesCount: z.number().int().nonnegative().optional(),
+});
+
+const OtlpResourceSchema = z.looseObject({
+  attributes: z.array(OtlpAttributeSchema).optional(),
+  droppedAttributesCount: z.number().int().nonnegative().optional(),
+});
+
+const OtlpStatusSchema = z.looseObject({
+  code: z.union([z.number(), z.string()]).optional(),
+  message: z.string().optional(),
+});
+
+const OtlpSpanSchema = z.looseObject({
+  traceId: z.string().optional(),
+  spanId: z.string().optional(),
+  parentSpanId: z.string().optional(),
+  name: z.string().optional(),
+  kind: z.number().int().optional(),
+  startTimeUnixNano: OtlpTimestampSchema.optional(),
+  endTimeUnixNano: OtlpTimestampSchema.optional(),
+  attributes: z.array(OtlpAttributeSchema).optional(),
+  droppedAttributesCount: z.number().int().nonnegative().optional(),
+  events: z.array(z.unknown()).optional(),
+  links: z.array(z.unknown()).optional(),
+  status: OtlpStatusSchema.optional(),
+});
+
+const OtlpLogRecordSchema = z.looseObject({
+  timeUnixNano: OtlpTimestampSchema.optional(),
+  observedTimeUnixNano: OtlpTimestampSchema.optional(),
+  severityNumber: z.number().int().optional(),
+  severityText: z.string().optional(),
+  body: OtlpAnyValueSchema.optional(),
+  attributes: z.array(OtlpAttributeSchema).optional(),
+  droppedAttributesCount: z.number().int().nonnegative().optional(),
+  traceId: z.string().optional(),
+  spanId: z.string().optional(),
+  flags: z.number().optional(),
+});
+
+const OtlpScopeSpansSchema = z.looseObject({
+  scope: OtlpScopeSchema.optional(),
+  spans: z.array(OtlpSpanSchema).optional(),
+});
+
+const OtlpScopeLogsSchema = z.looseObject({
+  scope: OtlpScopeSchema.optional(),
+  logRecords: z.array(OtlpLogRecordSchema).optional(),
+});
+
+const OtlpResourceSpansSchema = z.looseObject({
+  resource: OtlpResourceSchema.optional(),
+  scopeSpans: z.array(OtlpScopeSpansSchema).optional(),
+});
+
+const OtlpResourceLogsSchema = z.looseObject({
+  resource: OtlpResourceSchema.optional(),
+  scopeLogs: z.array(OtlpScopeLogsSchema).optional(),
+});
+
+/** The accepted shape of an OTLP traces payload. */
+export const OTLP_TRACES_SCHEMA = z.looseObject({
+  resourceSpans: z.array(OtlpResourceSpansSchema).optional(),
+});
+
+/** The accepted shape of an OTLP logs payload. */
+export const OTLP_LOGS_SCHEMA = z.looseObject({
+  resourceLogs: z.array(OtlpResourceLogsSchema).optional(),
+});
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sendJson(response, status, payload) {
+  if (response.headersSent) {
+    response.destroy();
+    return;
+  }
+  const body = Buffer.from(`${JSON.stringify(payload)}\n`, "utf8");
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": String(body.length),
+  });
+  response.end(body);
+}
+
+/**
+ * Read a request body with a hard byte ceiling.
+ *
+ * Returns `{ ok: false, tooLarge: true }` instead of buffering an
+ * unbounded body, and destroys the socket when the cap is hit.
+ */
+function readBoundedBody(request, maxBytes) {
+  return new Promise((resolve) => {
+    const declared = Number(request.headers["content-length"]);
+    if (Number.isSafeInteger(declared) && declared > maxBytes) {
+      resolve({ ok: false, tooLarge: true });
+      request.destroy();
+      return;
+    }
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    request.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        finish({ ok: false, tooLarge: true });
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => finish({ ok: true, body: Buffer.concat(chunks) }));
+    request.on("error", () => finish({ ok: false, tooLarge: false }));
+    request.on("aborted", () => finish({ ok: false, tooLarge: false }));
+  });
+}
+
+/**
+ * Create the receiver.
+ *
+ * @param {object} options
+ * @param {import("./journal.mjs").Journal} options.journal
+ * @param {object} [options.logger]
+ */
+export function createReceiver({ journal, logger = NULL_LOGGER, host = RECEIVER_HOST, port = RECEIVER_PORT } = {}) {
+  if (!journal) throw new Error("The receiver needs a journal");
+
+  const server = createServer((request, response) => {
+    //  A rejection inside the handler must never take the hub down: an
+    //  unhandled rejection ends the process on Node 15 and later.  The
+    //  handler answers a 500 and logs the error NAME only, because the
+    //  message of an error can quote the payload.
+    void handleRequest(request, response, { journal, logger }).catch((error) => {
+      logger.error("the otlp request failed", { errorName: error?.name ?? "Error" });
+      sendJson(response, 500, { error: "The hub could not handle the request" });
+    });
+  });
+
+  server.on("clientError", (error, socket) => {
+    if (socket && !socket.destroyed) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+  });
+
+  return {
+    server,
+    host,
+    port,
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+          server.removeListener("error", reject);
+          resolve(server.address());
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+async function handleRequest(request, response, { journal, logger }) {
+  //  A malformed request target, such as "//", is not a valid URL.  It is
+  //  answered with 400 instead of throwing out of the handler.
+  let path;
+  try {
+    path = new URL(request.url ?? "/", `http://${RECEIVER_HOST}:${RECEIVER_PORT}`).pathname;
+  } catch {
+    sendJson(response, 400, { error: "Malformed request target" });
+    return;
+  }
+
+  if (path !== "/v1/traces" && path !== "/v1/logs" && path !== "/v1/metrics") {
+    sendJson(response, 404, { error: "Not found" });
+    return;
+  }
+
+  if (request.method !== "POST") {
+    response.setHeader("allow", "POST");
+    sendJson(response, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  if (path === "/v1/metrics") {
+    sendJson(response, 501, {
+      error: "OTLP metrics are not supported: the hub has no metrics destination",
+    });
+    return;
+  }
+
+  const contentType = String(request.headers["content-type"] ?? "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    sendJson(response, 415, {
+      error: `Unsupported Content-Type "${contentType.slice(0, 64)}". Send application/json.`,
+    });
+    return;
+  }
+
+  const read = await readBoundedBody(request, MAX_BODY_BYTES);
+  if (!read.ok) {
+    if (read.tooLarge) {
+      sendJson(response, 413, { error: "Payload too large" });
+      return;
+    }
+    sendJson(response, 400, { error: "Could not read the request body" });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(read.body.toString("utf8"));
+  } catch {
+    sendJson(response, 400, { error: "Body is not valid JSON" });
+    return;
+  }
+  if (!isPlainObject(payload)) {
+    sendJson(response, 400, { error: "Body must be a JSON object" });
+    return;
+  }
+
+  //  The payload is validated before a normalizer sees it.  A payload that
+  //  does not match is refused with 400 and a fixed message: the answer
+  //  never quotes the payload.
+  const schema = path === "/v1/traces" ? OTLP_TRACES_SCHEMA : OTLP_LOGS_SCHEMA;
+  const checked = schema.safeParse(payload);
+  if (!checked.success) {
+    logger.warn("the otlp payload does not match the expected shape", {
+      path,
+      issues: checked.error.issues.length,
+    });
+    sendJson(response, 400, { error: "The OTLP payload does not match the expected shape" });
+    return;
+  }
+
+  const normalized =
+    path === "/v1/traces" ? normalizeOtlpTraces(checked.data) : normalizeOtlpLogs(checked.data);
+
+  //  One write and one fsync for the whole batch: a flush per event delays
+  //  the answer and invites the producer to retry the same spans.
+  const written = await journal.appendBatch(normalized.events);
+  logger.info("receiver accepted a batch", {
+    path,
+    received: normalized.events.length,
+    ignored: normalized.ignored,
+    written: normalized.events.length,
+    bytes: written,
+  });
+  sendJson(response, 200, {
+    ok: true,
+    received: normalized.events.length,
+    ignored: normalized.ignored,
+    written: normalized.events.length,
+  });
+}
