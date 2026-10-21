@@ -1,3 +1,5 @@
+import "server-only";
+
 import type { FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
 import type { R2FleetSummary } from "@/lib/r2-usage";
 import { receiptInboxEvidenceConfigured } from "@/lib/receipt-inbox-admin";
@@ -336,6 +338,21 @@ export async function fetchReceiptInboxSummary(): Promise<ReceiptInboxSummary> {
       ...(hasPartialConfiguration ? { error: "invalid_configuration" } : {}),
     };
   }
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // never call the live inbox, and report the same unconfigured shape the
+  // no-credentials path returns so the page is identical on every machine.
+  if (operationsHealthEgressDisabled()) {
+    return {
+      configured: false,
+      state: "unconfigured",
+      evidenceActionsConfigured: receiptInboxEvidenceConfigured(),
+      needsReviewCount: 0,
+      countIsLowerBound: false,
+      latestReceivedAt: null,
+      fetchedAt,
+      items: [],
+    };
+  }
   try {
     const response = await fetch(config.url, {
       headers: { Authorization: `Bearer ${config.token}`, Accept: "application/json" },
@@ -468,8 +485,26 @@ function unreachableSocratic(fetchedAt: string, error?: string): SocraticInfrast
   };
 }
 
+/**
+ * Playwright visual/e2e kill switch for server-side operations-health egress
+ * (Kody threads 2026-10-21: offline flag needs one shared definition, a prod
+ * marker, and coverage of every probe).  BOTH variables are required:
+ * OPERATIONS_HEALTH_OFFLINE opts in, and E2E_TEST_PASSWORD exists only in the
+ * Playwright webServer env (playwright.config.ts), so a stray prod flag can
+ * never mark the fleet unreachable.
+ */
+export function operationsHealthEgressDisabled(): boolean {
+  return (
+    process.env.OPERATIONS_HEALTH_OFFLINE === "true" &&
+    Boolean(process.env.E2E_TEST_PASSWORD)
+  );
+}
+
 export async function fetchSocraticInfrastructureSummary(): Promise<SocraticInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // short-circuit the external health probe so /ops never depends on egress.
+  if (operationsHealthEgressDisabled()) return unreachableSocratic(fetchedAt);
   try {
     const response = await fetch(SOCRATIC_HEALTH_URL, {
       headers: { Accept: "application/json" },
@@ -597,6 +632,8 @@ function unreachableCongress(fetchedAt: string, error?: string): CongressInfrast
  */
 export async function fetchCongressInfrastructureSummary(): Promise<CongressInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
+  // See fetchSocraticInfrastructureSummary: offline short-circuit for e2e.
+  if (operationsHealthEgressDisabled()) return unreachableCongress(fetchedAt);
   try {
     const response = await fetch(CONGRESS_HEALTH_URL, {
       headers: { Accept: "application/json" },
@@ -728,7 +765,9 @@ function mapCoolifyResource(
 export async function fetchCoolifyFleetSummary(): Promise<CoolifyFleetSummary> {
   const fetchedAt = new Date().toISOString();
   const config = coolifyConfiguration();
-  if (!config) {
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // no Coolify call, and the same unconfigured shape on every machine.
+  if (!config || operationsHealthEgressDisabled()) {
     return {
       configured: false,
       state: "unconfigured",
@@ -878,7 +917,14 @@ export async function fetchOperationsHealth(): Promise<OperationsHealthSummary> 
           fetchSocraticInfrastructureSummary(),
           fetchCongressInfrastructureSummary(),
           fetchCoolifyFleetSummary(),
-          fetchR2FleetSummary().catch((error) => {
+          // Playwright visual/e2e runs must render fully offline (suite
+          // invariant): an empty env leaves every R2 account unconfigured, so
+          // no Cloudflare call fires and the card is identical everywhere.
+          fetchR2FleetSummary(
+            fetch,
+            new Date(),
+            operationsHealthEgressDisabled() ? {} : process.env
+          ).catch((error) => {
             console.error("[operations] R2 fleet summary failed:", error);
             return null;
           }),

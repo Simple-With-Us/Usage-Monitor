@@ -34,7 +34,7 @@
 // the pushed channel would count it twice.  The gate is the same policy the
 // monitor applies to its own generic gen_ai mapper.
 
-import { fleetSecretsGet } from "../lib/fleet-secrets.mjs";
+import { fleetSecretsGetAsync } from "../lib/fleet-secrets.mjs";
 
 import { NULL_LOGGER } from "./internal-event.mjs";
 
@@ -288,10 +288,13 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * secret CLI.  Otherwise the token is read from the Mac-side fleet secret
  * store.  The value is held in memory only and is never written to disk.
  *
- * The secret store keeps its own in-memory cache, so the helper process is
- * spawned at most once per hub run instead of once per delivery pass.  A
- * miss is memoized as well, so a hub without the secret does not spawn the
- * helper every ten seconds either.
+ * The secret store keeps a miss in its own cache for the life of the
+ * process, so the store cache is not used here: a secret that appears
+ * later, or a token that is rotated, has to be seen by a running hub.  The
+ * memo above is the only cache: the helper process is spawned at most once
+ * per minute instead of once per delivery pass, and a miss is memoized as
+ * well, so a hub without the secret does not spawn the helper every ten
+ * seconds either.
  */
 export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
   let memo = { value: undefined, at: 0 };
@@ -302,8 +305,19 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
     if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: true });
-    } catch {
+      //  The store cache is NOT used here.  It keeps a miss forever, so a
+      //  secret that appears later, or a token that is rotated, would
+      //  never be seen again by a running hub.  The memo above keeps the
+      //  helper process to one call per minute instead of one per pass.
+      //  The async twin is used so a slow or hung helper cannot block the
+      //  event loop of the hub, which also serves the OTLP receiver.  The
+      //  lookup is strict: an absent key reads as missing, but a transient
+      //  failure (fetch/auth failure, timeout, missing binary) throws with
+      //  its cause instead of reading as missing, so it is retried on the
+      //  next pass rather than memoized as absent.
+      value = await fleetSecretsGetAsync("USAGE_INGEST_TOKEN", { strict: true });
+    } catch (error) {
+      if (error?.secretName === "USAGE_INGEST_TOKEN") throw error;
       value = undefined;
     }
     memo = {
@@ -367,6 +381,23 @@ export function shouldPushLedgerEvent(event, policy) {
   const provider = typeof event.provider === "string" ? event.provider.trim().toLowerCase() : "";
   if (policy.providers.has(provider)) return false;
   return true;
+}
+
+/**
+ * The ledger identity of one turn, for log/span dedupe.
+ *
+ * A log record carries the same token counts as the span of the same call,
+ * so the two are matched on the session id and the turn timestamp.  The
+ * timestamp is bucketed to the minute because a span end-time and its log
+ * timestamp can differ by milliseconds.  A log without a session or a
+ * timestamp cannot be matched to a span and returns null: it is always kept,
+ * because the ledger must not silently drop billable usage.
+ */
+export function usageKeyOf(event) {
+  const session = typeof event?.sessionId === "string" ? event.sessionId.trim() : "";
+  const ts = typeof event?.ts === "string" ? event.ts : "";
+  if (!session || ts.length < 16) return null;
+  return `${session} ${ts.slice(0, 16)}`;
 }
 
 /**
@@ -533,11 +564,28 @@ export function createUmSender({
     const skippedTurns = turnBatch.events.length - turnEvents.length;
 
     //  The ledger feed skips the platforms that already report on another
-    //  path, so one turn is never stored twice.
-    const ingestEvents = ingestBatch.events.filter((event) => shouldPushLedgerEvent(event, overlapPolicy));
+    //  path, so one turn is never stored twice.  A log record is skipped
+    //  only when this batch also carries the billable span of the same turn
+    //  (same session and minute): it carries the same token counts as that
+    //  span, so a log row would be a second billable row for one turn.  A
+    //  log-only turn has no span in the batch and must still reach the
+    //  ledger, or its usage is silently never billed.
+    const billableTurnKeys = new Set();
+    for (const event of ingestBatch.events) {
+      if (event?.kind !== "log" && shouldPushLedgerEvent(event, overlapPolicy)) {
+        const key = usageKeyOf(event);
+        if (key !== null) billableTurnKeys.add(key);
+      }
+    }
+    const ingestEvents = ingestBatch.events.filter((event) => {
+      if (!shouldPushLedgerEvent(event, overlapPolicy)) return false;
+      if (event?.kind !== "log") return true;
+      const key = usageKeyOf(event);
+      return key === null || !billableTurnKeys.has(key);
+    });
     const overlapSkipped = ingestBatch.events.length - ingestEvents.length;
     if (overlapSkipped > 0) {
-      logger.info("um ledger rows skipped for an overlapping platform", {
+      logger.info("um ledger rows skipped for an overlapping platform or a log record", {
         destination: UMBER_INGEST_DESTINATION,
         skipped: overlapSkipped,
       });
