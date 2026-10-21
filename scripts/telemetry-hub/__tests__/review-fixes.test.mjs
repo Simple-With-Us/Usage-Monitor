@@ -15,7 +15,7 @@ import { projectScope, scrubInternalEvent, scrubResourceLogs, scrubResourceSpans
 import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
 import { Journal } from "../journal.mjs";
 import { createReceiver, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
-import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent } from "../um-sender.mjs";
+import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent, usageKeyOf } from "../um-sender.mjs";
 
 const CANARY = "CANARY_SECRET_123";
 const created = [];
@@ -331,7 +331,19 @@ describe("the um sender", () => {
     assert.equal(shouldPushLedgerEvent({ platform: "claude-code" }, policy), true);
   });
 
-  it("does not bill a log record as a usage row", async () => {
+  it("matches a span and its log across millisecond timestamp skew", () => {
+    assert.equal(
+      usageKeyOf({ sessionId: "s", ts: "2023-11-14T22:13:21.000Z" }),
+      usageKeyOf({ sessionId: "s", ts: "2023-11-14T22:13:21.042Z" }),
+    );
+    assert.equal(usageKeyOf({ sessionId: "", ts: "2023-11-14T22:13:21.000Z" }), null);
+    assert.equal(usageKeyOf({ sessionId: "s" }), null);
+  });
+
+  it("bills a log-only turn as a usage row", async () => {
+    //  A turn whose only journal row is a log record has no span to bill,
+    //  so the log must reach the ledger: dropping every log unconditionally
+    //  silently never billed such turns.
     const { journal } = await openJournal();
     await journal.append(event(1, { kind: "log" }));
     const posted = [];
@@ -344,8 +356,33 @@ describe("the um sender", () => {
       },
     });
     const outcome = await sender.runOnce();
+    assert.equal(outcome.overlapSkipped, 0);
+    const usage = posted.find((item) => item.url.endsWith("/api/ingest/usage"));
+    assert.ok(usage, "the log-only turn is posted to the ledger");
+    assert.equal(usage.body.events.length, 1);
+  });
+
+  it("bills a span and its log record once, not twice", async () => {
+    //  A log record carries the same token counts as the span of the same
+    //  call, so when the batch carries both, only the span is billed.
+    const { journal } = await openJournal();
+    const ts = new Date(1700000000000).toISOString();
+    await journal.append(event(1, { kind: "span", sessionId: "session-x", ts }));
+    await journal.append(event(2, { kind: "log", sessionId: "session-x", ts }));
+    const posted = [];
+    const sender = createUmSender({
+      journal,
+      resolveToken: async () => "a-test-token",
+      fetchImpl: async (url, init) => {
+        posted.push({ url, body: JSON.parse(init.body) });
+        return fakeResponse(200, "{}");
+      },
+    });
+    const outcome = await sender.runOnce();
     assert.equal(outcome.overlapSkipped, 1);
-    assert.equal(posted.some((item) => item.url.endsWith("/api/ingest/usage")), false);
+    const usage = posted.find((item) => item.url.endsWith("/api/ingest/usage"));
+    assert.ok(usage, "the span is posted to the ledger");
+    assert.equal(usage.body.events.length, 1);
   });
 });
 
