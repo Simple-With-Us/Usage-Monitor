@@ -14,8 +14,8 @@
 // never committed, and nothing reaches the network beyond 127.0.0.1.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createVerify, generateKeyPairSync } from "node:crypto";
+import { chmodSync, closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,6 +35,24 @@ const safePath = [dirname(process.execPath), "/usr/bin", "/bin"].join(":");
 
 function generateKeyPair() {
   return generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+}
+
+// A fingerprint of the key material.  The test compares fingerprints, so the
+// key itself never travels through an assertion or a message.
+function fingerprint(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+// Reads a file once and reports its mode and its contents together.  Asking
+// for the mode and then reading the path separately leaves a gap in which the
+// file can be swapped for another one, so the descriptor does both.
+function readOnce(path) {
+  const fd = openSync(path, "r");
+  try {
+    return { mode: fstatSync(fd).mode & 0o777, content: readFileSync(fd, "utf8") };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const keyPem = generateKeyPair().privateKey.export({ type: "pkcs8", format: "pem" });
@@ -125,7 +143,7 @@ test("a generated key is accepted and comes back with a trailing newline", () =>
   const normalized = normalizePrivateKey(keyPem);
   assert.ok(normalized, "a real key was refused");
   assert.ok(normalized.endsWith("\n"), "the key has to end with a newline");
-  assert.equal(normalized.trim(), keyPem.trim());
+  assert.equal(fingerprint(normalized.trim()), fingerprint(keyPem.trim()));
 });
 
 test("a malformed PEM is refused, because the envelope is not a key", () => {
@@ -144,8 +162,9 @@ test("the staging copy is written for its owner only", () => {
   const path = join(root, "written.p8");
   const written = writePrivateKeyFile(path, keyPem);
   assert.ok(written.pem, `the key was not written: ${written.error}`);
-  assert.equal(statSync(path).mode & 0o777, 0o600, "the staging copy is not owner-only");
-  assert.equal(readFileSync(path, "utf8").trim(), keyPem.trim());
+  const read = readOnce(path);
+  assert.equal(read.mode, 0o600, "the staging copy is not owner-only");
+  assert.equal(fingerprint(read.content.trim()), fingerprint(keyPem.trim()));
 });
 
 test("a value that is not a key is refused, and no file is written", () => {
@@ -204,8 +223,9 @@ test("the command line writes a key to a file only its owner can read", async ()
   const path = join(root, "cli-written.p8");
   const result = await run(["write", path], keyPem);
   assert.equal(result.code, 0, `the write failed: ${result.stderr}`);
-  assert.equal(statSync(path).mode & 0o777, 0o600);
-  assert.equal(readFileSync(path, "utf8").trim(), keyPem.trim());
+  const read = readOnce(path);
+  assert.equal(read.mode, 0o600);
+  assert.equal(fingerprint(read.content.trim()), fingerprint(keyPem.trim()));
 
   const refused = await run(["write", join(root, "cli-refused.p8")], "not a private key");
   assert.notEqual(refused.code, 0);
