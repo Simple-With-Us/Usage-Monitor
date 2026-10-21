@@ -83,7 +83,9 @@ function codexTotalSignature(usage) {
   return CODEX_TOTAL_KEYS.map((key) => String(finiteCount(usage[key]))).join("|");
 }
 
-function shaEventId(parts) {
+/** Stable event id for one measurement.  Exported so producer-specific
+ * modules derive ids exactly the way this file does. */
+export function shaEventId(parts) {
   return createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
