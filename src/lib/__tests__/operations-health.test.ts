@@ -413,3 +413,38 @@ describe("operations health", () => {
     expect(JSON.stringify(result)).not.toContain("person@example.com");
   });
 });
+
+describe("operationsHealthEgressDisabled (Playwright offline kill switch)", () => {
+  beforeEach(() => {
+    resetOperationsHealthCacheForTests();
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    resetOperationsHealthCacheForTests();
+    vi.restoreAllMocks();
+  });
+
+  it("returns unreachable Socratic + Congress summaries without calling fetch", async () => {
+    process.env.OPERATIONS_HEALTH_OFFLINE = "true";
+    process.env.E2E_TEST_PASSWORD = "visual-test-password";
+    const spy = vi.spyOn(global, "fetch");
+    const socratic = await fetchSocraticInfrastructureSummary();
+    const congress = await fetchCongressInfrastructureSummary();
+    expect(socratic.state).toBe("unreachable");
+    expect(congress.state).toBe("unreachable");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("requires the Playwright-only marker: the flag alone does not disable egress", async () => {
+    process.env.OPERATIONS_HEALTH_OFFLINE = "true";
+    delete process.env.E2E_TEST_PASSWORD;
+    const spy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(Response.json(healthBody()));
+    const result = await fetchSocraticInfrastructureSummary();
+    expect(spy).toHaveBeenCalled();
+    expect(result.state).not.toBe("unreachable");
+  });
+});

@@ -468,11 +468,26 @@ function unreachableSocratic(fetchedAt: string, error?: string): SocraticInfrast
   };
 }
 
+/**
+ * Playwright visual/e2e kill switch for server-side operations-health egress
+ * (Kody threads 2026-10-21: offline flag needs one shared definition, a prod
+ * marker, and coverage of every probe).  BOTH variables are required:
+ * OPERATIONS_HEALTH_OFFLINE opts in, and E2E_TEST_PASSWORD exists only in the
+ * Playwright webServer env (playwright.config.ts), so a stray prod flag can
+ * never mark the fleet unreachable.
+ */
+export function operationsHealthEgressDisabled(): boolean {
+  return (
+    process.env.OPERATIONS_HEALTH_OFFLINE === "true" &&
+    Boolean(process.env.E2E_TEST_PASSWORD)
+  );
+}
+
 export async function fetchSocraticInfrastructureSummary(): Promise<SocraticInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
   // Playwright visual/e2e runs must render fully offline (suite invariant):
   // short-circuit the external health probe so /ops never depends on egress.
-  if (process.env.OPERATIONS_HEALTH_OFFLINE === "true") return unreachableSocratic(fetchedAt);
+  if (operationsHealthEgressDisabled()) return unreachableSocratic(fetchedAt);
   try {
     const response = await fetch(SOCRATIC_HEALTH_URL, {
       headers: { Accept: "application/json" },
@@ -601,7 +616,7 @@ function unreachableCongress(fetchedAt: string, error?: string): CongressInfrast
 export async function fetchCongressInfrastructureSummary(): Promise<CongressInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
   // See fetchSocraticInfrastructureSummary: offline short-circuit for e2e.
-  if (process.env.OPERATIONS_HEALTH_OFFLINE === "true") return unreachableCongress(fetchedAt);
+  if (operationsHealthEgressDisabled()) return unreachableCongress(fetchedAt);
   try {
     const response = await fetch(CONGRESS_HEALTH_URL, {
       headers: { Accept: "application/json" },

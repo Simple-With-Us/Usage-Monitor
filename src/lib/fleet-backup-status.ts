@@ -14,6 +14,7 @@
  */
 
 import { getBackupLayersStatus } from "@/lib/runtime-health";
+import { operationsHealthEgressDisabled } from "@/lib/operations-health";
 
 export const FLEET_BACKUP_CACHE_TTL_MS = 180_000; // 3 min
 export const FLEET_BACKUP_FAILURE_RETRY_MS = 45_000;
@@ -471,6 +472,15 @@ function parsePeerR2Weekly(
 async function fetchPeerStorageHealth(
   url: string
 ): Promise<PeerStorageHealth> {
+  // Same offline kill switch as operations-health.ts: no peer egress in e2e.
+  if (operationsHealthEgressDisabled()) {
+    return {
+      litestreamAgeSeconds: null,
+      litestreamReason: "peer_health_offline",
+      litestreamTiersDegraded: false,
+      r2Weekly: missingPeerR2Weekly("peer_health_offline"),
+    };
+  }
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(8_000),
