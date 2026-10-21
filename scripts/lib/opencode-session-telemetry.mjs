@@ -32,9 +32,15 @@
  *     replay comparison ignores metadata.project
  *     (src/lib/external-usage-events.ts metadataComparableForReplay), so
  *     adding it never re-keys or re-attributes a stored row.
- *   - Every event id is a function of EVERY field Usage Monitor compares
- *     (src/lib/external-usage-events.ts comparableEvent), so a changed field
- *     can never turn a replay into an HTTP 409 idempotency_conflict.
+ *   - Every event id THIS MODULE builds is a function of every compared field
+ *     of its own row that can move, so a changed field produces a NEW row
+ *     instead of an HTTP 409 idempotency_conflict against the stored one
+ *     (src/lib/external-usage-events.ts comparableEvent).  The fields that
+ *     cannot move are the constants of a row and the completion instant,
+ *     which comes from the immutable message payload.  The token rows keep
+ *     the shared parser's ids (session-token-collectors.mjs
+ *     tokenEventsFromBreakdown), which the shared contract fixes and which
+ *     nothing here changes.
  */
 
 import { basename } from "node:path";
@@ -320,17 +326,21 @@ export async function readOpencodeTelemetry(dbPath, since) {
  * JSON string that has to be parsed a second time.  `updatedAt` is a number
  * in the live catalog and a string in older ones, so both are accepted.
  *
- * The envelope is validated strictly: an unknown envelope shape is not
- * guessed at, it is rejected, and the collector reports no context limit
- * rather than a wrong one.
+ * The envelope is deliberately TOLERANT: an unknown top-level key is ignored
+ * and the body is accepted as a JSON string or as an already-parsed object.
+ * A strict envelope turned one odd field into zero context limits for every
+ * vendor at once, and every context row then reported a null limit with no
+ * error anywhere.  The only thing that can still make the whole catalog
+ * unusable is a cached value with no usable body, and that is reported
+ * through `problem` so the collector can say so out loud.
  */
 const ModelsDevCatalogEnvelopeSchema = z
   .object({
     updatedAt: z.union([z.string(), z.number()]).optional(),
     digest: z.string().optional(),
-    body: z.string(),
+    body: z.union([z.string(), z.record(z.string(), z.unknown())]),
   })
-  .strict();
+  .passthrough();
 
 /**
  * The provider / model records inside the catalog body.  The vendor records
@@ -369,6 +379,12 @@ const ModelsDevBodySchema = z.record(z.string(), z.unknown());
  * context window size in tokens.  Only the limits are kept, so the parsed
  * catalog is released as soon as this returns.
  *
+ * The parse is granular at every level that can drift: an unknown envelope
+ * key, a body that is already an object, one malformed vendor and one
+ * malformed model each cost only themselves.  A cached value with no usable
+ * body at all returns an empty catalog whose `problem` says why, so the
+ * collector can log it instead of losing the context limits silently.
+ *
  * A limit is only ever reported for the EXACT provider and model the message
  * used.  The catalog defines 546 model ids under more than one provider with
  * different windows (io-net publishes moonshotai/kimi-k2-instruct-0905 with
@@ -378,14 +394,25 @@ const ModelsDevBodySchema = z.record(z.string(), z.unknown());
  * and the context row then reports the used tokens with a null limit.
  */
 export function parseModelsDevCatalog(rawValue) {
+  const unusable = (problem) => ({
+    updatedAt: null,
+    problem,
+    /** No limit is known, because the cached catalog cannot be used. */
+    limitFor: () => null,
+  });
   const outer = parseJson(rawValue);
-  if (!outer || typeof outer !== "object") return null;
+  if (!outer || typeof outer !== "object" || Array.isArray(outer)) {
+    return unusable("the cached catalog is not a JSON object");
+  }
   const envelope = ModelsDevCatalogEnvelopeSchema.safeParse(outer);
-  if (!envelope.success) return null;
-  const bodyRaw = parseJson(envelope.data.body);
-  if (!bodyRaw || typeof bodyRaw !== "object") return null;
+  if (!envelope.success) return unusable("the cached catalog has no usable body");
+  const bodyRaw =
+    typeof envelope.data.body === "string" ? parseJson(envelope.data.body) : envelope.data.body;
+  if (!bodyRaw || typeof bodyRaw !== "object" || Array.isArray(bodyRaw)) {
+    return unusable("the cached catalog body is not a JSON object");
+  }
   const body = ModelsDevBodySchema.safeParse(bodyRaw);
-  if (!body.success) return null;
+  if (!body.success) return unusable("the cached catalog body is not a record of providers");
 
   const limits = new Map();
   for (const [providerId, rawProvider] of Object.entries(body.data)) {
@@ -395,6 +422,8 @@ export function parseModelsDevCatalog(rawValue) {
     const models = provider.data.models;
     if (!models) continue;
     for (const [modelId, rawModel] of Object.entries(models)) {
+      // The models are validated one by one, so a single malformed model
+      // does not cost the vendor its other models.
       const model = ModelsDevModelSchema.safeParse(rawModel);
       if (!model.success) continue;
       const context = model.data.limit?.context;
@@ -406,6 +435,8 @@ export function parseModelsDevCatalog(rawValue) {
   return {
     updatedAt:
       envelope.data.updatedAt === undefined ? null : String(envelope.data.updatedAt),
+    /** Null when the cached catalog was usable. */
+    problem: null,
     /** Context limit for one provider + model pair, or null. */
     limitFor(providerId, modelId) {
       if (!providerId || !modelId) return null;
@@ -546,7 +577,12 @@ export function opencodeCostEvent({
     occurredAtIso,
     model: modelId || undefined,
     costUsd,
-    extraId: `${messageId}:cost`,
+    // The id carries the raw provider id and the normalized vendor as well,
+    // because Usage Monitor compares metadata.providerId and the provider,
+    // and opencodeProviderInfo folds several raw provider ids onto one
+    // vendor.  No cost row is stored in Usage Monitor yet, so the id can
+    // still cover every compared field.
+    extraId: `${messageId}:${providerId || ""}:${provider || ""}:cost`,
   });
   if (!event) return null;
   if (providerId) event.metadata.providerId = providerId;
@@ -937,9 +973,8 @@ export function buildOpencodeExtraEvents({
   sessions,
   messageCounts,
   projects,
-  catalogValue,
+  catalog,
 }) {
-  const catalog = parseModelsDevCatalog(catalogValue);
   const projectBySession = projectNamesBySession(sessions, projects);
   const countsBySession = new Map();
   for (const row of messageCounts) {

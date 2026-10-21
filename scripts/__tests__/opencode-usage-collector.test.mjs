@@ -567,12 +567,27 @@ describe("opencode collector telemetry", () => {
     expect(againCompaction.eventId).toBe(compaction.eventId);
   });
 
-  it("rejects a malformed models.dev catalog instead of guessing a limit", async () => {
+  it("keeps the models.dev catalog usable when one field, vendor or model drifts", async () => {
     const { parseModelsDevCatalog } = await import("../lib/opencode-session-telemetry.mjs");
-    // The envelope must match the documented shape.
-    expect(parseModelsDevCatalog("not json")).toBeNull();
-    expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: 5 }))).toBeNull();
-    expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: "{}" }))).not.toBeNull();
+    // A cached value with no usable body at all is reported, not guessed at.
+    const broken = parseModelsDevCatalog("not json");
+    expect(broken.problem).toBeTruthy();
+    expect(broken.limitFor("opencode", "demo-model-1")).toBeNull();
+    expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: 5 })).problem).toBeTruthy();
+
+    // An unknown top-level key and a body that is already an object are
+    // both tolerated, so one odd field cannot erase every limit.
+    const tolerant = parseModelsDevCatalog(
+      JSON.stringify({
+        updatedAt: 1,
+        digest: "fixture",
+        somethingNew: { nested: true },
+        body: { opencode: { models: { "demo-model-1": { limit: { context: 1000 } } } } },
+      }),
+    );
+    expect(tolerant.problem).toBeNull();
+    expect(tolerant.limitFor("opencode", "demo-model-1")).toBe(1000);
+
     // A malformed vendor is skipped, the other vendors keep their limits.
     const catalog = parseModelsDevCatalog(
       JSON.stringify({
@@ -586,10 +601,51 @@ describe("opencode collector telemetry", () => {
         }),
       }),
     );
+    expect(catalog.problem).toBeNull();
     expect(catalog.limitFor("good", "m1")).toBe(1000);
     expect(catalog.limitFor("bad", "m2")).toBeNull();
     expect(catalog.limitFor("mixed", "m3")).toBeNull();
     expect(catalog.limitFor("mixed", "m4")).toBe(2000);
+  });
+
+  it("says out loud when the cached catalog cannot be used", async () => {
+    const warnings = [];
+    const db = new DatabaseSync(dbPath);
+    const original = db.prepare("SELECT value FROM kv WHERE key = ?").get("models-dev:catalog").value;
+    db.prepare("UPDATE kv SET value = ? WHERE key = ?").run("not json", "models-dev:catalog");
+    db.close();
+    const events = await collectOpencodeEvents({
+      dbPath,
+      since: new Date(0),
+      onWarning: (message) => warnings.push(message),
+    });
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("models.dev catalog unusable");
+    // The rows still report the used tokens, and the limit is null.
+    const contextEvents = byLabel(events, "context:");
+    expect(contextEvents.length).toBeGreaterThan(0);
+    expect(contextEvents.every((event) => event.metadata.contextLimit === null)).toBe(true);
+    // Put the catalog back so the rest of the file sees the normal fixture.
+    const restore = new DatabaseSync(dbPath);
+    restore.prepare("UPDATE kv SET value = ? WHERE key = ?").run(original, "models-dev:catalog");
+    restore.close();
+  });
+
+  it("gives a rewritten raw provider id its own cost event id", async () => {
+    const { opencodeCostEvent } = await import("../lib/opencode-session-telemetry.mjs");
+    const base = {
+      sessionId: "ses_fixture",
+      messageId: "msg_assistant_paid",
+      modelId: "demo-model-1",
+      provider: "muse-code",
+      costUsd: 0.0123,
+      occurredAtIso: new Date(BASE_MS + 1_000).toISOString(),
+    };
+    const first = opencodeCostEvent({ ...base, providerId: "muse" });
+    const second = opencodeCostEvent({ ...base, providerId: "meta" });
+    expect(first.eventId).not.toBe(second.eventId);
+    expect(first.metadata.providerId).toBe("muse");
+    expect(second.metadata.providerId).toBe("meta");
   });
 
   it("keeps every event inside the shared v2 contract", async () => {
