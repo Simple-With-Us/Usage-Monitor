@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   updateDeliveries: vi.fn(),
   updateDevice: vi.fn(),
   send: vi.fn(),
+  apnsConfig: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -25,12 +26,7 @@ vi.mock("@/lib/codecaps-push", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/codecaps-push")>();
   return {
     ...actual,
-    loadCodeCapsApnsConfig: () => ({
-      keyId: "K1",
-      teamId: "T1",
-      bundleId: "com.simplewithus.codecaps.ios",
-      privateKeyPem: "fake-test-key",
-    }),
+    loadCodeCapsApnsConfig: mocks.apnsConfig,
   };
 });
 
@@ -84,6 +80,12 @@ beforeEach(() => {
   mocks.updateDeliveries.mockReset().mockResolvedValue({ count: 1 });
   mocks.updateDevice.mockReset().mockResolvedValue({ count: 1 });
   mocks.send.mockReset().mockResolvedValue({ ok: true, disposition: "delivered" });
+  mocks.apnsConfig.mockReset().mockReturnValue({
+    keyId: "K1",
+    teamId: "T1",
+    bundleId: "com.simplewithus.codecaps.ios",
+    privateKeyPem: "fake-test-key",
+  });
   process.env.USAGE_INGEST_TOKEN = INGEST_TOKEN;
   delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
 });
@@ -125,6 +127,12 @@ describe("POST /api/codecaps/push/alerts", () => {
       title: "Codex · 5h",
       sound: "alarm-glass.wav",
       interruptionLevel: "active",
+      data: expect.objectContaining({
+        alertId: "runaway|openai|5h|first-seen",
+        kind: "runaway",
+        providerKey: "openai",
+        windowLabel: "5h",
+      }),
     }), expect.objectContaining({ config: expect.objectContaining({
       bundleId: "com.simplewithus.codecaps.ios",
     }) }));
@@ -169,5 +177,139 @@ describe("POST /api/codecaps/push/alerts", () => {
     const response = await POST(request([alert()]));
     expect(response.status).toBe(403);
     expect(mocks.createAlert).not.toHaveBeenCalled();
+  });
+
+  it("sends reset alerts only for selected canonical providers", async () => {
+    const resetPreferences = {
+      ...preferences,
+      resetProviders: { all: false, providerIDs: ["anthropic"] },
+    };
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: resetPreferences,
+    }]);
+    mocks.findDevice.mockResolvedValueOnce({
+      generation: BigInt(1), isActive: true, deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: resetPreferences,
+    });
+    const selected = await POST(request([alert({ id: "reset-a", kind: "quotaReset", providerKey: "anthropic" })]));
+    expect(selected.status).toBe(200);
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: resetPreferences,
+    }]);
+    const excluded = await POST(request([alert({ id: "reset-b", kind: "vendorReset", providerKey: "openai" })]));
+    expect(excluded.status).toBe(200);
+    expect(await excluded.json()).toMatchObject({ skippedByPreference: 1, delivered: 0 });
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: { ...preferences, resetProviders: { all: false, providerIDs: ["google-antigravity"] } },
+    }]);
+    mocks.findDevice.mockResolvedValueOnce({
+      generation: BigInt(1), isActive: true, deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: { ...preferences, resetProviders: { all: false, providerIDs: ["google-antigravity"] } },
+    });
+    const antigravityPool = await POST(request([alert({
+      id: "reset-antigravity", kind: "quotaReset", providerKey: "google-antigravity:gemini",
+    })]));
+    expect(antigravityPool.status).toBe(200);
+    expect(mocks.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps source filters exact and includes the parsed source in APNs data", async () => {
+    const sourceInstanceId = "6a875ea5-28c8-4b80-8d24-2c383da87a65";
+    const sourcePreferences = { ...preferences, sourceInstanceId };
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: sourcePreferences,
+    }]);
+    mocks.findDevice.mockResolvedValueOnce({
+      generation: BigInt(1), isActive: true, deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: sourcePreferences,
+    });
+    const occurrenceHash = "b".repeat(64);
+    const response = await POST(request([alert({ id: `${sourceInstanceId}|${occurrenceHash}`, kind: "anomaly" })]));
+    expect(response.status).toBe(200);
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ sourceInstanceId }),
+    }), expect.anything());
+
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: sourcePreferences,
+    }]);
+    const unknown = await POST(request([alert({ id: `machine-label|${occurrenceHash}`, kind: "anomaly" })]));
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toMatchObject({ skippedByPreference: 1, delivered: 0 });
+  });
+
+  it("continues to deliver reset alerts to legacy registrations without resetProviders", async () => {
+    const legacyPreferences = { options: preferences.options };
+    mocks.findMany.mockResolvedValueOnce([{
+      id: "device-1", generation: BigInt(1), deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: legacyPreferences,
+    }]);
+    mocks.findDevice.mockResolvedValueOnce({
+      generation: BigInt(1), isActive: true, deviceToken: "a".repeat(64), environment: "sandbox",
+      preferences: legacyPreferences,
+    });
+    const response = await POST(request([alert({ id: "legacy-reset", kind: "vendorReset", providerKey: "openai" })]));
+    expect(response.status).toBe(200);
+    expect(mocks.send).toHaveBeenCalledOnce();
+  });
+
+  it("persists for foreground polling without APNs and retries pending delivery later", async () => {
+    const occurrence = alert({ id: "no-apns|first-seen" });
+    mocks.apnsConfig.mockReturnValueOnce(null);
+    const first = await POST(request([occurrence]));
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({
+      apnsConfigured: false,
+      apnsUnavailableForActiveDevices: true,
+      persisted: 1,
+      delivered: 0,
+      retryableFailures: 1,
+    });
+    expect(mocks.createAlert).toHaveBeenCalledOnce();
+    expect(mocks.createDelivery).toHaveBeenCalledOnce();
+    expect(mocks.send).not.toHaveBeenCalled();
+
+    mocks.createAlert.mockRejectedValueOnce({ code: "P2002" });
+    mocks.findAlert.mockResolvedValueOnce({
+      id: occurrence.id,
+      kind: occurrence.kind,
+      providerKey: occurrence.providerKey,
+      providerTitle: occurrence.providerTitle,
+      windowLabel: occurrence.windowLabel,
+      summary: occurrence.summary,
+      occurredAt: new Date(occurrence.occurredAt),
+    });
+    mocks.createDelivery.mockRejectedValueOnce({ code: "P2002" });
+    const second = await POST(request([occurrence]));
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ apnsConfigured: true, duplicates: 1, delivered: 1 });
+    expect(mocks.send).toHaveBeenCalledOnce();
+  });
+
+  it("accepts and persists an alert without APNs when there are no active recipients", async () => {
+    mocks.apnsConfig.mockReturnValueOnce(null);
+    mocks.findMany.mockResolvedValueOnce([]);
+    const response = await POST(request([alert({ id: "no-recipients|first-seen" })]));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      apnsConfigured: false,
+      apnsUnavailableForActiveDevices: false,
+      persisted: 1,
+      delivered: 0,
+      retryableFailures: 0,
+    });
+    expect(mocks.createAlert).toHaveBeenCalledOnce();
+    expect(mocks.createDelivery).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
   });
 });

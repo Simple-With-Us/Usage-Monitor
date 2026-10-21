@@ -216,7 +216,7 @@ SQLite datasource — match provider names case-insensitively in JS (`.toLowerCa
 - As of 2026-09-23, Claude Code's own per-turn OTel **logs** (`api_request`,
   `user_prompt`, `tool_result`, `tool_decision`, `api_error`, etc.) no longer
   target this app at all — they go straight to a dedicated Sentry project
-  (`agent-sessions` in the `jays-services` org) via per-signal
+  (`agent-sessions` in the `simple-with-us` org) via per-signal
   `OTEL_EXPORTER_OTLP_LOGS_*` env vars in `~/.claude/settings.json` on the
   Mac.  Claude Code **metrics** keep targeting this app, unchanged, via
   `OTEL_EXPORTER_OTLP_METRICS_*` — but a production smoke test taken during
@@ -346,7 +346,7 @@ usage — no special-casing. Idempotent by `(subscriptionId, periodStart)` hash 
 
 `GET /api/sentry-health` (dashboard-session-gated like every non-ingest route) returns per-project
 unresolved-issue counts from Sentry's REST API when `SENTRY_READ_TOKEN` (+ optional `SENTRY_ORG`,
-default `jays-services`) are set; `{ configured: false }` otherwise, and the dashboard card
+default `simple-with-us`) are set; `{ configured: false }` otherwise, and the dashboard card
 (`src/components/SentryHealthCard.tsx`) renders nothing in that case. Tracked projects are a fixed
 list in `src/lib/sentry-health.ts` (`socratic-trade`, `congress-trade`, `fleet-infra`, `dealdex`, `botfleet`, `autorotate`, `contactlogo`).
 `SENTRY_READ_TOKEN` is never sent to the client. This is the "errors/health stay in Sentry" half of
