@@ -10,7 +10,7 @@ name: iOS TestFlight ship (Mac runner)
 # ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, IOS_DIST_P12_BASE64,
 # IOS_DIST_P12_PASSWORD). Never mint a new App Store Connect key.
 #
-# Ships Usage Client Monitor and LocalUsageMonitor (Import Package tap).
+# Ships Usage Monitor Client and LocalUsageMonitor (Import Package tap).
 #
 # RE-ENABLED 2026-10-17 (owner: bring every app up to date).  This workflow sat
 # `disabled_manually` after the 2026-09-27 failures ("no App Store Connect record
@@ -275,6 +275,33 @@ jobs:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh"
 
+      # Sync the standing testers and attach/submit the new build to the public
+      # external group.  A failure here is a warning, never a red ship.
+      - name: Sync standing TestFlight testers (usage)
+        if: success() && steps.gate.outputs.ship_usage == '1'
+        continue-on-error: true
+        env:
+          ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
+        run: |
+          for e in $(printf '%s' "${ASC_STANDING_TESTERS:-}" | tr ',;' '  '); do
+            echo "::add-mask::${e}"
+          done
+          set +e
+          appleid="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["usage"]["appleId"])')"
+          appleid_rc=$?
+          set -e
+          if [ "$appleid_rc" -ne 0 ] || [ -z "$appleid" ]; then
+            echo "::warning title=TestFlight standing testers::could not read the usage appleId from scripts/ios-fleet/apps.json (rc=${appleid_rc}); tester sync skipped.  The TestFlight upload itself succeeded."
+            exit 0
+          fi
+          set +e
+          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=TestFlight standing testers::tester sync exited ${rc}; see the standing-testers lines above.  The TestFlight upload itself succeeded."
+          fi
+
       # !cancelled() so a Client failure does not silently skip Local; the
       # secrets step must have succeeded so we never ship without signing.
       - name: Ship LocalUsageMonitor to TestFlight
@@ -283,6 +310,33 @@ jobs:
         env:
           IOS_TF_RELEASE_NOTES: "1"
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh"
+
+      # Sync the standing testers and attach/submit the new build to the public
+      # external group.  A failure here is a warning, never a red ship.
+      - name: Sync standing TestFlight testers (usage-local)
+        if: ${{ !cancelled() && steps.ship_usage_local.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
+        continue-on-error: true
+        env:
+          ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
+        run: |
+          for e in $(printf '%s' "${ASC_STANDING_TESTERS:-}" | tr ',;' '  '); do
+            echo "::add-mask::${e}"
+          done
+          set +e
+          appleid="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["usage-local"]["appleId"])')"
+          appleid_rc=$?
+          set -e
+          if [ "$appleid_rc" -ne 0 ] || [ -z "$appleid" ]; then
+            echo "::warning title=TestFlight standing testers::could not read the usage-local appleId from scripts/ios-fleet/apps.json (rc=${appleid_rc}); tester sync skipped.  The TestFlight upload itself succeeded."
+            exit 0
+          fi
+          set +e
+          node scripts/ios-fleet/asc-api.mjs ensure-standing-testers "$appleid"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=TestFlight standing testers::tester sync exited ${rc}; see the standing-testers lines above.  The TestFlight upload itself succeeded."
+          fi
 
       # Saved even when a ship step failed or the run was cancelled, but only on
       # ticks that actually tried to ship (a no-op tick changes no state).

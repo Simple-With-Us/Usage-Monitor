@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { fleetSecretsGet, fleetSecretsNames, resetFleetSecretsCache } from "../lib/fleet-secrets.mjs";
+import { fleetSecretsGet, fleetSecretsGetAsync, fleetSecretsNames, resetFleetSecretsCache } from "../lib/fleet-secrets.mjs";
 import { resolveCollectorToken } from "../lib/run-session-token-collector.mjs";
 
 function fakeFleet(values) {
@@ -75,6 +75,54 @@ describe("fleetSecretsGet", () => {
     expect(fleetSecretsGet("CACHE_TEST_NAME", opts)).toBe("cached-value");
     expect(exec).toHaveBeenCalledTimes(1);
     resetFleetSecretsCache();
+  });
+
+  it("still returns null by default when every lookup fails transiently", () => {
+    const exec = vi.fn(() => {
+      throw Object.assign(new Error("fetch failed"), { status: 4 });
+    });
+    expect(fleetSecretsGet("USAGE_INGEST_TOKEN", options(exec))).toBeNull();
+  });
+
+  it("throws with a cause in strict mode instead of reporting a failure as absent", () => {
+    const failure = Object.assign(new Error("fetch failed"), { status: 4 });
+    const exec = vi.fn(() => {
+      throw failure;
+    });
+    let error = null;
+    try {
+      fleetSecretsGet("USAGE_INGEST_TOKEN", { ...options(exec), strict: true });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).not.toBeNull();
+    expect(error.message).toContain("USAGE_INGEST_TOKEN");
+    expect(error.message).not.toContain("secret-value");
+    expect(error.secretName).toBe("USAGE_INGEST_TOKEN");
+    expect(error.cause).toBe(failure);
+  });
+
+  it("strict mode still returns null for an absent key", () => {
+    const exec = vi.fn(() => {
+      throw Object.assign(new Error("absent"), { status: 3 });
+    });
+    expect(fleetSecretsGet("USAGE_INGEST_TOKEN", { ...options(exec), strict: true })).toBeNull();
+  });
+
+  it("the async twin throws with a cause in strict mode on a transient failure", async () => {
+    const failure = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    const exec = vi.fn(async () => {
+      throw failure;
+    });
+    let error = null;
+    try {
+      await fleetSecretsGetAsync("USAGE_INGEST_TOKEN", { exec, binary: "/fake/fleet-secrets", strict: true });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).not.toBeNull();
+    expect(error.message).toContain("USAGE_INGEST_TOKEN");
+    expect(error.cause).toBe(failure);
   });
 });
 

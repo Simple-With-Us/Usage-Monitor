@@ -31,10 +31,17 @@ export function resolveCollectorToken(
 export const DEFAULT_COLLECTOR_LOOKBACK_DAYS = 180;
 export const COLLECTOR_STATE_OVERLAP_MINUTES = 24 * 60;
 
-function collectorStatePath(producerId, stateRoot) {
+/**
+ * The state file for one collector.  `suffix` names a sibling file for state
+ * that must outlive the checkpoint (the opencode project-name freeze lives in
+ * one, because a lost checkpoint replays rows and a lost freeze would let a
+ * renamed project change their content).
+ */
+export function collectorStatePath(producerId, stateRoot, suffix) {
   const safeProducerId = producerId.replace(/[^a-zA-Z0-9._-]/g, "_");
   const root = stateRoot ?? join(homedir(), ".cache", "usage-monitor", "collector-state");
-  return join(root, `${safeProducerId}.json`);
+  const safeSuffix = suffix ? String(suffix).replace(/[^a-zA-Z0-9._-]/g, "_") : "";
+  return join(root, safeSuffix ? `${safeProducerId}-${safeSuffix}.json` : `${safeProducerId}.json`);
 }
 
 /**

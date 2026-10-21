@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1142,10 +1143,55 @@ try {
   insert.run("msg_u", "ses_1", "user", 3, 1792198500000, 1792198510000, JSON.stringify({ time: { created: 1 } }));
   db.close();
   const ocCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
-  assert(ocCollected.length === 6, `opencode collector reads assistant rows (${ocCollected.length})`);
+  // Six token rows (msg_1 has four token types, msg_2 has two) plus the cost
+  // row for msg_1, which reported a real cost, plus one context row per
+  // assistant message.  The fixture database has no session_v2 / project / kv
+  // tables, so there is no models.dev catalog: the context rows report the
+  // used tokens and leave the limit null, and no session or lifecycle rows
+  // are produced.
+  assert(
+    ocCollected.length === 9,
+    `opencode collector reads assistant rows (${ocCollected.length})`,
+  );
+  assert(
+    ocCollected.filter((e) => e.label.startsWith("token:")).length === 6 &&
+      ocCollected.filter((e) => e.metricType === "cost").length === 1 &&
+      ocCollected.filter((e) => e.metricType === "cost")[0]?.costUsd === 0.000513474,
+    "opencode collector adds one cost row for the reported cost",
+  );
+  // The token rows are the rows Usage Monitor ALREADY stored, so their event
+  // ids and their content are PINNED here.  The id is the hash of the row's
+  // content, so a pinned id pins the content too: a change to either would
+  // make the next replay a different row, and Usage Monitor answers HTTP 409
+  // for the WHOLE batch when a replayed row differs from the stored one.
+  const ocTokenRows = ocCollected.filter((e) => e.label.startsWith("token:"));
+  assert(
+    JSON.stringify(ocTokenRows.map((e) => [e.eventId, e.label, e.quantity])) ===
+      JSON.stringify([
+        ["7a6445c704997442634ed0dc547649441c240f7682a67f749359543209e17fbc", "token:input", 10],
+        ["3dd2f4bd8550d8f4e113943830c1145fc25ab66157bed8a9bcabc1ae3aa6095e", "token:output", 50],
+        ["a1a60b68b999a56a51c9072146262726df9553b717bd2c3a21627710aa8f1163", "token:input", 436],
+        ["107e58b954d64fec328e17c77651902b7235815c40d0d9f4bcd33d20bcbb1ff3", "token:output", 221],
+        ["798b30fd142c5e6180d167d8b350a09e6cf2a2431397e88da80b19aa1522b0c3", "token:cacheRead", 218737],
+        ["d4998bcbd3be45c127fe5a79ba3e843d5617b09a3113760c0607729bfe5e17b5", "token:cacheCreation", 7],
+      ]),
+    "opencode token rows keep their exact event ids",
+  );
+  assert(
+    createHash("sha256").update(JSON.stringify(ocTokenRows)).digest("hex") ===
+      "e3c1af265367a5ca714b717422e7d5207d258c27a85be58c9045a89149ece2cf",
+    "opencode token rows keep their exact content",
+  );
+  assert(
+    ocCollected.filter((e) => e.label.startsWith("context:")).length === 2 &&
+      ocCollected
+        .filter((e) => e.label.startsWith("context:"))
+        .every((e) => e.metricType === "limit" && e.metadata.contextLimit === null),
+    "opencode collector reports the used tokens with a null limit when no catalog exists",
+  );
   const ocRecent = await collectOpencodeEvents({ dbPath, since: new Date(1792198590000) });
   assert(
-    ocRecent.length === 4 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
+    ocRecent.length === 6 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
     "opencode collector honours the since watermark",
   );
   assert(

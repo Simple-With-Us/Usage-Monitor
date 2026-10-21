@@ -32,6 +32,13 @@ describe("fetchFleetBackupStatus", () => {
 
     const payload = await fetchFleetBackupStatus();
     expect(payload.configured).toBe(false);
+    // A genuinely unconfigured key is still reported as such (and fails the
+    // check) — only a deliberately skipped check is exempt.
+    expect(payload.offline).toBeFalsy();
+    expect(payload.warnings.join(" ")).toContain(
+      "credentials are not configured"
+    );
+    expect(payload.ok).toBe(false);
     expect(payload.apps).toHaveLength(3);
     expect(payload.apps.map((a) => a.id)).toEqual([
       "usage-monitor",
@@ -588,6 +595,40 @@ describe("fetchFleetBackupStatus", () => {
     const ltx = st!.locations.find((l) => l.id === "b2-litestream");
     expect(ltx?.present).toBe(true);
     expect(ltx?.ok).toBe(true);
+    expect(st?.ok).toBe(true);
+  });
+
+  it("skips every egress and reports the peer as unknown (not missing) when offline", async () => {
+    vi.stubEnv("OPERATIONS_HEALTH_OFFLINE", "true");
+    vi.stubEnv("E2E_TEST_PASSWORD", "visual-test-password");
+    vi.stubEnv("BACKBLAZE_APPLICATION_KEY_ID", "keyid");
+    vi.stubEnv("BACKBLAZE_APPLICATION_KEY", "secret");
+    const fetchMock = vi.fn(async () => {
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await fetchFleetBackupStatus();
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The check was skipped on purpose, so it must not claim the Backblaze
+    // key is missing.
+    expect(payload.offline).toBe(true);
+    expect(payload.configured).toBe(false);
+    expect(payload.warnings.join(" ")).toContain("offline mode");
+    expect(payload.warnings.join(" ")).not.toContain("credentials are not configured");
+    // A skipped check is not a passed check either: the verdict stays
+    // fail-closed and `offline` explains why, so no consumer reads an
+    // unobserved fleet as healthy. This also keeps the assertion independent
+    // of ambient env (LITESTREAM_REQUIRED and friends cannot flip it).
+    expect(payload.ok).toBe(false);
+    const st = payload.apps.find((a) => a.id === "socratic-trade");
+    const live = st?.locations.find((l) => l.id === "peer-litestream");
+    expect(live?.ok).toBeNull();
+    // Unknown state must not read as "replica present" or "replica missing".
+    expect(live?.present).toBe(false);
+    expect(live?.unknown).toBe(true);
+    expect(live?.reason).toBe("peer_health_offline");
+    // An unobserved peer must not flip the app to a failed backup.
     expect(st?.ok).toBe(true);
   });
 });

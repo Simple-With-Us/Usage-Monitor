@@ -55,7 +55,52 @@ public enum QuotaWindowStatus: String, Codable, Hashable, Sendable {
     }
 }
 
+public struct QuotaPlanMetadata: Codable, Hashable, Sendable {
+    public var detectedPlanName: String?
+    public var userPlanName: String?
+    public var userCostUsd: String?
+    public var userRenewalDateText: String?
+    public var userSubtitle: String?
+    public var showCostAndRenewal: Bool?
+    public var hasMismatch: Bool
+
+    /// Declaring `init(from:)` suppresses Swift's implicit memberwise initializer,
+    /// which would be `internal` here anyway, so without this the public
+    /// `QuotaWindow.init(planMetadata:)` cannot be called with a plan from the
+    /// app target (previews, fixtures, synthesized rows).
+    public init(
+        detectedPlanName: String? = nil,
+        userPlanName: String? = nil,
+        userCostUsd: String? = nil,
+        userRenewalDateText: String? = nil,
+        userSubtitle: String? = nil,
+        showCostAndRenewal: Bool? = nil,
+        hasMismatch: Bool = false
+    ) {
+        self.detectedPlanName = detectedPlanName
+        self.userPlanName = userPlanName
+        self.userCostUsd = userCostUsd
+        self.userRenewalDateText = userRenewalDateText
+        self.userSubtitle = userSubtitle
+        self.showCostAndRenewal = showCostAndRenewal
+        self.hasMismatch = hasMismatch
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        detectedPlanName = try? container.decodeIfPresent(String.self, forKey: .detectedPlanName)
+        userPlanName = try? container.decodeIfPresent(String.self, forKey: .userPlanName)
+        userCostUsd = try? container.decodeIfPresent(String.self, forKey: .userCostUsd)
+        userRenewalDateText = try? container.decodeIfPresent(String.self, forKey: .userRenewalDateText)
+        userSubtitle = try? container.decodeIfPresent(String.self, forKey: .userSubtitle)
+        showCostAndRenewal = try? container.decodeIfPresent(Bool.self, forKey: .showCostAndRenewal)
+        hasMismatch = (try? container.decode(Bool.self, forKey: .hasMismatch)) ?? false
+    }
+}
+
 public struct QuotaWindow: Codable, Hashable, Sendable, Identifiable {
+    public var planMetadata: QuotaPlanMetadata?
+    public var planName: String?
     public var id: String
     public var provider: String
     public var sourceApp: String?
@@ -104,8 +149,12 @@ public struct QuotaWindow: Codable, Hashable, Sendable, Identifiable {
         occurredAt: String? = nil,
         source: String? = nil,
         providerLabel: String? = nil,
-        via: String? = nil
+        via: String? = nil,
+        planMetadata: QuotaPlanMetadata? = nil,
+        planName: String? = nil
     ) {
+        self.planMetadata = planMetadata
+        self.planName = planName
         self.id = id
         self.provider = provider
         self.sourceApp = sourceApp
@@ -126,6 +175,8 @@ public struct QuotaWindow: Codable, Hashable, Sendable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        planMetadata = try? container.decodeIfPresent(QuotaPlanMetadata.self, forKey: .planMetadata)
+        planName = try? container.decodeIfPresent(String.self, forKey: .planName)
         id = (try? container.decode(String.self, forKey: .id)) ?? UUID().uuidString
         provider = (try? container.decode(String.self, forKey: .provider)) ?? "unknown"
         sourceApp = try? container.decodeIfPresent(String.self, forKey: .sourceApp)

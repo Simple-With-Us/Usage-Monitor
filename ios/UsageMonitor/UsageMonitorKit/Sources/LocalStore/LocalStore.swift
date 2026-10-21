@@ -1,6 +1,6 @@
 import Foundation
 
-/// On-device money-truth store for **Usage Local Monitor**.
+/// On-device money-truth store for **Usage Monitor Local**.
 ///
 /// Schema authority: `docs/designs/2026-08-04-mobile-parity-and-phone-self-host.md` §2.2.1.
 ///
