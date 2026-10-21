@@ -6,6 +6,8 @@ import {
   apnsSoundForCodeCapsPreference,
   CODECAPS_PUSH_MAX_ALERT_AGE_MS,
   CODECAPS_PUSH_RECEIPT_RETENTION_DAYS,
+  codeCapsPushPreferenceAllowsAlert,
+  codeCapsPushSourceInstanceId,
   CodeCapsPushAlertSchema,
   CodeCapsPushPreferencesSchema,
   loadCodeCapsApnsConfig,
@@ -45,11 +47,6 @@ export async function POST(request: NextRequest) {
   }
   if (!alertIngestLimiter.check(getIngestIdentityRateLimitKey(credential.token))) {
     return NextResponse.json({ error: "Rate limited" }, { status: 429, headers: { "Retry-After": "60" } });
-  }
-
-  const apnsConfig = loadCodeCapsApnsConfig();
-  if (!apnsConfig) {
-    return NextResponse.json({ error: "CodeCaps APNs delivery is not configured" }, { status: 503 });
   }
 
   const now = new Date();
@@ -92,6 +89,11 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // Persist valid occurrences for authenticated foreground polling even while
+  // the optional APNs transport is unavailable. Pending receipts remain
+  // retryable when the producer republishes the same fresh occurrence later.
+  const apnsConfig = loadCodeCapsApnsConfig();
+
   try {
     const receiptCutoff = new Date(now.getTime() - CODECAPS_PUSH_RECEIPT_RETENTION_DAYS * 86_400_000);
     await prisma.codeCapsPushAlert.deleteMany({ where: { receivedAt: { lt: receiptCutoff } } });
@@ -107,6 +109,7 @@ export async function POST(request: NextRequest) {
     let failed = 0;
     let retryableFailures = 0;
     let authFailures = 0;
+    let apnsUnavailableForActiveDevices = false;
 
     for (const alert of validAlerts) {
       try {
@@ -138,7 +141,8 @@ export async function POST(request: NextRequest) {
       for (const device of devices) {
         const preferences = CodeCapsPushPreferencesSchema.safeParse(device.preferences);
         const option = preferences.success ? preferences.data.options[alert.kind] : undefined;
-        if (!device.deviceToken || !option?.enabled || !option.notification) {
+        if (!device.deviceToken || !option?.enabled || !option.notification ||
+          !preferences.success || !codeCapsPushPreferenceAllowsAlert(preferences.data, alert)) {
           skippedByPreference += 1;
           continue;
         }
@@ -150,6 +154,12 @@ export async function POST(request: NextRequest) {
           });
         } catch (error) {
           if (!isUniqueConflict(error)) throw error;
+        }
+        if (!apnsConfig) {
+          failed += 1;
+          retryableFailures += 1;
+          apnsUnavailableForActiveDevices = true;
+          continue;
         }
         const claimTime = new Date();
         const claim = await prisma.codeCapsPushAlertDelivery.updateMany({
@@ -188,7 +198,9 @@ export async function POST(request: NextRequest) {
         });
         const currentPreferences = CodeCapsPushPreferencesSchema.safeParse(currentDevice?.preferences);
         const currentOption = currentPreferences.success ? currentPreferences.data.options[alert.kind] : undefined;
-        if (!currentDevice?.isActive || !currentDevice.deviceToken || !currentOption?.enabled || !currentOption.notification) {
+        if (!currentDevice?.isActive || !currentDevice.deviceToken || !currentOption?.enabled ||
+          !currentOption.notification || !currentPreferences.success ||
+          !codeCapsPushPreferenceAllowsAlert(currentPreferences.data, alert)) {
           skippedByPreference += 1;
           await prisma.codeCapsPushAlertDelivery.updateMany({
             where: { alertId: alert.id, deviceId: device.id, outcome: "sending", attemptedAt: claimTime },
@@ -199,6 +211,7 @@ export async function POST(request: NextRequest) {
 
         const providerTitle = `${alert.providerTitle} · ${alert.windowLabel}`;
         const collisionSafeId = createHash("sha256").update(alert.id).digest("hex").slice(0, 32);
+        const sourceInstanceId = codeCapsPushSourceInstanceId(alert.id);
         const result = await sendApnsPush({
           deviceToken: currentDevice.deviceToken,
           environment: currentDevice.environment === "sandbox" ? "sandbox" : "production",
@@ -214,7 +227,9 @@ export async function POST(request: NextRequest) {
             alertId: alert.id,
             kind: alert.kind,
             providerKey: alert.providerKey,
+            windowLabel: alert.windowLabel,
             tab: "overview",
+            ...(sourceInstanceId ? { sourceInstanceId } : {}),
           },
         }, { config: apnsConfig });
 
@@ -257,6 +272,8 @@ export async function POST(request: NextRequest) {
       failed,
       retryableFailures,
       authFailures,
+      apnsConfigured: Boolean(apnsConfig),
+      apnsUnavailableForActiveDevices,
       receiptRetentionDays: CODECAPS_PUSH_RECEIPT_RETENTION_DAYS,
     };
     return NextResponse.json(response, {
