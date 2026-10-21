@@ -470,6 +470,9 @@ function unreachableSocratic(fetchedAt: string, error?: string): SocraticInfrast
 
 export async function fetchSocraticInfrastructureSummary(): Promise<SocraticInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // short-circuit the external health probe so /ops never depends on egress.
+  if (process.env.OPERATIONS_HEALTH_OFFLINE === "true") return unreachableSocratic(fetchedAt);
   try {
     const response = await fetch(SOCRATIC_HEALTH_URL, {
       headers: { Accept: "application/json" },
@@ -597,6 +600,8 @@ function unreachableCongress(fetchedAt: string, error?: string): CongressInfrast
  */
 export async function fetchCongressInfrastructureSummary(): Promise<CongressInfrastructureSummary> {
   const fetchedAt = new Date().toISOString();
+  // See fetchSocraticInfrastructureSummary: offline short-circuit for e2e.
+  if (process.env.OPERATIONS_HEALTH_OFFLINE === "true") return unreachableCongress(fetchedAt);
   try {
     const response = await fetch(CONGRESS_HEALTH_URL, {
       headers: { Accept: "application/json" },
