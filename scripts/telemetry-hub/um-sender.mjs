@@ -293,7 +293,7 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * miss is memoized as well, so a hub without the secret does not spawn the
  * helper every ten seconds either.
  */
-export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
+export function createTokenResolver({ env = process.env, now = () => Date.now(), getSecret = fleetSecretsGet } = {}) {
   let memo = { value: undefined, at: 0 };
   return async function resolveToken() {
     const fromEnv = env.USAGE_INGEST_TOKEN?.trim();
@@ -305,9 +305,13 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
       //  The module cache has no TTL and caches a MISS, so an absent or
       //  rotated secret would stay absent or stale for the whole process.
       //  The memo above already caps the CLI spawn at once a minute.
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
+      value = getSecret("USAGE_INGEST_TOKEN", { useCache: false });
     } catch {
-      value = undefined;
+      //  A transient lookup error must not clobber a previously resolved
+      //  token: keep the last good value.  The memo is still stamped, so
+      //  the CLI spawn stays capped at once a minute.
+      memo = { value: memo.value, at: stamp };
+      return memo.value;
     }
     memo = {
       value: typeof value === "string" && value.trim() ? value.trim() : undefined,
