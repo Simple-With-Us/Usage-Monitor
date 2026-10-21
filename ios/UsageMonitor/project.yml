@@ -122,7 +122,7 @@ targets:
         product: PushScaffold
 
   # -------------------------------------------------------------------------
-  # Usage Local Monitor — on-device self-host product (separate App Store app).
+  # Usage Monitor Local — on-device self-host product (separate App Store app).
   # Does NOT embed the remote client widget or link Networking money paths.
   # -------------------------------------------------------------------------
   LocalUsageMonitor:

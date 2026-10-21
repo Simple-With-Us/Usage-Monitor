@@ -4,7 +4,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "Privacy Policy — Usage Monitor",
   description:
-    "Privacy policy for Usage Client Monitor and Usage Local Monitor iOS apps and the Usage Monitor dashboard.",
+    "Privacy policy for Usage Monitor Client and Usage Monitor Local iOS apps and the Usage Monitor dashboard.",
   robots: { index: true, follow: true },
 };
 
@@ -20,8 +20,8 @@ export default function PrivacyPolicyPage() {
         </h1>
         <p className="text-sm text-gray-600 dark:text-gray-400">
           Effective August 10, 2026 · Applies to{" "}
-          <strong>Usage Client Monitor</strong>,{" "}
-          <strong>Usage Local Monitor</strong>, and the optional{" "}
+          <strong>Usage Monitor Client</strong>,{" "}
+          <strong>Usage Monitor Local</strong>, and the optional{" "}
           <strong>Usage Monitor</strong> web dashboard at usage.jays.services.
         </p>
       </header>
@@ -37,12 +37,12 @@ export default function PrivacyPolicyPage() {
             in the iOS apps.
           </li>
           <li>
-            <strong>Usage Local Monitor</strong> processes API keys and cost
+            <strong>Usage Monitor Local</strong> processes API keys and cost
             figures on your device. Your keys leave the device only when you
             choose a provider and the app calls that provider’s HTTPS API.
           </li>
           <li>
-            <strong>Usage Client Monitor</strong> talks only to a Usage Monitor
+            <strong>Usage Monitor Client</strong> talks only to a Usage Monitor
             server URL and read token that <em>you</em> configure (self-hosted
             or fleet). We do not receive that traffic unless you point the app
             at a server we operate and you choose to use it.
@@ -81,7 +81,7 @@ export default function PrivacyPolicyPage() {
           Data We Process
         </h2>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Local Monitor (On-Device)
+          Usage Monitor Local (On-Device)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -105,7 +105,7 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Client Monitor (Server Client)
+          Usage Monitor Client (Server Client)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
