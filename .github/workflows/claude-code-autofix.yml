@@ -13,6 +13,7 @@ permissions:
   contents: write
   pull-requests: write
 
+  issues: write
 concurrency:
   group: pr-autofix-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr }}
   cancel-in-progress: false
@@ -24,9 +25,10 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.review.user.type == 'Bot' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@31659885f58f08e129b6dc092f3493d7cdb74a11
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@346479236c431451689c9220e5160627d1699a1e
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      META_MODEL_API_TOKEN: ${{ secrets.META_MODEL_API_TOKEN }}
       USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
     with:
       allowed_bots: "chatgpt-codex-connector,chatgpt-codex-connector[bot],kody-ai,kody-ai[bot],cursor,cursor[bot],sentry,sentry[bot],swu-ag,swu-ag[bot],swu-bf-builder,swu-bf-builder[bot],swu-bf-compiler,swu-bf-compiler[bot],swu-bf-deployer,swu-bf-deployer[bot],swu-bf-designer,swu-bf-designer[bot],swu-bf-director,swu-bf-director[bot],swu-bf-fixer,swu-bf-fixer[bot],swu-bf-housekeeper,swu-bf-housekeeper[bot],swu-bf-monitor,swu-bf-monitor[bot],swu-bf-oracle,swu-bf-oracle[bot],swu-bf-plumber,swu-bf-plumber[bot],swu-bf-publisher,swu-bf-publisher[bot],swu-claude,swu-claude[bot],swu-clutch,swu-clutch[bot],swu-codex,swu-codex[bot],swu-cursor,swu-cursor[bot],swu-cursor-cloud,swu-cursor-cloud[bot],swu-echo,swu-echo[bot],swu-fx,swu-fx[bot],swu-gb-compiler,swu-gb-compiler[bot],swu-gb-deployer,swu-gb-deployer[bot],swu-gb-designer,swu-gb-designer[bot],swu-gb-director,swu-gb-director[bot],swu-gb-engineer,swu-gb-engineer[bot],swu-gb-fixer,swu-gb-fixer[bot],swu-gb-housekeeper,swu-gb-housekeeper[bot],swu-gb-monitor,swu-gb-monitor[bot],swu-gb-oracle,swu-gb-oracle[bot],swu-gb-plumber,swu-gb-plumber[bot],swu-gb-publisher,swu-gb-publisher[bot],swu-gb-trader,swu-gb-trader[bot],swu-grok-build,swu-grok-build[bot],swu-grok-web,swu-grok-web[bot],swu-jet,swu-jet[bot],swu-mc,swu-mc[bot],swu-minimax,swu-minimax[bot],swu-opencode,swu-opencode[bot],swu-operator,swu-operator[bot],swu-rob,swu-rob[bot],swu-wise,swu-wise[bot]"
