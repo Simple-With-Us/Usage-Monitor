@@ -471,3 +471,28 @@ test('visual: fleet alerts card with firing topic', async ({ page }) => {
   await expect(card.getByText('ship-pipeline')).toBeVisible();
   await expect(card).toHaveScreenshot('fleet-alerts-card.png', stableShot);
 });
+
+// Fleet Backups card offline state (#1715, Kody rule [4]): the e2e server
+// runs with OPERATIONS_HEALTH_OFFLINE=true, so /api/operations already
+// returns the skipped-check payload - pin exactly what a user sees then.
+// Relative times, backup ages and object counts are masked: they depend on
+// wall-clock and server state, not on the offline presentation under test.
+test('visual: fleet backups card offline', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.locator('section[aria-labelledby="fleet-backups-heading"]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('Backup checks skipped (offline mode)')).toBeVisible();
+  await expect(card.getByText('Unavailable').first()).toBeVisible();
+  // Expand the details so the per-app and per-location offline rows are
+  // pinned too (unobserved rows read Unavailable, never Healthy).
+  await card.getByRole('button', { name: 'Details' }).click();
+  await expect(card.locator('#fleet-backups-detail')).toBeVisible();
+  await expect(card).toHaveScreenshot('fleet-backups-offline.png', {
+    ...stableShot,
+    mask: [card.locator('time'), card.getByText(/ago|object/)],
+  });
+});
