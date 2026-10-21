@@ -523,15 +523,19 @@ export class Journal {
     if (target <= this.base) return false;
     const size = await this.fileSize();
     if (size <= this.maxJournalBytes) return false;
-    //  The compaction rewrites the whole remaining file, so it only runs
-    //  when the rewrite actually brings the file back under the cap.  A
-    //  file that stays over the cap would otherwise be rewritten on every
-    //  append, which amplifies the writes and stalls the receiver.
-    //  The skip is NOT unbounded, though: a destination that lags past the
-    //  cap must not make the file grow for the life of the hub, so the
-    //  rewrite runs again once the file passes a hard multiple of the cap.
-    const remaining = size - Math.min(target - this.base, size);
-    if (remaining >= this.maxJournalBytes && size < this.maxJournalBytes * 2) return false;
+    //  The compaction rewrites the whole remaining file, so it is only
+    //  worth its copy when the consumed prefix is a real part of the file.
+    //  While the unconsumed backlog is still over the cap the rewrite
+    //  cannot bring the file under it, so skipping keeps the write
+    //  amplification at 2x instead of copying the whole file for every
+    //  byte a slow destination consumes.
+    //  The skip is NOT unbounded, though: once the consumed prefix is at
+    //  least half the file the copy pays for itself, so the file still
+    //  shrinks.  That bounds the file at 2x the unconsumed backlog, which
+    //  is the smallest it can ever be while that backlog is retained.
+    const prefix = Math.min(target - this.base, size);
+    const remaining = size - prefix;
+    if (remaining >= this.maxJournalBytes && prefix * 2 < size) return false;
     await this.compactTo(target);
     return true;
   }
