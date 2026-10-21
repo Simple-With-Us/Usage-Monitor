@@ -314,7 +314,7 @@ jobs:
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
       - name: Sync standing TestFlight testers (usage-local)
-        if: success() && steps.gate.outputs.ship_usage_local == '1'
+        if: ${{ !cancelled() && steps.ship_usage_local.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
         continue-on-error: true
         env:
           ASC_STANDING_TESTERS: ${{ secrets.ASC_STANDING_TESTERS }}
