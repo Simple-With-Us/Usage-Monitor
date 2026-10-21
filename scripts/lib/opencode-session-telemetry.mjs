@@ -11,29 +11,41 @@
  * UM semantics this module is built against (read before changing a field):
  *
  *   - Token totals are summed ONLY from rows with metricType "usage" AND unit
- *     "token" (src/lib/llm-burn.ts, src/lib/cost-by-session.ts,
- *     src/lib/external-usage-events.ts loadAnalyticsTokenRows,
+ *     "token" (src/lib/external-usage-events.ts loadAnalyticsTokenRows,
+ *     src/lib/cost-by-session.ts, src/app/api/llm-burn/route.ts,
  *     src/lib/agents-overview.ts).  The context row therefore uses
- *     metricType "quota" and the session / lifecycle rows use unit "row", so
- *     neither can be summed into a token total.
- *   - A quota row's remaining percent is credits / limit * 100
- *     (src/lib/quota-windows.ts projectQuotaWindows) and UM's own quota
- *     producers send credits = percent REMAINING with limit = 100
- *     (scripts/lib/quota-event.mjs).  The context row follows that shape:
- *     limit 100, credits = percent remaining, raw context limit in
- *     metadata.contextLimit.
- *   - The shared v2 contract restricts limitWindow to minute|day|month|run
- *     (@jaywedgeworth22/congress-trading-shared UsageTelemetryLimitWindowSchema),
- *     so the context window token rides in metadata.quotaWindow like every
- *     other quota producer's window token.
+ *     metricType "limit" and the session / lifecycle rows use unit "row", so
+ *     none of them can be summed into a token total.
+ *   - The subscription quota panels are built ONLY from rows with metricType
+ *     "quota": src/lib/quota-events-loader.ts filters "metricType" = 'quota'
+ *     in SQL and src/lib/quota-windows.ts projectQuotaWindows projects those
+ *     rows into windows.  A context window is not a subscription quota, so
+ *     the context row uses metricType "limit" and never reaches a quota
+ *     panel.  It carries the used tokens as quantity, the context window as
+ *     limit and the utilization in metadata.
+ *   - metricType "limit" is a first-class value in both contracts
+ *     (@jaywedgeworth22/congress-trading-shared UsageTelemetryMetricTypeSchema
+ *     and src/lib/usage-telemetry.ts), and no UM consumer reads it as usage
+ *     or as quota.
  *   - The top-level `project` field is authoritative and is stamped into
  *     metadata.project server-side (src/app/api/ingest/usage/route.ts); the
  *     replay comparison ignores metadata.project
  *     (src/lib/external-usage-events.ts metadataComparableForReplay), so
  *     adding it never re-keys or re-attributes a stored row.
+ *   - Every event id THIS MODULE builds is a function of every compared field
+ *     of its own row that can move, so a changed field produces a NEW row
+ *     instead of an HTTP 409 idempotency_conflict against the stored one
+ *     (src/lib/external-usage-events.ts comparableEvent).  The fields that
+ *     cannot move are the constants of a row and the completion instant,
+ *     which comes from the immutable message payload.  The token rows keep
+ *     the shared parser's ids (session-token-collectors.mjs
+ *     tokenEventsFromBreakdown), which the shared contract fixes and which
+ *     nothing here changes.
  */
 
 import { basename } from "node:path";
+
+import { z } from "zod";
 
 import {
   OPENCODE_PRODUCER_ID,
@@ -78,10 +90,17 @@ export const OPENCODE_LIFECYCLE_TYPES = Object.freeze([
  * context, cost, session-fact and lifecycle rows carry the session id
  * regardless, and they are new event kinds UM has never stored.
  *
- * To turn it on, set OPENCODE_SESSION_ID_CUTOFF_MS to the install instant in
- * epoch milliseconds -- a few minutes AFTER the files are copied, so the rows
- * the previous collector version is still sending keep their stored shape --
- * and restart the LaunchAgent.  See resolveOpencodeSessionIdCutoffMs.
+ * To turn it on, set OPENCODE_SESSION_ID_CUTOFF_MS to ONE FIXED INSTANT in
+ * epoch milliseconds that is AFTER the LaunchAgent restarted on the new code,
+ * and restart the LaunchAgent.  The previous collector version keeps sending
+ * token rows without a session id until the LaunchAgent restarts, so an
+ * instant that is merely "a few minutes after the files were copied" is
+ * early: a message that completed in between would be stored by the old
+ * collector in the old shape and replayed by the new collector in the new
+ * shape, and Usage Monitor would answer HTTP 409 for the whole batch.  The
+ * boundary is compared against the message's completion instant, which never
+ * moves, so the row a pass sends is the row every later pass sends.
+ * See resolveOpencodeSessionIdCutoffMs.
  */
 export const OPENCODE_SESSION_ID_CUTOFF_MS = Number.MAX_SAFE_INTEGER;
 
@@ -124,12 +143,24 @@ const SESSION_COLUMNS = [
 /** Stay well under SQLite's bound parameter limit when fanning out ids. */
 const SQL_ID_CHUNK = 150;
 
+/**
+ * Read a table that every opencode build has.  A failure here is NOT
+ * swallowed: the collector marks the scan incomplete, so the checkpoint does
+ * not advance and the next pass reads the same window again.  Swallowing the
+ * error would let the watermark move past rows that were never read.
+ */
+function readAll(db, sql, params = []) {
+  return db.prepare(sql).all(...params);
+}
+
+/**
+ * Read a table that an older opencode build (or a fixture) may not have.
+ * A missing table must not stop the token rows from flowing.
+ */
 function safeAll(db, sql, params = []) {
   try {
     return db.prepare(sql).all(...params);
   } catch {
-    // An older opencode build (or a fixture without the table) must not stop
-    // the token rows from flowing.
     return [];
   }
 }
@@ -193,6 +224,18 @@ function parseJson(value) {
 }
 
 /**
+ * Canonical JSON with sorted object keys, so a value can be hashed into an
+ * event id.  The hash of a value is the same on every machine and in every
+ * pass, which is what makes an event id a function of the row's content.
+ */
+function stableJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+}
+
+/**
  * Read every row this collector needs in ONE read-only connection: the
  * assistant rows (tokens), the session rows (facts, project), the per-session
  * message counts, the lifecycle rows and the models.dev catalog.
@@ -210,13 +253,13 @@ export async function readOpencodeTelemetry(dbPath, since) {
     db.exec("PRAGMA busy_timeout = 5000");
     const sinceMs = since ? since.getTime() : 0;
 
-    const assistantRows = safeAll(
+    const assistantRows = readAll(
       db,
       "SELECT id, session_id, data FROM session_message " +
         "WHERE type = 'assistant' AND time_updated >= ? ORDER BY time_created, id",
       [sinceMs],
-    );
-    const lifecycleRows = safeAll(
+    ).map((row) => ({ ...row, data: parseJson(row.data) }));
+    const lifecycleRows = readAll(
       db,
       "SELECT id, session_id, type, time_created, time_updated, data FROM session_message " +
         `WHERE type IN (${marks(OPENCODE_LIFECYCLE_TYPES.length)}) AND time_created >= ? ` +
@@ -224,7 +267,14 @@ export async function readOpencodeTelemetry(dbPath, since) {
       [...OPENCODE_LIFECYCLE_TYPES, sinceMs],
     );
 
-    const sessionIds = uniqueIds(assistantRows.map((row) => row.session_id));
+    // Lifecycle rows belong to sessions that may have no assistant row in the
+    // window, so both row sets contribute the session ids that are loaded
+    // below.  A session that only produced a lifecycle signal still gets its
+    // project attribution.
+    const sessionIds = uniqueIds([
+      ...assistantRows.map((row) => row.session_id),
+      ...lifecycleRows.map((row) => row.session_id),
+    ]);
     const sessions = [];
     for (const chunk of chunkIds(sessionIds)) {
       sessions.push(
@@ -239,7 +289,7 @@ export async function readOpencodeTelemetry(dbPath, since) {
     const messageCounts = [];
     for (const chunk of chunkIds(sessionIds)) {
       messageCounts.push(
-        ...safeAll(
+        ...readAll(
           db,
           "SELECT session_id, type, COUNT(*) AS count FROM session_message " +
             `WHERE session_id IN (${marks(chunk.length)}) GROUP BY session_id, type`,
@@ -271,46 +321,166 @@ export async function readOpencodeTelemetry(dbPath, since) {
 }
 
 /**
+ * The models.dev catalog envelope.  The kv value is
+ * `{"updatedAt":..,"digest":..,"body":"<json string>"}`, so the body is a
+ * JSON string that has to be parsed a second time.  `updatedAt` is a number
+ * in the live catalog and a string in older ones, so both are accepted.
+ *
+ * The envelope is CLOSED: an unknown top-level key is a shape violation and
+ * the strict schema rejects it.  It is also ISOLATED: the violation is
+ * reported as a warning and the known fields are still read, so one odd
+ * field cannot erase every vendor's limits.  The earlier tolerant envelope
+ * accepted the key silently, so a catalog that changed shape looked exactly
+ * like a catalog that was fine.
+ */
+const ModelsDevCatalogEnvelopeFieldsSchema = z.object({
+  updatedAt: z.union([z.string(), z.number()]).optional(),
+  digest: z.string().optional(),
+  body: z.union([z.string(), z.record(z.string(), z.unknown())]),
+});
+
+const ModelsDevCatalogEnvelopeSchema = ModelsDevCatalogEnvelopeFieldsSchema.strict();
+
+/**
+ * The provider / model records inside the catalog body.  The vendor records
+ * carry many fields UM never reads (cost, modalities, release dates), so the
+ * model and limit records stay loose and only the fields the collector reads
+ * are typed.  `limit.context` is 0 for models with no context window (the
+ * transcription and video models), so 0 is valid here and is treated as "no
+ * limit" below.
+ *
+ * The records STRIP the fields UM does not read instead of retaining them:
+ * an undeclared field from the external catalog never survives the parse,
+ * and only the limit map leaves this module.
+ */
+const ModelsDevLimitSchema = z.object({
+  context: z.number().finite().nonnegative().optional(),
+});
+
+const ModelsDevModelSchema = z.object({
+  limit: ModelsDevLimitSchema.optional(),
+});
+
+const ModelsDevProviderSchema = z.object({
+  // Each model entry is validated on its own below, so one malformed model
+  // costs only itself and not every other model the vendor publishes.
+  models: z.record(z.string(), z.unknown()).optional(),
+});
+
+const ModelsDevBodySchema = z.record(z.string(), z.unknown());
+
+/**
  * Parse opencode's cached models.dev catalog (kv key `models-dev:catalog`).
  *
- * The kv value is `{"updatedAt":..,"digest":..,"body":"<json string>"}`, so the
- * body is a JSON string that has to be parsed a second time.  Inside it,
- * body[providerId].models[modelId].limit.context is the context window size
- * in tokens.  Only the limits are kept, so the parsed catalog is released as
- * soon as this returns.
+ * Inside the body, body[providerId].models[modelId].limit.context is the
+ * context window size in tokens.  Only the limits are kept, so the parsed
+ * catalog is released as soon as this returns.
+ *
+ * The parse is granular at every level that can drift: an unknown envelope
+ * key, a body that is already an object, one malformed vendor and one
+ * malformed model each cost only themselves.  A cached value with no usable
+ * body at all returns an empty catalog whose `problem` says why, so the
+ * collector can log it instead of losing the context limits silently.
+ *
+ * `problem` and `warning` say different things.  `problem` means the catalog
+ * cannot be used at all and every limit is lost.  `warning` means the
+ * catalog IS usable and something about it is not as expected, for example an
+ * unknown envelope key: the limits are still reported, and the collector logs
+ * the warning so the shape change is visible instead of silent.
+ *
+ * A limit is only ever reported for the EXACT provider and model the message
+ * used.  The catalog defines 546 model ids under more than one provider with
+ * different windows (io-net publishes moonshotai/kimi-k2-instruct-0905 with
+ * 32768 tokens while huggingface publishes the same model with 262144), so a
+ * cross-provider fallback would report a context window that belongs to a
+ * different vendor.  A model the provider does not publish yields no limit,
+ * and the context row then reports the used tokens with a null limit.
  */
 export function parseModelsDevCatalog(rawValue) {
+  const unusable = (problem) => ({
+    updatedAt: null,
+    problem,
+    /** The catalog cannot be used, so there is nothing to warn about. */
+    warning: null,
+    /** No limit is known, because the cached catalog cannot be used. */
+    limitFor: () => null,
+  });
+  // A missing catalog is the NORMAL state on a fresh install, or after a
+  // failed catalog fetch, so it gets its own message: an operator must not
+  // chase a corruption that does not exist.
+  if (
+    rawValue === null ||
+    rawValue === undefined ||
+    (typeof rawValue === "string" && !rawValue.trim())
+  ) {
+    return unusable("the cached catalog is missing (opencode has not cached models.dev yet)");
+  }
   const outer = parseJson(rawValue);
-  if (!outer || typeof outer !== "object") return null;
-  const body = typeof outer.body === "string" ? parseJson(outer.body) : outer.body;
-  if (!body || typeof body !== "object") return null;
+  if (!outer || typeof outer !== "object" || Array.isArray(outer)) {
+    return unusable("the cached catalog is not a JSON object");
+  }
+  const strict = ModelsDevCatalogEnvelopeSchema.safeParse(outer);
+  let envelope = null;
+  let warning = null;
+  if (strict.success) {
+    envelope = strict.data;
+  } else {
+    // The envelope is closed, so an unknown top-level key is a shape
+    // violation.  It is isolated to the envelope: the known fields are still
+    // read, so one odd field cannot erase every vendor's limits, and the
+    // violation is reported instead of being swallowed.
+    const unknownKeys = strict.error.issues
+      .filter((issue) => issue.code === "unrecognized_keys")
+      .flatMap((issue) => issue.keys ?? []);
+    const otherIssues = strict.error.issues.filter(
+      (issue) => issue.code !== "unrecognized_keys",
+    );
+    if (otherIssues.length > 0) return unusable("the cached catalog has no usable body");
+    const known = ModelsDevCatalogEnvelopeFieldsSchema.safeParse(outer);
+    if (!known.success) return unusable("the cached catalog has no usable body");
+    envelope = known.data;
+    warning = `the cached catalog envelope carries unknown key(s): ${unknownKeys.join(", ")}`;
+  }
+  const bodyRaw =
+    typeof envelope.body === "string" ? parseJson(envelope.body) : envelope.body;
+  if (!bodyRaw || typeof bodyRaw !== "object" || Array.isArray(bodyRaw)) {
+    return unusable("the cached catalog body is not a JSON object");
+  }
+  const body = ModelsDevBodySchema.safeParse(bodyRaw);
+  if (!body.success) return unusable("the cached catalog body is not a record of providers");
 
   const limits = new Map();
-  const byModelId = new Map();
-  for (const [providerId, provider] of Object.entries(body)) {
-    const models = provider?.models;
-    if (!models || typeof models !== "object") continue;
-    for (const [modelId, model] of Object.entries(models)) {
-      const context = numberOrNull(model?.limit?.context);
-      if (!context || context <= 0) continue;
+  for (const [providerId, rawProvider] of Object.entries(body.data)) {
+    // One malformed vendor must not cost every other vendor its limit.
+    const provider = ModelsDevProviderSchema.safeParse(rawProvider);
+    if (!provider.success) continue;
+    const models = provider.data.models;
+    if (!models) continue;
+    for (const [modelId, rawModel] of Object.entries(models)) {
+      // The models are validated one by one, so a single malformed model
+      // does not cost the vendor its other models.
+      const model = ModelsDevModelSchema.safeParse(rawModel);
+      if (!model.success) continue;
+      const context = model.data.limit?.context;
+      if (!Number.isFinite(context) || context <= 0) continue;
       limits.set(`${providerId}\u0000${modelId}`, context);
-      const key = modelId.toLowerCase();
-      if (!byModelId.has(key)) byModelId.set(key, { providerId, context });
     }
   }
 
   return {
-    updatedAt: typeof outer.updatedAt === "string" ? outer.updatedAt : null,
+    updatedAt: envelope.updatedAt === undefined ? null : String(envelope.updatedAt),
+    /** Null when the cached catalog was unusable. */
+    problem: null,
+    /**
+     * Null when nothing about the catalog was off.  A non-null warning means
+     * the catalog is USABLE and something about it is not as expected, for
+     * example an unknown envelope key.
+     */
+    warning,
     /** Context limit for one provider + model pair, or null. */
     limitFor(providerId, modelId) {
       if (!providerId || !modelId) return null;
       return limits.get(`${providerId}\u0000${modelId}`) ?? null;
-    },
-    /** Same model id under any other provider, or null. */
-    limitByModelId(modelId) {
-      if (!modelId) return null;
-      const hit = byModelId.get(String(modelId).toLowerCase());
-      return hit ? hit.context : null;
     },
   };
 }
@@ -447,7 +617,12 @@ export function opencodeCostEvent({
     occurredAtIso,
     model: modelId || undefined,
     costUsd,
-    extraId: `${messageId}:cost`,
+    // The id carries the raw provider id and the normalized vendor as well,
+    // because Usage Monitor compares metadata.providerId and the provider,
+    // and opencodeProviderInfo folds several raw provider ids onto one
+    // vendor.  No cost row is stored in Usage Monitor yet, so the id can
+    // still cover every compared field.
+    extraId: `${messageId}:${providerId || ""}:${provider || ""}:cost`,
   });
   if (!event) return null;
   if (providerId) event.metadata.providerId = providerId;
@@ -457,15 +632,35 @@ export function opencodeCostEvent({
 /**
  * Context-window utilization for one assistant message.
  *
- * contextTokens = tokens.input + tokens.cache.read + tokens.output, which is
- * exactly what opencode's own UI shows as "Total Tokens".  The limit comes
- * from the models.dev catalog; without a known limit the row is skipped
- * rather than guessed.
+ * contextTokens = tokens.input + tokens.cache.read + tokens.cache.write +
+ * tokens.output + tokens.reasoning.  opencode's tokens.output EXCLUDES
+ * reasoning and the shared token parser folds reasoning into the output row,
+ * so the context total adds it too; cache-write tokens occupy the prompt cache
+ * and therefore the window, and the shared token parser reports them as a
+ * cacheCreation row: the context row then counts exactly the tokens the token
+ * rows report for that message.
  *
- * metricType "quota" keeps the row out of every token total (UM only sums
- * metricType "usage" with unit "token"), and credits/limit follow UM's quota
- * convention (credits = percent remaining, limit = 100) so the dashboard
- * reads the remaining percent correctly.
+ * The limit comes from the models.dev catalog for the EXACT provider and
+ * model of the message.  A provider that does not publish the model yields no
+ * limit: the row still reports the used tokens and leaves the limit null
+ * rather than guessing at another vendor's window.
+ *
+ * The shape has to satisfy two UM rules at once:
+ *
+ *   - The row must not land in a token total.  UM sums tokens ONLY from rows
+ *     with metricType "usage" AND unit "token" (src/lib/external-usage-events.ts
+ *     loadAnalyticsTokenRows, src/lib/cost-by-session.ts,
+ *     src/app/api/llm-burn/route.ts, src/lib/agents-overview.ts), so the row
+ *     uses metricType "limit".
+ *   - The row must not show up in the subscription quota panels.  Those are
+ *     built ONLY from rows with metricType "quota" (src/lib/quota-events-loader.ts
+ *     filters "metricType" = 'quota' in SQL, src/lib/quota-windows.ts
+ *     projectQuotaWindows projects them), so the row uses metricType "limit"
+ *     and carries no quota window token.
+ *
+ * The values ride where UM reads them: quantity is the used tokens, limit is
+ * the context window in tokens, and metadata carries the same numbers plus
+ * the utilization percent.
  */
 export function opencodeContextEvent({
   sessionId,
@@ -480,12 +675,20 @@ export function opencodeContextEvent({
 }) {
   if (!sessionId || !messageId) return null;
   if (!Number.isFinite(contextTokens) || contextTokens <= 0) return null;
-  if (!Number.isFinite(contextLimit) || contextLimit <= 0) return null;
-  const usedPercent = clampPercent((contextTokens / contextLimit) * 100);
-  if (usedPercent === null) return null;
-  const remainingPercent = clampPercent(100 - usedPercent);
+  const limit = numberOrNull(contextLimit);
+  const hasLimit = limit !== null && limit > 0;
+  const usedPercent = hasLimit ? clampPercent((contextTokens / limit) * 100) : null;
+  const remainingPercent = usedPercent === null ? null : clampPercent(100 - usedPercent);
   return withOpencodeAttribution(
     {
+      // The id covers every compared field, so a catalog that starts
+      // publishing a different window for the model produces a new row
+      // instead of an HTTP 409 against the row Usage Monitor already stored.
+      // The RAW provider id is part of the id and not just the normalized
+      // vendor: opencodeProviderInfo collapses "meta" and every "muse*" onto
+      // "muse-code" and every "minimax*" onto "minimax", so a rewritten
+      // providerID would keep the id while the compared metadata.providerId
+      // moved, and Usage Monitor would reject the whole batch with HTTP 409.
       eventId: shaEventId([
         OPENCODE_PRODUCER_ID,
         sessionId,
@@ -493,31 +696,28 @@ export function opencodeContextEvent({
         modelId || "",
         "context",
         String(contextTokens),
+        hasLimit ? String(limit) : "",
+        provider || "",
+        providerId || "",
       ]),
       provider,
       service: "opencode",
       producerKeyRef: modelId || undefined,
       label: `context:${modelId}`,
-      metricType: "quota",
+      metricType: "limit",
       unit: "token",
       quantity: contextTokens,
-      limit: 100,
-      credits: remainingPercent,
+      ...(hasLimit ? { limit } : {}),
       billingMode: "estimated",
       confidence: "actual",
       occurredAt: occurredAtIso,
       metadata: {
         contextTokens,
-        contextLimit,
+        contextLimit: hasLimit ? limit : null,
         contextUsedPercent: usedPercent,
         contextRemainingPercent: remainingPercent,
         ...(modelId ? { model: modelId } : {}),
         ...(providerId ? { providerId } : {}),
-        quotaWindow: "context",
-        usedPercent,
-        isExhausted: remainingPercent <= 0,
-        remainingUnknown: false,
-        scale: "percent_0_100",
         source: "opencode",
       },
     },
@@ -539,11 +739,95 @@ const MESSAGE_COUNT_KEYS = {
 };
 
 /**
- * Session-level facts, one row per (session, last-activity timestamp).  The
- * session cost stays in metadata: the per-message cost events already carry
- * the cash, and a top-level costUsd here would double count it.
+ * Session-level facts, one row per session.
+ *
+ * The row reports only the facts of a session that never change: when it was
+ * created, what it belongs to and which session it continues.  Everything
+ * else about a session (its message counts, its running cost, the files it
+ * changed) moves as the session works, and it is reported by the snapshot
+ * row below instead.
+ *
+ * The split is what makes the row safe to replay.  Usage Monitor answers
+ * HTTP 409 idempotency_conflict for the WHOLE batch when a replayed row
+ * differs from the stored one in any compared field
+ * (src/lib/external-usage-events.ts comparableEvent), so a row whose content
+ * moves would either 409 on every pass or have to be re-keyed every pass.
+ * A row whose id is the session id and whose content is fixed is stored once
+ * and every later pass dedupes against it.
+ *
+ * The quantity is 1: the row counts the session, it does not re-report the
+ * session's message total, so a pass can never inflate a usage rollup.
+ *
+ * `occurredAt` is the creation instant, which is a fact about the session and
+ * not about the pass, so collectOpencodeEvents keeps this row out of the
+ * window filter: a session created before the window is still discovered
+ * through its in-window messages, and its one fact row would otherwise never
+ * be sent at all.
  */
-export function opencodeSessionEvent({
+export function opencodeSessionEvent({ session, project }) {
+  const sessionId = typeof session?.id === "string" ? session.id : null;
+  if (!sessionId) return null;
+  const createdIso = isoFromMs(session.time_created);
+  if (!createdIso) return null;
+
+  const metadata = { sessionId, sessionCreatedAt: createdIso };
+  if (typeof session.parent_id === "string" && session.parent_id) {
+    metadata.sessionParentId = session.parent_id.slice(0, 120);
+  }
+  if (project) metadata.project = project;
+
+  // The project rides on the row but is deliberately NOT part of the id:
+  // projectNameForSession answers with the project table's name once opencode
+  // has named it and the directory basename until then, so a session that is
+  // named or renamed mid-life would otherwise take a new id.  Usage Monitor
+  // strips metadata.project before it compares a replay against the stored row,
+  // so it would see only a brand-new id and store a SECOND fact row for the
+  // same session.  The id stays a function of the immutable facts only.
+  const idMetadata = { ...metadata };
+  delete idMetadata.project;
+
+  return withOpencodeAttribution(
+    {
+      // The id covers the rest of the metadata, so a fact that changes produces
+      // a new row rather than a conflict against the stored one.
+      eventId: shaEventId([
+        OPENCODE_PRODUCER_ID,
+        sessionId,
+        "session",
+        "facts",
+        stableJson(idMetadata),
+      ]),
+      // The session row describes the opencode session itself, so its
+      // provider is the producer and not the vendor of one of its turns.
+      // A vendor-derived provider would move when the session switches
+      // model, which would turn the stable id into a conflicting replay.
+      provider: OPENCODE_PRODUCER_ID,
+      service: "opencode",
+      label: "session",
+      metricType: "usage",
+      unit: "row",
+      quantity: 1,
+      billingMode: "estimated",
+      confidence: "actual",
+      occurredAt: createdIso,
+      metadata,
+    },
+    { sessionId, project },
+  );
+}
+
+/**
+ * The moving state of one session at one instant: its title, its message
+ * counts, its running cost, the files it changed and when it was last
+ * active.
+ *
+ * The id is the hash of the snapshot's content, so the same snapshot always
+ * carries the same id and dedupes on every later pass, while a changed
+ * snapshot becomes a new row instead of a conflict against the stored one.
+ * The quantity is 1 for the same reason as on the session row: a snapshot
+ * counts once, it never re-reports the session's totals.
+ */
+export function opencodeSessionSnapshotEvent({
   session,
   counts,
   provider,
@@ -593,6 +877,8 @@ export function opencodeSessionEvent({
   metadata.filesChangedAdditions = numberOrNull(session.summary_additions) ?? 0;
   metadata.filesChangedDeletions = numberOrNull(session.summary_deletions) ?? 0;
   metadata.filesChangedFiles = numberOrNull(session.summary_files) ?? 0;
+  // The session cost stays in metadata: the per-message cost events already
+  // carry the cash, and a top-level costUsd here would double count it.
   metadata.sessionCostUsd = numberOrNull(session.cost) ?? 0;
   metadata.sessionTokensInput = numberOrNull(session.tokens_input) ?? 0;
   metadata.sessionTokensOutput = numberOrNull(session.tokens_output) ?? 0;
@@ -600,18 +886,36 @@ export function opencodeSessionEvent({
   metadata.sessionTokensCacheRead = numberOrNull(session.tokens_cache_read) ?? 0;
   metadata.sessionTokensCacheWrite = numberOrNull(session.tokens_cache_write) ?? 0;
 
+  const content = {
+    provider: provider || OPENCODE_PRODUCER_ID,
+    label: "session-snapshot",
+    metricType: "usage",
+    unit: "row",
+    quantity: 1,
+    billingMode: "estimated",
+    confidence: "actual",
+    occurredAt: occurredAtIso,
+    metadata,
+  };
+
   return withOpencodeAttribution(
     {
-      eventId: shaEventId([OPENCODE_PRODUCER_ID, sessionId, String(lastActivity), "session", "facts"]),
-      provider,
+      eventId: shaEventId([
+        OPENCODE_PRODUCER_ID,
+        sessionId,
+        "session",
+        "snapshot",
+        stableJson(content),
+      ]),
+      provider: content.provider,
       service: "opencode",
-      label: "session",
-      metricType: "usage",
-      unit: "row",
-      quantity: totalMessages,
-      billingMode: "estimated",
-      confidence: "actual",
-      occurredAt: occurredAtIso,
+      label: content.label,
+      metricType: content.metricType,
+      unit: content.unit,
+      quantity: content.quantity,
+      billingMode: content.billingMode,
+      confidence: content.confidence,
+      occurredAt: content.occurredAt,
       metadata,
     },
     { sessionId, project },
@@ -619,10 +923,17 @@ export function opencodeSessionEvent({
 }
 
 /**
- * Compaction / model-switch / agent-switch / location-switch signals.  The
- * event id is the row id, so a replay of the same row dedupes.
+ * Compaction / model-switch / agent-switch / location-switch signals.
+ *
+ * The provider comes from the row's own model, never from the assistant rows
+ * of the current window.  A window-only lookup moves as assistant rows age
+ * out of the replay window, and a provider that moves under a stable event
+ * id is an HTTP 409 against the stored row.
+ *
+ * The id covers the row's content, so a changed field produces a new row
+ * instead of a conflict.
  */
-export function opencodeLifecycleEvent({ row, provider, project }) {
+export function opencodeLifecycleEvent({ row, project }) {
   const rowId = typeof row?.id === "string" && row.id ? row.id : null;
   const sessionId = typeof row?.session_id === "string" && row.session_id ? row.session_id : null;
   const type = typeof row?.type === "string" ? row.type : null;
@@ -659,21 +970,119 @@ export function opencodeLifecycleEvent({ row, provider, project }) {
     if (previous) metadata.previousLocationDirectory = previous.slice(0, 300);
   }
 
+  // The row's own model names the provider.  A row without model info falls
+  // back to the producer, which is stable for every later replay.
+  const provider = opencodeProviderInfo(providerId, modelId).provider || OPENCODE_PRODUCER_ID;
+  const content = {
+    provider,
+    label: `lifecycle:${type}`,
+    metricType: "usage",
+    unit: "row",
+    quantity: 1,
+    billingMode: "estimated",
+    confidence: "actual",
+    occurredAt: occurredAtIso,
+    metadata,
+  };
+
   return withOpencodeAttribution(
     {
-      eventId: shaEventId([OPENCODE_PRODUCER_ID, sessionId, rowId, "lifecycle", type]),
-      provider,
+      eventId: shaEventId([
+        OPENCODE_PRODUCER_ID,
+        sessionId,
+        rowId,
+        "lifecycle",
+        type,
+        stableJson(content),
+      ]),
+      provider: content.provider,
       service: "opencode",
-      label: `lifecycle:${type}`,
-      metricType: "usage",
-      unit: "row",
-      quantity: 1,
-      billingMode: "estimated",
-      confidence: "actual",
-      occurredAt: occurredAtIso,
+      label: content.label,
+      metricType: content.metricType,
+      unit: content.unit,
+      quantity: content.quantity,
+      billingMode: content.billingMode,
+      confidence: content.confidence,
+      occurredAt: content.occurredAt,
       metadata,
     },
     { sessionId, project },
+  );
+}
+
+/**
+ * One token count from opencode's assistant payload.
+ *
+ * The payload is untrusted external input, so it is parsed with a schema
+ * before any of it reaches telemetry.  A count is a finite number or a
+ * numeric string; null and an absent count are zero.  Anything else is not a
+ * count, so the payload is rejected instead of guessed at.
+ *
+ * The count itself is read with the TOKEN PARSER'S OWN RULE
+ * (session-token-collectors.mjs finiteCount: a finite number above zero is the
+ * count and anything else counts as zero), so the context total is always
+ * exactly the token rows' total for the same message.  A negative count is
+ * therefore zero here, the same as it is on the token row.
+ */
+const TokenCountSchema = z
+  .union([z.number().finite(), z.string(), z.null()])
+  .optional()
+  .transform((value) => {
+    if (value === undefined || value === null) return 0;
+    const count = Number(value);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  });
+
+/**
+ * The cache counts inside the token payload.  The object is stripped of the
+ * keys the collector does not read (opencode may publish more than read and
+ * write), and a missing or null cache counts as zero on both sides.
+ */
+const TokenCacheSchema = z
+  .object({
+    read: TokenCountSchema,
+    write: TokenCountSchema,
+  })
+  .nullable()
+  .optional();
+
+/**
+ * The token payload of one assistant message.
+ *
+ * The object is stripped of the keys the collector does not read, so a new
+ * opencode field cannot break the parse, and every key the collector DOES
+ * read is validated.  A payload that does not match produces no context row
+ * at all: a context row whose total is a guess would break the promise that
+ * it equals the token rows' total for the same message.
+ */
+const OpencodeTokensSchema = z.object({
+  input: TokenCountSchema,
+  output: TokenCountSchema,
+  reasoning: TokenCountSchema,
+  cache: TokenCacheSchema,
+});
+
+/**
+ * The context total for one assistant message, parsed from the payload.
+ *
+ * The total is input + cache read + cache write + output + reasoning, which
+ * is the token rows' total for the same message: the token parser folds the
+ * reasoning into the output row and reports the cache write as a cache
+ * creation row.
+ *
+ * Returns null when the payload is not the expected shape, so the caller can
+ * report it instead of sending a wrong total.
+ */
+export function parseOpencodeContextTokens(data) {
+  const parsed = OpencodeTokensSchema.safeParse(data?.tokens);
+  if (!parsed.success) return null;
+  const { input, output, reasoning, cache } = parsed.data;
+  return (
+    input +
+    (cache?.read ?? 0) +
+    (cache?.write ?? 0) +
+    output +
+    reasoning
   );
 }
 
@@ -687,9 +1096,9 @@ export function buildOpencodeExtraEvents({
   sessions,
   messageCounts,
   projects,
-  catalogValue,
+  catalog,
+  onWarning,
 }) {
-  const catalog = parseModelsDevCatalog(catalogValue);
   const projectBySession = projectNamesBySession(sessions, projects);
   const countsBySession = new Map();
   for (const row of messageCounts) {
@@ -739,25 +1148,42 @@ export function buildOpencodeExtraEvents({
       if (costEvent) events.push(costEvent);
     }
 
-    const contextTokens =
-      (numberOrNull(data.tokens?.input) ?? 0) +
-      (numberOrNull(data.tokens?.cache?.read) ?? 0) +
-      (numberOrNull(data.tokens?.output) ?? 0);
-    const contextLimit =
-      catalog?.limitFor(providerId, modelId) ?? catalog?.limitByModelId(modelId) ?? null;
-    if (occurredAtIso && contextLimit) {
-      const contextEvent = opencodeContextEvent({
-        sessionId,
-        messageId,
-        modelId,
-        providerId,
-        provider: info.provider,
-        contextTokens,
-        contextLimit,
-        occurredAtIso,
-        project,
-      });
-      if (contextEvent) events.push(contextEvent);
+    // The token payload is untrusted external input, so the context total is
+    // derived from the PARSED payload and not from the raw optional chaining.
+    // A payload that is not the expected shape produces no context row: a
+    // guessed total would break the promise that the context row equals the
+    // token rows' total for the same message.
+    const contextTokens = parseOpencodeContextTokens(data);
+    const hasTokenPayload = data?.tokens !== undefined && data?.tokens !== null;
+    if (contextTokens === null) {
+      // A message with no token payload at all is normal (opencode writes
+      // assistant rows without tokens), so only a payload that is present and
+      // malformed is worth a word in the run log.
+      if (hasTokenPayload) {
+        onWarning?.(
+          `opencode assistant message ${messageId} carries a token payload that is not the expected shape, so no context row was sent for it`,
+        );
+      }
+    } else {
+      // Only the exact provider and model of the message may set the limit.
+      // The catalog publishes 546 model ids under more than one provider with
+      // different context windows, so a fallback to another vendor's window
+      // would report a utilization that is off by an order of magnitude.
+      const contextLimit = catalog?.limitFor(providerId, modelId) ?? null;
+      if (occurredAtIso) {
+        const contextEvent = opencodeContextEvent({
+          sessionId,
+          messageId,
+          modelId,
+          providerId,
+          provider: info.provider,
+          contextTokens,
+          contextLimit,
+          occurredAtIso,
+          project,
+        });
+        if (contextEvent) events.push(contextEvent);
+      }
     }
   }
 
@@ -765,8 +1191,7 @@ export function buildOpencodeExtraEvents({
     const sessionId = typeof row?.session_id === "string" && row.session_id ? row.session_id : null;
     if (!sessionId) continue;
     const project = projectBySession.get(sessionId) ?? null;
-    const provider = providerBySession.get(sessionId) ?? "opencode";
-    const event = opencodeLifecycleEvent({ row, provider, project });
+    const event = opencodeLifecycleEvent({ row, project });
     if (event) events.push(event);
     const created = Number(row.time_created);
     if (Number.isFinite(created)) {
@@ -778,19 +1203,23 @@ export function buildOpencodeExtraEvents({
   for (const session of sessions) {
     const sessionId = typeof session?.id === "string" ? session.id : null;
     if (!sessionId) continue;
+    const project = projectBySession.get(sessionId) ?? null;
+    // The session fact is stable, so it is stored once and dedupes on every
+    // later pass.
+    const sessionEvent = opencodeSessionEvent({ session, project });
+    if (sessionEvent) events.push(sessionEvent);
+
     const sessionUpdated = numberOrNull(session.time_updated) ?? 0;
     const lastActivity = Math.max(sessionUpdated, lastActivityBySession.get(sessionId) ?? 0);
     if (!lastActivity) continue;
-    const project = projectBySession.get(sessionId) ?? null;
-    const provider = providerBySession.get(sessionId) ?? "opencode";
-    const event = opencodeSessionEvent({
+    const snapshotEvent = opencodeSessionSnapshotEvent({
       session,
       counts: countsBySession.get(sessionId) ?? [],
-      provider,
+      provider: providerBySession.get(sessionId) ?? OPENCODE_PRODUCER_ID,
       project,
       lastActivityMs: lastActivity,
     });
-    if (event) events.push(event);
+    if (snapshotEvent) events.push(snapshotEvent);
   }
 
   return events;
