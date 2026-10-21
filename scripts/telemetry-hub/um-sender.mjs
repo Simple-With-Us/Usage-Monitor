@@ -295,14 +295,28 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * per minute instead of once per delivery pass, and a miss is memoized as
  * well, so a hub without the secret does not spawn the helper every ten
  * seconds either.
+ *
+ * A lookup that FAILED is not the same as a secret that is NOT SET.  The
+ * helper reports the kind of every failed path, so the two can be told
+ * apart:  a helper that is unreachable keeps the last good token, because
+ * the store can be down for a minute and the hub must not stop delivering
+ * because of it.  A secret that is genuinely not set clears the token, so a
+ * rotated-away secret does not keep a stale one alive.
  */
-export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
+export function createTokenResolver({
+  env = process.env,
+  now = () => Date.now(),
+  logger = NULL_LOGGER,
+  getSecret = fleetSecretsGetAsync,
+} = {}) {
   let memo = { value: undefined, at: 0 };
+  let lastFailureKind;
   return async function resolveToken() {
     const fromEnv = env.USAGE_INGEST_TOKEN?.trim();
     if (fromEnv) return fromEnv;
     const stamp = now();
     if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
+    const failures = [];
     let value;
     try {
       //  The store cache is NOT used here.  It keeps a miss forever, so a
@@ -311,14 +325,32 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
       //  helper process to one call per minute instead of one per pass.
       //  The async twin is used so a slow or hung helper cannot block the
       //  event loop of the hub, which also serves the OTLP receiver.
-      value = await fleetSecretsGetAsync("USAGE_INGEST_TOKEN");
+      value = await getSecret("USAGE_INGEST_TOKEN", {
+        onError: (failure) => failures.push(failure),
+      });
     } catch {
       value = undefined;
     }
-    memo = {
-      value: typeof value === "string" && value.trim() ? value.trim() : undefined,
-      at: stamp,
-    };
+    const resolved = typeof value === "string" && value.trim() ? value.trim() : undefined;
+    if (resolved) {
+      memo = { value: resolved, at: stamp };
+      lastFailureKind = undefined;
+      return resolved;
+    }
+    //  A path that failed for any reason other than "the key is not set"
+    //  means the lookup did not really answer, so the last good token is
+    //  kept.  The kind is logged once per change, so an operator can tell
+    //  "the helper is not installed" from "the secret is not set".
+    const broken = failures.find((failure) => failure.kind !== "absent");
+    if (broken) {
+      if (broken.kind !== lastFailureKind) {
+        logger.warn("the fleet secret helper could not be reached", { kind: broken.kind });
+        lastFailureKind = broken.kind;
+      }
+      memo = { value: memo.value, at: stamp };
+      return memo.value;
+    }
+    memo = { value: undefined, at: stamp };
     return memo.value;
   };
 }
@@ -394,7 +426,7 @@ export function createUmSender({
   dryRun = false,
   logger = NULL_LOGGER,
   fetchImpl = globalThis.fetch,
-  resolveToken = createTokenResolver(),
+  resolveToken = createTokenResolver({ logger }),
   retryDelayMs = BASE_BACKOFF_MS,
   env = process.env,
 } = {}) {

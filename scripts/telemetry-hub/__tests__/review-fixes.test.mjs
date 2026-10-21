@@ -14,8 +14,9 @@ import { afterEach, describe, it } from "vitest";
 import { projectScope, scrubInternalEvent, scrubResourceLogs, scrubResourceSpans } from "../allowlist.mjs";
 import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
 import { Journal } from "../journal.mjs";
-import { createReceiver, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
-import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent } from "../um-sender.mjs";
+import { createReceiver, MAX_REJECTED_ROWS, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
+import { createUmSender, createTokenResolver, readOverlapPolicy, shouldPushLedgerEvent } from "../um-sender.mjs";
+import { fleetSecretsGet, fleetSecretsGetAsync } from "../../lib/fleet-secrets.mjs";
 
 const CANARY = "CANARY_SECRET_123";
 const created = [];
@@ -54,6 +55,32 @@ function event(index, overrides = {}) {
 
 function fakeResponse(status, body = "") {
   return { status, text: async () => body };
+}
+
+/** The rows the receiver wrote down, oldest first. */
+async function readRejectedRows(dir) {
+  try {
+    const text = await readFile(join(dir, "rejected-rows.jsonl"), "utf8");
+    return text
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/** One span that the receiver accepts. */
+function goodSpan(name = "a-good-span") {
+  return {
+    traceId: "a".repeat(32),
+    spanId: "b".repeat(16),
+    name,
+    startTimeUnixNano: "1700000000000000000",
+    endTimeUnixNano: "1700000001000000000",
+    attributes: [{ key: "gen_ai.request.model", value: { stringValue: "a-model" } }],
+  };
 }
 
 afterEach(async () => {
@@ -522,5 +549,313 @@ describe("the otlp receiver", () => {
     } finally {
       await receiver.close();
     }
+  });
+});
+
+describe("the rejected rows sink", () => {
+  it("writes a malformed span down instead of dropping it silently", async () => {
+    const { dir, journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [
+            {
+              scopeSpans: [
+                {
+                  scope: { name: "a-scope" },
+                  spans: [goodSpan(), { name: "a-broken-span", attributes: "not an array" }],
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const body = RECEIVER_RESPONSE_SCHEMA.parse(await response.json());
+      assert.equal(body.written, 1);
+      assert.equal(body.ignored, 1);
+      const records = await readRejectedRows(dir);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].level, "span");
+      assert.equal(records[0].path, "/v1/traces");
+      assert.equal(records[0].row.includes("a-broken-span"), true);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("writes a malformed log record down", async () => {
+    const { dir, journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/logs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceLogs: [
+            {
+              scopeLogs: [
+                {
+                  scope: { name: "a-scope" },
+                  logRecords: [
+                    {
+                      timeUnixNano: "1700000000000000000",
+                      severityText: "INFO",
+                      body: { stringValue: "a-good-record" },
+                      attributes: [],
+                    },
+                    { timeUnixNano: "1700000000000000000", attributes: "not an array" },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const body = RECEIVER_RESPONSE_SCHEMA.parse(await response.json());
+      assert.equal(body.ignored, 1);
+      const records = await readRejectedRows(dir);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].level, "log-record");
+      assert.equal(records[0].path, "/v1/logs");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("writes nothing down when every row matched", async () => {
+    const { dir, journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [{ scopeSpans: [{ scope: { name: "a-scope" }, spans: [goodSpan()] }] }],
+        }),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await readRejectedRows(dir), []);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("writes down at most the bounded number of rows", async () => {
+    const { dir, journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const spans = Array.from({ length: 40 }, () => ({ name: "a-broken-span", attributes: "not an array" }));
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ resourceSpans: [{ scopeSpans: [{ scope: { name: "a-scope" }, spans }] }] }),
+      });
+      assert.equal(response.status, 400);
+      const records = await readRejectedRows(dir);
+      assert.equal(records.length, MAX_REJECTED_ROWS);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("cuts one rejected row down to its bound", async () => {
+    const { dir, journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [
+            {
+              scopeSpans: [
+                {
+                  scope: { name: "a-scope" },
+                  spans: [goodSpan(), { name: "x".repeat(40 * 1024), attributes: "not an array" }],
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const records = await readRejectedRows(dir);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].row.length <= 16 * 1024, true);
+      assert.equal(records[0].bytes > 16 * 1024, true);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("rotates the rejected rows file when it grows past its bound", async () => {
+    const { dir, journal } = await openJournal({ maxSinkBytes: 512 });
+    const row = "x".repeat(200);
+    for (let i = 0; i < 10; i += 1) {
+      await journal.quarantineRejectedRows([
+        { path: "/v1/traces", level: "span", reason: "a-reason", bytes: row.length, row },
+      ]);
+    }
+    const rotated = await readFile(join(dir, "rejected-rows.jsonl.1"), "utf8");
+    assert.ok(rotated.length > 0);
+    const current = await readFile(join(dir, "rejected-rows.jsonl"), "utf8");
+    assert.ok(current.length > 0);
+  });
+});
+
+describe("the fleet secret lookup", () => {
+  it("keeps the null contract for a caller that did not ask for a signal", () => {
+    const value = fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("nope"), { status: 4 });
+      },
+      useCache: false,
+    });
+    assert.equal(value, null);
+  });
+
+  it("tells an absent secret apart from a helper that could not be reached", () => {
+    const failures = [];
+    fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("nope"), { status: 3 });
+      },
+      useCache: false,
+      onError: (failure) => failures.push(failure),
+    });
+    assert.equal(failures.length, 2);
+    assert.equal(failures.every((failure) => failure.kind === "absent"), true);
+    assert.equal(failures[0].name, "A_SECRET");
+  });
+
+  it("reports a helper that could not be reached as unavailable", () => {
+    const failures = [];
+    fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("nope"), { status: 4 });
+      },
+      useCache: false,
+      onError: (failure) => failures.push(failure),
+    });
+    assert.equal(failures[0].kind, "unavailable");
+    assert.equal(failures[0].exitCode, 4);
+  });
+
+  it("reports a helper that is not installed", () => {
+    const failures = [];
+    fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("spawn"), { code: "ENOENT" });
+      },
+      useCache: false,
+      onError: (failure) => failures.push(failure),
+    });
+    assert.equal(failures[0].kind, "missing-binary");
+  });
+
+  it("reports the kind of a failed async lookup", async () => {
+    const failures = [];
+    const value = await fleetSecretsGetAsync("A_SECRET", {
+      exec: async () => {
+        throw Object.assign(new Error("nope"), { status: 5 });
+      },
+      onError: (failure) => failures.push(failure),
+    });
+    assert.equal(value, null);
+    assert.equal(failures[0].kind, "unresolved");
+  });
+
+  it("puts nothing but the name, the path, the kind and the exit code into the report", () => {
+    const failures = [];
+    fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("a-secret-value"), { status: 4 });
+      },
+      useCache: false,
+      onError: (failure) => failures.push(failure),
+    });
+    assert.deepEqual(Object.keys(failures[0]).sort(), ["exitCode", "kind", "name", "path"]);
+    assert.equal(JSON.stringify(failures[0]).includes("a-secret-value"), false);
+  });
+
+  it("does not let a broken report callback break the lookup", () => {
+    const value = fleetSecretsGet("A_SECRET", {
+      exec: () => {
+        throw Object.assign(new Error("nope"), { status: 3 });
+      },
+      useCache: false,
+      onError: () => {
+        throw new Error("boom");
+      },
+    });
+    assert.equal(value, null);
+  });
+});
+
+describe("the um ingest token", () => {
+  it("keeps the last good token when the helper cannot be reached", async () => {
+    let clock = 1_700_000_000_000;
+    let call = 0;
+    const resolveToken = createTokenResolver({
+      env: {},
+      now: () => clock,
+      getSecret: async (name, options) => {
+        call += 1;
+        if (call === 1) return "a-token";
+        options.onError({ name, path: "/", kind: "unavailable", exitCode: 4 });
+        return null;
+      },
+    });
+    assert.equal(await resolveToken(), "a-token");
+    clock += 10 * 60 * 1000;
+    assert.equal(await resolveToken(), "a-token");
+  });
+
+  it("clears the token when the secret is genuinely not set", async () => {
+    let clock = 1_700_000_000_000;
+    const resolveToken = createTokenResolver({
+      env: {},
+      now: () => clock,
+      getSecret: async (name, options) => {
+        options.onError({ name, path: "/", kind: "absent", exitCode: 3 });
+        return null;
+      },
+    });
+    assert.equal(await resolveToken(), undefined);
+    clock += 10 * 60 * 1000;
+    assert.equal(await resolveToken(), undefined);
+  });
+
+  it("logs that the helper could not be reached without the token", async () => {
+    const warnings = [];
+    const resolveToken = createTokenResolver({
+      env: {},
+      now: () => 1_700_000_000_000,
+      logger: {
+        info() {},
+        warn(message, fields) {
+          warnings.push({ message, fields });
+        },
+        error() {},
+      },
+      getSecret: async (name, options) => {
+        options.onError({ name, path: "/", kind: "missing-binary" });
+        return null;
+      },
+    });
+    await resolveToken();
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].fields.kind, "missing-binary");
+    assert.equal(JSON.stringify(warnings[0]).includes("a-token"), false);
   });
 });

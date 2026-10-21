@@ -30,12 +30,20 @@
 // half believed, and a malformed row is dropped instead of reaching a
 // sender with an invalid identity.
 //
+// Two forensic sinks live next to the journal.  The dead-letter file records
+// the events a destination refused, and it keeps NO content:  those events
+// are still in the journal, so the dead letter is an index and not a copy.
+// The rejected-rows file records the rows a receiver refused, and it does
+// keep their text, because a row that never matched the shape is in no
+// other file at all.  Both sinks are bounded:  a sink that would grow past
+// its size is rotated, and the previous rotation is dropped.
+//
 // Zod is a runtime dependency of this repository.  The hub therefore has one
 // third-party import, and it is on the parsing boundary, where an explicit
 // runtime shape guard belongs.
 
 import { constants as fsConstants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
@@ -47,9 +55,12 @@ const FILE_MODE = 0o600;
 
 /** How many already-sent event ids one destination remembers. */
 export const MAX_SENT_IDS = 10_000;
-
 /** The journal file is compacted once it grows past this size. */
 export const MAX_JOURNAL_BYTES = 32 * 1024 * 1024;
+/** A forensic sink is rotated once it would grow past this size. */
+export const MAX_SINK_BYTES = 4 * 1024 * 1024;
+/** One rejected row is cut to this many characters. */
+export const MAX_REJECTED_ROW_CHARS = 16 * 1024;
 
 /** Read chunk size when scanning the journal. */
 const READ_CHUNK_BYTES = 256 * 1024;
@@ -138,17 +149,23 @@ export class Journal {
    * @param {object} [options.logger]
    * @param {number} [options.maxJournalBytes]  The size the journal file
    *        passes before the consumed prefix is dropped.
+   * @param {number} [options.maxSinkBytes]  The size a forensic sink passes
+   *        before it is rotated.
    */
-  constructor({ dir, logger = NULL_LOGGER, maxJournalBytes = MAX_JOURNAL_BYTES } = {}) {
+  constructor({ dir, logger = NULL_LOGGER, maxJournalBytes = MAX_JOURNAL_BYTES, maxSinkBytes = MAX_SINK_BYTES } = {}) {
     if (typeof dir !== "string" || !dir.trim()) throw new Error("Journal dir is required");
     this.dir = dir;
     this.logger = logger;
     this.maxJournalBytes = Number.isSafeInteger(maxJournalBytes) && maxJournalBytes > 0
       ? maxJournalBytes
       : MAX_JOURNAL_BYTES;
+    this.maxSinkBytes = Number.isSafeInteger(maxSinkBytes) && maxSinkBytes > 0
+      ? maxSinkBytes
+      : MAX_SINK_BYTES;
     this.journalPath = join(dir, "journal.jsonl");
     this.stateDir = join(dir, "state");
     this.deadLetterPath = join(dir, "dead-letter.jsonl");
+    this.rejectedRowsPath = join(dir, "rejected-rows.jsonl");
     this.handle = undefined;
     this.offsets = new Map();
     this.sentSets = new Map();
@@ -617,6 +634,80 @@ export class Journal {
       await file.close();
     }
     return record;
+  }
+
+  /**
+   * Write the rows a receiver refused into the rejected-rows file.
+   *
+   * The file is the forensic sink for the INBOUND side.  A row that does
+   * not match the expected shape is not silently dropped:  it is written
+   * here with the level it was dropped at and its own text, so a producer
+   * whose telemetry went missing can be looked at.
+   *
+   * The dead-letter file keeps its own rule and keeps NO content, because
+   * the events it indexes are still in the journal.  These rows are in no
+   * file at all, so they carry their own text.
+   *
+   * The file is bounded twice over:  every row is cut to
+   * `MAX_REJECTED_ROW_CHARS` and the file is rotated when it would grow
+   * past `MAX_SINK_BYTES`.  The previous rotation is dropped, so the sink
+   * holds at most two files and a producer that floods it cannot fill the
+   * disk.
+   */
+  async quarantineRejectedRows(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (list.length === 0) return 0;
+    const lines = list.map((entry) => {
+      const record = {
+        rejectedAt: new Date().toISOString(),
+        path: typeof entry?.path === "string" ? entry.path.slice(0, 64) : "",
+        level: typeof entry?.level === "string" ? entry.level.slice(0, 40) : "",
+        reason: typeof entry?.reason === "string" ? entry.reason.slice(0, 200) : "",
+        bytes: Number.isInteger(entry?.bytes) ? entry.bytes : 0,
+        row: typeof entry?.row === "string" ? entry.row.slice(0, MAX_REJECTED_ROW_CHARS) : "",
+      };
+      return JSON.stringify(record);
+    });
+    const body = `${lines.join("\n")}\n`;
+    await this.rotateIfNeeded(this.rejectedRowsPath, Buffer.byteLength(body, "utf8"));
+    const file = await open(this.rejectedRowsPath, "a", FILE_MODE);
+    try {
+      await file.write(body, null, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    return list.length;
+  }
+
+  /**
+   * Rotate a forensic sink when it would grow past the bound.
+   *
+   * The previous rotation is dropped, so a sink holds at most two files.
+   * A sink that cannot be rotated is appended to anyway:  losing the
+   * forensic record is worse than a file that is a little too big.
+   */
+  async rotateIfNeeded(path, extraBytes) {
+    let size = 0;
+    try {
+      size = (await stat(path)).size;
+    } catch {
+      size = 0;
+    }
+    if (size + extraBytes <= this.maxSinkBytes) return;
+    const rotated = `${path}.1`;
+    try {
+      await unlink(rotated);
+    } catch {
+      //  There is no previous rotation, or it cannot be removed:  the
+      //  rename below replaces it anyway.
+    }
+    try {
+      await rename(path, rotated);
+    } catch {
+      //  The file is gone already, or it cannot be moved:  the write
+      //  below appends to whatever is there.
+    }
   }
 
   /** Close the journal handle. */

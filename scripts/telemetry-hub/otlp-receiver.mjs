@@ -20,6 +20,20 @@
 // checked.  A payload that does not match is answered with 400 and a fixed
 // message: the answer never quotes the payload, because the payload holds
 // the producer content.
+//
+// The ENVELOPE is refused as a whole, but a ROW inside it is not.  One
+// malformed span, log record, scope or resource costs that row only, and
+// the rows around it are still accepted:  a telemetry receiver that
+// refuses a whole batch over one bad row would let any single producer
+// drop everyone's billing telemetry.  The number of dropped rows is
+// counted and reported in the answer.
+//
+// A dropped row is not silently dropped.  It is written to the
+// rejected-rows file, with the level it was dropped at, so a producer
+// whose telemetry went missing can be looked at.  That file is local, it
+// is bounded, and nothing sends it anywhere: the Sentry allowlist is
+// applied to the rows that were ACCEPTED, and a row that never matched
+// the shape never reaches a sender.
 
 import { createServer } from "node:http";
 import { z } from "zod";
@@ -28,6 +42,20 @@ import { normalizeOtlpLogs, normalizeOtlpTraces, NULL_LOGGER } from "./internal-
 
 /** The largest body the receiver will read.  Matches Sentry's container cap. */
 export const MAX_BODY_BYTES = 12 * 1024 * 1024;
+
+/**
+ * How many rejected rows one request writes down.
+ *
+ * The COUNT of the dropped rows is always reported, in the answer and in
+ * the log.  The rows THEMSELVES are written to the rejected-rows file, so
+ * a producer whose telemetry went missing can be looked at.  The number of
+ * rows that are written down is bounded, so one hostile request cannot
+ * fill the disk.
+ */
+export const MAX_REJECTED_ROWS = 25;
+
+/** How many characters of one rejected row are written down. */
+export const MAX_REJECTED_ROW_CHARS = 16 * 1024;
 
 const RECEIVER_HOST = "127.0.0.1";
 const RECEIVER_PORT = 4318;
@@ -158,28 +186,41 @@ export const RECEIVER_RESPONSE_SCHEMA = z.looseObject({
  * Every level is checked on its own, so one bad span or one bad log row
  * costs that row only.  The count of the dropped rows is returned, and
  * the caller reports it.
+ *
+ * The dropped rows are also COLLECTED, up to `MAX_REJECTED_ROWS` of them,
+ * so the caller can write them to the rejected-rows file.  A row that is
+ * not written down is a row that is gone for good, and a producer whose
+ * telemetry went missing has to be able to find out why.
  */
 function projectTraces(payload) {
   const resources = [];
+  const rejected = [];
   let dropped = 0;
+  const reject = (level, row) => {
+    dropped += 1;
+    if (rejected.length < MAX_REJECTED_ROWS) {
+      const described = describeRejectedRow(row);
+      rejected.push({ level, row: described.text, bytes: described.bytes });
+    }
+  };
   for (const rawResource of payload.resourceSpans ?? []) {
     const resource = OtlpResourceSpansSchema.safeParse(rawResource);
     if (!resource.success) {
-      dropped += 1;
+      reject("resource", rawResource);
       continue;
     }
     const scopeSpans = [];
     for (const rawScope of resource.data.scopeSpans ?? []) {
       const scope = OtlpScopeSpansSchema.safeParse(rawScope);
       if (!scope.success) {
-        dropped += 1;
+        reject("scope", rawScope);
         continue;
       }
       const spans = [];
       for (const rawSpan of scope.data.spans ?? []) {
         const span = OtlpSpanSchema.safeParse(rawSpan);
         if (!span.success) {
-          dropped += 1;
+          reject("span", rawSpan);
           continue;
         }
         spans.push(span.data);
@@ -188,31 +229,39 @@ function projectTraces(payload) {
     }
     if (scopeSpans.length > 0) resources.push({ resource: resource.data.resource, scopeSpans });
   }
-  return { payload: { resourceSpans: resources }, dropped };
+  return { payload: { resourceSpans: resources }, dropped, rejected };
 }
 
 /** Keep the log rows that are well formed.  See `projectTraces`. */
 function projectLogs(payload) {
   const resources = [];
+  const rejected = [];
   let dropped = 0;
+  const reject = (level, row) => {
+    dropped += 1;
+    if (rejected.length < MAX_REJECTED_ROWS) {
+      const described = describeRejectedRow(row);
+      rejected.push({ level, row: described.text, bytes: described.bytes });
+    }
+  };
   for (const rawResource of payload.resourceLogs ?? []) {
     const resource = OtlpResourceLogsSchema.safeParse(rawResource);
     if (!resource.success) {
-      dropped += 1;
+      reject("resource", rawResource);
       continue;
     }
     const scopeLogs = [];
     for (const rawScope of resource.data.scopeLogs ?? []) {
       const scope = OtlpScopeLogsSchema.safeParse(rawScope);
       if (!scope.success) {
-        dropped += 1;
+        reject("scope", rawScope);
         continue;
       }
       const logRecords = [];
       for (const rawRecord of scope.data.logRecords ?? []) {
         const record = OtlpLogRecordSchema.safeParse(rawRecord);
         if (!record.success) {
-          dropped += 1;
+          reject("log-record", rawRecord);
           continue;
         }
         logRecords.push(record.data);
@@ -221,7 +270,30 @@ function projectLogs(payload) {
     }
     if (scopeLogs.length > 0) resources.push({ resource: resource.data.resource, scopeLogs });
   }
-  return { payload: { resourceLogs: resources }, dropped };
+  return { payload: { resourceLogs: resources }, dropped, rejected };
+}
+
+/**
+ * The text of one row that did not match the shape.
+ *
+ * The text is cut to `MAX_REJECTED_ROW_CHARS`, so a hostile payload cannot
+ * make the rejected-rows file grow without a bound.  The byte count of the
+ * original row is kept next to it, so a truncated row is still visible as
+ * a truncated one.
+ */
+function describeRejectedRow(row) {
+  let text;
+  try {
+    text = JSON.stringify(row);
+  } catch {
+    text = "";
+  }
+  if (typeof text !== "string") return { text: "", bytes: 0 };
+  const bytes = Buffer.byteLength(text, "utf8");
+  return {
+    text: text.length > MAX_REJECTED_ROW_CHARS ? `${text.slice(0, MAX_REJECTED_ROW_CHARS)}...` : text,
+    bytes,
+  };
 }
 
 function isPlainObject(value) {
@@ -403,6 +475,31 @@ async function handleRequest(request, response, { journal, logger }) {
   }
 
   const projected = isTraces ? projectTraces(checked.data) : projectLogs(checked.data);
+
+  //  A row that does not match the shape is written down before anything
+  //  else happens with the request.  The rows that DID match are still
+  //  accepted, so the answer is still 200, but the dropped rows are not
+  //  gone:  they are in the rejected-rows file, with the level they were
+  //  dropped at.  Writing them down is best effort:  a failure here must
+  //  not cost the producer the rows that were fine.
+  if (projected.rejected.length > 0) {
+    try {
+      await journal.quarantineRejectedRows(
+        projected.rejected.map((entry) => ({
+          path,
+          level: entry.level,
+          reason: "the row does not match the expected shape",
+          bytes: entry.bytes,
+          row: entry.row,
+        })),
+      );
+    } catch (error) {
+      logger.warn("the rejected rows could not be written down", {
+        errorName: error?.name ?? "Error",
+      });
+    }
+  }
+
   const normalized = isTraces
     ? normalizeOtlpTraces(projected.payload)
     : normalizeOtlpLogs(projected.payload);
@@ -411,6 +508,7 @@ async function handleRequest(request, response, { journal, logger }) {
     logger.warn("the otlp payload had rows that do not match the expected shape", {
       path,
       dropped: projected.dropped,
+      recorded: projected.rejected.length,
     });
   }
   if (normalized.events.length === 0) {
