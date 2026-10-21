@@ -101,7 +101,7 @@ export default function FleetAlertsCard() {
   }
 
   return (
-    <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+    <div data-testid="fleet-alerts-card" className="rounded-xl border border-border bg-card p-5 shadow-sm">
       <Header
         dot={dotFor(worstFiringSeverity(data))}
         headline={`${firing} Firing`}
@@ -180,7 +180,7 @@ function Shell({
   onRefresh?: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+    <div data-testid="fleet-alerts-card" className="rounded-xl border border-border bg-card p-5 shadow-sm">
       <Header dot={dot} headline={headline} detail={detail} onRefresh={onRefresh} />
     </div>
   );

@@ -250,6 +250,18 @@ describe("review regressions", () => {
     expect(p.reason).toContain("malformed");
   });
 
+  it("degrades only the malformed topic, not the whole payload", async () => {
+    // One topic with alerts:null (or a non-numeric firing) must not blank the
+    // card: the boundary schema tolerates it and the parser keeps valid topics.
+    process.env.FLEET_ALERTS_URL = "https://alert-ingress.example.workers.dev";
+    const badTopic = { firing: "not-a-number", alerts: null };
+    stubFetch({ ...sample, topics: { ...sample.topics, broken: badTopic } });
+    const p = await getFleetAlerts();
+    expect(p.ok).toBe(true);
+    expect(p.summary.alerts).toBeGreaterThan(0);
+    expect(Object.keys(p.topics)).not.toContain("broken");
+  });
+
   it("tolerates additive top-level fields from the ingress", async () => {
     // The ingress contract lives in AI-Fleet-Coordinator, so a routine field
     // addition there must not blank the whole card to "malformed".

@@ -87,17 +87,26 @@ function normalizePhase(value: unknown): FleetAlertPhase {
  * `z.unknown()` here: per-alert normalization below already drops malformed
  * entries one at a time, so one bad alert degrades a topic, not the page.
  */
-const IngressTopicSchema = z.looseObject({
-  firing: z.number().optional(),
-  total: z.number().optional(),
-  alerts: z.array(z.unknown()).optional(),
+// Plain z.object strips unknown keys from the parsed result (rules 2/58:
+// unknown external fields must be rejected or explicitly stripped), while
+// still ACCEPTING envelopes that carry additive fields - the ingress contract
+// is owned by AI-Fleet-Coordinator, so a new field there must not blank the
+// card; it just never flows downstream.
+// Per-topic fields are .catch()-tolerant: one malformed topic degrades only
+// itself (the defensive parser below already recomputes firing/total from the
+// alert list and drops malformed entries one at a time), so a bad topic can
+// no longer make the whole payload fail the boundary schema.
+const IngressTopicSchema = z.object({
+  firing: z.number().optional().catch(undefined),
+  total: z.number().optional().catch(undefined),
+  alerts: z.array(z.unknown()).nullish().catch(undefined),
 });
 
-const FleetAlertsIngressSchema = z.looseObject({
+const FleetAlertsIngressSchema = z.object({
   generatedAt: z.string().nullish(),
   channel: z.string().optional(),
   summary: z
-    .looseObject({ topics: z.number(), alerts: z.number(), firing: z.number() })
+    .object({ topics: z.number(), alerts: z.number(), firing: z.number() })
     .optional(),
   topics: z.record(z.string(), IngressTopicSchema),
 });
