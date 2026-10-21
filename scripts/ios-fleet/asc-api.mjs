@@ -3,12 +3,12 @@
  * Minimal App Store Connect API client. No dependencies beyond Node's
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
- * Auth (AFC-359; no handoff file is read): the first source that is present
- * (never prints values):
+ * Auth (AFC-359): the first source that is present (never prints values):
  *   1. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the environment
+ *      (the PEM is read from the file ASC_KEY_PATH points at; the hosted
+ *      ios-ship runner stages that file with scripts/ios-stage-asc-key.sh)
  *   2. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64
- *      (hosted ios-ship; the base64 p8 is decoded to a 0600 temp file and
- *      removed on exit)
+ *      (the base64 p8 is decoded to a 0600 temp file and removed on exit)
  *   3. Infisical Fleet-OPS /asc via `fleet-secrets get`
  *
  * Usage:
@@ -655,7 +655,8 @@ async function main() {
     console.error(
       "asc-auth: no App Store Connect credential found. Tried, in order:\n" +
       "  1) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the environment\n" +
-      "  2) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment"
+      "  2) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment\n" +
+      "  3) Infisical Fleet-OPS /asc via `fleet-secrets get` (FLEET_SECRETS_BIN)"
     );
     process.exit(1);
   }
