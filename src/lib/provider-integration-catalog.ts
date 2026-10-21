@@ -465,7 +465,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     ],
     limitations: [
       "totalCost is public storage price × billable GB × UTC month fraction only.",
-      "totalRequests is whole megabytes of storage so request-limit budgets can soft-cap footprint.",
+      "totalRequests is whole megabytes of storage so request-limit budgets can soft-cap footprint; as a storage gauge it is excluded from request-anomaly detection.",
       "Very large buckets may truncate inventory at a safety max file-version count.",
     ],
     source: "src/lib/adapters/backblaze.ts",

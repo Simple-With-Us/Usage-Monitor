@@ -6,6 +6,7 @@ import {
   isDecommissionedProviderName,
   DEFAULT_USAGE_UNIT_LABEL,
   hasConfiguredProviderField,
+  isTotalRequestsGaugeProvider,
   usageUnitLabelForProvider,
 } from "@/lib/provider-definitions";
 
@@ -70,6 +71,16 @@ describe("usageUnitLabelForProvider", () => {
   it("does not apply built-in labels to custom providers reusing a built-in slug", () => {
     expect(usageUnitLabelForProvider("render", "custom")).toBe("Requests");
     expect(usageUnitLabelForProvider("render", "CUSTOM")).toBe("Requests");
+  });
+
+  it("marks only the Backblaze storage gauge as a gauge (UM-1622)", () => {
+    expect(isTotalRequestsGaugeProvider("backblaze")).toBe(true);
+    expect(isTotalRequestsGaugeProvider("Backblaze")).toBe(true);
+    // Cumulative flows (incl. Render bandwidth MTD) stay anomaly-eligible.
+    expect(isTotalRequestsGaugeProvider("render")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("openai")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("backblaze", "custom")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("some-custom-provider")).toBe(false);
   });
 
   it("keeps every declared usageUnitLabel non-empty", () => {
