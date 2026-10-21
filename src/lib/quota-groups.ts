@@ -246,6 +246,13 @@ export function buildQuotaGroups(
   events: QuotaEventLike[],
   now = new Date(),
   manifest?: ResolvedProviderManifest,
+  /**
+   * Metadata records already parsed for these events, keyed by the event.
+   * The caller (`projectQuotaWindows`) parses each event's metadata once and
+   * hands the record down, so one quota response does not JSON.parse the same
+   * document twice.
+   */
+  parsedMetadata?: ReadonlyMap<QuotaEventLike, Record<string, unknown>>,
 ): QuotaProviderQuotaGroup[] {
   const resolved = manifest ?? resolveProviderManifest(null);
   const nowMs = now.getTime();
@@ -260,7 +267,7 @@ export function buildQuotaGroups(
   const byProviderWindow = new Map<string, WindowBucket>();
 
   for (const event of events) {
-    const meta = quotaMetadataRecord(event.metadata);
+    const meta = parsedMetadata?.get(event) ?? quotaMetadataRecord(event.metadata);
     const providerKey = normalizeProviderKey(event.provider, resolved);
     const via =
       resolved.byKey.get(providerKey)?.terms?.via ??

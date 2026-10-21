@@ -268,8 +268,13 @@ export function projectQuotaWindows(
   const resolved = manifest ?? resolveProviderManifest(null);
 
   const latest = new Map<string, { window: QuotaWindow; series: string }>();
+  // Parse each event's metadata once and share the record with the group
+  // builder below, so a quota response does not JSON.parse the same document
+  // twice (the primary read path returns the SQLite JSON column as TEXT).
+  const parsedMetadata = new Map<QuotaEventLike, Record<string, unknown>>();
   for (const event of events) {
     const meta = quotaMetadataRecord(event.metadata);
+    parsedMetadata.set(event, meta);
     const planMetadata = projectQuotaPlanMetadata(meta);
     const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
     const modelId = asString(meta.modelId);
@@ -439,7 +444,7 @@ export function projectQuotaWindows(
   return {
     generatedAt: now.toISOString(),
     windows,
-    quotaGroups: buildQuotaGroups(events, now, resolved),
+    quotaGroups: buildQuotaGroups(events, now, resolved, parsedMetadata),
     skipModelTypes,
     providerGroups: groupWindowsByProvider(windows, resolved),
   };
