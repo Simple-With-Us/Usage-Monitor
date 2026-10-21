@@ -308,6 +308,17 @@ jobs:
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
 
+      # The App Store Connect credential contract (AFC-459):  the private key
+      # comes from the environment or from Infisical, and a path on disk is
+      # not a credential source at all.  Fully offline:  the keys are
+      # generated at test time and the fleet reader is replaced by a fake.
+      - name: Test the App Store Connect credential contract
+        run: |
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          bash scripts/ios-fleet/test-asc-credentials.sh
+
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
       # a payload-shape regression in the collector can be caught before the
