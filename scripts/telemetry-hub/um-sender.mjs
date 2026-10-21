@@ -302,7 +302,10 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
     if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: true });
+      //  The module cache has no TTL and caches a MISS, so an absent or
+      //  rotated secret would stay absent or stale for the whole process.
+      //  The memo above already caps the CLI spawn at once a minute.
+      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
     } catch {
       value = undefined;
     }
@@ -533,11 +536,16 @@ export function createUmSender({
     const skippedTurns = turnBatch.events.length - turnEvents.length;
 
     //  The ledger feed skips the platforms that already report on another
-    //  path, so one turn is never stored twice.
-    const ingestEvents = ingestBatch.events.filter((event) => shouldPushLedgerEvent(event, overlapPolicy));
+    //  path, so one turn is never stored twice.  It also skips log records:
+    //  a log carries the same usage as the span for the same call, and the
+    //  two carry different event ids, so billing both stores one LLM call
+    //  twice.
+    const ingestEvents = ingestBatch.events.filter(
+      (event) => event?.kind !== "log" && shouldPushLedgerEvent(event, overlapPolicy),
+    );
     const overlapSkipped = ingestBatch.events.length - ingestEvents.length;
     if (overlapSkipped > 0) {
-      logger.info("um ledger rows skipped for an overlapping platform", {
+      logger.info("um ledger rows skipped for a log record or an overlapping platform", {
         destination: UMBER_INGEST_DESTINATION,
         skipped: overlapSkipped,
       });

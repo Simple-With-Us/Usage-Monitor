@@ -395,13 +395,18 @@ export class Journal {
     if (!this.handle && !(await this.exists())) {
       return { events, endOffset: start };
     }
-    //  The base is captured for the whole read.  A compaction that runs
-    //  while this read is in flight moves the base of the FILE, but the
-    //  positions of THIS read belong to the file it opened.  Using the
-    //  new base with the old positions would hand out an offset that is
-    //  too large and would skip events.
-    const base = this.base;
-    const file = await open(this.journalPath, fsConstants.O_RDONLY);
+    //  The base must belong to the file that is read.  A compaction that
+    //  renames the journal between the two would leave this read with the
+    //  OLD base and the NEW file, so `start - base` is too large by the
+    //  compacted bytes and the destination silently skips every event
+    //  between its offset and the compaction point.  Capturing the base
+    //  and opening the file together under the compaction mutex keeps the
+    //  two in step.  Once the descriptor is open the rename cannot change
+    //  the file it refers to, so the rest of the read runs unlocked.
+    const { base, file } = await this.fileMutex(async () => {
+      const opened = await open(this.journalPath, fsConstants.O_RDONLY);
+      return { base: this.base, file: opened };
+    });
     try {
       const info = await file.stat();
       const size = info.size;
