@@ -24,10 +24,17 @@
 # "Always Allow".  Until then every pass logs the one-line failure below.
 #
 # Test seams (offline tests only): UM_KEYCHAIN_SECURITY_BIN, UM_NODE_BIN,
-# UM_QUOTA_COLLECTOR_SCRIPT.
+# UM_QUOTA_COLLECTOR_SCRIPT.  UM_KEYCHAIN_ACCOUNT overrides the account the item
+# is looked up under; the default is Claude Code's own empty account.
 set -uo pipefail
 
 KEYCHAIN_SERVICE="Claude Code-credentials"
+KEYCHAIN_ACCOUNT="${UM_KEYCHAIN_ACCOUNT:-}"
+# An empty account must not be passed as -a "": Keychain matches it exactly.
+# Omit -a instead so the lookup works whether Claude Code filed the item
+# under an empty account or the macOS username.
+ACCOUNT_ARGS=()
+[[ -n "$KEYCHAIN_ACCOUNT" ]] && ACCOUNT_ARGS=(-a "$KEYCHAIN_ACCOUNT")
 SECURITY_BIN="${UM_KEYCHAIN_SECURITY_BIN:-/usr/bin/security}"
 TIMEOUT_SECS="${UM_KEYCHAIN_TIMEOUT_SECS:-20}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,12 +56,16 @@ read_keychain_credential() {
     log "keychain: $SECURITY_BIN not found; claude-code quota skipped this pass"
     return 0
   fi
-  [[ "$TIMEOUT_SECS" =~ ^[0-9]+$ ]] || TIMEOUT_SECS=20
+  # 0 must not survive: perl's alarm 0 cancels the timer instead of arming it,
+  # which would leave the read unbounded on an unanswered prompt.
+  [[ "$TIMEOUT_SECS" =~ ^[0-9]+$ && "$TIMEOUT_SECS" -gt 0 ]] || TIMEOUT_SECS=20
   local cred rc
   # perl's alarm survives exec, so the read dies after the timeout.  stderr is
-  # discarded: security prints item attributes there on some failures.
+  # discarded: security prints item attributes there on some failures.  The
+  # account is always passed: without it a stale item under the same service
+  # can be injected instead of Claude Code's own credential.
   cred="$(/usr/bin/perl -e 'alarm shift; exec @ARGV or exit 127' "$TIMEOUT_SECS" \
-    "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)"
+    "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" "${ACCOUNT_ARGS[@]}" -w 2>/dev/null)"
   rc=$?
   if [[ $rc -ne 0 ]]; then
     case "$rc" in
