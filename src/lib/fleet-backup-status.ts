@@ -938,12 +938,15 @@ async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
     });
   }
 
-  // An offline run observed nothing, so the skipped check must not turn the
-  // payload into a failure verdict (unknown != failure).
+  // A skipped check is not a passed check: stay fail-closed while offline so
+  // a consumer that only reads `ok` never sees an unobserved fleet as
+  // healthy. Consumers that know the `offline` flag render "not checked"
+  // instead of "failing" (the web card does; the iOS model carries the flag).
   const overallOk =
+    !offline &&
     apps.length > 0 &&
     apps.every((a) => a.ok) &&
-    (offline || warnings.length === 0);
+    warnings.length === 0;
 
   return {
     configured: creds != null,

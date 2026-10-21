@@ -616,8 +616,11 @@ describe("fetchFleetBackupStatus", () => {
     expect(payload.configured).toBe(false);
     expect(payload.warnings.join(" ")).toContain("offline mode");
     expect(payload.warnings.join(" ")).not.toContain("credentials are not configured");
-    // A skipped check is not a failed check.
-    expect(payload.ok).toBe(true);
+    // A skipped check is not a passed check either: the verdict stays
+    // fail-closed and `offline` explains why, so no consumer reads an
+    // unobserved fleet as healthy. This also keeps the assertion independent
+    // of ambient env (LITESTREAM_REQUIRED and friends cannot flip it).
+    expect(payload.ok).toBe(false);
     const st = payload.apps.find((a) => a.id === "socratic-trade");
     const live = st?.locations.find((l) => l.id === "peer-litestream");
     expect(live?.ok).toBeNull();

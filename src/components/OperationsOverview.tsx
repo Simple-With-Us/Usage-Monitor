@@ -890,6 +890,10 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
         ? "healthy"
         : "degraded";
   const okApps = data.apps.filter((a) => a.ok).length;
+  // Per-app and per-location pills must not contradict the header pill: a
+  // skipped (offline) check observed nothing, so every row reads unavailable.
+  const appState = (appOk: boolean): OperationalState =>
+    data.offline ? "unavailable" : appOk ? "healthy" : "degraded";
   return (
     <section aria-labelledby="fleet-backups-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -929,22 +933,24 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
                     <span className="ml-1 font-normal text-gray-400">· this app</span>
                   ) : null}
                 </p>
-                <StatePill state={app.ok ? "healthy" : "degraded"} />
+                <StatePill state={appState(app.ok)} />
               </div>
               <ul className="mt-2 space-y-1.5">
                 {app.locations.map((loc) => (
                   <li key={`${app.id}-${loc.id}`} className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">{loc.label}</span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {loc.ok === true
-                        ? "OK"
-                        : loc.ok === false
-                          ? loc.present
-                            ? "Lagging"
-                            : "Missing"
-                          : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
-                            ? "N/A"
-                            : "Unknown"}
+                      {data.offline
+                        ? "Unavailable"
+                        : loc.ok === true
+                          ? "OK"
+                          : loc.ok === false
+                            ? loc.present
+                              ? "Lagging"
+                              : "Missing"
+                            : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
+                              ? "N/A"
+                              : "Unknown"}
                       {loc.latestAgeSeconds != null
                         ? ` · ${fleetBackupAgeLabel(loc.latestAgeSeconds)}`
                         : ""}
