@@ -1,4 +1,10 @@
 import {
+  projectQuotaPlanMetadata,
+  quotaDetectedPlanName,
+  quotaMetadataRecord,
+  type QuotaPlanMetadata,
+} from "@/lib/quota-plan-metadata";
+import {
   antigravityPlatformCardTitle,
   antigravityQuotaPool,
   normalizeQuotaWindowKey,
@@ -21,6 +27,8 @@ export const QUOTA_EXPIRED_MS = 48 * 60 * 60 * 1000;
 export type QuotaSourceFreshness = "fresh" | "stale" | "old";
 
 export interface QuotaSourceReading {
+  planMetadata?: QuotaPlanMetadata;
+  planName?: string;
   source: string;
   sourceLabel: string;
   machine: string | null;
@@ -49,11 +57,6 @@ export interface QuotaProviderQuotaGroup {
   provider: string;
   providerLabel: string;
   windows: QuotaGroupWindow[];
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
 }
 
 function asString(value: unknown): string | null {
@@ -181,8 +184,10 @@ function eventToCandidate(
   nowMs: number,
   via: string | null,
   rawKey: string,
+  meta: Record<string, unknown>,
 ): QuotaSourceCandidate | null {
-  const meta = asRecord(event.metadata);
+  const planMetadata = projectQuotaPlanMetadata(meta);
+  const detectedPlanName = quotaDetectedPlanName(planMetadata, meta);
   const modelId = asString(meta.modelId);
   const bucketId = asString(meta.bucketId);
   const label =
@@ -207,6 +212,8 @@ function eventToCandidate(
   const sourceId = normalizeSourceId(source, collector);
 
   return {
+    ...(planMetadata ? { planMetadata } : {}),
+    ...(detectedPlanName ? { planName: detectedPlanName } : {}),
     source: sourceId,
     sourceLabel: humanSourceLabel(source, collector),
     machine,
@@ -235,64 +242,39 @@ function sortSourcesForDisplay(
   return [primary, ...rest];
 }
 
-export function buildQuotaGroups(
-  events: QuotaEventLike[],
-  now = new Date(),
+interface WindowBucket {
+  providerKey: string;
+  candidates: QuotaSourceCandidate[];
+  rawKey: string;
+  windowKey: string;
+  pool: ReturnType<typeof antigravityQuotaPool> | null;
+}
+
+/**
+ * Folds quota events into group candidates as they arrive.
+ *
+ * The caller hands over each event's ALREADY parsed metadata record, so one
+ * quota response decodes every metadata document exactly once and no parsed
+ * record has to outlive the iteration that produced it.
+ */
+export interface QuotaGroupBuilder {
+  /** Fold one event and its (already parsed) metadata into the candidates. */
+  add(event: QuotaEventLike, meta: Record<string, unknown>): void;
+  /** Assemble the provider groups from the candidates added so far. */
+  finish(): QuotaProviderQuotaGroup[];
+}
+
+export function createQuotaGroupBuilder(
+  now: Date,
   manifest?: ResolvedProviderManifest,
-): QuotaProviderQuotaGroup[] {
+): QuotaGroupBuilder {
   const resolved = manifest ?? resolveProviderManifest(null);
   const nowMs = now.getTime();
-  interface WindowBucket {
-    providerKey: string;
-    candidates: QuotaSourceCandidate[];
-    rawKey: string;
-    windowKey: string;
-    pool: ReturnType<typeof antigravityQuotaPool> | null;
-  }
-
   const byProviderWindow = new Map<string, WindowBucket>();
 
-  for (const event of events) {
-    const meta = asRecord(event.metadata);
-    const providerKey = normalizeProviderKey(event.provider, resolved);
-    const via =
-      resolved.byKey.get(providerKey)?.terms?.via ??
-      (providerKey === "google-antigravity" ? "antigravity" : null);
-    const stampedWindowKey = asString(meta.windowKey);
-    const normalized = normalizeQuotaWindowKey({
-      quotaWindow: asString(meta.quotaWindow),
-      bucketId: asString(meta.bucketId),
-      label: event.label ?? null,
-      modelId: asString(meta.modelId),
-    });
-    const rolledKey = stampedWindowKey
-      ? rollupQuotaWindowKey(stampedWindowKey)
-      : rollupQuotaWindowKey(normalized.windowKey);
-    const rawKey = asString(meta.rawKey) ?? normalized.rawKey;
-    const pool =
-      via === "antigravity"
-        ? antigravityQuotaPool({
-            label: event.label ?? null,
-            modelId: asString(meta.modelId),
-            bucketId: asString(meta.bucketId),
-            modelGroup: asString(meta.modelGroup),
-          })
-        : null;
-    const candidate = eventToCandidate(event, nowMs, via, rawKey);
-    if (!candidate) continue;
-
-    const groupKey = pool
-      ? `${providerKey}\0${pool}\0${rolledKey}`
-      : `${providerKey}\0${rolledKey}`;
-    let bucket = byProviderWindow.get(groupKey);
-    if (!bucket) {
-      bucket = { providerKey, candidates: [], rawKey, windowKey: rolledKey, pool };
-      byProviderWindow.set(groupKey, bucket);
-    }
-    bucket.candidates.push(candidate);
-  }
-
   const toReading = (row: QuotaSourceCandidate): QuotaSourceReading => ({
+    ...(row.planMetadata ? { planMetadata: row.planMetadata } : {}),
+    ...(row.planName ? { planName: row.planName } : {}),
     source: row.source,
     sourceLabel: row.sourceLabel,
     machine: row.machine,
@@ -306,51 +288,108 @@ export function buildQuotaGroups(
     detail: row.detail ?? null,
   });
 
-  const providerMap = new Map<string, QuotaProviderQuotaGroup>();
+  return {
+    add(event, meta) {
+      const providerKey = normalizeProviderKey(event.provider, resolved);
+      const via =
+        resolved.byKey.get(providerKey)?.terms?.via ??
+        (providerKey === "google-antigravity" ? "antigravity" : null);
+      const stampedWindowKey = asString(meta.windowKey);
+      const normalized = normalizeQuotaWindowKey({
+        quotaWindow: asString(meta.quotaWindow),
+        bucketId: asString(meta.bucketId),
+        label: event.label ?? null,
+        modelId: asString(meta.modelId),
+      });
+      const rolledKey = stampedWindowKey
+        ? rollupQuotaWindowKey(stampedWindowKey)
+        : rollupQuotaWindowKey(normalized.windowKey);
+      const rawKey = asString(meta.rawKey) ?? normalized.rawKey;
+      const pool =
+        via === "antigravity"
+          ? antigravityQuotaPool({
+              label: event.label ?? null,
+              modelId: asString(meta.modelId),
+              bucketId: asString(meta.bucketId),
+              modelGroup: asString(meta.modelGroup),
+            })
+          : null;
+      const candidate = eventToCandidate(event, nowMs, via, rawKey, meta);
+      if (!candidate) return;
 
-  for (const [, bucket] of byProviderWindow) {
-    const { providerKey, candidates, rawKey, windowKey, pool } = bucket;
-    const primaryCandidate = pickPrimarySource(candidates, nowMs);
-    if (!primaryCandidate) continue;
+      const groupKey = pool
+        ? `${providerKey}\0${pool}\0${rolledKey}`
+        : `${providerKey}\0${rolledKey}`;
+      let bucket = byProviderWindow.get(groupKey);
+      if (!bucket) {
+        bucket = { providerKey, candidates: [], rawKey, windowKey: rolledKey, pool };
+        byProviderWindow.set(groupKey, bucket);
+      }
+      bucket.candidates.push(candidate);
+    },
 
-    const primary = toReading(primaryCandidate);
-    // Drop the primary candidate by reference before mapping: `toReading` always
-    // returns fresh objects, so filtering the mapped readings would never match.
-    const sources = sortSourcesForDisplay(
-      candidates.filter((row) => row !== primaryCandidate).map(toReading),
-      primary,
-    );
+    finish() {
+      const providerMap = new Map<string, QuotaProviderQuotaGroup>();
 
-    const displayName = quotaWindowDisplayName({
-      windowKey,
-      rawKey,
-      resetAt: primary.resetAt,
-      nowMs,
-    });
+      for (const [, bucket] of byProviderWindow) {
+        const { providerKey, candidates, rawKey, windowKey, pool } = bucket;
+        const primaryCandidate = pickPrimarySource(candidates, nowMs);
+        if (!primaryCandidate) continue;
 
-    let group = providerMap.get(providerKey);
-    if (!group) {
-      group = {
-        provider: providerKey,
-        providerLabel: quotaProviderLabel(providerKey, resolved),
-        windows: [],
-      };
-      providerMap.set(providerKey, group);
-    }
+        const primary = toReading(primaryCandidate);
+        // Drop the primary candidate by reference before mapping: `toReading` always
+        // returns fresh objects, so filtering the mapped readings would never match.
+        const sources = sortSourcesForDisplay(
+          candidates.filter((row) => row !== primaryCandidate).map(toReading),
+          primary,
+        );
 
-    group.windows.push({
-      windowKey,
-      displayName,
-      rawKey,
-      platformTitle: pool ? antigravityPlatformCardTitle(pool) : null,
-      primary,
-      sources,
-    });
+        const displayName = quotaWindowDisplayName({
+          windowKey,
+          rawKey,
+          resetAt: primary.resetAt,
+          nowMs,
+        });
+
+        let group = providerMap.get(providerKey);
+        if (!group) {
+          group = {
+            provider: providerKey,
+            providerLabel: quotaProviderLabel(providerKey, resolved),
+            windows: [],
+          };
+          providerMap.set(providerKey, group);
+        }
+
+        group.windows.push({
+          windowKey,
+          displayName,
+          rawKey,
+          platformTitle: pool ? antigravityPlatformCardTitle(pool) : null,
+          primary,
+          sources,
+        });
+      }
+
+      for (const group of providerMap.values()) {
+        group.windows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      }
+
+      return [...providerMap.values()].sort((a, b) =>
+        a.providerLabel.localeCompare(b.providerLabel),
+      );
+    },
+  };
+}
+
+export function buildQuotaGroups(
+  events: QuotaEventLike[],
+  now = new Date(),
+  manifest?: ResolvedProviderManifest,
+): QuotaProviderQuotaGroup[] {
+  const builder = createQuotaGroupBuilder(now, manifest);
+  for (const event of events) {
+    builder.add(event, quotaMetadataRecord(event.metadata));
   }
-
-  for (const group of providerMap.values()) {
-    group.windows.sort((a, b) => a.displayName.localeCompare(b.displayName));
-  }
-
-  return [...providerMap.values()].sort((a, b) => a.providerLabel.localeCompare(b.providerLabel));
+  return builder.finish();
 }
