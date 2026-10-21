@@ -133,7 +133,7 @@ export function countEventKinds(events) {
     if (label.startsWith("token:")) counts.token += 1;
     else if (label.startsWith("context:")) counts.context += 1;
     else if (label.startsWith("lifecycle:")) counts.lifecycle += 1;
-    else if (label === "session") counts.session += 1;
+    else if (label === "session" || label === "session-snapshot") counts.session += 1;
     else if (event?.metricType === "cost") counts.cost += 1;
   }
   return counts;
@@ -150,7 +150,7 @@ export function sampleEventPerKind(events) {
         ? "context"
         : label.startsWith("lifecycle:")
           ? "lifecycle"
-          : label === "session"
+          : label === "session" || label === "session-snapshot"
             ? "session"
             : event?.metricType === "cost"
               ? "cost"
