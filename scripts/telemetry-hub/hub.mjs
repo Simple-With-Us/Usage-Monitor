@@ -10,6 +10,11 @@
 //
 // The scrubber that enforces the Sentry policy lives in ./allowlist.mjs.
 //
+// ONE tick at a time.  A delivery pass can take far longer than the tick
+// interval, so the pass carries an in-flight guard: a second pass never
+// starts on top of the first one, so no event is delivered twice and no
+// two passes write the same offset file at the same time.
+//
 // Usage:
 //   node scripts/telemetry-hub/hub.mjs [--dry-run] [--state-dir <path>]
 //        [--port <n>] [--um-base-url <url>] [--sentry-endpoint <url>]
@@ -119,7 +124,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const umSender = createUmSender({
     journal,
-    baseUrl: options.umBaseUrl ?? process.env.UM_BASE_URL?.trim() ?? undefined,
+    baseUrl: options.umBaseUrl?.trim() || process.env.UM_BASE_URL?.trim() || undefined,
     dryRun: options.dryRun,
     logger,
   });
@@ -166,8 +171,18 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
+  //  A pass can take far longer than the tick: three attempts with a
+  //  twenty second timeout and a backoff, per chunk, per destination.  The
+  //  in-flight flag keeps a second pass from starting on top of the first
+  //  one, so no event is delivered twice and no two passes write the same
+  //  offset file at the same time.
+  let inFlight = false;
   const timer = setInterval(() => {
-    void runDeliveryPass({ umSender, sentrySender, logger });
+    if (inFlight) return;
+    inFlight = true;
+    void runDeliveryPass({ umSender, sentrySender, logger }).finally(() => {
+      inFlight = false;
+    });
   }, DEFAULT_TICK_MS);
   timer.unref?.();
 

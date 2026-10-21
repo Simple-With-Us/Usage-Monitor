@@ -37,7 +37,10 @@ function event(index, overrides = {}) {
   return {
     eventId: `event-${index}`,
     ts: new Date(1700000000000 + index * 1000).toISOString(),
-    platform: "opencode",
+    //  A platform that no other collector reports, so the ledger feed
+    //  really posts it.  A platform with its own collector is skipped by
+    //  the overlap gate on purpose.
+    platform: "a-agent",
     model: "a-model",
     operation: "chat",
     tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0, reasoning: 0 },

@@ -27,6 +27,8 @@
 //       log body is never forwarded.
 //   S7  A span's `events` and `links` arrays are dropped, because Sentry
 //       drops them server-side anyway and they can carry content.
+//   S8  A scope is PROJECTED, never forwarded as it arrived.  Its attributes
+//       go through the allowlist like every other attribute list.
 //
 // This module has no imports on purpose: it is the security-critical core
 // and it must stay independently testable.
@@ -236,6 +238,29 @@ function boundedNumber(value) {
 }
 
 /**
+ * Project one OTLP scope object.
+ *
+ * The scope is producer controlled, so it is never forwarded as it arrived.
+ * The name and the version are bounded strings, the attributes go through
+ * the same allowlist as every other attribute list, and everything else is
+ * dropped.  A scope with no valid field becomes an empty object.
+ */
+export function projectScope(scope, options) {
+  if (!isPlainObject(scope)) return {};
+  const out = {};
+  const name = boundedName(scope.name);
+  if (name) out.name = name;
+  const version = boundedName(scope.version);
+  if (version) out.version = version;
+  const attributes = scrubOtlpAttributes(scope.attributes, options);
+  out.attributes = attributes;
+  if (Number.isInteger(scope.droppedAttributesCount) && scope.droppedAttributesCount >= 0) {
+    out.droppedAttributesCount = scope.droppedAttributesCount;
+  }
+  return out;
+}
+
+/**
  * Scrub ONE OTLP span.
  *
  * Keeps the identity and timing fields, filters the attributes through the
@@ -315,7 +340,7 @@ export function scrubResourceSpans(payload, options) {
         const scrubbed = scrubSpan(span, options);
         if (scrubbed) outSpans.push(scrubbed);
       }
-      if (outSpans.length > 0) outScopes.push({ scope: isPlainObject(scope.scope) ? scope.scope : {}, spans: outSpans });
+      if (outSpans.length > 0) outScopes.push({ scope: projectScope(scope.scope, options), spans: outSpans });
     }
     if (outScopes.length === 0) continue;
     out.push({
@@ -350,7 +375,7 @@ export function scrubResourceLogs(payload, options) {
         const scrubbed = scrubLogRecord(record, options);
         if (scrubbed) outRecords.push(scrubbed);
       }
-      if (outRecords.length > 0) outScopes.push({ scope: isPlainObject(scope.scope) ? scope.scope : {}, logRecords: outRecords });
+      if (outRecords.length > 0) outScopes.push({ scope: projectScope(scope.scope, options), logRecords: outRecords });
     }
     if (outScopes.length === 0) continue;
     out.push({
@@ -443,7 +468,12 @@ export function scrubInternalEvent(event, options) {
   if (typeof stripped.durationMs === "number" && Number.isFinite(stripped.durationMs)) {
     out.durationMs = stripped.durationMs;
   }
-  if (typeof stripped.operation === "string") out.name = stripped.operation;
+  //  The span name is the operation, and the operation is an ALLOWLISTED
+  //  value: it comes from the `gen_ai.operation.name` attribute and never
+  //  from a raw span name.  It is bounded here as well, so a hand edited
+  //  journal row cannot push an unbounded string into the envelope.
+  const name = boundedName(stripped.operation);
+  if (name) out.name = name;
   if (out.kind === "log") {
     out.body = { stringValue: rebuildLogBody(attributes) };
     out.severityNumber = stripped.status === "error" ? 17 : 9;

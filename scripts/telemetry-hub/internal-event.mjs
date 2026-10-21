@@ -165,6 +165,33 @@ export function sha256Hex(input) {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
+/**
+ * A stable JSON serialization: object keys are sorted, so the same logical
+ * value always produces the same text whatever key order the producer used.
+ */
+function stableStringify(value) {
+  if (value === undefined) return "u";
+  if (value === null) return "n";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  return JSON.stringify(String(value));
+}
+
+/**
+ * A one-way digest of an arbitrary JSON value.
+ *
+ * Only the digest is ever kept.  The value itself is neither stored nor
+ * sent, so a digest can tell two records apart without carrying their
+ * content.  This is the same idea the monitor's own idempotency keys use.
+ */
+export function stableDigest(value) {
+  return sha256Hex(stableStringify(value));
+}
+
 function normalizePlatform(raw) {
   const value = readString(raw, 64);
   if (!value) return "unknown-agent";
@@ -231,7 +258,11 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     flat["agent.platform"] ?? flat["gen_ai.system"] ?? flat["gen_ai.agent.name"],
   );
   const model = readString(flat["gen_ai.request.model"] ?? flat["model"], 160);
-  const operation = readString(flat["gen_ai.operation.name"] ?? span.name, 120) ?? "chat";
+  //  The operation comes from the ALLOWLISTED `gen_ai.operation.name`
+  //  attribute and from nothing else.  A raw span name is producer free
+  //  text: it can carry the prompt, so it never becomes the operation and
+  //  never reaches the Sentry path.
+  const operation = readString(flat["gen_ai.operation.name"], 120) ?? "chat";
   const statusCode = isPlainObject(span.status) ? span.status.code : undefined;
   const statusText = isPlainObject(span.status) ? span.status.message : undefined;
   const isError =
@@ -314,11 +345,23 @@ export function normalizeLogRecord(record, resourceAttributes = {}) {
   );
   const severity = readInt(record.severityNumber);
   const isError = severity !== undefined && severity >= 17;
+  //  A log record has no id of its own, so the identity is built from the
+  //  record itself.  The timestamp alone is not enough: two records of the
+  //  same nanosecond on the same span would collide, and the second one
+  //  would be dropped as already sent.  The body and the attributes enter
+  //  the identity as ONE-WAY DIGESTS, never as values, so the content is
+  //  neither kept nor sent.  A retry of the same record produces the same
+  //  digests and therefore the same identity.
   const eventId = computeEventId("log", [
     record.timeUnixNano ?? "",
+    record.observedTimeUnixNano ?? "",
     platform,
     record.spanId ?? "",
     record.traceId ?? "",
+    severity ?? "",
+    typeof record.severityText === "string" ? record.severityText : "",
+    stableDigest(record.body ?? null),
+    stableDigest(record.attributes ?? []),
   ]);
   return {
     eventId,

@@ -163,19 +163,31 @@ export function buildLogsEnvelope(events) {
  * Split a list into chunks that respect both a count cap and a body size
  * cap.  The body cap is checked on the serialized envelope, so a batch of
  * very large attribute values is split before it reaches the 12 MiB cap.
+ *
+ * The size of ONE event is measured once and the running total is carried
+ * along.  Re-serializing the whole candidate for every event made the pass
+ * quadratic and could build hundreds of megabytes of discarded JSON.
  */
 export function chunkBySize(events, build, { maxCount, maxChars }) {
   const chunks = [];
   let current = [];
+  let currentChars = 0;
+  //  The fixed part of the envelope is serialized once, and every event
+  //  gets an allowance for the ids and the timestamps the envelope adds.
+  const overhead = JSON.stringify(build([])).length;
+  const perEventAllowance = 256;
+  const limit = Math.max(1, maxChars - overhead);
   for (const event of events) {
-    const candidate = current.concat([event]);
-    const size = JSON.stringify(build(candidate)).length;
-    if (current.length > 0 && (candidate.length > maxCount || size > maxChars)) {
+    const eventChars = JSON.stringify(event ?? null).length + perEventAllowance;
+    const candidateChars = currentChars + eventChars;
+    if (current.length > 0 && (current.length + 1 > maxCount || candidateChars > limit)) {
       chunks.push(current);
       current = [event];
+      currentChars = eventChars;
       continue;
     }
-    current = candidate;
+    current.push(event);
+    currentChars = candidateChars;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
@@ -200,6 +212,7 @@ export function createSentrySender({
   if (!journal) throw new Error("The Sentry sender needs a journal");
   const destination = "sentry";
   const root = endpoint ? endpoint.replace(/\/+$/, "") : "";
+  let inFlight = false;
 
   async function post(path, envelope) {
     const json = JSON.stringify(envelope);
@@ -295,6 +308,20 @@ export function createSentrySender({
 
   /** One pass over the Sentry destination. */
   async function runOnce() {
+    //  A pass can outlive the delivery tick.  The guard keeps two passes
+    //  from delivering the same events twice and from writing the same
+    //  offset file at the same time.  The hub guards the whole pass as
+    //  well; this one makes the sender safe on its own.
+    if (inFlight) return { ok: true, delivered: 0, quarantined: 0, busy: true };
+    inFlight = true;
+    try {
+      return await runOnceGuarded();
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  async function runOnceGuarded() {
     const batch = await journal.readBatch(destination, readLimit);
     if (batch.events.length === 0) {
       return { ok: true, delivered: 0, quarantined: 0, empty: true };
@@ -336,8 +363,13 @@ export function createSentrySender({
       const outcome = await deliverGroup(chunk, SENTRY_TRACES_PATH, buildTracesEnvelope);
       if (outcome.outcome !== "ok") {
         //  Whatever was delivered before the failure stays delivered, so
-        //  the next pass does not send it again.
-        await journal.markSentBatch(destination, deliveredIds);
+        //  the next pass does not send it again.  That includes the events
+        //  of the failed chunk that the isolation split delivered before
+        //  the failure: they reached Sentry, so they must be marked.
+        const partial = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event?.eventId)
+          .filter((id) => typeof id === "string" && id);
+        await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
         logger.warn("sentry is not accepting the batch", {
           destination,
           path: SENTRY_TRACES_PATH,
@@ -361,7 +393,12 @@ export function createSentrySender({
     for (const chunk of logChunks) {
       const outcome = await deliverGroup(chunk, SENTRY_LOGS_PATH, buildLogsEnvelope);
       if (outcome.outcome !== "ok") {
-        await journal.markSentBatch(destination, deliveredIds);
+        //  The same rule as the span chunks: the events of the failed
+        //  chunk that were delivered before the failure stay delivered.
+        const partial = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event?.eventId)
+          .filter((id) => typeof id === "string" && id);
+        await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
         logger.warn("sentry is not accepting the batch", {
           destination,
           path: SENTRY_LOGS_PATH,

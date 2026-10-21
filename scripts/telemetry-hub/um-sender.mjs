@@ -27,6 +27,12 @@
 // minted for a producer scope is checked against the platform of a turn, so
 // a scoped token would have to allow every platform the hub carries
 // ("opencode", ...) on top of the hub's own producer id.
+//
+// The ledger feed has an OVERLAP GATE.  Usage Monitor keeps one ledger row
+// per turn, so a platform that already reports on another path would
+// contribute a second row for the same turn and the month-to-date sum of
+// the pushed channel would count it twice.  The gate is the same policy the
+// monitor applies to its own generic gen_ai mapper.
 
 import { fleetSecretsGet } from "../lib/fleet-secrets.mjs";
 
@@ -56,6 +62,44 @@ const TOKEN_MEMO_MS = 60_000;
 
 const UMBER_TURNS_DESTINATION = "um-turns";
 const UMBER_INGEST_DESTINATION = "um-ingest";
+
+/**
+ * The platforms whose usage already reaches Usage Monitor on another path.
+ *
+ * Codex, Grok, Copilot, DeepSeek, Antigravity and OpenCode each have an
+ * exact local collector, and the billed Cursor usage comes from the
+ * server-side Cursor Admin API poller.  A hub row for one of those turns
+ * would be a SECOND row for the same turn.  The idempotency key cannot
+ * catch it, because the hub and the collector use a different producer id.
+ *
+ * The list mirrors the overlap set of the monitor's own generic gen_ai
+ * mapper (`OVERLAP_SOURCE_APPS` in src/lib/otlp/gen-ai-mapper.ts) and adds
+ * OpenCode, which has an exact local collector of its own.
+ */
+export const DEFAULT_OVERLAP_PLATFORMS = Object.freeze([
+  "openai-codex",
+  "codex-cli",
+  "grok-build",
+  "grok-cli",
+  "copilot-cli",
+  "github-copilot",
+  "deepseek-dsh",
+  "deepseek-harness",
+  "antigravity-cli",
+  "antigravity-statusline",
+  "opencode",
+  "claude-code",
+  "cursor",
+  "cursor-agent",
+]);
+
+/**
+ * The providers whose spend is billed by another feed.
+ *
+ * The Cursor Admin API poller stores the billed Cursor usage whatever
+ * harness reported it, so a hub row with that provider overlaps.
+ */
+export const DEFAULT_OVERLAP_PROVIDERS = Object.freeze(["cursor"]);
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -243,6 +287,11 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * The environment wins, so a LaunchAgent can be configured without the
  * secret CLI.  Otherwise the token is read from the Mac-side fleet secret
  * store.  The value is held in memory only and is never written to disk.
+ *
+ * The secret store keeps its own in-memory cache, so the helper process is
+ * spawned at most once per hub run instead of once per delivery pass.  A
+ * miss is memoized as well, so a hub without the secret does not spawn the
+ * helper every ten seconds either.
  */
 export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
   let memo = { value: undefined, at: 0 };
@@ -250,19 +299,74 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
     const fromEnv = env.USAGE_INGEST_TOKEN?.trim();
     if (fromEnv) return fromEnv;
     const stamp = now();
-    if (memo.value && stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
+    if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
+      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: true });
     } catch {
       value = undefined;
     }
-    if (typeof value === "string" && value.trim()) {
-      memo = { value: value.trim(), at: stamp };
-      return memo.value;
-    }
-    return undefined;
+    memo = {
+      value: typeof value === "string" && value.trim() ? value.trim() : undefined,
+      at: stamp,
+    };
+    return memo.value;
   };
+}
+
+/**
+ * Read the overlap policy of the ledger feed from the environment.
+ *
+ *   TELEMETRY_HUB_OVERLAP_PLATFORMS  the platforms treated as overlapping.
+ *                                    It REPLACES the default list, so one
+ *                                    platform can be taken out of it.
+ *   TELEMETRY_HUB_PLATFORM_ALLOWLIST  the only platforms that are pushed.
+ *                                    It does not override the overlap
+ *                                    block, exactly like the monitor's own
+ *                                    gen_ai mapper.
+ *   TELEMETRY_HUB_ALLOW_OVERLAP=1     push the overlapping platforms too.
+ *                                    The operator accepts both feeds.
+ */
+export function readOverlapPolicy(env = process.env) {
+  const raw = env.TELEMETRY_HUB_OVERLAP_PLATFORMS?.trim();
+  const platforms = raw
+    ? raw
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean)
+    : [...DEFAULT_OVERLAP_PLATFORMS];
+  const allowRaw = env.TELEMETRY_HUB_ALLOW_OVERLAP?.trim().toLowerCase();
+  const allowOverlap = allowRaw === "true" || allowRaw === "1" || allowRaw === "on" || allowRaw === "yes";
+  const listRaw = env.TELEMETRY_HUB_PLATFORM_ALLOWLIST?.trim();
+  const allowlist = listRaw
+    ? listRaw
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean)
+    : null;
+  return {
+    platforms: new Set(platforms),
+    providers: new Set(DEFAULT_OVERLAP_PROVIDERS),
+    allowOverlap,
+    allowlist,
+  };
+}
+
+/**
+ * True when the event may be pushed to the ledger.
+ *
+ * The gate is by platform and by provider, because a harness can report a
+ * provider that another feed bills.
+ */
+export function shouldPushLedgerEvent(event, policy) {
+  if (!isPlainObject(event)) return false;
+  const platform = typeof event.platform === "string" ? event.platform.trim().toLowerCase() : "";
+  if (policy.allowlist && !policy.allowlist.includes(platform)) return false;
+  if (policy.allowOverlap) return true;
+  if (policy.platforms.has(platform)) return false;
+  const provider = typeof event.provider === "string" ? event.provider.trim().toLowerCase() : "";
+  if (policy.providers.has(provider)) return false;
+  return true;
 }
 
 /**
@@ -283,9 +387,15 @@ export function createUmSender({
   fetchImpl = globalThis.fetch,
   resolveToken = createTokenResolver(),
   retryDelayMs = BASE_BACKOFF_MS,
+  env = process.env,
 } = {}) {
   if (!journal) throw new Error("The UM sender needs a journal");
-  const root = baseUrl.replace(/\/+$/, "");
+  //  An empty or blank base URL would make every request a relative URL,
+  //  which cannot be fetched.  It falls back to the default host like any
+  //  other unusable value.
+  const configuredBase = typeof baseUrl === "string" ? baseUrl.trim() : "";
+  const root = (configuredBase || DEFAULT_UM_BASE_URL).replace(/\/+$/, "");
+  const overlapPolicy = readOverlapPolicy(env);
 
   async function postJson(path, body, token) {
     let response;
@@ -333,13 +443,21 @@ export function createUmSender({
   }
 
   async function runChannel({ destination, events, build, path, token, dryRunChannel }) {
-    if (events.length === 0) return { ok: true, delivered: 0, quarantined: 0 };
+    if (events.length === 0) {
+      //  A dry run never advances an offset, so every branch reports the
+      //  dry run.  Otherwise the events behind an empty batch would be
+      //  skipped for good.
+      return { ok: true, delivered: 0, quarantined: 0, dryRun: dryRunChannel === true };
+    }
     const body = build(events);
     //  An event with no usage produces no ledger row, so a batch can be
     //  empty.  There is nothing to post then, and the offset still moves.
     const list = Array.isArray(body?.events) ? body.events : Array.isArray(body?.turns) ? body.turns : null;
     if (list && list.length === 0) {
-      return { ok: true, delivered: 0, quarantined: 0, skipped: events.length };
+      //  A dry run never advances an offset, so the empty branch reports
+      //  the dry run as well.  Otherwise the events behind the empty batch
+      //  would be skipped for good.
+      return { ok: true, delivered: 0, quarantined: 0, skipped: events.length, dryRun: dryRunChannel === true };
     }
     if (dryRunChannel) {
       logger.info("um channel dry run", {
@@ -395,18 +513,39 @@ export function createUmSender({
    * the other one's offset.
    */
   async function runOnce() {
-    const token = await resolveToken();
-    if (!token) {
-      logger.error("the um ingest token is not available", { destination: "um" });
-      return { ok: false, retry: false, turns: { ok: false }, ingest: { ok: false } };
+    //  The token is required by both channels.  A dry run never touches
+    //  the network, so it does not need one.
+    let token;
+    if (!dryRun) {
+      token = await resolveToken();
+      if (!token) {
+        logger.error("the um ingest token is not available", { destination: "um" });
+        throw new Error("USAGE_INGEST_TOKEN is not available: the um sender cannot post");
+      }
     }
 
     const turnBatch = await journal.readBatch(UMBER_TURNS_DESTINATION, batchSize);
     const ingestBatch = await journal.readBatch(UMBER_INGEST_DESTINATION, batchSize);
 
+    //  A log record is not a turn.  It carries tokens, so it belongs to
+    //  the ledger, but it must not become an agent turn in the dashboard.
+    const turnEvents = turnBatch.events.filter((event) => event?.kind !== "log");
+    const skippedTurns = turnBatch.events.length - turnEvents.length;
+
+    //  The ledger feed skips the platforms that already report on another
+    //  path, so one turn is never stored twice.
+    const ingestEvents = ingestBatch.events.filter((event) => shouldPushLedgerEvent(event, overlapPolicy));
+    const overlapSkipped = ingestBatch.events.length - ingestEvents.length;
+    if (overlapSkipped > 0) {
+      logger.info("um ledger rows skipped for an overlapping platform", {
+        destination: UMBER_INGEST_DESTINATION,
+        skipped: overlapSkipped,
+      });
+    }
+
     const turns = await runChannel({
       destination: UMBER_TURNS_DESTINATION,
-      events: turnBatch.events,
+      events: turnEvents,
       build: (events) => ({ turns: events.map((event) => buildUmTurn(event)).filter(Boolean) }),
       path: "/api/otlp/v1/traces",
       token,
@@ -418,7 +557,7 @@ export function createUmSender({
 
     const ingest = await runChannel({
       destination: UMBER_INGEST_DESTINATION,
-      events: ingestBatch.events,
+      events: ingestEvents,
       build: (events) =>
         buildUsageV2Batch(events.map((event) => buildUsageV2Event(event, { provider })), {
           producerId,
@@ -437,6 +576,8 @@ export function createUmSender({
       retry: turns.retry === true || ingest.retry === true,
       turns,
       ingest,
+      skippedTurns,
+      overlapSkipped,
     };
   }
 
