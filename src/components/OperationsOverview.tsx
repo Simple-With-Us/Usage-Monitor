@@ -880,11 +880,15 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
       </section>
     );
   }
-  const state: OperationalState = !data.configured
-    ? "unconfigured"
-    : data.ok
-      ? "healthy"
-      : "degraded";
+  // An offline (skipped) check observed nothing: report it as unavailable
+  // instead of claiming a missing key or a healthy fleet.
+  const state: OperationalState = data.offline
+    ? "unavailable"
+    : !data.configured
+      ? "unconfigured"
+      : data.ok
+        ? "healthy"
+        : "degraded";
   const okApps = data.apps.filter((a) => a.ok).length;
   return (
     <section aria-labelledby="fleet-backups-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
@@ -896,9 +900,11 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
           <div className="min-w-0">
             <h3 id="fleet-backups-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Fleet Backups</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {data.configured
-                ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
-                : "Backblaze monitor key not configured"}
+              {data.offline
+                ? "Backup checks skipped (offline mode)"
+                : data.configured
+                  ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
+                  : "Backblaze monitor key not configured"}
             </p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Checked <time suppressHydrationWarning dateTime={data.asOf}>{relativeTime(data.asOf)}</time>

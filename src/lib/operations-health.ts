@@ -1,3 +1,5 @@
+import "server-only";
+
 import type { FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
 import type { R2FleetSummary } from "@/lib/r2-usage";
 import { receiptInboxEvidenceConfigured } from "@/lib/receipt-inbox-admin";
