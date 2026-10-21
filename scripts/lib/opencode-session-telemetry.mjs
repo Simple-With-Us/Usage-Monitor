@@ -348,26 +348,24 @@ const ModelsDevCatalogEnvelopeSchema = ModelsDevCatalogEnvelopeFieldsSchema.stri
  * are typed.  `limit.context` is 0 for models with no context window (the
  * transcription and video models), so 0 is valid here and is treated as "no
  * limit" below.
+ *
+ * The records STRIP the fields UM does not read instead of retaining them:
+ * an undeclared field from the external catalog never survives the parse,
+ * and only the limit map leaves this module.
  */
-const ModelsDevLimitSchema = z
-  .object({
-    context: z.number().finite().nonnegative().optional(),
-  })
-  .passthrough();
+const ModelsDevLimitSchema = z.object({
+  context: z.number().finite().nonnegative().optional(),
+});
 
-const ModelsDevModelSchema = z
-  .object({
-    limit: ModelsDevLimitSchema.optional(),
-  })
-  .passthrough();
+const ModelsDevModelSchema = z.object({
+  limit: ModelsDevLimitSchema.optional(),
+});
 
-const ModelsDevProviderSchema = z
-  .object({
-    // Each model entry is validated on its own below, so one malformed model
-    // costs only itself and not every other model the vendor publishes.
-    models: z.record(z.string(), z.unknown()).optional(),
-  })
-  .passthrough();
+const ModelsDevProviderSchema = z.object({
+  // Each model entry is validated on its own below, so one malformed model
+  // costs only itself and not every other model the vendor publishes.
+  models: z.record(z.string(), z.unknown()).optional(),
+});
 
 const ModelsDevBodySchema = z.record(z.string(), z.unknown());
 
