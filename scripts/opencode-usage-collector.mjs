@@ -117,7 +117,19 @@ export async function collectOpencodeEvents({
       sessionIdCutoffMs,
     });
     const extraEvents = buildOpencodeExtraEvents(telemetry);
-    return filterEventsSince([...tokenEvents, ...extraEvents], since);
+    // The session fact is dated at the session's creation instant, so the
+    // window filter would drop it for every session that was created before
+    // the window even though the session is still discovered through its
+    // in-window messages.  Its content never moves and its id is the
+    // session's, so the row is stored once and every later pass dedupes
+    // against it; only sessions seen in the window emit it.
+    const sessionFacts = [];
+    const windowedExtraEvents = [];
+    for (const event of extraEvents) {
+      if (event?.label === "session") sessionFacts.push(event);
+      else windowedExtraEvents.push(event);
+    }
+    return [...filterEventsSince([...tokenEvents, ...windowedExtraEvents], since), ...sessionFacts];
   } catch (error) {
     if (scanStatus) scanStatus.complete = false;
     if (DEBUG) log(`database read failed (${error instanceof Error ? error.message : "error"})`);

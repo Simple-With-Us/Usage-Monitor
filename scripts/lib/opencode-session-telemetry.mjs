@@ -556,11 +556,13 @@ export function opencodeCostEvent({
 /**
  * Context-window utilization for one assistant message.
  *
- * contextTokens = tokens.input + tokens.cache.read + tokens.output +
- * tokens.reasoning.  opencode's tokens.output EXCLUDES reasoning and the
- * shared token parser folds reasoning into the output row, so the context
- * total adds it too: the context row then counts exactly the tokens the
- * token rows report for that message.
+ * contextTokens = tokens.input + tokens.cache.read + tokens.cache.write +
+ * tokens.output + tokens.reasoning.  opencode's tokens.output EXCLUDES
+ * reasoning and the shared token parser folds reasoning into the output row,
+ * so the context total adds it too; cache-write tokens occupy the prompt cache
+ * and therefore the window, and the shared token parser reports them as a
+ * cacheCreation row: the context row then counts exactly the tokens the token
+ * rows report for that message.
  *
  * The limit comes from the models.dev catalog for the EXACT provider and
  * model of the message.  A provider that does not publish the model yields no
@@ -606,6 +608,11 @@ export function opencodeContextEvent({
       // The id covers every compared field, so a catalog that starts
       // publishing a different window for the model produces a new row
       // instead of an HTTP 409 against the row Usage Monitor already stored.
+      // The RAW provider id is part of the id and not just the normalized
+      // vendor: opencodeProviderInfo collapses "meta" and every "muse*" onto
+      // "muse-code" and every "minimax*" onto "minimax", so a rewritten
+      // providerID would keep the id while the compared metadata.providerId
+      // moved, and Usage Monitor would reject the whole batch with HTTP 409.
       eventId: shaEventId([
         OPENCODE_PRODUCER_ID,
         sessionId,
@@ -615,6 +622,7 @@ export function opencodeContextEvent({
         String(contextTokens),
         hasLimit ? String(limit) : "",
         provider || "",
+        providerId || "",
       ]),
       provider,
       service: "opencode",
@@ -673,6 +681,12 @@ const MESSAGE_COUNT_KEYS = {
  *
  * The quantity is 1: the row counts the session, it does not re-report the
  * session's message total, so a pass can never inflate a usage rollup.
+ *
+ * `occurredAt` is the creation instant, which is a fact about the session and
+ * not about the pass, so collectOpencodeEvents keeps this row out of the
+ * window filter: a session created before the window is still discovered
+ * through its in-window messages, and its one fact row would otherwise never
+ * be sent at all.
  */
 export function opencodeSessionEvent({ session, project }) {
   const sessionId = typeof session?.id === "string" ? session.id : null;
@@ -978,6 +992,7 @@ export function buildOpencodeExtraEvents({
     const contextTokens =
       (numberOrNull(data.tokens?.input) ?? 0) +
       (numberOrNull(data.tokens?.cache?.read) ?? 0) +
+      (numberOrNull(data.tokens?.cache?.write) ?? 0) +
       (numberOrNull(data.tokens?.output) ?? 0) +
       (numberOrNull(data.tokens?.reasoning) ?? 0);
     // Only the exact provider and model of the message may set the limit.

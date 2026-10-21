@@ -326,6 +326,87 @@ describe("opencode collector telemetry", () => {
     expect(noLimit.quantity).toBe(20);
   });
 
+  it("keeps the session fact for a session created before the window", async () => {
+    // The window covers only the last message, so the session is discovered
+    // through it even though the session itself was created before the window.
+    // Its fact row is dated at the creation instant, so the window filter must
+    // not drop it: the one row per session would otherwise never be sent for
+    // any session that outlives a collection window.
+    const events = await collect({ since: new Date(BASE_MS + 6_000) });
+    const sessionRows = events.filter((event) => event.label === "session");
+    expect(sessionRows).toHaveLength(1);
+    expect(sessionRows[0].occurredAt).toBe(new Date(BASE_MS).toISOString());
+    expect(sessionRows[0].metadata.sessionCreatedAt).toBe(new Date(BASE_MS).toISOString());
+    // The rows that belong to the window are still filtered by it.
+    const outsideWindow = events.filter(
+      (event) => event.label !== "session" && Date.parse(event.occurredAt) < BASE_MS + 6_000,
+    );
+    expect(outsideWindow).toHaveLength(0);
+  });
+
+  it("counts cache-write tokens in the context total, like the token rows do", async () => {
+    // The token rows report cache-write tokens as a cacheCreation row, and
+    // those tokens occupy the prompt cache and therefore the window.
+    const cacheWriteId = "msg_assistant_cache_write";
+    const db = new DatabaseSync(dbPath);
+    db.prepare(
+      "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      cacheWriteId,
+      SESSION_ID,
+      "assistant",
+      8,
+      BASE_MS + 7_000,
+      BASE_MS + 7_500,
+      JSON.stringify({
+        time: { created: BASE_MS + 7_000, completed: BASE_MS + 7_500 },
+        model: { id: "demo-model-1", providerID: "opencode" },
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 20, write: 40 } },
+        cost: 0,
+      }),
+    );
+    db.close();
+
+    try {
+      const events = await collect();
+      const context = events.find(
+        (event) => event.label.startsWith("context:") && event.occurredAt === new Date(BASE_MS + 7_500).toISOString(),
+      );
+      expect(context).toBeDefined();
+      // input 10 + cache.read 20 + cache.write 40 + output 5.
+      expect(context.quantity).toBe(75);
+      expect(context.metadata.contextTokens).toBe(75);
+    } finally {
+      const cleanup = new DatabaseSync(dbPath);
+      cleanup.prepare("DELETE FROM session_message WHERE id = ?").run(cacheWriteId);
+      cleanup.close();
+    }
+  });
+
+  it("gives a rewritten raw provider id its own context event id", async () => {
+    const { opencodeContextEvent } = await import("../lib/opencode-session-telemetry.mjs");
+    const base = {
+      sessionId: SESSION_ID,
+      messageId: MESSAGE_ID,
+      modelId: "demo-model-1",
+      contextTokens: 360,
+      contextLimit: CONTEXT_LIMIT,
+      occurredAtIso: new Date(BASE_MS + 1_000).toISOString(),
+    };
+    // "meta" and "muse-1" both normalize to the vendor "muse-code", but Usage
+    // Monitor compares metadata.providerId, so the two rows must not share an
+    // id: a shared id would 409 the whole batch on the rewritten provider.
+    const meta = opencodeContextEvent({ ...base, providerId: "meta", provider: "muse-code" });
+    const muse = opencodeContextEvent({ ...base, providerId: "muse-1", provider: "muse-code" });
+    expect(meta.metadata.providerId).toBe("meta");
+    expect(muse.metadata.providerId).toBe("muse-1");
+    expect(meta.eventId).not.toBe(muse.eventId);
+    // The same raw id still replays byte-identically.
+    const again = opencodeContextEvent({ ...base, providerId: "meta", provider: "muse-code" });
+    expect(again.eventId).toBe(meta.eventId);
+  });
+
   it("keeps the token rows byte-identical to the shared parser and adds no token rows", async () => {
     const events = await collect();
     const db = new DatabaseSync(dbPath, { readOnly: true });
