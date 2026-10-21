@@ -49,13 +49,7 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
           "occurredAt",
           "metadata",
           ROW_NUMBER() OVER (
-            PARTITION BY
-              COALESCE(json_extract("metadata", '$._producerInstanceId'), ''),
-              COALESCE(
-                json_extract("metadata", '$.modelId'),
-                json_extract("metadata", '$.bucketId'),
-                "provider" || ':' || COALESCE("label", '')
-              )
+            PARTITION BY "producerKey", "seriesKey"
             ORDER BY "occurredAt" DESC,
               "planRevision" DESC,
               "createdAt" DESC, "id" DESC
@@ -77,7 +71,24 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
             CASE WHEN typeof("rawPlanRevision") IN ('integer', 'real')
               AND "rawPlanRevision" > 0
               AND "rawPlanRevision" < 1.7976931348623157e308
-              THEN "rawPlanRevision" ELSE 0 END AS "planRevision"
+              THEN "rawPlanRevision" ELSE 0 END AS "planRevision",
+            -- Partition identity, mirroring projectQuotaWindows' asString():
+            -- only a non-blank string counts, surrounding whitespace is
+            -- ignored, and anything else (NULL, "", "  ", a number) falls
+            -- through to the next candidate.  The in-memory fallback in
+            -- loadFallback computes the same key.
+            COALESCE(
+              CASE WHEN typeof("rawProducerId") = 'text'
+                THEN TRIM("rawProducerId", char(32, 9, 10, 11, 12, 13)) END,
+              ''
+            ) AS "producerKey",
+            COALESCE(
+              NULLIF(CASE WHEN typeof("rawModelId") = 'text'
+                THEN TRIM("rawModelId", char(32, 9, 10, 11, 12, 13)) END, ''),
+              NULLIF(CASE WHEN typeof("rawBucketId") = 'text'
+                THEN TRIM("rawBucketId", char(32, 9, 10, 11, 12, 13)) END, ''),
+              "provider" || ':' || COALESCE("label", '')
+            ) AS "seriesKey"
           FROM (
             SELECT
               "provider",
@@ -90,13 +101,16 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
               "metadata",
               "createdAt",
               "id",
-              -- One metadata JSON parse per row for the revision sort key
-              -- instead of re-parsing it four times inside the window ORDER BY.
-              json_extract("metadata", '$.planUserUpdatedAt') AS "rawPlanRevision"
+              -- One metadata JSON parse per extracted key, all in this one
+              -- level; the levels above only read these columns.
+              json_extract("metadata", '$.planUserUpdatedAt') AS "rawPlanRevision",
+              json_extract("metadata", '$._producerInstanceId') AS "rawProducerId",
+              json_extract("metadata", '$.modelId') AS "rawModelId",
+              json_extract("metadata", '$.bucketId') AS "rawBucketId"
             FROM "ExternalUsageEvent"
             WHERE "metricType" = 'quota'
               AND "occurredAt" >= ${since}
-          ) AS "withRawRevision"
+          ) AS "withRawKeys"
         ) AS "withRevision"
       ) AS "ranked"
       WHERE "rn" = 1
@@ -117,47 +131,90 @@ export async function loadLatestQuotaWindowEvents(since: Date): Promise<QuotaEve
   }
 }
 
+/**
+ * The whitespace `asString` trims: space, tab, LF, VT, FF, CR.  The window
+ * query trims the same set with `TRIM(x, char(32, 9, 10, 11, 12, 13))`.
+ */
+const SERIES_WHITESPACE = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
+
+/** Rows per page when the degraded path walks the window. */
+const FALLBACK_PAGE_SIZE = 500;
+
+/** `asString` as the window query computes it: a non-blank trimmed string, else null. */
+function seriesText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(SERIES_WHITESPACE, "");
+  return text === "" ? null : text;
+}
+
+type FallbackRow = {
+  id: string;
+  createdAt: Date;
+  provider: string;
+  service: string | null;
+  sourceApp: string | null;
+  label: string | null;
+  credits: number | null;
+  limit: number | null;
+  occurredAt: Date;
+  metadata: unknown;
+};
+
+function revision(metadata: unknown): number {
+  if (!metadata || typeof metadata !== "object") return 0;
+  const value = (metadata as Record<string, unknown>).planUserUpdatedAt;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function partitionKey(row: FallbackRow): string {
+  const meta = (row.metadata && typeof row.metadata === "object"
+    ? row.metadata : {}) as Record<string, unknown>;
+  const series =
+    seriesText(meta.modelId) ??
+    seriesText(meta.bucketId) ??
+    `${row.provider}:${row.label ?? ""}`;
+  const producer = seriesText(meta._producerInstanceId) ?? "";
+  return `${producer}\0${series}`;
+}
+
+/** True when `a` beats `b` under the window query's ORDER BY. */
+function outranks(a: FallbackRow, b: FallbackRow): boolean {
+  return (
+    a.occurredAt.getTime() - b.occurredAt.getTime()
+    || revision(a.metadata) - revision(b.metadata)
+    || a.createdAt.getTime() - b.createdAt.getTime()
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  ) > 0;
+}
+
 async function loadFallback(since: Date): Promise<QuotaEventLike[]> {
-  // No flat `take`: a blind row cap is taken before the revision tie-break runs,
-  // so it can discard the very event the revision rule exists to promote and
-  // make this path disagree with the raw window query.  A 15-minute poll is
-  // ~96 rows/day/series, so a 400-row cap is well under one series' worth of a
-  // 14-day window.  The scan is bounded by `since`, and the result is reduced
-  // to the same one-row-per-partition shape the raw query returns.
-  const rows = await prisma.externalUsageEvent.findMany({
-    where: { metricType: "quota", occurredAt: { gte: since } },
-    orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
-    select: {
-      id: true, createdAt: true, provider: true, service: true, sourceApp: true,
-      label: true, credits: true, limit: true, occurredAt: true, metadata: true,
-    },
-  });
-  function revision(metadata: unknown): number {
-    if (!metadata || typeof metadata !== "object") return 0;
-    const value = (metadata as Record<string, unknown>).planUserUpdatedAt;
-    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-  }
-  function partitionKey(row: (typeof rows)[number]): string {
-    const meta = (row.metadata ?? {}) as Record<string, unknown>;
-    const series =
-      (typeof meta.modelId === "string" && meta.modelId) ||
-      (typeof meta.bucketId === "string" && meta.bucketId) ||
-      `${row.provider}:${row.label ?? ""}`;
-    const producer =
-      typeof meta._producerInstanceId === "string" ? meta._producerInstanceId : "";
-    return `${producer}\0${series}`;
-  }
-  // Prisma cannot order by a JSON scalar on SQLite; sort the fallback in memory
-  // and keep only the first row per partition, so the revision tie-break decides
-  // the winner before anything is dropped.
-  const best = new Map<string, (typeof rows)[number]>();
-  for (const row of [...rows].sort((a, b) =>
-    b.occurredAt.getTime() - a.occurredAt.getTime()
-    || revision(b.metadata) - revision(a.metadata)
-    || b.createdAt.getTime() - a.createdAt.getTime()
-    || b.id.localeCompare(a.id))) {
-    const key = partitionKey(row);
-    if (!best.has(key)) best.set(key, row);
+  // Prisma cannot partition or order by a JSON scalar on SQLite, so the degraded
+  // path walks the window in keyset pages and keeps only the best row per
+  // partition as it goes.  Memory is bounded by one page plus one row per
+  // partition, never by the window, and nothing is dropped before the revision
+  // tie-break has seen it: a flat `take` is applied before that tie-break, so it
+  // can discard the very event the rule exists to promote (and evict
+  // low-cadence producers), making this path disagree with the window query.
+  const best = new Map<string, FallbackRow>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page: FallbackRow[] = await prisma.externalUsageEvent.findMany({
+      where: { metricType: "quota", occurredAt: { gte: since } },
+      orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      take: FALLBACK_PAGE_SIZE,
+      ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
+      select: {
+        id: true, createdAt: true, provider: true, service: true, sourceApp: true,
+        label: true, credits: true, limit: true, occurredAt: true, metadata: true,
+      },
+    });
+    for (const row of page) {
+      const key = partitionKey(row);
+      const current = best.get(key);
+      if (current === undefined || outranks(row, current)) best.set(key, row);
+    }
+    if (page.length < FALLBACK_PAGE_SIZE) break;
+    cursor = page[page.length - 1].id;
   }
   return [...best.values()];
 }

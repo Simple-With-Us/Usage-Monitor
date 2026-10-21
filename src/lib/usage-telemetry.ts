@@ -277,6 +277,12 @@ const planMetadataExtensionSchema = z
   })
   .partial();
 
+// Not the trust boundary: `event` already passed UsageTelemetryV2EventSchema and
+// `raw` is that same event's input, so a failed safeParse below is a defensive
+// branch.  It degrades (the optional extension is dropped, the event is kept)
+// instead of throwing: a throw would turn one odd metadata blob into a 400 for
+// the whole batch and lose its billing events, and this module rejects bad
+// events one at a time (see `rejections`), never by failing the batch.
 function restoreBoundedPlanMetadata(
   event: UsageTelemetryV2Batch["events"][number],
   raw: unknown,
