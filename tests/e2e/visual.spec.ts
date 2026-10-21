@@ -462,6 +462,9 @@ test('visual: fleet alerts card with firing topic', async ({ page }) => {
   await page.goto('/ops');
   await pinFonts(page);
   const card = page.getByTestId('fleet-alerts-card');
+  // The card only mounts once the /ops payload resolves, so wait for it
+  // instead of asserting on its contents straight after navigation.
+  await expect(card).toBeVisible({ timeout: 30_000 });
   await expect(card.getByText('5h window at 92% (burn 3.1x)')).toBeVisible();
   await expect(card.getByRole('button', { name: 'Refresh Fleet Alerts' })).toBeVisible();
   await expect(card.getByText('quota-burn')).toBeVisible();
