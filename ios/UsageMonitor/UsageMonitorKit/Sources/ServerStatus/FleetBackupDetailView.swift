@@ -93,7 +93,10 @@ struct FleetBackupDetailView: View {
                 StatusBadge(
                     labelText,
                     status: locationStatus(location),
-                    systemImage: location.unknown == true
+                    // No verdict at all (never probed, or the check was
+                    // skipped) is not a failure: an unobserved row must not
+                    // wear the failure glyph beside its neutral badge.
+                    systemImage: location.unknown == true || location.ok == nil
                         ? "questionmark.circle"
                         : location.ok == true ? "checkmark" : "exclamationmark"
                 )
@@ -128,9 +131,11 @@ struct FleetBackupDetailView: View {
 
     private func locationStatus(_ location: ServerMetrics.FleetBackups.Location) -> Theme.SemanticStatus {
         if location.unknown == true { return .neutral }
-        // A deliberately skipped check observed nothing: every row is neutral,
-        // flag or no flag, so the two call sites never disagree.
-        if fleet.offline == true { return .neutral }
+        // A deliberately skipped check observed nothing: an unobserved row is
+        // neutral, but a row that was really observed keeps its own state,
+        // so the detail view agrees with the web card and the platforms
+        // section.
+        if fleet.offline == true && location.ok == nil { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }
         // No probe result at all is unknown, never a failure.
