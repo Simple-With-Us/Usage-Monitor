@@ -336,6 +336,21 @@ export async function fetchReceiptInboxSummary(): Promise<ReceiptInboxSummary> {
       ...(hasPartialConfiguration ? { error: "invalid_configuration" } : {}),
     };
   }
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // never call the live inbox, and report the same unconfigured shape the
+  // no-credentials path returns so the page is identical on every machine.
+  if (operationsHealthEgressDisabled()) {
+    return {
+      configured: false,
+      state: "unconfigured",
+      evidenceActionsConfigured: receiptInboxEvidenceConfigured(),
+      needsReviewCount: 0,
+      countIsLowerBound: false,
+      latestReceivedAt: null,
+      fetchedAt,
+      items: [],
+    };
+  }
   try {
     const response = await fetch(config.url, {
       headers: { Authorization: `Bearer ${config.token}`, Accept: "application/json" },
@@ -748,7 +763,9 @@ function mapCoolifyResource(
 export async function fetchCoolifyFleetSummary(): Promise<CoolifyFleetSummary> {
   const fetchedAt = new Date().toISOString();
   const config = coolifyConfiguration();
-  if (!config) {
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // no Coolify call, and the same unconfigured shape on every machine.
+  if (!config || operationsHealthEgressDisabled()) {
     return {
       configured: false,
       state: "unconfigured",
@@ -898,7 +915,14 @@ export async function fetchOperationsHealth(): Promise<OperationsHealthSummary> 
           fetchSocraticInfrastructureSummary(),
           fetchCongressInfrastructureSummary(),
           fetchCoolifyFleetSummary(),
-          fetchR2FleetSummary().catch((error) => {
+          // Playwright visual/e2e runs must render fully offline (suite
+          // invariant): an empty env leaves every R2 account unconfigured, so
+          // no Cloudflare call fires and the card is identical everywhere.
+          fetchR2FleetSummary(
+            fetch,
+            new Date(),
+            operationsHealthEgressDisabled() ? {} : process.env
+          ).catch((error) => {
             console.error("[operations] R2 fleet summary failed:", error);
             return null;
           }),

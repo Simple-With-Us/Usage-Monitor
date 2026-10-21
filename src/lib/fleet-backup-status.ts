@@ -393,6 +393,11 @@ interface PeerStorageHealth {
   litestreamReason: string | null;
   /** True when the peer reports a compaction-tier wedge even if L0 is fresh. */
   litestreamTiersDegraded: boolean;
+  /**
+   * True when the peer state could not be observed at all (offline e2e
+   * run).  The replica is UNKNOWN then, not missing.
+   */
+  stateUnknown?: boolean;
   r2Weekly: PeerR2WeeklyStatus;
 }
 
@@ -478,6 +483,7 @@ async function fetchPeerStorageHealth(
       litestreamAgeSeconds: null,
       litestreamReason: "peer_health_offline",
       litestreamTiersDegraded: false,
+      stateUnknown: true,
       r2Weekly: missingPeerR2Weekly("peer_health_offline"),
     };
   }
@@ -646,7 +652,12 @@ function summarizeApp(
 
 async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
   const warnings: string[] = [];
-  const creds = resolveMonitorCredentials();
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // drop the Backblaze monitor credentials so no B2 list call fires and the
+  // pinned rows never depend on live Backblaze state.
+  const creds = operationsHealthEgressDisabled()
+    ? null
+    : resolveMonitorCredentials();
   const nowMs = now.getTime();
 
   let auth: B2Auth | null = null;
@@ -804,10 +815,14 @@ async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
         );
         // Continuous sync (L0) is the Live row.  A wedged higher compaction
         // tier is a warning on that same row, not "the replica is down".
-        const present =
-          peer.litestreamAgeSeconds != null || peer.litestreamTiersDegraded;
-        const ok =
-          peer.litestreamAgeSeconds != null
+        // An unobserved peer (offline e2e run) is UNKNOWN, not a missing
+        // replica: keep the row non-failing so the app verdict stays honest.
+        const present = peer.stateUnknown
+          ? true
+          : peer.litestreamAgeSeconds != null || peer.litestreamTiersDegraded;
+        const ok = peer.stateUnknown
+          ? null
+          : peer.litestreamAgeSeconds != null
             ? ageOk
             : peer.litestreamTiersDegraded
               ? false

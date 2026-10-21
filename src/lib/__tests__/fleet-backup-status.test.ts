@@ -590,4 +590,28 @@ describe("fetchFleetBackupStatus", () => {
     expect(ltx?.ok).toBe(true);
     expect(st?.ok).toBe(true);
   });
+
+  it("skips every egress and reports the peer as unknown (not missing) when offline", async () => {
+    vi.stubEnv("OPERATIONS_HEALTH_OFFLINE", "true");
+    vi.stubEnv("E2E_TEST_PASSWORD", "visual-test-password");
+    vi.stubEnv("BACKBLAZE_APPLICATION_KEY_ID", "keyid");
+    vi.stubEnv("BACKBLAZE_APPLICATION_KEY", "secret");
+    const fetchMock = vi.fn(async () => {
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = await fetchFleetBackupStatus();
+    expect(fetchMock).not.toHaveBeenCalled();
+    // No Backblaze credentials resolve offline, so the card is unconfigured.
+    expect(payload.configured).toBe(false);
+    const st = payload.apps.find((a) => a.id === "socratic-trade");
+    const live = st?.locations.find((l) => l.id === "peer-litestream");
+    expect(live?.ok).toBeNull();
+    // Unknown state must not read as "replica missing".
+    expect(live?.present).toBe(true);
+    expect(live?.reason).toBe("peer_health_offline");
+    // An unobserved peer must not flip the app to a failed backup.
+    expect(st?.ok).toBe(true);
+  });
 });
