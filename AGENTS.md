@@ -105,7 +105,7 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   collection route the dashboard-session middleware excludes for GET (see "Subscriptions" below);
   `POST /api/subscriptions` and both `PUT`/`DELETE /api/subscriptions/:id` stay
   session-cookie-only.
-- `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Local Monitor: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
+- `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Monitor Local: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
 - `POST /api/providers/refresh-stale` — dashboard session.  Re-fetches pollable providers whose usage snapshot or external billing confirmation is older than one hour.  Manual/push providers are skipped.
 - `GET /api/export/daily-rollups` — dashboard session cookie OR the same
   `isUsageReadAuthorized` scheme. Exports `ExternalUsageEventDailyRollup` rows as JSON

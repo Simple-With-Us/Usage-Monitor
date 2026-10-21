@@ -5,7 +5,7 @@ import LocalBudget
 import LocalStore
 import AppCore
 
-/// Full shell for **Usage Local Monitor** — on-device money-truth that aims to
+/// Full shell for **Usage Monitor Local** — on-device money-truth that aims to
 /// match and exceed web/remote for personal poll + subscription tracking.
 public struct LocalRootView: View {
     @Bindable var settings: AppSettings
@@ -116,7 +116,8 @@ public struct LocalRootView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                    // Always-visible product identity (home-screen: "Usage Local Monitor").
+                    // Always-visible product identity:  "Usage Monitor Local" in the app,  and the
+                    // home-screen label is "Local Monitor".
                     HStack(spacing: Theme.Spacing.sm) {
                         Image(systemName: "iphone")
                             .font(.system(size: 14, weight: .semibold))
@@ -324,7 +325,7 @@ public struct LocalRootView: View {
                     Text("Only for a Mac .umkeys file.  Needs the passphrase you set when you built it.  Do not use this for the website JSON.")
                 }
                 Section("Also in This Project") {
-                    Text("**Usage Client Monitor** is the other app: a live-sync client for a server you host yourself (or the owner fleet). Use that when you run a VPS.")
+                    Text("**Usage Monitor Client** is the other app: a live-sync client for a server you host yourself (or the owner fleet). Use that when you run a VPS.")
                         .font(Theme.Typography.caption)
                 }
                 Section("Providers Catalog") {

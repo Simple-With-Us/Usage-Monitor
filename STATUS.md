@@ -40,7 +40,7 @@ scheduled upsert.  Extra-ship no.  No Coolify.  Rollout:
 
 ## Prior (2026-09-13 FX — Local Import Package tap)
 
-Usage Local Monitor Settings no longer puts a Merge / Replace picker next to
+Usage Monitor Local Settings no longer puts a Merge / Replace picker next to
 **Import Package**.  That List Picker stole the button tap (repeat of
 2026-09-04).  Import Package is its own section; merge vs replace is a sheet
 after the file pick.  The website **Download For Local** JSON

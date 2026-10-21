@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-10  
 **Team:** CC8UTF7ATG (Jay Wedgeworth, LLC)  
-**Apps:** Usage Client Monitor · Usage Local Monitor  
+**Apps:** Usage Monitor Client · Usage Monitor Local  
 
 The retired `services.jays.usage.*` ASC records have version **1.0** in `PREPARE_FOR_SUBMISSION` and VALID TestFlight builds; the renamed apps need new records (see the 2026-09-23 note). This pack is the copy, privacy answers, review notes, and screenshot plan agents/humans paste into ASC (or push via `scripts/asc-push-listing.rb`).
 
@@ -38,11 +38,11 @@ Contact (review): Jay Wedgeworth · mail@jays.services · +1 956-420-0244
 
 ---
 
-## 1) Usage Client Monitor
+## 1) Usage Monitor Client
 
 | | |
 |--|--|
-| **ASC name** | Usage Client Monitor |
+| **ASC name** | Usage Monitor Client |
 | **Bundle ID** | `com.simplewithus.usage.client.ios` |
 | **SKU** | `usage-client-monitor` |
 | **ASC app id** | `6820881005` (was retired: `6799230435`) |
@@ -55,7 +55,7 @@ Contact (review): Jay Wedgeworth · mail@jays.services · +1 956-420-0244
 ### Description
 
 ```
-Usage Client Monitor is the iOS companion for a Usage Monitor server you host.
+Usage Monitor Client is the iOS companion for a Usage Monitor server you host.
 
 See month-to-date API spend, budgets, and alerts without living in a browser tab.  Point the app at your server URL, store a read token in the Keychain, and keep budgets on your Lock Screen and Home Screen widgets.
 
@@ -88,7 +88,7 @@ api,budget,cost,usage,openai,anthropic,llm,devops,monitor,self-host,spend
 ### What's New (1.0)
 
 ```
-Initial App Store release of Usage Client Monitor — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.
+Initial App Store release of Usage Monitor Client — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.
 ```
 
 ### App Review notes
@@ -122,11 +122,11 @@ Declare data types only if the app *by design* sends them off-device: budget JSO
 
 ---
 
-## 2) Usage Local Monitor
+## 2) Usage Monitor Local
 
 | | |
 |--|--|
-| **ASC name** | Usage Local Monitor |
+| **ASC name** | Usage Monitor Local |
 | **Bundle ID** | `com.simplewithus.usage.local.ios` |
 | **SKU** | `usage-local-monitor` |
 | **ASC app id** | `6820885210` (was retired: `6799230729`) |
@@ -139,7 +139,7 @@ Declare data types only if the app *by design* sends them off-device: budget JSO
 ### Description
 
 ```
-Usage Local Monitor keeps API and subscription spend visible on your iPhone — entirely on-device.
+Usage Monitor Local keeps API and subscription spend visible on your iPhone — entirely on-device.
 
 Add the providers you already pay for, store keys in the Keychain, and see month-to-date cost, budgets, renewals, and alerts without running a separate server.
 
@@ -157,7 +157,7 @@ WHO IT IS FOR
 Individual developers and small teams who want phone-first cost awareness without hosting Usage Monitor.
 
 WHAT IT IS NOT
-• Not a remote dashboard client (that is Usage Client Monitor)
+• Not a remote dashboard client (that is Usage Monitor Client)
 • Not a bank, brokerage, or tax product
 • Does not invent spend for providers that only offer console billing — those stay as subscription or manual rows
 
@@ -173,7 +173,7 @@ api,budget,cost,openai,anthropic,openrouter,llm,local,on-device,usage,spend
 ### What's New (1.0)
 
 ```
-Initial App Store release of Usage Local Monitor — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.
+Initial App Store release of Usage Monitor Local — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.
 ```
 
 ### App Review notes
