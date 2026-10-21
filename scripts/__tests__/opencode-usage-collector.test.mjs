@@ -404,6 +404,78 @@ describe("opencode collector telemetry", () => {
     }
   });
 
+  it("validates the token payload before it reaches the context row", async () => {
+    const warnings = [];
+    const malformedId = "msg_assistant_malformed_tokens";
+    const negativeId = "msg_assistant_negative_tokens";
+    const db = new DatabaseSync(dbPath);
+    const insert = db.prepare(
+      "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+    // The cache write is an object, so it is not a token count at all.
+    insert.run(
+      malformedId,
+      SESSION_ID,
+      "assistant",
+      8,
+      BASE_MS + 7_000,
+      BASE_MS + 7_500,
+      JSON.stringify({
+        time: { created: BASE_MS + 7_000, completed: BASE_MS + 7_500 },
+        model: { id: "demo-model-1", providerID: "opencode" },
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 20, write: { nested: true } } },
+        cost: 0,
+      }),
+    );
+    // A negative count is not a count either: it is zero, the same as it is
+    // on the token row, so the context total still matches the token rows.
+    insert.run(
+      negativeId,
+      SESSION_ID,
+      "assistant",
+      9,
+      BASE_MS + 8_000,
+      BASE_MS + 8_500,
+      JSON.stringify({
+        time: { created: BASE_MS + 8_000, completed: BASE_MS + 8_500 },
+        model: { id: "demo-model-1", providerID: "opencode" },
+        tokens: { input: -5, output: 5, reasoning: 0, cache: { read: 20, write: 0 } },
+        cost: 0,
+      }),
+    );
+    db.close();
+
+    try {
+      const events = await collect({ onWarning: (message) => warnings.push(message) });
+      const malformedIso = new Date(BASE_MS + 7_500).toISOString();
+      const negativeIso = new Date(BASE_MS + 8_500).toISOString();
+      // The malformed payload produces NO context row: a guessed total would
+      // break the promise that the context row equals the token rows' total
+      // for the same message.
+      expect(
+        events.find(
+          (event) => event.label.startsWith("context:") && event.occurredAt === malformedIso,
+        ),
+      ).toBeUndefined();
+      // ...and it is reported, so the gap is visible in the run log.
+      expect(warnings.some((message) => message.includes(malformedId))).toBe(true);
+      // The negative count is zero on both sides, so the totals still match.
+      const negativeContext = events.find(
+        (event) => event.label.startsWith("context:") && event.occurredAt === negativeIso,
+      );
+      expect(negativeContext.metadata.contextTokens).toBe(25);
+      const negativeTokens = events
+        .filter((event) => event.label.startsWith("token:") && event.occurredAt === negativeIso)
+        .reduce((total, event) => total + event.quantity, 0);
+      expect(negativeTokens).toBe(negativeContext.metadata.contextTokens);
+    } finally {
+      const cleanup = new DatabaseSync(dbPath);
+      cleanup.prepare("DELETE FROM session_message WHERE id IN (?, ?)").run(malformedId, negativeId);
+      cleanup.close();
+    }
+  });
+
   it("gives a rewritten raw provider id its own context event id", async () => {
     const { opencodeContextEvent } = await import("../lib/opencode-session-telemetry.mjs");
     const base = {
@@ -622,10 +694,28 @@ describe("opencode collector telemetry", () => {
     expect(broken.problem).toBeTruthy();
     expect(broken.limitFor("opencode", "demo-model-1")).toBeNull();
     expect(parseModelsDevCatalog(JSON.stringify({ updatedAt: 1, digest: "d", body: 5 })).problem).toBeTruthy();
+    // A catalog that was never cached is the normal state on a fresh
+    // install, so it gets its own message and is not called corrupt.
+    expect(parseModelsDevCatalog(null).problem).toContain("missing");
+    expect(parseModelsDevCatalog("   ").problem).toContain("missing");
 
-    // An unknown top-level key and a body that is already an object are
-    // both tolerated, so one odd field cannot erase every limit.
+    // A body that is already an object is usable, and the known-shape
+    // envelope is accepted without a word.
     const tolerant = parseModelsDevCatalog(
+      JSON.stringify({
+        updatedAt: 1,
+        digest: "fixture",
+        body: { opencode: { models: { "demo-model-1": { limit: { context: 1000 } } } } },
+      }),
+    );
+    expect(tolerant.problem).toBeNull();
+    expect(tolerant.warning).toBeNull();
+    expect(tolerant.limitFor("opencode", "demo-model-1")).toBe(1000);
+
+    // An unknown top-level key is a shape violation, so it is REPORTED
+    // instead of being swallowed, and the known limits still work: one odd
+    // field can never erase every vendor's limits.
+    const unknownKey = parseModelsDevCatalog(
       JSON.stringify({
         updatedAt: 1,
         digest: "fixture",
@@ -633,8 +723,9 @@ describe("opencode collector telemetry", () => {
         body: { opencode: { models: { "demo-model-1": { limit: { context: 1000 } } } } },
       }),
     );
-    expect(tolerant.problem).toBeNull();
-    expect(tolerant.limitFor("opencode", "demo-model-1")).toBe(1000);
+    expect(unknownKey.problem).toBeNull();
+    expect(unknownKey.warning).toContain("somethingNew");
+    expect(unknownKey.limitFor("opencode", "demo-model-1")).toBe(1000);
 
     // A malformed vendor is skipped, the other vendors keep their limits.
     const catalog = parseModelsDevCatalog(
@@ -650,6 +741,7 @@ describe("opencode collector telemetry", () => {
       }),
     );
     expect(catalog.problem).toBeNull();
+    expect(catalog.warning).toBeNull();
     expect(catalog.limitFor("good", "m1")).toBe(1000);
     expect(catalog.limitFor("bad", "m2")).toBeNull();
     expect(catalog.limitFor("mixed", "m3")).toBeNull();
@@ -662,21 +754,59 @@ describe("opencode collector telemetry", () => {
     const original = db.prepare("SELECT value FROM kv WHERE key = ?").get("models-dev:catalog").value;
     db.prepare("UPDATE kv SET value = ? WHERE key = ?").run("not json", "models-dev:catalog");
     db.close();
-    const events = await collectOpencodeEvents({
-      dbPath,
-      since: new Date(0),
-      onWarning: (message) => warnings.push(message),
+    try {
+      const events = await collectOpencodeEvents({
+        dbPath,
+        since: new Date(0),
+        onWarning: (message) => warnings.push(message),
+      });
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("models.dev catalog unusable");
+      // The rows still report the used tokens, and the limit is null.
+      const contextEvents = byLabel(events, "context:");
+      expect(contextEvents.length).toBeGreaterThan(0);
+      expect(contextEvents.every((event) => event.metadata.contextLimit === null)).toBe(true);
+    } finally {
+      // Put the catalog back in a finally block, so a failing expectation
+      // cannot leave the shared fixture broken for every later test.
+      const restore = new DatabaseSync(dbPath);
+      restore.prepare("UPDATE kv SET value = ? WHERE key = ?").run(original, "models-dev:catalog");
+      restore.close();
+    }
+  });
+
+  it("says out loud when the cached catalog carries an unknown envelope key", async () => {
+    const warnings = [];
+    const db = new DatabaseSync(dbPath);
+    const original = db.prepare("SELECT value FROM kv WHERE key = ?").get("models-dev:catalog").value;
+    const body = JSON.stringify({
+      opencode: { models: { "demo-model-1": { limit: { context: CONTEXT_LIMIT } } } },
     });
-    expect(warnings.length).toBe(1);
-    expect(warnings[0]).toContain("models.dev catalog unusable");
-    // The rows still report the used tokens, and the limit is null.
-    const contextEvents = byLabel(events, "context:");
-    expect(contextEvents.length).toBeGreaterThan(0);
-    expect(contextEvents.every((event) => event.metadata.contextLimit === null)).toBe(true);
-    // Put the catalog back so the rest of the file sees the normal fixture.
-    const restore = new DatabaseSync(dbPath);
-    restore.prepare("UPDATE kv SET value = ? WHERE key = ?").run(original, "models-dev:catalog");
-    restore.close();
+    db.prepare("UPDATE kv SET value = ? WHERE key = ?").run(
+      JSON.stringify({ updatedAt: 1, digest: "fixture", somethingNew: { nested: true }, body }),
+      "models-dev:catalog",
+    );
+    db.close();
+    try {
+      const events = await collectOpencodeEvents({
+        dbPath,
+        since: new Date(0),
+        onWarning: (message) => warnings.push(message),
+      });
+      // The unknown key is reported, not swallowed.
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("models.dev catalog warning");
+      expect(warnings[0]).toContain("somethingNew");
+      // The valid limit still works: one odd field cannot erase every
+      // vendor's limits.
+      const contextEvents = byLabel(events, "context:");
+      expect(contextEvents.length).toBeGreaterThan(0);
+      expect(contextEvents.some((event) => event.metadata.contextLimit === CONTEXT_LIMIT)).toBe(true);
+    } finally {
+      const restore = new DatabaseSync(dbPath);
+      restore.prepare("UPDATE kv SET value = ? WHERE key = ?").run(original, "models-dev:catalog");
+      restore.close();
+    }
   });
 
   it("gives a rewritten raw provider id its own cost event id", async () => {

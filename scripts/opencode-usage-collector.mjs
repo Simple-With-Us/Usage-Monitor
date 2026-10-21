@@ -125,7 +125,13 @@ export async function collectOpencodeEvents({
     if (catalog.problem) {
       onWarning?.(`models.dev catalog unusable: ${catalog.problem}`);
     }
-    const extraEvents = buildOpencodeExtraEvents({ ...telemetry, catalog });
+    // A catalog that IS usable but is not the expected shape is reported the
+    // same way: the limits still work, so the run log has to say that the
+    // envelope changed instead of letting the change pass unnoticed.
+    if (catalog.warning) {
+      onWarning?.(`models.dev catalog warning: ${catalog.warning}`);
+    }
+    const extraEvents = buildOpencodeExtraEvents({ ...telemetry, catalog, onWarning });
     // The session fact is dated at the session's creation instant, so the
     // window filter would drop it for every session that was created before
     // the window even though the session is still discovered through its

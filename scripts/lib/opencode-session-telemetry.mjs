@@ -326,21 +326,20 @@ export async function readOpencodeTelemetry(dbPath, since) {
  * JSON string that has to be parsed a second time.  `updatedAt` is a number
  * in the live catalog and a string in older ones, so both are accepted.
  *
- * The envelope is deliberately TOLERANT: an unknown top-level key is ignored
- * and the body is accepted as a JSON string or as an already-parsed object.
- * A strict envelope turned one odd field into zero context limits for every
- * vendor at once, and every context row then reported a null limit with no
- * error anywhere.  The only thing that can still make the whole catalog
- * unusable is a cached value with no usable body, and that is reported
- * through `problem` so the collector can say so out loud.
+ * The envelope is CLOSED: an unknown top-level key is a shape violation and
+ * the strict schema rejects it.  It is also ISOLATED: the violation is
+ * reported as a warning and the known fields are still read, so one odd
+ * field cannot erase every vendor's limits.  The earlier tolerant envelope
+ * accepted the key silently, so a catalog that changed shape looked exactly
+ * like a catalog that was fine.
  */
-const ModelsDevCatalogEnvelopeSchema = z
-  .object({
-    updatedAt: z.union([z.string(), z.number()]).optional(),
-    digest: z.string().optional(),
-    body: z.union([z.string(), z.record(z.string(), z.unknown())]),
-  })
-  .passthrough();
+const ModelsDevCatalogEnvelopeFieldsSchema = z.object({
+  updatedAt: z.union([z.string(), z.number()]).optional(),
+  digest: z.string().optional(),
+  body: z.union([z.string(), z.record(z.string(), z.unknown())]),
+});
+
+const ModelsDevCatalogEnvelopeSchema = ModelsDevCatalogEnvelopeFieldsSchema.strict();
 
 /**
  * The provider / model records inside the catalog body.  The vendor records
@@ -385,6 +384,12 @@ const ModelsDevBodySchema = z.record(z.string(), z.unknown());
  * body at all returns an empty catalog whose `problem` says why, so the
  * collector can log it instead of losing the context limits silently.
  *
+ * `problem` and `warning` say different things.  `problem` means the catalog
+ * cannot be used at all and every limit is lost.  `warning` means the
+ * catalog IS usable and something about it is not as expected, for example an
+ * unknown envelope key: the limits are still reported, and the collector logs
+ * the warning so the shape change is visible instead of silent.
+ *
  * A limit is only ever reported for the EXACT provider and model the message
  * used.  The catalog defines 546 model ids under more than one provider with
  * different windows (io-net publishes moonshotai/kimi-k2-instruct-0905 with
@@ -397,17 +402,49 @@ export function parseModelsDevCatalog(rawValue) {
   const unusable = (problem) => ({
     updatedAt: null,
     problem,
+    /** The catalog cannot be used, so there is nothing to warn about. */
+    warning: null,
     /** No limit is known, because the cached catalog cannot be used. */
     limitFor: () => null,
   });
+  // A missing catalog is the NORMAL state on a fresh install, or after a
+  // failed catalog fetch, so it gets its own message: an operator must not
+  // chase a corruption that does not exist.
+  if (
+    rawValue === null ||
+    rawValue === undefined ||
+    (typeof rawValue === "string" && !rawValue.trim())
+  ) {
+    return unusable("the cached catalog is missing (opencode has not cached models.dev yet)");
+  }
   const outer = parseJson(rawValue);
   if (!outer || typeof outer !== "object" || Array.isArray(outer)) {
     return unusable("the cached catalog is not a JSON object");
   }
-  const envelope = ModelsDevCatalogEnvelopeSchema.safeParse(outer);
-  if (!envelope.success) return unusable("the cached catalog has no usable body");
+  const strict = ModelsDevCatalogEnvelopeSchema.safeParse(outer);
+  let envelope = null;
+  let warning = null;
+  if (strict.success) {
+    envelope = strict.data;
+  } else {
+    // The envelope is closed, so an unknown top-level key is a shape
+    // violation.  It is isolated to the envelope: the known fields are still
+    // read, so one odd field cannot erase every vendor's limits, and the
+    // violation is reported instead of being swallowed.
+    const unknownKeys = strict.error.issues
+      .filter((issue) => issue.code === "unrecognized_keys")
+      .flatMap((issue) => issue.keys ?? []);
+    const otherIssues = strict.error.issues.filter(
+      (issue) => issue.code !== "unrecognized_keys",
+    );
+    if (otherIssues.length > 0) return unusable("the cached catalog has no usable body");
+    const known = ModelsDevCatalogEnvelopeFieldsSchema.safeParse(outer);
+    if (!known.success) return unusable("the cached catalog has no usable body");
+    envelope = known.data;
+    warning = `the cached catalog envelope carries unknown key(s): ${unknownKeys.join(", ")}`;
+  }
   const bodyRaw =
-    typeof envelope.data.body === "string" ? parseJson(envelope.data.body) : envelope.data.body;
+    typeof envelope.body === "string" ? parseJson(envelope.body) : envelope.body;
   if (!bodyRaw || typeof bodyRaw !== "object" || Array.isArray(bodyRaw)) {
     return unusable("the cached catalog body is not a JSON object");
   }
@@ -433,10 +470,15 @@ export function parseModelsDevCatalog(rawValue) {
   }
 
   return {
-    updatedAt:
-      envelope.data.updatedAt === undefined ? null : String(envelope.data.updatedAt),
-    /** Null when the cached catalog was usable. */
+    updatedAt: envelope.updatedAt === undefined ? null : String(envelope.updatedAt),
+    /** Null when the cached catalog was unusable. */
     problem: null,
+    /**
+     * Null when nothing about the catalog was off.  A non-null warning means
+     * the catalog is USABLE and something about it is not as expected, for
+     * example an unknown envelope key.
+     */
+    warning,
     /** Context limit for one provider + model pair, or null. */
     limitFor(providerId, modelId) {
       if (!providerId || !modelId) return null;
@@ -971,6 +1013,82 @@ export function opencodeLifecycleEvent({ row, project }) {
 }
 
 /**
+ * One token count from opencode's assistant payload.
+ *
+ * The payload is untrusted external input, so it is parsed with a schema
+ * before any of it reaches telemetry.  A count is a finite number or a
+ * numeric string; null and an absent count are zero.  Anything else is not a
+ * count, so the payload is rejected instead of guessed at.
+ *
+ * The count itself is read with the TOKEN PARSER'S OWN RULE
+ * (session-token-collectors.mjs finiteCount: a finite number above zero is the
+ * count and anything else counts as zero), so the context total is always
+ * exactly the token rows' total for the same message.  A negative count is
+ * therefore zero here, the same as it is on the token row.
+ */
+const TokenCountSchema = z
+  .union([z.number().finite(), z.string(), z.null()])
+  .optional()
+  .transform((value) => {
+    if (value === undefined || value === null) return 0;
+    const count = Number(value);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  });
+
+/**
+ * The cache counts inside the token payload.  The object is stripped of the
+ * keys the collector does not read (opencode may publish more than read and
+ * write), and a missing or null cache counts as zero on both sides.
+ */
+const TokenCacheSchema = z
+  .object({
+    read: TokenCountSchema,
+    write: TokenCountSchema,
+  })
+  .nullable()
+  .optional();
+
+/**
+ * The token payload of one assistant message.
+ *
+ * The object is stripped of the keys the collector does not read, so a new
+ * opencode field cannot break the parse, and every key the collector DOES
+ * read is validated.  A payload that does not match produces no context row
+ * at all: a context row whose total is a guess would break the promise that
+ * it equals the token rows' total for the same message.
+ */
+const OpencodeTokensSchema = z.object({
+  input: TokenCountSchema,
+  output: TokenCountSchema,
+  reasoning: TokenCountSchema,
+  cache: TokenCacheSchema,
+});
+
+/**
+ * The context total for one assistant message, parsed from the payload.
+ *
+ * The total is input + cache read + cache write + output + reasoning, which
+ * is the token rows' total for the same message: the token parser folds the
+ * reasoning into the output row and reports the cache write as a cache
+ * creation row.
+ *
+ * Returns null when the payload is not the expected shape, so the caller can
+ * report it instead of sending a wrong total.
+ */
+export function parseOpencodeContextTokens(data) {
+  const parsed = OpencodeTokensSchema.safeParse(data?.tokens);
+  if (!parsed.success) return null;
+  const { input, output, reasoning, cache } = parsed.data;
+  return (
+    input +
+    (cache?.read ?? 0) +
+    (cache?.write ?? 0) +
+    output +
+    reasoning
+  );
+}
+
+/**
  * Every non-token event for one window: the reported cost, the context
  * utilization, the session facts and the lifecycle signals.
  */
@@ -981,6 +1099,7 @@ export function buildOpencodeExtraEvents({
   messageCounts,
   projects,
   catalog,
+  onWarning,
 }) {
   const projectBySession = projectNamesBySession(sessions, projects);
   const countsBySession = new Map();
@@ -1031,30 +1150,42 @@ export function buildOpencodeExtraEvents({
       if (costEvent) events.push(costEvent);
     }
 
-    const contextTokens =
-      (numberOrNull(data.tokens?.input) ?? 0) +
-      (numberOrNull(data.tokens?.cache?.read) ?? 0) +
-      (numberOrNull(data.tokens?.cache?.write) ?? 0) +
-      (numberOrNull(data.tokens?.output) ?? 0) +
-      (numberOrNull(data.tokens?.reasoning) ?? 0);
-    // Only the exact provider and model of the message may set the limit.
-    // The catalog publishes 546 model ids under more than one provider with
-    // different context windows, so a fallback to another vendor's window
-    // would report a utilization that is off by an order of magnitude.
-    const contextLimit = catalog?.limitFor(providerId, modelId) ?? null;
-    if (occurredAtIso) {
-      const contextEvent = opencodeContextEvent({
-        sessionId,
-        messageId,
-        modelId,
-        providerId,
-        provider: info.provider,
-        contextTokens,
-        contextLimit,
-        occurredAtIso,
-        project,
-      });
-      if (contextEvent) events.push(contextEvent);
+    // The token payload is untrusted external input, so the context total is
+    // derived from the PARSED payload and not from the raw optional chaining.
+    // A payload that is not the expected shape produces no context row: a
+    // guessed total would break the promise that the context row equals the
+    // token rows' total for the same message.
+    const contextTokens = parseOpencodeContextTokens(data);
+    const hasTokenPayload = data?.tokens !== undefined && data?.tokens !== null;
+    if (contextTokens === null) {
+      // A message with no token payload at all is normal (opencode writes
+      // assistant rows without tokens), so only a payload that is present and
+      // malformed is worth a word in the run log.
+      if (hasTokenPayload) {
+        onWarning?.(
+          `opencode assistant message ${messageId} carries a token payload that is not the expected shape, so no context row was sent for it`,
+        );
+      }
+    } else {
+      // Only the exact provider and model of the message may set the limit.
+      // The catalog publishes 546 model ids under more than one provider with
+      // different context windows, so a fallback to another vendor's window
+      // would report a utilization that is off by an order of magnitude.
+      const contextLimit = catalog?.limitFor(providerId, modelId) ?? null;
+      if (occurredAtIso) {
+        const contextEvent = opencodeContextEvent({
+          sessionId,
+          messageId,
+          modelId,
+          providerId,
+          provider: info.provider,
+          contextTokens,
+          contextLimit,
+          occurredAtIso,
+          project,
+        });
+        if (contextEvent) events.push(contextEvent);
+      }
     }
   }
 
