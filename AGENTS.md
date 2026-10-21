@@ -23,6 +23,19 @@ Hosting and routing (apexes, hostnames, hosts, deploy paths): consult the privat
 >
 > Archaeology: pre-2026-09-22 `services.jays.usage.*` references in pre-rename `docs/rollouts/*`, `docs/audits/*`, and pre-2026-09-22 rows of `docs/EFFORT-LOG.md` + `STATUS.md` are historical record — each carries a dated archaeology note at the top of the file.  Do not rename them.  The same applies to the unsuffixed `com.simplewithus.usage.client` / `.local` rows dated 2026-09-23 to 2026-10-11.
 
+> **App names (owner ruling 2026-10-21).**  The two iOS apps carry **three** names,  and each
+> is right in its own place:  the App Store listings are **Usage Monitor Client** and **Usage
+> Monitor Local**,  the home-screen labels (`CFBundleDisplayName`) are **Usage Monitor** and
+> **Local Monitor**,  and the website brand is plain **Usage Monitor**.  The listings use the
+> word-swapped form because "Usage Monitor" and "Local Monitor" were both already taken in the
+> App Store and an app cannot carry another app's name;  the owner prefers the swapped form.
+> Do not "unify" them:  do not change `CFBundleDisplayName` to the longer names,  and do not
+> change the listing names to the shorter ones.  Copy that names an app to a user —  the
+> dashboard,  the in-app strings,  the Chrome extension title,  the App Store listing script —
+> uses the **listing** name.  The pre-swap word order ("Usage Client Monitor" / "Usage Local
+> Monitor") is gone from the product surface;  it survives only in the dated records above,
+> which are not to be renamed.
+
 ## Codex Cloud protocol bootstrap
 
 Run `bash .codex/setup.sh` during cloud provisioning and `bash .codex/maintenance.sh` on
