@@ -547,6 +547,63 @@ export function projectNamesBySession(sessions, projects) {
   return bySession;
 }
 
+/**
+ * How many session names are remembered.  The map only has to outlive the
+ * sessions whose rows Usage Monitor still holds, so it is capped; the cap is
+ * far above the number of opencode sessions a workstation accumulates.
+ */
+export const MAX_FROZEN_PROJECT_NAMES = 5_000;
+
+/**
+ * The project name a session is attributed to, decided once and never moved.
+ *
+ * Usage Monitor stores a row under a stable event id and answers HTTP 409 for
+ * the WHOLE batch when a replay arrives with the same id and different
+ * content.  The project name is part of that content: `assertCompatible-
+ * ProjectAttribution` compares the stored name with the replayed one and
+ * throws when they differ, so a project that opencode names after the fact,
+ * or a directory that gets renamed, would take every opencode event in the
+ * batch down with it.  The collector replays the last 24 hours on every pass
+ * (COLLECTOR_STATE_OVERLAP_MINUTES), so the renamed name would arrive on the
+ * very next pass and the producer would stay wedged until the rename was
+ * undone.
+ *
+ * A name is therefore frozen the first time a session resolves to one.  A
+ * session that resolved to NO name is not frozen: a row stored without a
+ * project can still gain one, because Usage Monitor only compares two names
+ * when both sides carry one.
+ *
+ * The frozen map is updated IN PLACE, so the caller owns the file it keeps it
+ * in and can persist whatever the pass decided.
+ */
+export function freezeProjectNames(resolvedBySession, frozenBySession = new Map()) {
+  const frozen = frozenBySession instanceof Map ? frozenBySession : new Map();
+  const previous = new Map(frozen);
+  const names = new Map();
+  for (const [sessionId, resolvedName] of resolvedBySession instanceof Map ? resolvedBySession : []) {
+    const frozenName = previous.get(sessionId);
+    if (frozenName) {
+      names.set(sessionId, frozenName);
+      continue;
+    }
+    names.set(sessionId, resolvedName ?? null);
+  }
+  // The sessions in this window come first, so trimming keeps the ones that
+  // are live and drops the oldest remembered names.
+  const rebuilt = new Map();
+  for (const [sessionId, name] of names) {
+    if (name) rebuilt.set(sessionId, name);
+    if (rebuilt.size >= MAX_FROZEN_PROJECT_NAMES) break;
+  }
+  for (const [sessionId, name] of previous) {
+    if (rebuilt.size >= MAX_FROZEN_PROJECT_NAMES) break;
+    if (!rebuilt.has(sessionId) && name) rebuilt.set(sessionId, name);
+  }
+  frozen.clear();
+  for (const [sessionId, name] of rebuilt) frozen.set(sessionId, name);
+  return names;
+}
+
 /** Attach the project + session id to one event without touching its id. */
 export function withOpencodeAttribution(event, { sessionId, project }) {
   if (!event) return event;
@@ -563,11 +620,18 @@ export function withOpencodeAttribution(event, { sessionId, project }) {
  * Token rows, one assistant row at a time so the session id can be attached
  * without touching the shared parser or the token event ids.
  *
- * The project rides on every token row: UM ignores `project` when it compares
- * a replay against the stored row, so this never 409s and it back-fills the
- * project attribution onto the rows UM already stored.  The session id is
- * attached only to rows completed after OPENCODE_SESSION_ID_CUTOFF_MS, for
- * the reason documented on that constant.
+ * The project rides on every token row.  Usage Monitor strips `project` from
+ * the metadata it compares, so attaching it to a row it already stored
+ * back-fills the attribution instead of conflicting, and a row it stored
+ * without a project can still gain one.  What it does NOT ignore is the name:
+ * `assertCompatibleProjectAttribution` compares the stored name against the
+ * replayed one and answers HTTP 409 for the WHOLE batch when they differ, so
+ * a project that opencode names later, or a directory that gets renamed,
+ * would take every opencode event down with it.  freezeProjectNames is what
+ * keeps the name still.
+ *
+ * The session id is attached only to rows completed after
+ * OPENCODE_SESSION_ID_CUTOFF_MS, for the reason documented on that constant.
  */
 export function buildOpencodeTokenEvents({
   assistantRows,
@@ -780,9 +844,13 @@ export function opencodeSessionEvent({ session, project }) {
   // projectNameForSession answers with the project table's name once opencode
   // has named it and the directory basename until then, so a session that is
   // named or renamed mid-life would otherwise take a new id.  Usage Monitor
-  // strips metadata.project before it compares a replay against the stored row,
-  // so it would see only a brand-new id and store a SECOND fact row for the
-  // same session.  The id stays a function of the immutable facts only.
+  // strips metadata.project from the metadata it compares, so a new id would
+  // store a SECOND fact row for the same session rather than dedupe against
+  // it.  The id stays a function of the immutable facts only.
+  //
+  // The name itself is held still by freezeProjectNames, because Usage Monitor
+  // compares the two project names separately and answers HTTP 409 for the
+  // whole batch when they differ.
   const idMetadata = { ...metadata };
   delete idMetadata.project;
 
@@ -1140,9 +1208,12 @@ export function buildOpencodeExtraEvents({
   messageCounts,
   projects,
   catalog,
+  projectBySession: givenProjectBySession,
   onWarning,
 }) {
-  const projectBySession = projectNamesBySession(sessions, projects);
+  // The caller passes the frozen names, so every event of a session carries
+  // the same project name as the token rows of that session.
+  const projectBySession = givenProjectBySession ?? projectNamesBySession(sessions, projects);
   const countsBySession = new Map();
   for (const row of messageCounts) {
     const sessionId = typeof row?.session_id === "string" ? row.session_id : null;
