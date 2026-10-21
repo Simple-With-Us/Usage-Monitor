@@ -7,9 +7,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
 
-import { collectOpencodeEvents } from "../opencode-usage-collector.mjs";
+import {
+  collectOpencodeEvents,
+  opencodeProjectNamesPath,
+  readFrozenProjectNames,
+  writeFrozenProjectNames,
+} from "../opencode-usage-collector.mjs";
 import { OPENCODE_PRODUCER_ID, parseOpencodeMessageRows } from "../lib/session-token-collectors.mjs";
 import {
+  freezeProjectNames,
   OPENCODE_SESSION_ID_CUTOFF_MS,
   resolveOpencodeSessionIdCutoffMs,
 } from "../lib/opencode-session-telemetry.mjs";
@@ -681,27 +687,35 @@ describe("opencode collector telemetry", () => {
     expect(secondSnapshot.eventId).not.toBe(firstSnapshot.eventId);
   });
 
-  it("keeps the session-fact id stable when the project is named", async () => {
-    const first = await collect();
+  it("keeps the project name of a session once it has been seen", async () => {
+    const frozen = new Map();
+    const first = await collect({ frozenProjectNames: frozen });
     const firstSession = first.find((event) => event.label === "session");
+    const firstToken = byLabel(first, "token:")[0];
     // The fixture's project row has no name, so the project is the directory
-    // basename.  opencode fills the name in later, which is exactly the moment
-    // a project-derived id would fork.
+    // basename, and that name is frozen from here on.
     expect(firstSession.metadata.project).toBe("Demo-Project");
+    expect(frozen.get(SESSION_ID)).toBe("Demo-Project");
 
     const db = new DatabaseSync(dbPath);
     db.prepare("UPDATE project SET name = ? WHERE id = ?").run("Named-Project", "proj_fixture");
     db.close();
 
     try {
-      const second = await collect();
+      const second = await collect({ frozenProjectNames: frozen });
       const secondSession = second.find((event) => event.label === "session");
-      // The emitted row still carries the current name...
-      expect(secondSession.metadata.project).toBe("Named-Project");
-      // ...but the id did not move, because Usage Monitor strips
-      // metadata.project before it compares a replay: a new id would store a
-      // SECOND fact row for the same session rather than dedupe against it.
+      const secondToken = byLabel(second, "token:")[0];
+      // Usage Monitor compares the stored project name against the replayed
+      // one and answers HTTP 409 for the WHOLE batch when they differ, so the
+      // name must not move once a session has been attributed.
+      expect(secondSession.metadata.project).toBe("Demo-Project");
+      expect(secondToken.metadata.project).toBe("Demo-Project");
+      // The id did not move either, so the replay is byte-identical and
+      // dedupes against the stored row instead of conflicting with it.
       expect(secondSession.eventId).toBe(firstSession.eventId);
+      expect(secondSession.metadata).toEqual(firstSession.metadata);
+      expect(secondToken.eventId).toBe(firstToken.eventId);
+      expect(secondToken.metadata).toEqual(firstToken.metadata);
     } finally {
       const cleanup = new DatabaseSync(dbPath);
       cleanup.prepare("UPDATE project SET name = ? WHERE id = ?").run(null, "proj_fixture");
@@ -923,5 +937,48 @@ describe("opencode collector telemetry", () => {
     expect(contextEvents[0].metadata.contextLimit).toBeNull();
     expect(contextEvents[0].limit).toBeUndefined();
     expect(events.filter((event) => event.label === "session")).toHaveLength(0);
+  });
+
+  it("lets a session that had no project gain one", () => {
+    // A row stored without a project can still gain one, because Usage
+    // Monitor only compares two names when both sides carry one.  A session
+    // with no name is therefore not frozen.
+    const frozen = new Map();
+    const withoutName = freezeProjectNames(new Map([["ses_none", null]]), frozen);
+    expect(withoutName.get("ses_none")).toBeNull();
+    expect(frozen.size).toBe(0);
+
+    const withName = freezeProjectNames(new Map([["ses_none", "Demo-Project"]]), frozen);
+    expect(withName.get("ses_none")).toBe("Demo-Project");
+    expect(frozen.get("ses_none")).toBe("Demo-Project");
+  });
+
+  it("keeps a frozen name even when the session resolves to none", () => {
+    const frozen = new Map([["ses_one", "Demo-Project"]]);
+    const names = freezeProjectNames(new Map([["ses_one", null]]), frozen);
+    expect(names.get("ses_one")).toBe("Demo-Project");
+    expect(frozen.get("ses_one")).toBe("Demo-Project");
+  });
+
+  it("keeps the frozen names in a file of their own", async () => {
+    const path = join(harnessRoot, "opencode-project-names.json");
+    const frozen = new Map([["ses_b", "Demo-Project"], ["ses_a", "Another-Project"]]);
+    expect(await writeFrozenProjectNames(path, frozen)).toBe(true);
+    // An unchanged freeze does not rewrite the file.
+    expect(await writeFrozenProjectNames(path, frozen)).toBe(false);
+
+    const read = await readFrozenProjectNames(path);
+    expect(read.get("ses_a")).toBe("Another-Project");
+    expect(read.get("ses_b")).toBe("Demo-Project");
+
+    // A missing file is an empty map, not a failure: the collector freezes
+    // the names it sees from the next pass on.
+    expect((await readFrozenProjectNames(join(harnessRoot, "absent.json"))).size).toBe(0);
+  });
+
+  it("keeps the frozen names beside the checkpoint and not in it", () => {
+    const path = opencodeProjectNamesPath("opencode");
+    expect(path.endsWith("opencode-project-names.json")).toBe(true);
+    expect(path).toContain(join("usage-monitor", "collector-state"));
   });
 });
