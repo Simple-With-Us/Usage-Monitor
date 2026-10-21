@@ -49,7 +49,10 @@ describe("CodeCaps plan metadata", () => {
     const plan = { planDetectedName: "Max 20x", planUserName: "Team", planType: "Max 20x" };
     const response = projectQuotaWindows([
       { provider: "claude", occurredAt: now, credits: 50, metadata: JSON.stringify({ source: "codecaps", ...plan }) },
-      { provider: "anthropic", occurredAt: now, credits: 50, metadata: { source: "codecaps", ...plan } },
+      // Distinct source id: `sortSourcesForDisplay` drops any candidate whose
+      // source AND reportedAt match the primary, so an identically-sourced
+      // fixture would be deduped away and its shape never reach `sources`.
+      { provider: "anthropic", occurredAt: now, credits: 50, metadata: { source: "subscription-quota-collector", ...plan } },
     ], now);
 
     const expected = {
@@ -69,7 +72,11 @@ describe("CodeCaps plan metadata", () => {
     // would compare identical fixture data and pass whichever candidate won,
     // leaving the other shape's grouped metadata unasserted.
     const group = response.quotaGroups?.find((g) => g.provider === response.windows[0].providerKey);
-    const readings = [group!.windows[0].primary, ...group!.windows[0].sources];
+    // `sortSourcesForDisplay` returns `[primary, ...rest]`, so `sources`
+    // already carries the primary: prepending `primary` again would assert the
+    // same reading twice and never the second fixture's shape.
+    const reading = group!.windows[0];
+    const readings = reading.sources.length > 1 ? reading.sources : [reading.primary];
     expect(readings).toHaveLength(2);
     for (const reading of readings) {
       expect(reading.planMetadata).toEqual(expected);
