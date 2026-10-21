@@ -940,7 +940,7 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
                   <li key={`${app.id}-${loc.id}`} className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">{loc.label}</span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {data.offline
+                      {data.offline && loc.ok == null
                         ? "Unavailable"
                         : loc.ok === true
                           ? "OK"

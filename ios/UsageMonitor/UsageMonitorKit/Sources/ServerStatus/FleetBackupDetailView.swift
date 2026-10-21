@@ -111,6 +111,8 @@ struct FleetBackupDetailView: View {
     }
 
     private func locationLabel(_ location: ServerMetrics.FleetBackups.Location) -> String {
+        // Never observed is not a failure: no probe result exists at all.
+        if location.unknown == true { return "Unknown" }
         if location.ok == true { return "OK" }
         if location.ok == false {
             return location.present == true ? "Lagging" : "Missing"
@@ -123,6 +125,7 @@ struct FleetBackupDetailView: View {
     }
 
     private func locationStatus(_ location: ServerMetrics.FleetBackups.Location) -> Theme.SemanticStatus {
+        if location.unknown == true { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }
         return .warning
