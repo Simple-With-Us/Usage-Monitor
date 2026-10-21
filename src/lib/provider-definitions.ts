@@ -17,6 +17,13 @@ export interface ProviderDefinition {
   // repurpose that scalar (e.g. Render stores bandwidth in MB), so they set a
   // truthful unit label here. Unset defaults to DEFAULT_USAGE_UNIT_LABEL.
   usageUnitLabel?: string;
+  // True when totalRequests is a stock/gauge at poll time (e.g. Backblaze
+  // storage MB inventoried now), not a cumulative month-to-date flow.
+  // Differencing a gauge into "daily requests" manufactures request spikes
+  // from inventory swings, so gauge series are excluded from request-anomaly
+  // detection (UM-1622). The value still drives request-limit soft caps,
+  // labelled with usageUnitLabel.
+  totalRequestsIsGauge?: boolean;
   /**
    * Built-ins stay in this historical registry so existing records remain
    * legible. Only `active` providers are offered for new connections or
@@ -91,7 +98,7 @@ const DEFINITIONS = [
   { name: "pushover", displayName: "Pushover", type: "builtin", category: "Notifications", usageUnitLabel: "Messages", helpNote: "Reads the application message limit, remaining messages, and reset date. The API does not expose subscription price." },
   { name: "cloudflare", displayName: "Cloudflare", type: "builtin", category: "Infrastructure", needsAccountId: true, helpNote: "Reads fixed subscriptions and, for eligible PayGo accounts, billing-grade usage cost. A Billing Read API token needs no email; email is only for a Global API key. The optional D1, R2, KV, and Queue fields are single-resource metadata/readability probes only; they do not affect billing, subscriptions, spend, usage, quotas, or PayGo eligibility." },
   { name: "hetzner", displayName: "Hetzner Cloud", type: "builtin", category: "Infrastructure", helpNote: "Inventories servers, volumes, floating/primary IPs, load balancers, and snapshots from the Hetzner Cloud API (one read token per project). totalCost is an estimated month-to-date from the public pricing catalog × current inventory, pro-rated by UTC month elapsed — labelled with a costCoverageCaveat (not an invoice). Accrued invoice / billing-history endpoints are not available on the public API." },
-  { name: "backblaze", displayName: "Backblaze B2", type: "builtin", category: "Infrastructure", usageUnitLabel: "Storage (MB)", defaultRefreshIntervalMin: 360, helpNote: "Inventories B2 buckets and file versions (including hidden versions that still bill) via the Native API with a read-only application key (listBuckets + listFiles). totalRequests is whole megabytes of stored data so a monthly request limit in MB can soft-cap storage; totalCost is an estimated MTD from public storage pricing × billable GB after the free allowance, pro-rated by UTC month — labelled with a costCoverageCaveat (not an invoice). Download bandwidth and Class A/B API transactions are not exposed by inventory APIs; set ProviderPlan.monthlyBudgetUsd and console Caps & Alerts for hard protection. Prefer a dedicated read-only key (not write/delete backup keys). API key = applicationKey; Application Key ID is required config (or pass keyId:applicationKey as the single API key field).", needsConfig: { fields: [{ key: "applicationKeyId", label: "Application Key ID", placeholder: "003…", required: true }, { key: "storageCapGb", label: "Soft storage cap (GB, optional)", placeholder: "50", advanced: true }, { key: "storagePricePerGbMonth", label: "Storage price $/GB-month (optional)", placeholder: "0.006", advanced: true }, { key: "freeStorageGb", label: "Free storage allowance GB (optional)", placeholder: "10", advanced: true }] } },
+  { name: "backblaze", displayName: "Backblaze B2", type: "builtin", category: "Infrastructure", usageUnitLabel: "Storage (MB)", totalRequestsIsGauge: true, defaultRefreshIntervalMin: 360, helpNote: "Inventories B2 buckets and file versions (including hidden versions that still bill) via the Native API with a read-only application key (listBuckets + listFiles). totalRequests is whole megabytes of stored data so a monthly request limit in MB can soft-cap storage (it is a storage gauge, excluded from request-anomaly detection); totalCost is an estimated MTD from public storage pricing × billable GB after the free allowance, pro-rated by UTC month — labelled with a costCoverageCaveat (not an invoice). Download bandwidth and Class A/B API transactions are not exposed by inventory APIs; set ProviderPlan.monthlyBudgetUsd and console Caps & Alerts for hard protection. Prefer a dedicated read-only key (not write/delete backup keys). API key = applicationKey; Application Key ID is required config (or pass keyId:applicationKey as the single API key field).", needsConfig: { fields: [{ key: "applicationKeyId", label: "Application Key ID", placeholder: "003…", required: true }, { key: "storageCapGb", label: "Soft storage cap (GB, optional)", placeholder: "50", advanced: true }, { key: "storagePricePerGbMonth", label: "Storage price $/GB-month (optional)", placeholder: "0.006", advanced: true }, { key: "freeStorageGb", label: "Free storage allowance GB (optional)", placeholder: "10", advanced: true }] } },
   { name: "coolify", displayName: "Coolify", type: "builtin", category: "Infrastructure", helpNote: "Reads server reachability/usability and application deployment status (up/down, degraded) from a Coolify instance's REST API, plus a best-effort per-server inventory of its applications, databases, and services. Coolify is a self-hosted PaaS control plane, not a metered vendor, so this connector reports no cost, invoice, or subscription state - that is intentionally left blank rather than shown as $0. Live CPU/memory/disk utilization is pushed by Coolify's optional Sentinel agent into the instance's own database and is not exposed by any documented REST endpoint, so it is not read here. Defaults to the Coolify Cloud API; set Host for a self-hosted instance.", needsConfig: { fields: [{ key: "host", label: "Host (optional; defaults to Coolify Cloud)", placeholder: "https://coolify.example.com" }] } },
   { name: "deno", displayName: "Deno Deploy", type: "builtin", category: "Developer Platform", lifecycle: "retired", helpNote: "Legacy Deno Deploy records are retained for historical reporting.  New Deno Deploy connections and automatic polling are retired because this host is dead.  Congress.Trade and other Jay apps now run on Coolify, not Deno Deploy.", needsConfig: { fields: [{ key: "orgSlug", label: "Organization slug (optional, historical)", placeholder: "legacy-org" }] } },
   { name: "apify", displayName: "Apify", type: "builtin", category: "Data", creditBased: true, helpNote: "Reads billing cycle, usage USD, maximum usage, active plan, base price, and included credits from official account APIs." },
@@ -199,6 +206,26 @@ export function usageUnitLabelForProvider(
     (provider) => canonicalProviderKey(provider.name) === canonical
   );
   return definition?.usageUnitLabel ?? DEFAULT_USAGE_UNIT_LABEL;
+}
+
+/**
+ * True when a built-in provider's totalRequests is a gauge (stock at poll
+ * time, e.g. Backblaze storage MB) rather than a cumulative flow. Keyed by
+ * canonical name like usageUnitLabelForProvider. Gauge series must not be
+ * differenced into daily "requests" for anomaly detection (UM-1622).
+ */
+export function isTotalRequestsGaugeProvider(
+  name: string,
+  providerType: string = "builtin"
+): boolean {
+  if (providerType.trim().toLowerCase() !== "builtin") {
+    return false;
+  }
+  const canonical = canonicalProviderKey(name);
+  const definition = BUILT_IN_PROVIDERS.find(
+    (provider) => canonicalProviderKey(provider.name) === canonical
+  );
+  return definition?.totalRequestsIsGauge ?? false;
 }
 
 export const PROVIDER_CATEGORIES = [
