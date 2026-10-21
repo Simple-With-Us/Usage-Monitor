@@ -14,7 +14,7 @@ import { afterEach, describe, it } from "vitest";
 import { projectScope, scrubInternalEvent, scrubResourceLogs, scrubResourceSpans } from "../allowlist.mjs";
 import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
 import { Journal } from "../journal.mjs";
-import { createReceiver } from "../otlp-receiver.mjs";
+import { createReceiver, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
 import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent } from "../um-sender.mjs";
 
 const CANARY = "CANARY_SECRET_123";
@@ -237,20 +237,31 @@ describe("the journal", () => {
     const sizeBefore = (await stat(join(dir, "journal.jsonl"))).size;
     assert.ok(sizeBefore > 512);
 
-    //  Every destination reads past the first event, so the prefix is
-    //  consumed and can be dropped.
-    const first = await journal.readBatch("um-turns", 1);
-    await journal.setOffset("um-turns", first.endOffset);
-    await journal.setOffset("um-ingest", first.endOffset);
-    await journal.setOffset("sentry", first.endOffset);
+    //  Every destination reads the same way, so the prefix they have all
+    //  read is consumed and can be dropped.  The compaction only runs when
+    //  it brings the file back under the cap, so it takes a few reads.
+    const delivered = [];
+    let sizeAfter = sizeBefore;
+    for (let index = 0; index < 8; index += 1) {
+      const batch = await journal.readBatch("um-turns", 1);
+      if (batch.events.length === 0) break;
+      delivered.push(batch.events[0].eventId);
+      await journal.setOffset("um-turns", batch.endOffset);
+      await journal.setOffset("um-ingest", batch.endOffset);
+      await journal.setOffset("sentry", batch.endOffset);
+      sizeAfter = (await stat(join(dir, "journal.jsonl"))).size;
+      if (sizeAfter < sizeBefore) break;
+    }
 
-    const sizeAfter = (await stat(join(dir, "journal.jsonl"))).size;
     assert.ok(sizeAfter < sizeBefore);
     //  The remaining events are still there, and the offset still points
-    //  at the right place.
+    //  at the right place, because the offsets are absolute.  No event is
+    //  lost and none is delivered twice.
     const rest = await journal.readBatch("um-turns", 10);
-    assert.equal(rest.events.length, 7);
-    assert.equal(rest.events[0].eventId, "event-2");
+    assert.deepEqual(
+      [...delivered, ...rest.events.map((item) => item.eventId)],
+      ["event-1", "event-2", "event-3", "event-4", "event-5", "event-6", "event-7", "event-8"],
+    );
   });
 });
 
@@ -319,9 +330,85 @@ describe("the um sender", () => {
     assert.equal(shouldPushLedgerEvent({ platform: "opencode" }, policy), false);
     assert.equal(shouldPushLedgerEvent({ platform: "claude-code" }, policy), true);
   });
+
+  it("does not bill a log record as a usage row", async () => {
+    const { journal } = await openJournal();
+    await journal.append(event(1, { kind: "log" }));
+    const posted = [];
+    const sender = createUmSender({
+      journal,
+      resolveToken: async () => "a-test-token",
+      fetchImpl: async (url, init) => {
+        posted.push({ url, body: JSON.parse(init.body) });
+        return fakeResponse(200, "{}");
+      },
+    });
+    const outcome = await sender.runOnce();
+    assert.equal(outcome.overlapSkipped, 1);
+    assert.equal(posted.some((item) => item.url.endsWith("/api/ingest/usage")), false);
+  });
 });
 
 describe("the otlp receiver", () => {
+  it("keeps the good rows of a batch that has one bad row", async () => {
+    const { journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [
+            {
+              scopeSpans: [
+                {
+                  scope: { name: "a-scope" },
+                  spans: [
+                    {
+                      traceId: "a".repeat(32),
+                      spanId: "b".repeat(16),
+                      name: "a-span",
+                      startTimeUnixNano: "1700000000000000000",
+                      endTimeUnixNano: "1700000001000000000",
+                      attributes: [{ key: "gen_ai.request.model", value: { stringValue: "a-model" } }],
+                    },
+                    { name: "a-broken-span", attributes: "not an array" },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const body = RECEIVER_RESPONSE_SCHEMA.parse(await response.json());
+      assert.equal(body.written, 1);
+      assert.equal(body.ignored, 1);
+      const batch = await journal.readBatch("um-turns", 10);
+      assert.equal(batch.events.length, 1);
+      assert.equal(batch.events[0].model, "a-model");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("refuses a payload that has no usable row", async () => {
+    const { journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ resourceSpans: [{ scopeSpans: [{ spans: "not an array" }] }] }),
+      });
+      assert.equal(response.status, 400);
+    } finally {
+      await receiver.close();
+    }
+  });
+
   it("answers a malformed request target instead of crashing", async () => {
     const { journal } = await openJournal();
     const receiver = createReceiver({ journal, port: 0 });
@@ -384,7 +471,7 @@ describe("the otlp receiver", () => {
         }),
       });
       assert.equal(response.status, 200);
-      const body = await response.json();
+      const body = RECEIVER_RESPONSE_SCHEMA.parse(await response.json());
       assert.equal(body.written, 1);
       const batch = await journal.readBatch("um-turns", 10);
       assert.equal(batch.events.length, 1);

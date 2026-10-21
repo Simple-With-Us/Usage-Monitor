@@ -111,6 +111,17 @@ function createMutex() {
   };
 }
 
+/**
+ * The id of an event, when the event carries a valid one.
+ *
+ * The journal validates every row before a sender can see it, so this is
+ * the second guard for a caller that maps ids out of an event.
+ */
+export function eventIdOf(event) {
+  const checked = JournalEventSchema.safeParse(event);
+  return checked.success ? checked.data.eventId : undefined;
+}
+
 /** A destination name becomes a file name, so it is restricted. */
 export function normalizeDestination(name) {
   const value = String(name ?? "").trim().toLowerCase();
@@ -395,16 +406,19 @@ export class Journal {
     if (!this.handle && !(await this.exists())) {
       return { events, endOffset: start };
     }
-    //  The base is captured for the whole read.  A compaction that runs
-    //  while this read is in flight moves the base of the FILE, but the
-    //  positions of THIS read belong to the file it opened.  Using the
-    //  new base with the old positions would hand out an offset that is
-    //  too large and would skip events.
-    const base = this.base;
-    const file = await open(this.journalPath, fsConstants.O_RDONLY);
-    try {
+    //  The base and the file are taken together, under the file mutex, so
+    //  a compaction cannot slip between them.  A compaction that runs
+    //  after this point replaces the file, but the handle below still
+    //  points at the file this read belongs to, so the positions of this
+    //  read and the base of this read always belong together.
+    const opened = await this.fileMutex(async () => {
+      const base = this.base;
+      const file = await open(this.journalPath, fsConstants.O_RDONLY);
       const info = await file.stat();
-      const size = info.size;
+      return { base, file, size: info.size };
+    });
+    const { base, file, size } = opened;
+    try {
       const fileStart = Math.max(0, start - base);
       if (fileStart >= size) return { events, endOffset: start };
       const decoder = new StringDecoder("utf8");
@@ -499,6 +513,12 @@ export class Journal {
     if (target <= this.base) return false;
     const size = await this.fileSize();
     if (size <= this.maxJournalBytes) return false;
+    //  The compaction rewrites the whole remaining file, so it only runs
+    //  when the rewrite actually brings the file back under the cap.  A
+    //  file that stays over the cap would otherwise be rewritten on every
+    //  append, which amplifies the writes and stalls the receiver.
+    const remaining = size - Math.min(target - this.base, size);
+    if (remaining >= this.maxJournalBytes) return false;
     await this.compactTo(target);
     return true;
   }

@@ -288,10 +288,13 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * secret CLI.  Otherwise the token is read from the Mac-side fleet secret
  * store.  The value is held in memory only and is never written to disk.
  *
- * The secret store keeps its own in-memory cache, so the helper process is
- * spawned at most once per hub run instead of once per delivery pass.  A
- * miss is memoized as well, so a hub without the secret does not spawn the
- * helper every ten seconds either.
+ * The secret store keeps a miss in its own cache for the life of the
+ * process, so the store cache is not used here: a secret that appears
+ * later, or a token that is rotated, has to be seen by a running hub.  The
+ * memo above is the only cache: the helper process is spawned at most once
+ * per minute instead of once per delivery pass, and a miss is memoized as
+ * well, so a hub without the secret does not spawn the helper every ten
+ * seconds either.
  */
 export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
   let memo = { value: undefined, at: 0 };
@@ -302,7 +305,11 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
     if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
-      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: true });
+      //  The store cache is NOT used here.  It keeps a miss forever, so a
+      //  secret that appears later, or a token that is rotated, would
+      //  never be seen again by a running hub.  The memo above keeps the
+      //  helper process to one call per minute instead of one per pass.
+      value = fleetSecretsGet("USAGE_INGEST_TOKEN", { useCache: false });
     } catch {
       value = undefined;
     }
@@ -533,11 +540,15 @@ export function createUmSender({
     const skippedTurns = turnBatch.events.length - turnEvents.length;
 
     //  The ledger feed skips the platforms that already report on another
-    //  path, so one turn is never stored twice.
-    const ingestEvents = ingestBatch.events.filter((event) => shouldPushLedgerEvent(event, overlapPolicy));
+    //  path, so one turn is never stored twice.  A log record is skipped
+    //  as well: it carries the same token counts as the span of the same
+    //  call, so a log row would be a second billable row for one turn.
+    const ingestEvents = ingestBatch.events.filter(
+      (event) => event?.kind !== "log" && shouldPushLedgerEvent(event, overlapPolicy),
+    );
     const overlapSkipped = ingestBatch.events.length - ingestEvents.length;
     if (overlapSkipped > 0) {
-      logger.info("um ledger rows skipped for an overlapping platform", {
+      logger.info("um ledger rows skipped for an overlapping platform or a log record", {
         destination: UMBER_INGEST_DESTINATION,
         skipped: overlapSkipped,
       });
