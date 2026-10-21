@@ -377,6 +377,26 @@ describe("opencode collector telemetry", () => {
       // input 10 + cache.read 20 + cache.write 40 + output 5.
       expect(context.quantity).toBe(75);
       expect(context.metadata.contextTokens).toBe(75);
+      // The token rows the context total claims to match: assert them, or this
+      // test passes even when the cache-write contribution is missing from one
+      // side of the equality.
+      const tokenRows = events
+        .filter(
+          (event) =>
+            event.label.startsWith("token:") &&
+            event.occurredAt === new Date(BASE_MS + 7_500).toISOString(),
+        )
+        .map((event) => [event.label, event.quantity])
+        .sort(([left], [right]) => left.localeCompare(right));
+      expect(tokenRows).toEqual([
+        ["token:cacheCreation", 40],
+        ["token:cacheRead", 20],
+        ["token:input", 10],
+        ["token:output", 5],
+      ]);
+      expect(
+        tokenRows.reduce((total, [, quantity]) => total + quantity, 0),
+      ).toBe(context.metadata.contextTokens);
     } finally {
       const cleanup = new DatabaseSync(dbPath);
       cleanup.prepare("DELETE FROM session_message WHERE id = ?").run(cacheWriteId);
@@ -533,6 +553,34 @@ describe("opencode collector telemetry", () => {
     // of the snapshot, so a changed snapshot is a new row and never a
     // conflict against the stored one.
     expect(secondSnapshot.eventId).not.toBe(firstSnapshot.eventId);
+  });
+
+  it("keeps the session-fact id stable when the project is named", async () => {
+    const first = await collect();
+    const firstSession = first.find((event) => event.label === "session");
+    // The fixture's project row has no name, so the project is the directory
+    // basename.  opencode fills the name in later, which is exactly the moment
+    // a project-derived id would fork.
+    expect(firstSession.metadata.project).toBe("Demo-Project");
+
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE project SET name = ? WHERE id = ?").run("Named-Project", "proj_fixture");
+    db.close();
+
+    try {
+      const second = await collect();
+      const secondSession = second.find((event) => event.label === "session");
+      // The emitted row still carries the current name...
+      expect(secondSession.metadata.project).toBe("Named-Project");
+      // ...but the id did not move, because Usage Monitor strips
+      // metadata.project before it compares a replay: a new id would store a
+      // SECOND fact row for the same session rather than dedupe against it.
+      expect(secondSession.eventId).toBe(firstSession.eventId);
+    } finally {
+      const cleanup = new DatabaseSync(dbPath);
+      cleanup.prepare("UPDATE project SET name = ? WHERE id = ?").run(null, "proj_fixture");
+      cleanup.close();
+    }
   });
 
   it("emits lifecycle rows for compaction and model switches", async () => {

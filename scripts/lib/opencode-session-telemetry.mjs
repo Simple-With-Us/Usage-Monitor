@@ -730,25 +730,32 @@ export function opencodeSessionEvent({ session, project }) {
   const createdIso = isoFromMs(session.time_created);
   if (!createdIso) return null;
 
-  const metadata = {
-    sessionId,
-    ...(project ? { project } : {}),
-    sessionCreatedAt: createdIso,
-  };
+  const metadata = { sessionId, sessionCreatedAt: createdIso };
   if (typeof session.parent_id === "string" && session.parent_id) {
     metadata.sessionParentId = session.parent_id.slice(0, 120);
   }
+  if (project) metadata.project = project;
+
+  // The project rides on the row but is deliberately NOT part of the id:
+  // projectNameForSession answers with the project table's name once opencode
+  // has named it and the directory basename until then, so a session that is
+  // named or renamed mid-life would otherwise take a new id.  Usage Monitor
+  // strips metadata.project before it compares a replay against the stored row,
+  // so it would see only a brand-new id and store a SECOND fact row for the
+  // same session.  The id stays a function of the immutable facts only.
+  const idMetadata = { ...metadata };
+  delete idMetadata.project;
 
   return withOpencodeAttribution(
     {
-      // The id covers the metadata, so a fact that changes produces a new row
-      // rather than a conflict against the stored one.
+      // The id covers the rest of the metadata, so a fact that changes produces
+      // a new row rather than a conflict against the stored one.
       eventId: shaEventId([
         OPENCODE_PRODUCER_ID,
         sessionId,
         "session",
         "facts",
-        stableJson(metadata),
+        stableJson(idMetadata),
       ]),
       // The session row describes the opencode session itself, so its
       // provider is the producer and not the vendor of one of its turns.
