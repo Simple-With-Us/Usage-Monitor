@@ -296,7 +296,11 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * well, so a hub without the secret does not spawn the helper every ten
  * seconds either.
  */
-export function createTokenResolver({ env = process.env, now = () => Date.now() } = {}) {
+export function createTokenResolver({
+  env = process.env,
+  now = () => Date.now(),
+  getSecret = fleetSecretsGetAsync,
+} = {}) {
   let memo = { value: undefined, at: 0 };
   return async function resolveToken() {
     const fromEnv = env.USAGE_INGEST_TOKEN?.trim();
@@ -315,10 +319,14 @@ export function createTokenResolver({ env = process.env, now = () => Date.now() 
       //  failure (fetch/auth failure, timeout, missing binary) throws with
       //  its cause instead of reading as missing, so it is retried on the
       //  next pass rather than memoized as absent.
-      value = await fleetSecretsGetAsync("USAGE_INGEST_TOKEN", { strict: true });
+      value = await getSecret("USAGE_INGEST_TOKEN", { strict: true });
     } catch (error) {
-      if (error?.secretName === "USAGE_INGEST_TOKEN") throw error;
-      value = undefined;
+      //  A transient lookup failure keeps the last good token, so a hub that
+      //  already holds one keeps delivering.  The memo is not stamped here, so
+      //  the next pass looks again, and a failed lookup is never memoized as
+      //  absent.  With no good token yet, the failure is thrown, as before.
+      if (memo.value) return memo.value;
+      throw error;
     }
     memo = {
       value: typeof value === "string" && value.trim() ? value.trim() : undefined,
