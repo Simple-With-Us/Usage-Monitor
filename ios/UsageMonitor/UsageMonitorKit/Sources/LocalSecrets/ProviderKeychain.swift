@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// Keychain storage for provider API keys (Usage Local Monitor only).
+/// Keychain storage for provider API keys (Usage Monitor Local only).
 /// Never write secrets into SQLite / LocalStore.
 public struct ProviderCredentials: Sendable, Equatable, Codable {
     public var apiKey: String

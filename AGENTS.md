@@ -23,6 +23,29 @@ Hosting and routing (apexes, hostnames, hosts, deploy paths): consult the privat
 >
 > Archaeology: pre-2026-09-22 `services.jays.usage.*` references in pre-rename `docs/rollouts/*`, `docs/audits/*`, and pre-2026-09-22 rows of `docs/EFFORT-LOG.md` + `STATUS.md` are historical record — each carries a dated archaeology note at the top of the file.  Do not rename them.  The same applies to the unsuffixed `com.simplewithus.usage.client` / `.local` rows dated 2026-09-23 to 2026-10-11.
 
+> **App names (owner ruling 2026-10-21).**  The two iOS apps carry **three** names,  and each
+> is right in its own place:
+>
+> - the App Store listings are **Usage Monitor Client** and **Usage Monitor Local** —  the
+>   word-swapped form,  because "Usage Monitor" and "Local Monitor" were both already taken in
+>   the App Store and an app cannot carry another app's name;  the owner prefers the swapped form.
+> - the home-screen labels (`CFBundleDisplayName`) are **Usage Monitor** and **Local Monitor**.
+> - the website brand is plain **Usage Monitor**.
+>
+> Which one a string uses depends on what it refers to.  Copy that names an app **to the user**
+> —  the dashboard's support and privacy pages,  the Chrome extension title,  the App Store
+> listing script,  and in-app text that points at the *other* app —  uses the **listing** name.
+> Copy where the app refers to **itself** —  the Settings footer,  the lock screen,  the Face ID
+> prompt,  the notifications —  reads `CFBundleDisplayName` at runtime and therefore says the
+> **short** name.  Do not "unify" them:  do not change `CFBundleDisplayName` to the longer
+> names,  do not change the listing names to the shorter ones,  and do not rewrite
+> self-referential in-app copy to the listing name.
+>
+> The pre-swap word order ("Usage Client Monitor" / "Usage Local Monitor") is gone from the
+> user-facing surface.  It survives in the dated records above,  which are not to be renamed,
+> and in one comment in the pinned `scripts/ios-fleet/` vendor copy,  which is fleet-shared and
+> is not renamed for the same reason.
+
 ## Codex Cloud protocol bootstrap
 
 Run `bash .codex/setup.sh` during cloud provisioning and `bash .codex/maintenance.sh` on
@@ -105,7 +128,7 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   collection route the dashboard-session middleware excludes for GET (see "Subscriptions" below);
   `POST /api/subscriptions` and both `PUT`/`DELETE /api/subscriptions/:id` stay
   session-cookie-only.
-- `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Local Monitor: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
+- `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Monitor Local: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
 - `POST /api/providers/refresh-stale` — dashboard session.  Re-fetches pollable providers whose usage snapshot or external billing confirmation is older than one hour.  Manual/push providers are skipped.
 - `GET /api/export/daily-rollups` — dashboard session cookie OR the same
   `isUsageReadAuthorized` scheme. Exports `ExternalUsageEventDailyRollup` rows as JSON
