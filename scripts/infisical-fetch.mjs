@@ -1,7 +1,8 @@
-// Copied verbatim from Simple-With-Us/BotFleet scripts/infisical-fetch.mjs on
-// 2026-09-29, with .github/actions/infisical-secrets, so the Mac release
-// workflow reads its signing certificate the way BotFleet's release.yml does.
-// Keep the two copies in step until the fleet has a shared action.
+// Copied from Simple-With-Us/BotFleet scripts/infisical-fetch.mjs, in step with
+// BotFleet's main at b91fa490e7e7 on 2026-10-21, together with
+// .github/actions/infisical-secrets, so the Mac release workflow reads its
+// signing certificate the way BotFleet's release.yml does.  Keep the two copies
+// in step until the fleet has a shared action.
 //
 // CI-side Infisical fetch: universal-auth login, one bulk secrets list, then
 // per requested name mask + export into $GITHUB_ENV -- falling back to a
@@ -20,9 +21,9 @@
 // `maskValue` below, because the runner's parser stops at the first newline.
 // A login/list failure never crashes the job -- callers still get their
 // GH_FALLBACK_<NAME> values, or the missing-name warning/error below.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 function splitNames(raw) {
   return String(raw ?? "")
@@ -153,9 +154,6 @@ async function resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, 
   }
   try {
     const token = await loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl });
-    // The access token rides in an Authorization header below and is never
-    // printed; mask it anyway so no future error path can surface it.
-    maskValue(token, log);
     return await listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
   } catch (err) {
     // Never interpolate the raw error body -- Infisical error payloads have
@@ -216,7 +214,18 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
   }
 }
 
-const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+// Compare physical paths.  Node's ESM loader realpaths the entry module, so an
+// invocation through a symlinked directory (macOS /var -> /private/var) never
+// matches process.argv[1] when compared as text.
+function isEntryModule() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const isMain = isEntryModule();
 if (isMain) {
   run().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
