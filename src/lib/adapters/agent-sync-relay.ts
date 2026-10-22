@@ -4,7 +4,7 @@ export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
-  const defaultUrl = "https://agent-sync.jays.services/health";
+  const defaultUrl = "https://agents.simplewithus.com/health";
   const url = (config?.endpoint as string) || defaultUrl;
   const res = await fetchJson(
     url,
