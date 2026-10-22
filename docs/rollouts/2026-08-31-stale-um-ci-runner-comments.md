@@ -29,7 +29,7 @@ no effect whatsoever.
 Consequences, in rough order of severity:
 
 1. **The documented emergency runbook is inert.**
-   `gh variable set UM_CI_RUNNER --repo jaywedgeworth22/Usage-Monitor --body ""`
+   `gh variable set UM_CI_RUNNER --repo Simple-With-Us/Usage-Monitor --body ""`
    is presented as an "instant, global hosted fallback."  It reads nothing and
    changes nothing.  Someone reaching for it during a CI incident would believe
    they had failed over and would not have.

@@ -15,5 +15,5 @@ submissions `c0cacf28` / `da7d7fb2` submitted 2026-08-15T07:15Z.
 
 Live read ~10 minutes later: both still `WAITING_FOR_REVIEW`.
 
-Workflow: https://github.com/jaywedgeworth22/Usage-Monitor/actions/runs/31870990915
+Workflow: https://github.com/Simple-With-Us/Usage-Monitor/actions/runs/31870990915
 Code: #1219

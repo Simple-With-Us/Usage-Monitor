@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 ## Scope
 
-- Pin immutable `@jaywedgeworth22/congress-trading-shared#v2.0.0` at merge commit
+- Pin immutable `@Simple-With-Us/congress-trading-shared#v2.0.0` at merge commit
   `19a077a4a8245963775c9fedb462a6741b0a70aa`.
 - Validate v2 batches through the shared Zod schema rather than a second hand-written
   wire parser.
@@ -46,7 +46,7 @@ v2-only producer behind an older production receiver.
 ## Updates
 
 - 2026-07-29 (X9): the shared pin in `package.json` is now
-  `@jaywedgeworth22/congress-trading-shared#v2.3.0`; the `#v2.0.0` pin recorded above
+  `@Simple-With-Us/congress-trading-shared#v2.3.0`; the `#v2.0.0` pin recorded above
   is historical. The v2 wire schema, canonical idempotency, and ACK contract are
   unchanged by this bump.
 - 2026-07-29 (X2, documentation half): **producer requirement** — producers must

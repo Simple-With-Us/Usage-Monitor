@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
+import { UsageTelemetryV2BatchSchema } from "@Simple-With-Us/congress-trading-shared";
 import { fleetIngestJobs } from "./fleet-usage-collector.mjs";
 import { quotaEventsFromMiniMax } from "./minimax-usage-collector.mjs";
 import {

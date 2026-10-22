@@ -103,6 +103,9 @@ struct UsageMonitorApp: App {
                 await AlertNotifier.activateAccountScope(
                     AlertNotifier.currentAccountScopeID(hostOverride: environment.settings.baseHost)
                 )
+                if !ScreenshotDemo.isEnabled {
+                    await WidgetSnapshotStore.refreshSecondarySections(using: environment.apiClient)
+                }
             }
             .task {
                 for await _ in NotificationCenter.default.notifications(
@@ -121,10 +124,16 @@ struct UsageMonitorApp: App {
         .onChange(of: scenePhase) { _, phase in
             Task {
                 await activateCurrentAccountScope()
+                if phase == .active, !ScreenshotDemo.isEnabled {
+                    await WidgetSnapshotStore.refreshSecondarySections(using: environment.apiClient)
+                }
             }
-            // Queue the next background budget refresh when leaving foreground.
-            if phase == .background, PlatformRuntime.supportsBackgroundAppRefresh {
-                BackgroundRefreshManager.shared.schedule()
+            // Force-reload widgets and queue background budget refresh when leaving foreground.
+            if phase == .background {
+                WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
+                if PlatformRuntime.supportsBackgroundAppRefresh {
+                    BackgroundRefreshManager.shared.schedule()
+                }
             }
         }
     }

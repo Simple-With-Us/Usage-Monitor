@@ -2,7 +2,7 @@
 # ship-testflight.sh - Archive + upload an iOS app to TestFlight without Xcode UI.
 #
 # Usage:
-#   bash /Users/jay/apps/ios-fleet/ship-testflight.sh <socratic|congress|usage|usage-local|dealdex|autorotate|autorotate-mac|contactlogo|contactlogo-mac|botfleet|botfleet-mac> [options]
+#   bash /Users/jay/apps/ios-fleet/ship-testflight.sh <socratic|congress|usage|usage-local|dealdex|autorotate|autorotate-mac|contactlogo|contactlogo-mac|botfleet|botfleet-mac|clutch> [options]
 #
 # Options:
 #   --repo-root PATH   Repo root (default: cwd)
@@ -19,13 +19,11 @@
 #                           AND no local/project sequence exists (dangerous:
 #                           may reuse a build number ASC rejects as duplicate)
 #
-# Version numbering (owner directive 2026-08-12, revised same day):
-#   MARKETING_VERSION       = 1.0.<seq>          +1 on EVERY rebuild
-#   CURRENT_PROJECT_VERSION = <UTC YYYYMMDDHHMM> when the build was cut
+# Version numbering (owner directive 2026-08-12, unified 2026-10-18):
+#   MARKETING_VERSION       = 1.0.<commit_count> (from git rev-list --count HEAD)
+#   CURRENT_PROJECT_VERSION = <commit_count>
 # App Store Connect renders "<marketing> (<build>)", so a ship shows
-# "1.0.8 (202609012215)". Marketing +1 every rebuild; build is the cut time.
-# The sequence is max(local cache, App Store Connect, project.pbxproj) + 1, so a
-# lost or reset local counter cannot silently reuse a shipped version.
+# "1.0.148 (148)".  Unified across macOS and iOS; timestamps permanently retired.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS HOLDING BACK AUTOMATIC SHIPPING: THE MIN-INTERVAL RATE LIMIT
@@ -66,6 +64,10 @@
 #   IOS_TF_RELEASE_NOTES=1     publish to App Store Connect
 #   IOS_TF_RELEASE_NOTES=0     off entirely
 #   unset (DEFAULT)            dry render into the ship log; nothing is written
+# Owner binding 2026-09-08 (Jay): production ships MUST publish What to Test
+# (IOS_TF_RELEASE_NOTES=1). Body = 1-2 change/fix/upgrade types, or the other
+# reason for the build if not a product change. Empty/placeholder/agent names ban.
+# No --force-ship.
 #   IOS_TF_RELEASE_TITLE=...   override the "<App> Update" title
 # CI needs `fetch-depth: 0` on actions/checkout or the runner workspace holds a
 # single commit and the range is uncomputable (verified 2026-08-13 on all three
@@ -74,7 +76,7 @@
 # Secrets (never printed):
 #   ~/.secrets/appstore-connect.env  (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH)
 #   or Xcode-signed-in session for destination=upload export
-#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or ~/.secrets/global-api-keys)
+#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or Infisical via fleet-secrets)
 #   SENTRY_DSN         (injected into xcodebuild so Cocoa plist $(SENTRY_DSN) is set)
 #
 # Sentry after a successful archive (2026-09-01):
@@ -87,8 +89,8 @@
 set -euo pipefail
 
 # LaunchAgents inherit a tiny PATH (no Homebrew). Node is required for
-# ensure-tf-ready. Keep this before any `node` / `xcodegen` call.
-export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+# ensure-tf-ready. Prioritize /usr/bin and /bin so Apple distribution tools (rsync -E) use native macOS binaries.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 APPS_JSON="${FLEET_DIR}/apps.json"
@@ -194,6 +196,9 @@ sentry_project_for_app() {
     autorotate|autorotate-mac) echo "autorotate" ;;
     contactlogo|contactlogo-mac) echo "contactlogo" ;;
     botfleet|botfleet-mac) echo "botfleet" ;;
+    fleetlink) echo "fleetlink" ;;
+    codecaps|codecaps-mac) echo "codecaps" ;;
+    hoghunter) echo "hoghunter" ;;
     *) echo "" ;;
   esac
 }
@@ -204,9 +209,10 @@ load_sentry_auth() {
   if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
     return 0
   fi
-  local keys="${HOME}/.secrets/global-api-keys"
-  if [[ -f "$keys" ]]; then
-    SENTRY_AUTH_TOKEN="$(grep -m1 '^SENTRY_AUTH_TOKEN=' "$keys" | cut -d= -f2- | tr -d '"' | tr -d '\r')"
+  # OPS-818: read from Infisical Fleet-OPS via fleet-secrets, not the retired flat file.
+  local fs_bin="/Users/jay/.local/bin/fleet-secrets"
+  if [[ -x "$fs_bin" ]]; then
+    SENTRY_AUTH_TOKEN="$("$fs_bin" get SENTRY_AUTH_TOKEN 2>/dev/null || true)"
     export SENTRY_AUTH_TOKEN
   fi
 }
@@ -621,7 +627,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$APP_KEY" ]] || die "app key required (e.g. socratic, congress, usage, usage-local, dealdex, autorotate, autorotate-mac, contactlogo, contactlogo-mac, botfleet, botfleet-mac)"
+[[ -n "$APP_KEY" ]] || die "app key required (e.g. socratic, congress, usage, usage-local, dealdex, autorotate, autorotate-mac, contactlogo, contactlogo-mac, botfleet, botfleet-mac, clutch)"
 [[ -f "$APPS_JSON" ]] || die "missing apps registry: $APPS_JSON"
 
 # Validate APP_KEY against apps.json before requiring Xcode tools so --help-adjacent
@@ -630,13 +636,6 @@ _EARLY_BUNDLE="$(json_get "$APP_KEY" bundleId)"
 _EARLY_SCHEME="$(json_get "$APP_KEY" scheme)"
 _EARLY_PROJECT="$(json_get "$APP_KEY" projectRel)"
 [[ -n "$_EARLY_BUNDLE" && -n "$_EARLY_SCHEME" && -n "$_EARLY_PROJECT" ]] || die "unknown app key or incomplete registry: $APP_KEY"
-# An app whose bundle ID has no App Store Connect record yet must not ship:
-# an upload would either fail or, worse, pair the new bundle with an old
-# record's Apple ID.  apps.json marks such apps with "ascRecordPending": true
-# and a null appleId until the owner creates the record.
-if [[ "$(json_get "$APP_KEY" ascRecordPending)" == "True" ]]; then
-  die "refusing to ship ${APP_KEY}: no App Store Connect record yet for ${_EARLY_BUNDLE} (apps.json ascRecordPending=true). Create the record, set its appleId in apps.json, drop ascRecordPending, then refresh the pin."
-fi
 
 # Prefer stable Xcode.app over Xcode-beta for TestFlight / ASC compatibility.
 # Beta toolchains + beta macOS stamp BuildMachineOSBuild that App Store review
@@ -671,7 +670,16 @@ fi
 
 
 if [[ -z "$REPO_ROOT" ]]; then
-  REPO_ROOT="$(pwd)"
+  hint="$(json_get "$APP_KEY" worktreeHint || true)"
+  hint="${hint/#\~/$HOME}"
+  if [[ -n "$hint" && -d "$hint" ]]; then
+    REPO_ROOT="$hint"
+  else
+    REPO_ROOT="$(pwd)"
+  fi
+fi
+if [[ ! -d "$REPO_ROOT" ]]; then
+  die "repo root does not exist: $REPO_ROOT"
 fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
 
@@ -794,9 +802,9 @@ else
     # run that is really about to archive, and by exactly 1.
     SEQ="$(next_build_seq "$SEQ_FLOOR")"
   fi
-  MARKETING="${MARKETING_PREFIX}.${SEQ}"
-  # NOT "$MARKETING" — see the CFBundleVersion note above utc_build_stamp.
-  BUILD_NUM="$(utc_build_stamp)"
+  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo "$SEQ")"
+  MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
+  BUILD_NUM="${COMMIT_COUNT}"
 fi
 
 # The project file and the shipped version must never disagree silently. The
@@ -992,18 +1000,6 @@ ensure_tf_ready() {
 
 acquire_archive_lock
 log "archiving..."
-# Usage Client and Usage Local Monitor: both targets in
-# ios/UsageMonitor/UsageMonitor.xcodeproj default to
-# CODE_SIGN_IDENTITY=iPhone Developer, which makes Xcode ask ASC for
-# IOS_APP_DEVELOPMENT profiles.  On GH-hosted runners that path bearer-fails
-# even with a valid AuthKey_<id>.p8 (runs 34039065969, 34067392006).
-# Clearing identity lets Automatic pick Distribution for archive.  Both keys
-# need it: ios-ship.yml ships usage-local through this script too.
-ARCHIVE_IDENTITY_FLAGS=()
-if [[ "${APP_KEY}" == "usage" || "${APP_KEY}" == "usage-local" ]]; then
-  ARCHIVE_IDENTITY_FLAGS+=(CODE_SIGN_IDENTITY=)
-fi
-
 set +e
 if [[ "$PLATFORM" == "macOS" ]]; then
   ARCHIVE_PLATFORM_FLAGS=(-destination "generic/platform=macOS")
@@ -1030,7 +1026,6 @@ xcodebuild archive \
   ${ASC_AUTH_FLAGS[@]:+"${ASC_AUTH_FLAGS[@]}"} \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   CODE_SIGN_STYLE=Automatic \
-  ${ARCHIVE_IDENTITY_FLAGS[@]:+"${ARCHIVE_IDENTITY_FLAGS[@]}"} \
   MARKETING_VERSION="$MARKETING" \
   CURRENT_PROJECT_VERSION="$BUILD_NUM" \
   ${SENTRY_DSN_FLAGS[@]:+"${SENTRY_DSN_FLAGS[@]}"} \

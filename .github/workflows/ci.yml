@@ -324,7 +324,7 @@ jobs:
       #    POST sits behind an `import.meta.url` / `process.argv[1]` main
       #    guard, and the Codex ~/.codex path assertions are string math on
       #    join() -- nothing is read off disk. Its one dependency is the pinned
-      #    @jaywedgeworth22/congress-trading-shared schema from `npm ci`, which
+      #    @Simple-With-Us/congress-trading-shared schema from `npm ci`, which
       #    is the point: it catches a v2 wire-schema break at the collector.
       #  * cf-token-map: `bash -n` plus greps over scripts/cf-token-map.sh. It
       #    asserts that script's value-blind properties (never echoes $VAL, no

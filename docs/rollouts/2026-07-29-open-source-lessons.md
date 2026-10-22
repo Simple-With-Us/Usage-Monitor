@@ -81,7 +81,7 @@ receipts/subscriptions, unchanged.
 License verified: **MIT Expat** outside `ee/` directories — patterns are free
 to borrow. Their ingestion API (`POST /api/public/ingestion`) is a versioned
 batch envelope with per-event IDs and per-event success/error statuses.
-Assessment: our v2 telemetry contract (`@jaywedgeworth22/congress-trading-shared`,
+Assessment: our v2 telemetry contract (`@Simple-With-Us/congress-trading-shared`,
 the wire authority) already provides the equivalent — durable `eventId`s,
 explicit ACK counts (`received/persisted/duplicates/pruned/rejected`), and
 typed retry/error responses. Tightening per-event error detail is a

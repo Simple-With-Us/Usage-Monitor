@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import type { UsageTelemetryErrorCode } from "@jaywedgeworth22/congress-trading-shared";
+import type { UsageTelemetryErrorCode } from "@Simple-With-Us/congress-trading-shared";
 import { prisma } from "@/lib/prisma";
 import {
   ExternalUsageIdempotencyCollisionError,

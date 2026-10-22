@@ -9,7 +9,7 @@ plus the later R2 enable/force-rebuild).  This note is the remainder.
 - Do **not** split `workers/receipt-inbox` into its own GitHub repo.  It shares
   `workers/receipt-lifecycle.mjs` and the root `package.json`.
 - `usage-monitor-receipt-inbox` is already Git-linked to
-  `jaywedgeworth22/Usage-Monitor` `main` (Workers Builds deploy command
+  `Simple-With-Us/Usage-Monitor` `main` (Workers Builds deploy command
   `npx wrangler deploy --config workers/receipt-inbox/wrangler.jsonc`).  That
   path fires on every `main` commit and deploys inbox only.
 - `usage-monitor-receipt-lifecycle-auditor` was still CLI-only (last modified

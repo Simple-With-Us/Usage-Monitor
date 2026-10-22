@@ -4,7 +4,7 @@ Written by a cloud/remote session that cannot reach `agy`, Infisical, the
 Hetzner host, or Xcode. Everything below needs a session running on the
 Mac (local Claude Code, or the owner directly) to finish. Branch:
 `claude/antigravity-telemetry-integration-k6tpjf`, PR **#1100** (draft):
-https://github.com/jaywedgeworth22/Usage-Monitor/pull/1100
+https://github.com/Simple-With-Us/Usage-Monitor/pull/1100
 
 Two unrelated things are bundled on this branch — the Antigravity collector
 (the actual task) and a small iOS wording fix for a backup-status card the

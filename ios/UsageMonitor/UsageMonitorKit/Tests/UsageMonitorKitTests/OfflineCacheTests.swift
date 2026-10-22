@@ -592,6 +592,9 @@ final class OfflineCacheTests: XCTestCase {
         XCTAssertNil(missing.cpuUsagePct)
         XCTAssertEqual(missing.status, "offline")
         XCTAssertTrue(missing.flags.contains("Heartbeat stale — Mac looks offline."))
+
+        let sampleSection = WidgetSnapshotBuilder.macSection(from: .sample)
+        XCTAssertEqual(sampleSection.arch, "Apple M5")
     }
 }
 

@@ -1,10 +1,10 @@
 # Producer coverage matrix — UM v2 ingest (2026-09-13)
 
-Authoritative map of every known producer of `/api/ingest/usage` (and `/api/otlp/v1/metrics`) data, the v2 fields they send, the fields UM accepts, and any gap.  When this list drifts from reality, fix the list, not the contract: the v2 wire is owned by `@jaywedgeworth22/congress-trading-shared` and changes there require a cross-app PR.
+Authoritative map of every known producer of `/api/ingest/usage` (and `/api/otlp/v1/metrics`) data, the v2 fields they send, the fields UM accepts, and any gap.  When this list drifts from reality, fix the list, not the contract: the v2 wire is owned by `@Simple-With-Us/congress-trading-shared` and changes there require a cross-app PR.
 
 ## How the wire works
 
-- v2 batch envelope = `{ schemaVersion: 2, producerId, producerInstanceId?, events: UsageTelemetryV2Event[] }` parsed by `src/lib/usage-telemetry.ts` against `UsageTelemetryV2BatchSchema` and `UsageTelemetryV2EventSchema` from `@jaywedgeworth22/congress-trading-shared`.  `sourceVersion` and `environment` are NOT batch-level fields in the strict v2 schema; `environment` lives on each event.
+- v2 batch envelope = `{ schemaVersion: 2, producerId, producerInstanceId?, events: UsageTelemetryV2Event[] }` parsed by `src/lib/usage-telemetry.ts` against `UsageTelemetryV2BatchSchema` and `UsageTelemetryV2EventSchema` from `@Simple-With-Us/congress-trading-shared`.  `sourceVersion` and `environment` are NOT batch-level fields in the strict v2 schema; `environment` lives on each event.
 - Auth: `Authorization: Bearer ${USAGE_INGEST_TOKEN}` (or per-producer `USAGE_INGEST_PRODUCER_TOKENS` mapping when `USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true`).
 - Idempotency: `eventId` is the producer's durable key; UM re-derives the same length-prefixed SHA-256 from the shared contract when absent.
 - Persisted result semantics (narrower than request acceptance): `attempted` = submitted events, `persisted` = newly inserted rows, `skippedPrunedDuplicates` = blocked by retention tombstones.  Never derive `persisted` from `activeEvents.length`.
@@ -116,7 +116,7 @@ Fields the schema makes optional, and which producers actually send them.
 
 Before a new producer is wired:
 
-1. Implement the producer side using `createUsageTelemetryV2Event` and `createUsageTelemetryClient` from `@jaywedgeworth22/congress-trading-shared`.
+1. Implement the producer side using `createUsageTelemetryV2Event` and `createUsageTelemetryClient` from `@Simple-With-Us/congress-trading-shared`.
 2. Send a single-event batch in dry-run mode to a local UM instance (`npm run dev`, `USAGE_MONITOR_INGEST_URL=http://localhost:3000/api/ingest/usage`).
 3. Confirm `/api/ingest/usage` returns `200`, `attempted: 1`, `persisted: 1`, `duplicates: 0`, `rejected: 0`, `pruned: 0`.  Any non-zero `rejected` is a schema mismatch — read the typed error in the response body.
 4. Replay the same batch and confirm `persisted: 0, duplicates: 1` — that proves idempotency works.

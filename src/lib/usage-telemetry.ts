@@ -4,7 +4,7 @@ import {
   UsageTelemetryV2BatchSchema,
   UsageTelemetryV2EventSchema,
   type UsageTelemetryV2Batch,
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 
 const MAX_EVENTS = 100;
 const MAX_METADATA_KEYS = 50;
@@ -453,7 +453,7 @@ function deriveIdempotencyKey(
   if (explicit) return explicit;
 
   // CONTRACT: must stay byte-for-byte identical to
-  // `@jaywedgeworth22/congress-trading-shared`'s deriveUsageTelemetryIdempotencyKey.
+  // `@Simple-With-Us/congress-trading-shared`'s deriveUsageTelemetryIdempotencyKey.
   // Basis = sourceApp + provider + metricType + keyRef + occurredAt (5 fields).
   // Distinct same-timestamp rows must send an explicit idempotencyKey from the
   // client — do not expand this basis without bumping both repos together.

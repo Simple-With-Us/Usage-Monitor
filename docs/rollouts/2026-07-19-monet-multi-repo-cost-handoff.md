@@ -79,7 +79,7 @@ Owner asked why GitHub Actions costs never showed up as "insane." Pulled the rea
 
 **Root cause of Congress.Trade's specific number, and it's fixed:** a self-hosted CI runner (`coolify-hetzner-congress-ci`) was purpose-built in PR #518 specifically to avoid metered GitHub-hosted minutes, wired behind a `CT_CI_RUNNER` repo variable — but the variable was **never actually set**, so `ci.yml` had been silently falling back to paid `ubuntu-latest` for the repo's extremely high automated-PR volume this whole time. Confirmed the runner is healthy (online, idle) and activated it:
 ```
-gh variable set CT_CI_RUNNER --repo jaywedgeworth22/Congress.Trade --body "congress-ci"
+gh variable set CT_CI_RUNNER --repo Simple-With-Us/Congress.Trade --body "congress-ci"
 ```
 This takes effect on the next push with no code change, no deploy, and a documented one-command rollback (`gh variable set CT_CI_RUNNER --body ""`) if the runner ever goes down. Should collapse most of the $184/mo going forward.
 
@@ -111,6 +111,6 @@ Socratic.Trade's smaller $6.90/mo has no equivalent switch mechanism (`ci.yml` t
 ## Verification commands for whoever picks this up
 - API-usage-monitor prod: `curl https://usage.jays.services/api/health` (expect `f0891dc` or later, `ok:true`).
 - Congress.Trade prod: `curl https://congress.trade/api/health` (per deploy.yml's post-deploy check pattern).
-- PR states: `gh pr view 557 --repo jaywedgeworth22/Congress.Trade` / `gh pr view 559 --repo jaywedgeworth22/Congress.Trade`.
-- CI runner activation: `gh api repos/jaywedgeworth22/Congress.Trade/actions/variables/CT_CI_RUNNER` (expect `value: "congress-ci"`).
+- PR states: `gh pr view 557 --repo Simple-With-Us/Congress.Trade` / `gh pr view 559 --repo Simple-With-Us/Congress.Trade`.
+- CI runner activation: `gh api repos/Simple-With-Us/Congress.Trade/actions/variables/CT_CI_RUNNER` (expect `value: "congress-ci"`).
 - GitHub Actions billing: `gh api /users/jaywedgeworth22/settings/billing/usage`.

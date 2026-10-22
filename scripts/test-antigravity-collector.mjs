@@ -10,7 +10,7 @@
 // future agy changes it, the live collector breaks and this fixture is the
 // record of what it used to emit.
 
-import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
+import { UsageTelemetryV2BatchSchema } from "@Simple-With-Us/congress-trading-shared";
 
 import {
   assertUniqueSeriesKeys,

@@ -4,7 +4,7 @@
 
 Three things ship together on one branch.
 
-1. **Producer coverage audit.**  `docs/observability/producer-coverage-matrix.md` maps every known producer of `/api/ingest/usage` and `/api/otlp/v1/metrics` to the v2 fields they send, what UM accepts, and the known honest gaps.  No wire change — the v2 schema in `@jaywedgeworth22/congress-trading-shared` is the absolute truth; this is the human reference.
+1. **Producer coverage audit.**  `docs/observability/producer-coverage-matrix.md` maps every known producer of `/api/ingest/usage` and `/api/otlp/v1/metrics` to the v2 fields they send, what UM accepts, and the known honest gaps.  No wire change — the v2 schema in `@Simple-With-Us/congress-trading-shared` is the absolute truth; this is the human reference.
 2. **Three new Sentry Application Metrics on the `usage-monitor` project.**  `scheduler.duration_ms` (gauge), `ingest.admission_rejected` (counter), `rollup.completed` (counter).  These fill the gaps the 2026-09-01 Sentry fleet integration plan called out for UM.  No SDK re-init; uses the existing Sentry SDK.
 3. **UM → fleet-infra mirror.**  A small dependency-free raw-envelope client (`src/lib/sentry-fleet.ts`) mirrors a bounded subset of UM's app-health signals into the shared fleet-infra Sentry project so the fleet health view sees UM alongside the peer apps.  Pattern ports `scripts/sentry-ci-report.py` to TypeScript and reuses the same DSN-gated no-op contract.
 

@@ -35,7 +35,7 @@ The product can still go green while the owner makes a wrong spend decision.  Th
 
 | PR | Title | Relevance |
 |----|-------|-----------|
-| [#1233](https://github.com/jaywedgeworth22/Usage-Monitor/pull/1233) | `docs(effort): board hygiene — close stale In Progress [GROK]` | Directly addresses DOC-02.  This audit does not steal that closeout. |
+| [#1233](https://github.com/Simple-With-Us/Usage-Monitor/pull/1233) | `docs(effort): board hygiene — close stale In Progress [GROK]` | Directly addresses DOC-02.  This audit does not steal that closeout. |
 
 No other product PRs were open at inventory.
 
@@ -213,7 +213,7 @@ Sibling audits own adapter correctness and EOM formulas.  This section is accoun
 
 #### TQ-04 — Shared telemetry contract is duplicated, not imported
 **Severity:** P1
-**Evidence:** `package.json:50` pins `@jaywedgeworth22/congress-trading-shared#v2.5.2`.  `usage-telemetry.test.ts:191-193` says hashes “MUST match” the shared package.  Zero test files import the package; vectors are hardcoded hex.
+**Evidence:** `package.json:50` pins `@Simple-With-Us/congress-trading-shared#v2.5.2`.  `usage-telemetry.test.ts:191-193` says hashes “MUST match” the shared package.  Zero test files import the package; vectors are hardcoded hex.
 **Second-order risk:** A shared-package bump or producer-side key change desyncs silently.  Green UM CI does not prove wire compatibility with the pin.
 **Improvement:** Import shared test vectors (or a `contract-vectors` export) and fail on hash mismatch.
 
@@ -351,7 +351,7 @@ UX polish is a sibling audit.  These are structural a11y debts that affect money
 
 #### VL-02 — Private GitHub pin for the cross-app contract
 **Severity:** P1
-**Evidence:** `package.json:50` — `github:jaywedgeworth22/congress-trading-shared#v2.5.2`.
+**Evidence:** `package.json:50` — `github:Simple-With-Us/congress-trading-shared#v2.5.2`.
 **Second-order risk:** GitHub outage, token loss, or repo rename breaks `npm ci`, ingest, and sibling producers together.  Combined with TQ-04 (duplicated vectors), there is no offline contract copy that CI proves.
 **Improvement:** Vendored tarball or npm mirror.  Pin SHA in the lockfile with a drift check.  Document v1-only degraded mode.
 

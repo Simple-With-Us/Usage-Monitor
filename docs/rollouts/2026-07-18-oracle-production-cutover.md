@@ -75,7 +75,7 @@ The Garage authenticated dry-run and Coolify container/disk probes are green.
   revision. Database and startup are healthy; backup is required and active;
   the scheduler is required and its first Oracle tick completed successfully.
 - GitHub Uptime Monitor run
-  [29663357832](https://github.com/jaywedgeworth22/Usage-Monitor/actions/runs/29663357832)
+  [29663357832](https://github.com/Simple-With-Us/Usage-Monitor/actions/runs/29663357832)
   passed immediately after the DNS flip.
 - The Sentry `usage-monitor-garage-backup` recovery check-in returned HTTP 200.
   Existing free UptimeRobot liveness and strict-readiness monitor definitions

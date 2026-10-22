@@ -717,7 +717,7 @@ async function postUsageBatchWithRetry({ ingestUrl, ingestToken, body, log }) {
       continue;
     }
     if (!response.ok && response.status !== 202) {
-      throw new Error(`Ingest rejected the batch (HTTP ${response.status})`);
+      throw new Error(`Ingest rejected the batch (HTTP ${response.status}): ${text}`);
     }
     if (!isCompleteUsageIngestAck(parsed, body.events.length)) {
       const waitMs = Math.min(60_000, Math.pow(2, attempt) * 1000);

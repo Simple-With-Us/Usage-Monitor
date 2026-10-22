@@ -18,7 +18,7 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 
 const DEFAULT_RUNTIME_ROOT = join(process.env.HOME || "", "apps", "usage-monitor-collector-runtime");
-const PRODUCTION_REPO_URL = "https://github.com/jaywedgeworth22/Usage-Monitor.git";
+const PRODUCTION_REPO_URL = "https://github.com/Simple-With-Us/Usage-Monitor.git";
 const REQUIRED_SCRIPTS = [
   "antigravity-session-collector.mjs",
   "antigravity-statusline-telemetry.mjs",

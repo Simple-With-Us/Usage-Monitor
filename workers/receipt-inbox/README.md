@@ -87,7 +87,7 @@ npm run receipt-inbox:deploy
 ## Git repository (Workers Builds)
 
 Do **not** make a separate GitHub repo.  Source is already in
-`jaywedgeworth22/Usage-Monitor` (`workers/receipt-inbox` plus
+`Simple-With-Us/Usage-Monitor` (`workers/receipt-inbox` plus
 `workers/receipt-lifecycle-auditor`).  Both workers import
 `workers/receipt-lifecycle.mjs` and take `postal-mime` / `wrangler` from the
 repo-root `package.json`, so the Cloudflare root directory must stay empty

@@ -81,7 +81,7 @@ Six parallel audit lanes, all findings verified against code at `main@bd8accbb`.
 
 ## 4. Cross-app interop
 
-**Strong:** shared-schema v2 with byte-for-byte idempotency and explicit ACKs; bounded streaming reads; typed producer client in `@jaywedgeworth22/congress-trading-shared#v2.3.0`; receipt-cash isolation (distinct token + HMAC); 415 with actionable gRPC message.
+**Strong:** shared-schema v2 with byte-for-byte idempotency and explicit ACKs; bounded streaming reads; typed producer client in `@Simple-With-Us/congress-trading-shared#v2.3.0`; receipt-cash isolation (distinct token + HMAC); 415 with actionable gRPC message.
 
 | # | Finding | Sev | Evidence |
 |---|---|---|---|

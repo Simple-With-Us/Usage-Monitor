@@ -595,7 +595,7 @@ describe("shared-contract compliance", () => {
   it("every fixture event validates against the v2 ingest event schema", async () => {
     // A batch that fails the shared schema is rejected server-side with no
     // dashboard change to notice, so prove the shape here rather than on the Mac.
-    const { UsageTelemetryV2EventSchema } = await import("@jaywedgeworth22/congress-trading-shared");
+    const { UsageTelemetryV2EventSchema } = await import("@Simple-With-Us/congress-trading-shared");
     const cases = [
       ["claude", "claude-oauth-usage.json"],
       ["codex", "codex-wham-usage.json"],

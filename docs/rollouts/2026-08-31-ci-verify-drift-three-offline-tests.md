@@ -48,7 +48,7 @@ network/secret-free" requirement.  None needed CI-secret gating.**
   Codex `~/.codex` archive-key assertions are `join()` string math — no path is
   ever stat'd or read.  `scripts/lib/run-session-token-collector.mjs` has no
   module-level side effects at all.  The one external dependency is the pinned
-  `@jaywedgeworth22/congress-trading-shared` v2 schema installed by `npm ci`,
+  `@Simple-With-Us/congress-trading-shared` v2 schema installed by `npm ci`,
   which is the point of running it in CI: it catches a wire-schema break at the
   collector boundary.
 - **`test:cf-token-map`** — `bash -n` plus greps over `scripts/cf-token-map.sh`.
