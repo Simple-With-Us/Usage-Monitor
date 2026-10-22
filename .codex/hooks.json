@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Volumes/External/Lanes/Usage-Monitor/session-recovery-env-deleted-1f8a5b/.codex/hooks/block-xcode-project-writes.py'",
+            "statusMessage": "Blocking Xcode project file writes"
+          }
+        ]
+      }
+    ]
+  }
+}
