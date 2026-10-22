@@ -50,7 +50,7 @@ describe("agent-sync-relay adapter", () => {
     fetchMock.mockResolvedValue(mockResponse);
 
     const res = await fetchUsage("dummy-key", {
-      endpoint: "https://agent-sync.jays.services/health",
+      endpoint: "https://agents.simplewithus.com/health",
     });
 
     expect(res.balance).toBeNull();
@@ -62,7 +62,7 @@ describe("agent-sync-relay adapter", () => {
       data: { ok: true, service: "agent-sync-push" },
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://agent-sync.jays.services/health",
+      "https://agents.simplewithus.com/health",
       expect.any(Object)
     );
   });
@@ -76,7 +76,7 @@ describe("agent-sync-relay adapter", () => {
 
     await expect(
       fetchUsage("dummy-key", {
-        endpoint: "https://agent-sync.jays.services/health",
+        endpoint: "https://agents.simplewithus.com/health",
       })
     ).rejects.toMatchObject({ code: "HTTP_ERROR", status: 500 });
   });
