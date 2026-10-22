@@ -58,7 +58,10 @@ apps = json.load(open(sys.argv[1]))["apps"]
 def s(v):
     return "" if v is None else str(v)
 print(f"usage_appleId={s(apps.get('usage', {}).get('appleId'))}")
+print(f"usage_bundleId={s(apps.get('usage', {}).get('bundleId'))}")
+print(f"usage_widget_bundleId={s((apps.get('usage', {}).get('extraBundleIds') or [''])[0])}")
 print(f"usage_local_appleId={s(apps.get('usage-local', {}).get('appleId'))}")
+print(f"usage_local_bundleId={s(apps.get('usage-local', {}).get('bundleId'))}")
 print(f"usage_pending={s(apps.get('usage', {}).get('ascRecordPending'))}")
 print(f"usage_local_pending={s(apps.get('usage-local', {}).get('ascRecordPending'))}")
 print(f"socratic_appleId={apps.get('socratic', {}).get('appleId', '')}")
@@ -67,10 +70,13 @@ print(f"dealdex_appleId={apps.get('dealdex', {}).get('appleId', '')}")
 print(f"dealdex_bundleId={apps.get('dealdex', {}).get('bundleId', '')}")
 PY
 )"
-# Usage + Local moved to com.simplewithus.usage.{client,local} on 2026-09-23.
+# Usage + Local now use the explicit `.ios` bundle suffix (2026-10-09).
 # Their old Apple IDs (6799230435 / 6799230729) belong to the retired
 # services.jays.usage.* records and must not come back; the new App Store
 # Connect records are pending, so appleId stays empty and the ship is refused.
+check "usage client bundle ID" "com.simplewithus.usage.client.ios" "${usage_bundleId}"
+check "usage widget bundle ID" "com.simplewithus.usage.client.ios.widget" "${usage_widget_bundleId}"
+check "usage local bundle ID" "com.simplewithus.usage.local.ios" "${usage_local_bundleId}"
 check "usage appleId pending (empty)" "" "${usage_appleId}"
 check "usage-local appleId pending (empty)" "" "${usage_local_appleId}"
 check "usage ascRecordPending" "True" "${usage_pending}"

@@ -2569,7 +2569,7 @@ describe("alert delivery", () => {
             config: {
               keyId: "KEY123456",
               teamId: "CC8UTF7ATG",
-              bundleId: "com.simplewithus.usage.client",
+              bundleId: "com.simplewithus.usage.client.ios",
               privateKeyPem,
             },
             transport: async (request) => {
@@ -3591,14 +3591,14 @@ describe("S12: per-code severity overrides and channel routing (env parsing)", (
     const config = readAlertDeliveryConfig({
       APNS_KEY_ID: "KEY123456",
       APNS_TEAM_ID: "CC8UTF7ATG",
-      APNS_BUNDLE_ID: "com.simplewithus.usage.client",
+      APNS_BUNDLE_ID: "com.simplewithus.usage.client.ios",
       APNS_P8: pem,
     } as unknown as NodeJS.ProcessEnv);
     expect(config.channels).toHaveLength(1);
     expect(config.channels[0]?.kind).toBe("apns");
     if (config.channels[0]?.kind === "apns") {
       expect(config.channels[0].config.keyId).toBe("KEY123456");
-      expect(config.channels[0].config.bundleId).toBe("com.simplewithus.usage.client");
+      expect(config.channels[0].config.bundleId).toBe("com.simplewithus.usage.client.ios");
     }
   });
 });

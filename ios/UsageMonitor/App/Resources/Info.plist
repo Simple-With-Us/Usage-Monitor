@@ -38,7 +38,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.simplewithus.usage.client.deeplink</string>
+			<string>com.simplewithus.usage.client.ios.deeplink</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>usageclientmonitor</string>
@@ -51,7 +51,7 @@
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.simplewithus.usage.client.refresh</string>
+		<string>com.simplewithus.usage.client.ios.refresh</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

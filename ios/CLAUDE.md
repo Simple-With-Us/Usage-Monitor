@@ -4,8 +4,8 @@ Two shipped apps share one XcodeGen project and one Swift package:
 
 | App | Bundle ID | Scheme | Entry |
 |-----|-----------|--------|-------|
-| Usage Client Monitor | `com.simplewithus.usage.client` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
-| Usage Local Monitor | `com.simplewithus.usage.local` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
+| Usage Client Monitor | `com.simplewithus.usage.client.ios` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
+| Usage Local Monitor | `com.simplewithus.usage.local.ios` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
 
 **Project:** `ios/UsageMonitor/UsageMonitor.xcodeproj`
 **XcodeGen:** `ios/UsageMonitor/project.yml` — edit this, then `xcodegen generate`. Do not hand-edit `project.pbxproj`.

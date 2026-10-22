@@ -25,7 +25,7 @@
     },
     "usage": {
       "displayName": "Usage Monitor",
-      "bundleId": "com.simplewithus.usage.client",
+      "bundleId": "com.simplewithus.usage.client.ios",
       "appleId": null,
       "ascRecordPending": true,
       "scheme": "UsageMonitor",
@@ -34,13 +34,13 @@
       "worktreeHint": "~/apps/usage-grok-ios-tf",
       "marketingVersionDefault": "1.0.0",
       "extraBundleIds": [
-        "com.simplewithus.usage.client.widget"
+        "com.simplewithus.usage.client.ios.widget"
       ],
-      "notes": "Server-backed client. ASC SKU usage-client-monitor. Self-host free server code. Bundle ID is com.simplewithus.usage.client (2026-09-23 scheme; was services.jays.usage.client.monitor, then com.simplewithus.usagemonitor.ios). appleId is null on purpose: the old Apple ID belongs to the services.jays.usage.client.monitor record and cannot be moved to a new bundle ID. A new App Store Connect record for com.simplewithus.usage.client is pending (owner step); ship-testflight.sh refuses this key while ascRecordPending is true."
+      "notes": "Server-backed client. ASC SKU usage-client-monitor. Self-host free server code. Bundle ID is com.simplewithus.usage.client.ios (2026-10-09 scheme; supersedes the 2026-09-23 suffix omission; was services.jays.usage.client.monitor, then com.simplewithus.usagemonitor.ios). appleId is null on purpose: the old Apple ID belongs to the services.jays.usage.client.monitor record and cannot be moved to a new bundle ID. A new App Store Connect record for com.simplewithus.usage.client.ios is pending (owner step); the widget is an extension and has no separate App Store Connect record. ship-testflight.sh refuses this key while ascRecordPending is true."
     },
     "usage-local": {
       "displayName": "Local Monitor",
-      "bundleId": "com.simplewithus.usage.local",
+      "bundleId": "com.simplewithus.usage.local.ios",
       "appleId": null,
       "ascRecordPending": true,
       "scheme": "LocalUsageMonitor",
@@ -48,7 +48,7 @@
       "xcodegenDir": "ios/UsageMonitor",
       "worktreeHint": "~/apps/usage-grok-ios-tf",
       "marketingVersionDefault": "1.0.0",
-      "notes": "On-device free App Store product; no server. ASC SKU usage-local-monitor. Separate from client. This repo's ios-ship.yml skips this key. Bundle ID is com.simplewithus.usage.local (2026-09-23 scheme; was services.jays.usage.local.monitor, then com.simplewithus.usagemonitor.local.ios). appleId is null on purpose: the old Apple ID belongs to the services.jays.usage.local.monitor record and cannot be moved to a new bundle ID. A new App Store Connect record for com.simplewithus.usage.local is pending (owner step); ship-testflight.sh refuses this key while ascRecordPending is true."
+      "notes": "On-device free App Store product; no server. ASC SKU usage-local-monitor. Separate from client. This repo's ios-ship.yml skips this key. Bundle ID is com.simplewithus.usage.local.ios (2026-10-09 scheme; supersedes the 2026-09-23 suffix omission; was services.jays.usage.local.monitor, then com.simplewithus.usagemonitor.local.ios). appleId is null on purpose: the old Apple ID belongs to the services.jays.usage.local.monitor record and cannot be moved to a new bundle ID. A new App Store Connect record for com.simplewithus.usage.local.ios is pending (owner step); ship-testflight.sh refuses this key while ascRecordPending is true."
     },
     "dealdex": {
       "displayName": "DealDex",

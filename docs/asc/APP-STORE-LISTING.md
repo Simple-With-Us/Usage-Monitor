@@ -6,7 +6,7 @@
 
 The retired `services.jays.usage.*` ASC records have version **1.0** in `PREPARE_FOR_SUBMISSION` and VALID TestFlight builds; the renamed apps need new records (see the 2026-09-23 note). This pack is the copy, privacy answers, review notes, and screenshot plan agents/humans paste into ASC (or push via `scripts/asc-push-listing.rb`).
 
-> **2026-09-23 identifier note (supersedes the 2026-09-22 note):**  The apps now use `com.simplewithus.usage.client` (home-screen name Usage Monitor) and `com.simplewithus.usage.local` (Local Monitor), App Group `group.com.simplewithus.usage`.  The ASC records and IDs in this pack (apps `6799230435` / `6799230729` and their version / localization IDs) belong to the retired `services.jays.usage.*` bundle IDs.  An App Store Connect record's bundle ID cannot be changed, so those records cannot serve the new bundles.  New records for `com.simplewithus.usage.client` and `com.simplewithus.usage.local` are pending (owner step); until they exist, the ID rows below are marked retired and `scripts/asc-push-listing.rb` refuses to run.  The listing copy (names, text, privacy answers) still applies to the new records.  See `docs/rollouts/2026-09-23-usage-identifier-fixes.md`.
+> **2026-10-09 identifier note (supersedes the 2026-09-23 scheme):**  The current host app IDs are `com.simplewithus.usage.client.ios` and `com.simplewithus.usage.local.ios`; the widget extension is `com.simplewithus.usage.client.ios.widget`.  All three use App Group `group.com.simplewithus.usage`; the Client host app also uses Push Notifications.  The widget is bundled inside the Client app and does not get its own App Store Connect app record.  The ASC records and IDs in this pack (apps `6799230435` / `6799230729` and their version / localization IDs) belong to retired bundle IDs and cannot be reused.  New ASC records for the Client and Local apps remain pending (owner step); until they exist, the ID rows below are marked retired and `scripts/asc-push-listing.rb` refuses to run.  The listing copy (names, text, privacy answers) still applies to the new records.  See `docs/rollouts/2026-10-09-ios-bundle-identifiers.md`.
 
 Public legal URLs (must stay unauthenticated):
 
@@ -43,7 +43,7 @@ Contact (review): Jay Wedgeworth · mail@jays.services · +1 956-420-0244
 | | |
 |--|--|
 | **ASC name** | Usage Client Monitor |
-| **Bundle ID** | `com.simplewithus.usage.client` |
+| **Bundle ID** | `com.simplewithus.usage.client.ios` |
 | **SKU** | `usage-client-monitor` |
 | **ASC app id** | pending new record (retired: `6799230435`) |
 | **Version id (1.0)** | pending new record (retired: `4dd15570-c956-4895-93f3-d3e7adc21080`) |
@@ -127,7 +127,7 @@ Declare data types only if the app *by design* sends them off-device: budget JSO
 | | |
 |--|--|
 | **ASC name** | Usage Local Monitor |
-| **Bundle ID** | `com.simplewithus.usage.local` |
+| **Bundle ID** | `com.simplewithus.usage.local.ios` |
 | **SKU** | `usage-local-monitor` |
 | **ASC app id** | pending new record (retired: `6799230729`) |
 | **Version id (1.0)** | pending new record (retired: `7ddabffc-9fbd-413d-addd-34476fa5cefd`) |

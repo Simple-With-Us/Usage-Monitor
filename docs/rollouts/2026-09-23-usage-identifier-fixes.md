@@ -1,3 +1,5 @@
+> **[SUPERSEDED / identifier scheme only, 2026-10-09]** The owner has added the `.ios` suffix to the Client and Local bundle IDs.  The active identifiers and current Apple Developer registration steps are in [`2026-10-09-ios-bundle-identifiers.md`](2026-10-09-ios-bundle-identifiers.md).  The other fixes recorded below remain historical context.
+
 # 2026-09-23 — Usage identifier fixes (corrects #1524)
 
 PR #1524 (merged 2026-09-22 as `6fa88df`) renamed the Usage-Monitor bundle IDs to `com.simplewithus.usagemonitor.*`.  This change fixes four defects in it and moves every identifier to the scheme Jay set on 2026-09-23.  The 2026-09-22 record stays in [`2026-09-22-bundle-id-migration.md`](2026-09-22-bundle-id-migration.md) with a superseded banner.

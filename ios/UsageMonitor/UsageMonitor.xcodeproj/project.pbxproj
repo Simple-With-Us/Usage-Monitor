@@ -580,7 +580,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.widget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widget;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -602,7 +602,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local.ios;
 				PRODUCT_NAME = LocalUsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -749,7 +749,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.widgettests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widgettests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -771,7 +771,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local.ios;
 				PRODUCT_NAME = LocalUsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -795,7 +795,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios;
 				PRODUCT_NAME = UsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -813,7 +813,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UsageMonitor.app/UsageMonitor";
@@ -836,7 +836,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios;
 				PRODUCT_NAME = UsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -854,7 +854,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UsageMonitor.app/UsageMonitor";
@@ -873,7 +873,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.widget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widget;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -889,7 +889,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.widgettests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widgettests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

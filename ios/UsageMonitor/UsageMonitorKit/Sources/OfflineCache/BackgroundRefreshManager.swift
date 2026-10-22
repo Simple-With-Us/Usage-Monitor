@@ -20,7 +20,7 @@ import BackgroundTasks
 /// to honour a user host override.
 ///
 /// ## App-target wiring (see integration notes)
-///  1. `Info.plist` already declares `com.simplewithus.usage.client.refresh` in
+///  1. `Info.plist` already declares `com.simplewithus.usage.client.ios.refresh` in
 ///     `BGTaskSchedulerPermittedIdentifiers` and the `fetch` background mode.
 ///  2. During launch, **before the app finishes launching**, call
 ///     `BackgroundRefreshManager.shared.configure(...)` then `.register()`.
@@ -30,7 +30,7 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
     public static let shared = BackgroundRefreshManager()
 
     /// Must match `BGTaskSchedulerPermittedIdentifiers` in the app `Info.plist`.
-    public static let taskIdentifier = "com.simplewithus.usage.client.refresh"
+    public static let taskIdentifier = "com.simplewithus.usage.client.ios.refresh"
 
     private let lock = NSLock()
     private var _makeClient: @Sendable () -> APIClient = { APIClient() }

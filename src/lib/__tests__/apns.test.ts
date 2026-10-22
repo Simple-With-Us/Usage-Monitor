@@ -25,7 +25,7 @@ const testKeyPem = generateKeyPairSync("ec", { namedCurve: "P-256" })
 const testConfig = (): ApnsConfig => ({
   keyId: "KEY123456",
   teamId: "CC8UTF7ATG",
-  bundleId: "com.simplewithus.usage.client",
+  bundleId: "com.simplewithus.usage.client.ios",
   privateKeyPem: testKeyPem,
 });
 
@@ -55,7 +55,7 @@ describe("loadApnsConfig", () => {
     const base = {
       APNS_KEY_ID: "K1",
       APNS_TEAM_ID: "T1",
-      APNS_BUNDLE_ID: "com.simplewithus.usage.client",
+      APNS_BUNDLE_ID: "com.simplewithus.usage.client.ios",
       APNS_P8: testKeyPem,
     };
     expect(apnsConfigured(loadApnsConfig(base))).toBe(true);
@@ -84,7 +84,7 @@ describe("loadApnsConfig", () => {
       APNS_TEAM_ID: "T1",
       APNS_P8: testKeyPem,
     });
-    expect(config?.bundleId).toBe("com.simplewithus.usage.client");
+    expect(config?.bundleId).toBe("com.simplewithus.usage.client.ios");
   });
 });
 
@@ -164,7 +164,7 @@ describe("sendApnsPush", () => {
       { config: testConfig(), transport }
     );
     expect(calls[0].path).toBe(`/3/device/${token}`);
-    expect(calls[0].headers["apns-topic"]).toBe("com.simplewithus.usage.client");
+    expect(calls[0].headers["apns-topic"]).toBe("com.simplewithus.usage.client.ios");
     expect(calls[0].headers["apns-push-type"]).toBe("alert");
     expect(calls[0].headers["apns-collapse-id"]).toBe("budget-openrouter");
     const payload = JSON.parse(calls[0].body);

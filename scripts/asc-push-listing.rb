@@ -27,7 +27,7 @@ end
 APPS = {
   "client" => {
     # 2026-09-23: nil until the App Store Connect record for
-    # com.simplewithus.usage.client exists. The old IDs (app 6799230435 and
+    # com.simplewithus.usage.client.ios exists. The old IDs (app 6799230435 and
     # its version/localization IDs) belong to the retired
     # services.jays.usage.client.monitor record.
     app_id: nil,
@@ -80,7 +80,7 @@ APPS = {
   },
   "local" => {
     # 2026-09-23: nil until the App Store Connect record for
-    # com.simplewithus.usage.local exists. The old IDs (app 6799230729 and
+    # com.simplewithus.usage.local.ios exists. The old IDs (app 6799230729 and
     # its version/localization IDs) belong to the retired
     # services.jays.usage.local.monitor record.
     app_id: nil,
