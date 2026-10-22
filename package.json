@@ -106,7 +106,7 @@
     "prisma": "^6.0.0",
     "@typescript/native": "npm:typescript@^7.0.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "npm:@typescript/typescript6@^6.0.3",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "wrangler": "4.151.1"
   },
