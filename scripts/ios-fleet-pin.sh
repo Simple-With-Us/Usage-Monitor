@@ -11,9 +11,9 @@
 #   GitHub-hosted macos-latest has no /Users/jay/apps/ios-fleet. This repo
 #   vendors the fleet scripts (Congress.Trade / Socratic.Trade #3089 protocol)
 #   and pins their sha256 so an unreviewed edit to ship-testflight.sh /
-#   apps.json / asc-api.mjs / AppUpdatePrompt.swift cannot silently change
-#   what TestFlight uploads or what each iOS target prompts.  Refreshing
-#   the pin is a reviewed PR.
+#   apps.json / asc-api.mjs / asc-key.mjs / AppUpdatePrompt.swift cannot
+#   silently change what TestFlight uploads or what each iOS target prompts.
+#   Refreshing the pin is a reviewed PR.
 #
 # ON DRIFT
 #   Read the diff, decide whether the tooling change is wanted, then either
@@ -30,7 +30,7 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 
 # Exactly the runtime files that can change what this repo ships, plus the
 # one AppUpdatePrompt.swift that every iOS target must copy byte-for-byte.
-PINNED_FILES="ship-testflight.sh asc-api.mjs apps.json AppUpdatePrompt.swift"
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift"
 COPIED_PROMPT_TARGETS="ios/UsageMonitor/App/AppUpdatePrompt.swift ios/UsageMonitor/LocalApp/AppUpdatePrompt.swift"
 
 MODE="check"
