@@ -319,6 +319,28 @@ describe("the um sender", () => {
     assert.equal(posted.some((item) => item.url.endsWith("/api/ingest/usage")), false);
   });
 
+  it("does not bill a log record that a span already bills", async () => {
+    const { journal } = await openJournal();
+    //  One LLM call reported twice: as a span and as a log record.  The two
+    //  carry different event ids, so posting both stores the call twice.
+    await journal.append(event(1, { kind: "span", eventId: "span-1" }));
+    await journal.append(event(1, { kind: "log", eventId: "log-1" }));
+    const ledger = [];
+    const sender = createUmSender({
+      journal,
+      resolveToken: async () => "a-test-token",
+      fetchImpl: async (url, init) => {
+        if (url.endsWith("/api/ingest/usage")) ledger.push(...JSON.parse(init.body).events);
+        return fakeResponse(200, "{}");
+      },
+    });
+    await sender.runOnce();
+    assert.deepEqual(
+      ledger.map((row) => row.eventId),
+      ["span-1"],
+    );
+  });
+
   it("skips a provider that another feed bills", () => {
     const policy = readOverlapPolicy({});
     assert.equal(shouldPushLedgerEvent({ platform: "a-agent", provider: "cursor" }, policy), false);

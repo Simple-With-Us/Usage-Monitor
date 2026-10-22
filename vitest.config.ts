@@ -20,6 +20,11 @@ export default defineConfig({
       "**/.worktrees/**",
       "**/tests/e2e/**", // Playwright owns these specs, not Vitest.
       "**/*.workers.test.*",
+      // The iOS ship tooling is tested by Node's own test runner
+      // (`node --test scripts/ios-fleet/*.test.mjs`) and by the iOS
+      // credential step in CI.  Vitest cannot run them:  they are node:test
+      // suites, and a file with no Vitest suite in it is a failed file.
+      "**/scripts/ios-fleet/**",
     ],
     coverage: {
       provider: "v8",
