@@ -68,6 +68,47 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
 const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
 
 /**
+ * Sentry's own typed span columns.
+ *
+ * Measured Oct-21-2026 against the throwaway Sentry project with one probe
+ * span per shape: a numeric value is stored ONLY on these keys, and a
+ * string on one of them is dropped whole.  Every other key is a string
+ * column for Sentry, and a number on such a key is dropped whole too.  So
+ * the hub keeps a number a number on these keys and sends every other
+ * allowlisted value as a string.  Sending it the other way round loses the
+ * value: that is how `duration_ms`, `ttft_ms`, `context.limit` and
+ * `context.utilization_pct` never reached the stored span.
+ */
+export const SENTRY_NUMERIC_ATTRIBUTES = Object.freeze([
+  "gen_ai.usage.input_tokens",
+  "gen_ai.usage.output_tokens",
+  "gen_ai.usage.cache_read_input_tokens",
+  "gen_ai.usage.cache_creation_input_tokens",
+  "gen_ai.usage.total_tokens",
+  "http.response.status_code",
+]);
+
+/**
+ * Sentry filters any attribute whose key carries the word "token" when the
+ * value is a string: the stored value becomes the literal marker
+ * `[Filtered]`.  A number on such a key is dropped instead, so a key with
+ * "token" in its name can only reach Sentry on one of the typed columns
+ * above.  `gen_ai.usage.reasoning_tokens` is not one of them, so it can
+ * never arrive under that name, and neither can `context.tokens`.
+ *
+ * These two attributes therefore travel under a different name on the
+ * Sentry wire.  The producer contract does not move: the internal event
+ * keeps the original keys, and the Usage Monitor path reads them
+ * unchanged, so only the Sentry payload is affected.
+ */
+export const SENTRY_ATTRIBUTE_RENAMES = Object.freeze({
+  "context.tokens": "context.used",
+  "gen_ai.usage.reasoning_tokens": "gen_ai.usage.reasoning_count",
+});
+
+const NUMERIC_ATTRIBUTE_SET = new Set(SENTRY_NUMERIC_ATTRIBUTES);
+
+/**
  * Producer free-text fields.  These are CONTENT: they belong to the UM path
  * only and must never reach the Sentry path in any form.
  */
@@ -128,15 +169,39 @@ function keyIsAllowed(key, dropKeys) {
 /**
  * Build one OTLP attribute entry from a plain scalar.
  *
- * Integers are emitted as `intValue` (a string, per the OTLP JSON mapping of
- * int64) and non-integers as `doubleValue`.
+ * The type follows Sentry's own columns, not the type of the value: the
+ * typed numeric columns keep their numbers, and every other allowlisted
+ * attribute is sent as a string, because a number or a boolean on a string
+ * column is dropped by Sentry.  A key that Sentry filters by name is
+ * renamed first, so the value survives under the new name.
  */
 export function otlpAttribute(key, value) {
-  if (typeof value === "string") return { key, value: { stringValue: boundString(value) } };
-  if (typeof value === "boolean") return { key, value: { boolValue: value } };
+  const outKey = Object.prototype.hasOwnProperty.call(SENTRY_ATTRIBUTE_RENAMES, key)
+    ? SENTRY_ATTRIBUTE_RENAMES[key]
+    : key;
+  if (NUMERIC_ATTRIBUTE_SET.has(outKey)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (Number.isInteger(value)) return { key: outKey, value: { intValue: String(value) } };
+      return { key: outKey, value: { doubleValue: value } };
+    }
+    //  A numeric string still belongs on a numeric column, so it is
+    //  parsed rather than sent as text and dropped by Sentry.
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed !== "") {
+        const parsed = Number(trimmed);
+        if (Number.isFinite(parsed)) {
+          if (Number.isInteger(parsed)) return { key: outKey, value: { intValue: String(parsed) } };
+          return { key: outKey, value: { doubleValue: parsed } };
+        }
+      }
+    }
+    return undefined;
+  }
+  if (typeof value === "string") return { key: outKey, value: { stringValue: boundString(value) } };
+  if (typeof value === "boolean") return { key: outKey, value: { stringValue: value ? "true" : "false" } };
   if (typeof value === "number" && Number.isFinite(value)) {
-    if (Number.isInteger(value)) return { key, value: { intValue: String(value) } };
-    return { key, value: { doubleValue: value } };
+    return { key: outKey, value: { stringValue: String(value) } };
   }
   return undefined;
 }
@@ -429,7 +494,10 @@ export function internalEventAttributes(event, options) {
   for (const [key, value] of typed) {
     if (value === undefined || value === null) continue;
     const attribute = otlpAttribute(key, value);
-    if (attribute) merged.set(key, attribute);
+    //  The map is keyed by the attribute's OWN key, so a renamed attribute
+    //  and the producer attribute it renames collapse into one entry
+    //  instead of shipping the same wire key twice.
+    if (attribute) merged.set(attribute.key, attribute);
   }
   if (Array.isArray(event.toolNames) && event.toolNames.length > 0) {
     const names = event.toolNames
