@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { projectScope, scrubInternalEvent, scrubResourceLogs, scrubResourceSpans } from "../allowlist.mjs";
-import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
+import { computeEventId, normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
 import { Journal } from "../journal.mjs";
 import { createReceiver, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
 import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent, usageKeyOf } from "../um-sender.mjs";
@@ -153,6 +153,85 @@ describe("the sentry scrubber", () => {
 });
 
 describe("the internal event identity", () => {
+  it("distinguishes accepted spans that lack trace and span ids", () => {
+    const base = {
+      startTimeUnixNano: "1700000000000000000",
+      attributes: [
+        { key: "agent.platform", value: { stringValue: "a-agent" } },
+        { key: "gen_ai.request.model", value: { stringValue: "model-one" } },
+      ],
+    };
+    const first = normalizeSpan(base);
+    const second = normalizeSpan({
+      ...base,
+      attributes: base.attributes.map((attribute) =>
+        attribute.key === "gen_ai.request.model"
+          ? { ...attribute, value: { stringValue: "model-two" } }
+          : attribute,
+      ),
+    });
+
+    assert.ok(first);
+    assert.ok(second);
+    assert.notEqual(first.eventId, second.eventId);
+  });
+
+  it("includes merged resource attributes in fallback span identity", () => {
+    const span = {
+      startTimeUnixNano: "1700000000000000000",
+      attributes: [{ key: "agent.platform", value: { stringValue: "a-agent" } }],
+    };
+    const first = normalizeSpan(span, { "service.name": "service-one" });
+    const second = normalizeSpan(span, { "service.name": "service-two" });
+
+    assert.ok(first);
+    assert.ok(second);
+    assert.notEqual(first.eventId, second.eventId);
+  });
+
+  it("keeps fallback span identity stable when attribute and object keys are reordered", () => {
+    const first = normalizeSpan(
+      {
+        startTimeUnixNano: "1700000000000000000",
+        attributes: [
+          { key: "agent.platform", value: { stringValue: "a-agent" } },
+          { key: "gen_ai.request.model", value: { stringValue: "a-model" } },
+        ],
+      },
+      { "service.name": "service-one", "deployment.environment.name": "test" },
+    );
+    const retried = normalizeSpan(
+      {
+        attributes: [
+          { value: { stringValue: "a-model" }, key: "gen_ai.request.model" },
+          { value: { stringValue: "a-agent" }, key: "agent.platform" },
+        ],
+        startTimeUnixNano: "1700000000000000000",
+      },
+      { "deployment.environment.name": "test", "service.name": "service-one" },
+    );
+
+    assert.ok(first);
+    assert.ok(retried);
+    assert.equal(first.eventId, retried.eventId);
+  });
+
+  it("preserves the historical span id for spans with native trace and span ids", () => {
+    const span = {
+      traceId: "a".repeat(32),
+      spanId: "b".repeat(16),
+      startTimeUnixNano: "1700000000000000000",
+      attributes: [{ key: "agent.platform", value: { stringValue: "a-agent" } }],
+    };
+    const normalized = normalizeSpan(span);
+
+    assert.ok(normalized);
+    assert.equal(
+      normalized.eventId,
+      computeEventId("span", [span.traceId, span.spanId, span.startTimeUnixNano, "a-agent"]),
+    );
+  });
+
   it("gives two different log records two different ids", () => {
     const base = {
       timeUnixNano: "1700000000000000000",

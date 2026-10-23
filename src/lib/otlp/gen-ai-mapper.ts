@@ -54,8 +54,8 @@ import type {
 // normalized name rather than rejected.
 //
 // Double-counting guard (lives in the ROUTE, not here — this function is
-// pure): platforms with an exact local JSONL collector (codex, grok,
-// copilot, deepseek, antigravity) and Cursor (billed by the Admin API
+// pure): platforms with an exact local collector (codex, grok, copilot,
+// deepseek, antigravity, OpenCode, FX) and Cursor (billed by the Admin API
 // poller) are skipped by default; see OVERLAP_SOURCE_APPS +
 // shouldMapGenAiPlatform in this module and the OTLP_GEN_AI_* env knobs
 // in .env.example.  Cursor hook turns stay on AgentTurn, not this path.
@@ -86,6 +86,8 @@ export const OVERLAP_SOURCE_APPS = new Set([
   "deepseek-harness",
   "antigravity-cli",
   "antigravity-statusline",
+  "opencode",
+  "fx",
   "cursor",
   "cursor-agent",
 ]);

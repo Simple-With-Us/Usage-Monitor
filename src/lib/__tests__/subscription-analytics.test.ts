@@ -55,6 +55,19 @@ describe("subscription analytics discriminators", () => {
     ).toBe(false);
   });
 
+  it("treats OpenCode and Fx session estimates as analytics, not cash", () => {
+    expect(
+      isSubscriptionAnalyticsTelemetry({ sourceApp: "opencode", service: "opencode" }),
+    ).toBe(true);
+    expect(
+      isSubscriptionAnalyticsTelemetry({ sourceApp: "fx", service: "fx" }),
+    ).toBe(true);
+    expect(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS).toContain("opencode");
+    expect(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS).toContain("fx");
+    expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "opencode", service: "opencode" })).toBe(true);
+    expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "fx", service: "fx" })).toBe(true);
+  });
+
   it("does not double-count Claude OTLP costUsd with token derivation", () => {
     expect(
       shouldDeriveAnalyticsTokenEstimate({
@@ -74,6 +87,8 @@ describe("subscription analytics discriminators", () => {
       "antigravity-statusline",
       "github-copilot",
       "deepseek-dsh",
+      "opencode",
+      "fx",
     ]);
   });
 });

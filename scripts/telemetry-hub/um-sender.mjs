@@ -66,15 +66,15 @@ const UMBER_INGEST_DESTINATION = "um-ingest";
 /**
  * The platforms whose usage already reaches Usage Monitor on another path.
  *
- * Codex, Grok, Copilot, DeepSeek, Antigravity and OpenCode each have an
+ * Codex, Grok, Copilot, DeepSeek, Antigravity, OpenCode and FX each have an
  * exact local collector, and the billed Cursor usage comes from the
  * server-side Cursor Admin API poller.  A hub row for one of those turns
  * would be a SECOND row for the same turn.  The idempotency key cannot
  * catch it, because the hub and the collector use a different producer id.
  *
  * The list mirrors the overlap set of the monitor's own generic gen_ai
- * mapper (`OVERLAP_SOURCE_APPS` in src/lib/otlp/gen-ai-mapper.ts) and adds
- * OpenCode, which has an exact local collector of its own.
+ * mapper (`OVERLAP_SOURCE_APPS` in src/lib/otlp/gen-ai-mapper.ts) and keeps
+ * the hub-specific Grok CLI and Claude Code guards as well.
  */
 export const DEFAULT_OVERLAP_PLATFORMS = Object.freeze([
   "openai-codex",
@@ -88,6 +88,7 @@ export const DEFAULT_OVERLAP_PLATFORMS = Object.freeze([
   "antigravity-cli",
   "antigravity-statusline",
   "opencode",
+  "fx",
   "claude-code",
   "cursor",
   "cursor-agent",
