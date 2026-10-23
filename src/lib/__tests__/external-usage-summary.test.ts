@@ -961,12 +961,15 @@ describe("OpenCode PAYG cost beside session estimates", () => {
   const rawCutoff = new Date("2026-07-01T00:00:00.000Z");
   const raw = [
     { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 12, quantity: 0 },
+    { sourceApp: "opencode", provider: "openrouter", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 3, quantity: 0 },
+    { sourceApp: "opencode", provider: "azure", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 6, quantity: 0 },
     { sourceApp: "opencode", provider: "muse-code", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 7, quantity: 0 },
     { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "token:input", metricType: "usage", unit: "token", cost: null, quantity: 1_000_000 },
     { sourceApp: "fx", provider: "xai", service: "fx", label: "token:input", metricType: "usage", unit: "token", cost: null, quantity: 1_000_000 },
   ];
   const rollups = [
     { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", totalCostUsd: 5 },
+    { sourceApp: "opencode", provider: "bedrock", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", totalCostUsd: 4 },
     { sourceApp: "opencode", provider: "opencode", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", totalCostUsd: 2 },
   ];
   const tokenRows = [
@@ -978,6 +981,39 @@ describe("OpenCode PAYG cost beside session estimates", () => {
     vi.clearAllMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.$queryRaw.mockResolvedValue(tokenRows);
+  });
+
+  it("merges distinct cost labels into one public group without counting either amount twice", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
+      { label: "api-equivalent", metricType: "cost", unit: "usd", cost: 3, quantity: 0 },
+      { label: "other-estimate", metricType: "cost", unit: "usd", cost: 1, quantity: 0 },
+      { label: "token:input", metricType: "usage", unit: "token", cost: null, quantity: 1_000_000 },
+    ].map((row) => ({
+      sourceApp: "opencode",
+      provider: "anthropic",
+      service: "opencode",
+      projectId: null,
+      environment: null,
+      limit: null,
+      limitWindow: null,
+      label: row.label,
+      metricType: row.metricType,
+      unit: row.unit,
+      _sum: { costUsd: row.cost, requests: 0, quantity: row.quantity },
+      _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
+      _max: { occurredAt: now },
+    })));
+
+    const summary = await summarizeExternalUsageEvents(rawCutoff, rawCutoff, now);
+    expect(summary.groups).toHaveLength(2);
+    expect(summary.groups.find((group) => group.metricType === "cost")).toEqual(
+      expect.objectContaining({
+        eventCount: 2,
+        totalCostUsd: 3,
+        estimatedApiEquivalentUsd: 1,
+      }),
+    );
+    expect(summary.groups.find((group) => group.metricType === "usage")?.estimatedApiEquivalentUsd).toBe(0);
   });
 
   it("separates raw and rolled-up PAYG cash from token and subscription estimates in the summary", async () => {
@@ -1015,6 +1051,12 @@ describe("OpenCode PAYG cost beside session estimates", () => {
       estimatedApiEquivalentUsd: 0,
     }));
     expect(group("anthropic", "usage")?.estimatedApiEquivalentUsd).toBe(3);
+    for (const [provider, cost] of [["openrouter", 3], ["azure", 6], ["bedrock", 4]] as const) {
+      expect(group(provider, "cost")).toEqual(expect.objectContaining({
+        totalCostUsd: cost,
+        estimatedApiEquivalentUsd: 0,
+      }));
+    }
     expect(group("muse-code", "cost")).toEqual(expect.objectContaining({
       totalCostUsd: 0,
       estimatedApiEquivalentUsd: 7,
@@ -1045,6 +1087,13 @@ describe("OpenCode PAYG cost beside session estimates", () => {
       estimatedApiEquivalentUsd: 3,
       pricedEventCount: 2,
     }));
+    for (const [provider, cost] of [["openrouter", 3], ["azure", 6], ["bedrock", 4]] as const) {
+      expect(byProvider.get(provider)).toEqual(expect.objectContaining({
+        usagePushed: cost,
+        estimatedApiEquivalentUsd: 0,
+        pricedEventCount: 1,
+      }));
+    }
     expect(byProvider.get("muse-code")?.estimatedApiEquivalentUsd).toBe(7);
     expect(byProvider.get("opencode")?.estimatedApiEquivalentUsd).toBe(2);
     expect(byProvider.get("xai")?.estimatedApiEquivalentUsd).toBe(2);
@@ -1053,11 +1102,12 @@ describe("OpenCode PAYG cost beside session estimates", () => {
     expect(byProvider.get("xai")?.usagePushed).toBe(0);
 
     const attribution = await sumMonthToDateExternalCostAttribution(monthStart, rawCutoff, now);
-    expect(attribution).toEqual([expect.objectContaining({
+    expect(attribution).toEqual(expect.arrayContaining([expect.objectContaining({
       provider: "anthropic",
       sourceApp: "opencode",
       projectId: "project-a",
       costUsd: 17,
-    })]);
+    })]));
+    expect(attribution).toHaveLength(4);
   });
 });

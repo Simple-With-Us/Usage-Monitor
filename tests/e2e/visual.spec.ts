@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { BUDGET_VIEW } from '../../src/lib/fleet-budget/__tests__/view-fixture';
+import type { AgentsOverviewResponse } from '../../src/lib/agents-overview';
 import { test, expect, type Page, type Route } from '@playwright/test';
 
 // Committed determinism stylesheet (DejaVu font pinning).  Applied AFTER
@@ -288,6 +289,48 @@ test.describe('visual: settings page', () => {
   });
 });
 
+
+test('visual: coding platform notes preserve sentence gaps', async ({ page }) => {
+  const overview: AgentsOverviewResponse = {
+    ok: true, windowDays: 30, windowLabel: 'Last 30 Days', generatedAt: FROZEN_NOW_ISO,
+    macHostname: 'Office Mac', macChip: 'Apple Silicon',
+    summary: {
+      activeAgentCount: 1, totalAgentCount: 1, totalTokens: 10000,
+      totalApiEquivalentCostUsd: 0.04, apiEquivalentCostComplete: true, unpricedModelCount: 0,
+      totalSubscriptionCostUsd: 0, totalNetSavingsUsd: 0, savingsMultiplier: 0,
+      topModel: null, telemetryIncomplete: false, telemetryIncompleteNote: null,
+      unreliablePlatformIds: [],
+    },
+    burn5h: { tokens5h: 0, costEstimate5hUsd: 0, costEstimateComplete: true,
+      burnRateTokensPerHour: 0, burnRateUsdPerHour: 0 },
+    platforms: [{
+      id: 'opencode', name: 'OpenCode', provider: 'Multi-Provider', isRunningOnMac: true,
+      macStatus: 'running', dataCapability: 'Local session token receipts', fidelityTier: 'session_jsonl',
+      notes: 'Local session usage is reported.  Cloud sessions require separate receipts.',
+      monthlySeatCostUsd: 0, billedMonthlySeatCostUsd: 0, seatPlanName: 'No Fixed Seat',
+      seatPlanNote: null, seatPlanSource: 'unknown', listMonthlySeatCostUsd: 0,
+      bundledOffsetUsd: null, bundledOffsetLabel: null, seatCostNote: null,
+      telemetryAccuracy: 'reported', telemetryAccuracyLabel: 'Reported',
+      telemetryAccuracyNote: 'Exact token counts from local session receipts.', usageIsReliable: true,
+      totalTokens: 10000, inputTokens: 8000, outputTokens: 2000,
+      cacheReadTokens: 0, cacheCreationTokens: 0, apiEquivalentCostUsd: 0.04,
+      apiEquivalentCostComplete: true, tokenDerivedCostUsd: 0.04, reportedCostUsd: 0,
+      estimatedCostUsd: 0.04, netSavingsUsd: 0, modelsUsed: [],
+    }],
+    modelDistribution: [],
+  };
+  await settle(page);
+  await page.route('**/api/agents-overview?*', route => json(route, overview));
+  await page.route('**/api/quota-windows', route => json(route, { windows: [] }));
+  await login(page);
+  await page.goto('/agents');
+  await pinFonts(page);
+  const card = page.getByTestId('agent-platform-opencode');
+  await expect(card.getByText('Local session usage is reported.', { exact: false }))
+    .toHaveJSProperty('textContent', 'Local session usage is reported.\u00a0 Cloud sessions require separate receipts.');
+  await expect(card.getByRole('heading', { name: 'OpenCode', exact: true })).toBeVisible();
+  await expect(card).toHaveScreenshot('coding-platform-notes.png', stableShot);
+});
 
 test('visual: quota provenance distinguishes conflicting readings', async ({ page }) => {
   await settle(page);

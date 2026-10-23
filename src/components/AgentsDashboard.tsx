@@ -315,6 +315,7 @@ export function AgentsDashboard() {
                 return (
                   <div
                     key={platform.id}
+                    data-testid={`agent-platform-${platform.id}`}
                     className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col justify-between transition-all"
                   >
                     <div>

@@ -37,13 +37,7 @@ const SOURCE_APP_ONLY_ANALYTICS = new Set<string>([
   "deepseek-dsh",
 ]);
 
-const OPENCODE_PAYG_PROVIDERS = new Set([
-  "anthropic",
-  "openai",
-  "google-ai",
-  "xai",
-  "deepseek",
-]);
+const OPENCODE_NON_PAYG_PROVIDERS = new Set(["minimax", "muse-code", "opencode"]);
 
 type AnalyticsTelemetryShape = {
   sourceApp: string;
@@ -57,7 +51,8 @@ function isOpencodePaygCost(input: AnalyticsTelemetryShape): boolean {
   const app = input.sourceApp?.trim().toLowerCase();
   // Existing OpenCode PAYG message-cost rows use the shared estimated-cost
   // wire shape.  Changing it would conflict with persisted event IDs, so
-  // distinguish only providers with an explicit PAYG mapping in its parser.
+  // use the parser's exact non-PAYG mappings.  Every other nonempty provider
+  // is PAYG there, including OpenRouter, Bedrock, and Azure providers.
   // The cost row has providerId metadata but no billing-mode metadata, and
   // daily rollups retain neither; this shape survives both storage forms.
   return (
@@ -65,8 +60,8 @@ function isOpencodePaygCost(input: AnalyticsTelemetryShape): boolean {
     input.service?.trim().toLowerCase() === "opencode" &&
     input.metricType === "cost" &&
     input.label === "api-equivalent" &&
-    !!input.provider &&
-    OPENCODE_PAYG_PROVIDERS.has(input.provider.trim().toLowerCase())
+    !!input.provider?.trim() &&
+    !OPENCODE_NON_PAYG_PROVIDERS.has(input.provider.trim().toLowerCase())
   );
 }
 

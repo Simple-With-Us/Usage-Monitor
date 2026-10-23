@@ -75,10 +75,10 @@ describe("subscription analytics discriminators", () => {
       metricType: "cost",
       label: "api-equivalent",
     };
-    for (const provider of ["anthropic", "openai", "google-ai", "xai", "deepseek"]) {
+    for (const provider of ["anthropic", "openai", "google-ai", "xai", "deepseek", "openrouter", "bedrock", "azure"]) {
       expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(false);
     }
-    for (const provider of ["minimax", "muse-code", "opencode", "unmapped-vendor"]) {
+    for (const provider of ["minimax", "muse-code", "opencode", " "]) {
       expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(true);
     }
     expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", label: "other" })).toBe(true);

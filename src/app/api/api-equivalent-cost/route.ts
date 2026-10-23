@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildApiEquivalentCost } from "@/lib/claude-cost-check";
-import { SUBSCRIPTION_ANALYTICS_SOURCE_APPS } from "@/lib/subscription-analytics";
+import {
+  SUBSCRIPTION_ANALYTICS_SOURCE_APPS,
+  isSubscriptionAnalyticsTelemetry,
+} from "@/lib/subscription-analytics";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +41,7 @@ export async function GET(request: NextRequest) {
         _sum: { quantity: true },
       }),
       prisma.externalUsageEvent.groupBy({
-        by: ["provider", "sourceApp", "keyRef"],
+        by: ["provider", "sourceApp", "service", "keyRef", "label"],
         where: {
           sourceApp: { in: sourceApps },
           metricType: "cost",
@@ -58,7 +61,13 @@ export async function GET(request: NextRequest) {
           : "unknown",
         quantity: group._sum.quantity ?? 0,
       })),
-      costGroups.map((group) => ({
+      costGroups.filter((group) => isSubscriptionAnalyticsTelemetry({
+        sourceApp: group.sourceApp,
+        service: group.service,
+        provider: group.provider,
+        metricType: "cost",
+        label: group.label,
+      })).map((group) => ({
         provider: group.provider,
         sourceApp: group.sourceApp,
         model: group.keyRef,
