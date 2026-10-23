@@ -42,6 +42,7 @@ Sentry verification used the existing runtime token in place without exporting i
 ## Changes
 
 - Include OpenCode and Fx in Agents Overview's raw/rollup source queries, cards, and model totals.  Keep their API-equivalent estimates in the existing analytics classification rather than cash billing.  Unknown models remain unpriced.
+- Scope reported-estimate suppression by provider and producer in summary and month-to-date analytics.  A Claude or Grok reported estimate must not suppress a separate OpenCode or Fx token estimate using the same provider.  This addresses Sentry review finding `4363295510`.
 - Qualify the overview's Claude and Codex descriptions to match the implemented feeds.  A local CLI collector does not establish cloud or separate Desktop coverage.
 - Serialize the four existing custom TTFT/context measurements as strings on Sentry paths, preserving zero and fractional values.  Keep recognized token counters numeric and preserve typed Usage Monitor input and content filtering.
 - Give accepted spans missing native IDs a stable source-payload identity so unrelated spans no longer collapse into one journal event.  Preserve historical IDs for spans with native trace/span IDs.  A producer retrying an old missing-ID payload after upgrading can produce a new identity once; this compatibility limit affects malformed spans only and is another reason source deployment is separate from merge.
