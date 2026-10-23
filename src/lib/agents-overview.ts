@@ -11,7 +11,10 @@ import { prisma } from "@/lib/prisma";
 import { isDeepSeekPaygModel, sumDeepSeekPaygEvents, type DeepSeekPaygEvent } from "@/lib/pricing/deepseek-payg";
 import { CURSOR_ADMIN_SOURCE_APP } from "@/lib/cursor-admin-poller";
 import { deriveTokenCostUsd, getModelPricing } from "@/lib/pricing/model-pricing";
-import { SUBSCRIPTION_ANALYTICS_SOURCE_APPS } from "@/lib/subscription-analytics";
+import {
+  SUBSCRIPTION_ANALYTICS_SOURCE_APPS,
+  isSubscriptionAnalyticsTelemetry,
+} from "@/lib/subscription-analytics";
 import {
   isReliableTokenTelemetryKind,
   resolveTelemetryAccuracy,
@@ -344,6 +347,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     [] as Array<{
       sourceApp: string;
       provider: string;
+      service?: string | null;
       keyRef: string | null;
       label?: string | null;
       _sum: { totalQuantity?: number | null; totalCostUsd?: number | null };
@@ -376,7 +380,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { quantity: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef"],
+      by: ["sourceApp", "provider", "service", "keyRef", "label"],
       where: {
         OR: eventWhereOr,
         metricType: "cost",
@@ -395,7 +399,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { quantity: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef"],
+      by: ["sourceApp", "provider", "service", "keyRef", "label"],
       where: {
         OR: eventWhereOr,
         metricType: "cost",
@@ -417,7 +421,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       : emptyRollup,
     queryRollups
       ? prisma.externalUsageEventDailyRollup.groupBy({
-          by: ["sourceApp", "provider", "keyRef"],
+          by: ["sourceApp", "provider", "service", "keyRef", "label"],
           where: {
             OR: eventWhereOr,
             metricType: "cost",
@@ -502,6 +506,22 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   const skipOverlappingSeatEvent = (sourceApp: string): boolean =>
     hasCursorAdminBilling && sourceApp.trim().toLowerCase() === "cursor-agent";
 
+  const isReportedSeatCost = (row: {
+    sourceApp: string;
+    provider: string;
+    service?: string | null;
+    label?: string | null;
+  }): boolean =>
+    row.sourceApp === CURSOR_ADMIN_SOURCE_APP ||
+    row.sourceApp === "cursor-agent" ||
+    isSubscriptionAnalyticsTelemetry({
+      sourceApp: row.sourceApp,
+      service: row.service,
+      provider: row.provider,
+      metricType: "cost",
+      label: row.label,
+    });
+
   const observedByPlatform: Partial<Record<string, { planType: string }>> = {};
   if (observedCodexPlan?.keyRef?.trim()) {
     observedByPlatform["openai-codex"] = { planType: observedCodexPlan.keyRef.trim() };
@@ -526,6 +546,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   for (const row of costGroups) {
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (!isReportedSeatCost(row)) continue;
     if (skipOverlappingSeatEvent(row.sourceApp)) continue;
     const app = platformIdForSourceApp(row.sourceApp);
     const current = reportedCostByPlatform.get(app) || 0;
@@ -533,6 +554,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   }
   for (const row of rollupCostGroups) {
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (!isReportedSeatCost(row)) continue;
     if (skipOverlappingSeatEvent(row.sourceApp)) continue;
     const app = platformIdForSourceApp(row.sourceApp);
     const current = reportedCostByPlatform.get(app) || 0;
@@ -890,6 +912,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   for (const g of cost5hGroups) {
     if (!isReliableTokenSourceApp(g.sourceApp)) continue;
+    if (!isReportedSeatCost(g)) continue;
     if (skipOverlappingSeatEvent(g.sourceApp)) continue;
     const cost = Math.max(0, g._sum.costUsd || 0);
     const app = platformIdForSourceApp(g.sourceApp);
