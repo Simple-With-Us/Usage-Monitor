@@ -230,6 +230,7 @@ test.describe('visual: dashboard', () => {
     await login(page);
     await page.goto('/');
     await pinFonts(page);
+    await page.locator('summary').filter({ hasText: 'Charts, telemetry & paid services' }).click();
     const panel = page.getByTestId('external-telemetry-panel');
     const row = panel.getByRole('row').filter({ hasText: 'opencode' });
     await expect(row.getByText('1,000,000', { exact: true })).toBeVisible();
