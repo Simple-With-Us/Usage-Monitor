@@ -837,11 +837,11 @@ function analyticsEstimateSourceKey(provider: string, sourceApp: string): string
 
 function deriveAnalyticsTokenUsdBySource(
   rows: AnalyticsTokenRow[]
-): Map<string, { providerKey: string; usd: number }> {
+): Map<string, { bucketKey: string; usd: number }> {
   const byModel = new Map<
     string,
     {
-      providerKey: string;
+      bucketKey: string;
       sourceKey: string;
       model: string;
       input: number;
@@ -856,13 +856,13 @@ function deriveAnalyticsTokenUsdBySource(
     if (!shouldDeriveAnalyticsTokenEstimate(row)) continue;
     if (!Number.isFinite(row.quantity) || row.quantity <= 0) continue;
     const model = row.keyRef?.trim() || "";
-    const providerKey = canonicalProviderKey(row.provider);
+    const bucketKey = normalizedProviderName(row.provider);
     const sourceKey = analyticsEstimateSourceKey(row.provider, row.sourceApp);
     const key = JSON.stringify([sourceKey, model]);
     const bucket =
       byModel.get(key) ??
       {
-        providerKey,
+        bucketKey,
         sourceKey,
         model,
         input: 0,
@@ -881,9 +881,9 @@ function deriveAnalyticsTokenUsdBySource(
     byModel.set(key, bucket);
   }
 
-  const bySource = new Map<string, { providerKey: string; usd: number }>();
+  const bySource = new Map<string, { bucketKey: string; usd: number }>();
   for (const tokens of byModel.values()) {
-    const { providerKey, sourceKey, model } = tokens;
+    const { bucketKey, sourceKey, model } = tokens;
     const resolved = model ? getModelPricing(model) : null;
     if (!resolved) continue;
     const derived = deriveTokenCostUsd(resolved.pricing, tokens);
@@ -892,7 +892,10 @@ function deriveAnalyticsTokenUsdBySource(
       usd += deriveTokenCostUsd(resolved.pricing, { input: tokens.unknown }).costUsd;
     }
     const existing = bySource.get(sourceKey);
-    bySource.set(sourceKey, { providerKey, usd: (existing?.usd ?? 0) + usd });
+    bySource.set(sourceKey, {
+      bucketKey: existing?.bucketKey ?? bucketKey,
+      usd: (existing?.usd ?? 0) + usd,
+    });
   }
   return bySource;
 }
@@ -1908,12 +1911,12 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, now);
   const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
-  for (const [sourceKey, { providerKey, usd: extra }] of derivedBySource) {
+  for (const [sourceKey, { bucketKey, usd: extra }] of derivedBySource) {
     if (!(extra > 0)) continue;
     if ((reportedEstimateBySource.get(sourceKey) ?? 0) > 0) continue;
-    const bucket = byProvider.get(providerKey) ?? emptyProviderPushedCost();
+    const bucket = byProvider.get(bucketKey) ?? emptyProviderPushedCost();
     bucket.estimatedApiEquivalentUsd += extra;
-    byProvider.set(providerKey, bucket);
+    byProvider.set(bucketKey, bucket);
   }
 
   return {

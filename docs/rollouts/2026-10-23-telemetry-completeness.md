@@ -64,6 +64,14 @@ Focused regression suites cover source inclusion, model totals, analytics classi
 
 The web deployment and collector rollout are separate artifacts.  Merging server code does not install a new Mac collector or hub build.  This task does not restart exporters, enable a listener, alter disabled hooks, or modify security/trust settings.
 
+Concrete verification receipts:
+
+- `npm run lint`, `npm run typecheck`, and `npm run build` passed in the original hosted [CI run40009703633](https://github.com/Simple-With-Us/Usage-Monitor/actions/runs/40009703633), alongside the full coverage suite and repository checks.  This hosted run also passed the R2/maintenance and Oracle harness cases that failed in the local host environment described above.
+- `npx vitest run src/lib/__tests__/subscription-analytics.test.ts src/lib/__tests__/external-usage-summary.test.ts src/lib/__tests__/daily-usage-series.test.ts src/lib/__tests__/anomaly-loader.test.ts src/lib/__tests__/agents-overview.test.ts` passed locally: five suites, 54 tests.
+- `npx vitest run src/app/api/api-equivalent-cost/__tests__/route.test.ts` passed locally: two tests covering classified cash/estimate rows and retained history boundaries.  `npm run typecheck`, targeted `npx eslint` on the changed files, and `git diff --check` passed after these changes.
+- `npx playwright test tests/e2e/visual.spec.ts --update-snapshots` and the subsequent `npx playwright test` both passed on the hosted [baseline run40016502232](https://github.com/Simple-With-Us/Usage-Monitor/actions/runs/40016502232).  The generated OpenCode card PNG was inspected.
+- Final server and report verification runs are linked in [PR1767](https://github.com/Simple-With-Us/Usage-Monitor/pull/1767); production revision and readiness receipts are recorded on UM-1624 after deployment.
+
 ## Post-Merge Review Follow-Up
 
 PR #1766 deployed as `fd5c8cc041c6e898d19b2bdd963ff48ceed0cfaf`.  Public strict readiness returned HTTP 200 with database, scheduler, and backup healthy.  Production Agents Overview returned 12 platforms and confirmed OpenCode's 2,123,159,422 tokens across eight models; Fx correctly remained without received usage.
@@ -73,5 +81,7 @@ Kody posted its completed review after that merge.  The follow-up requires nativ
 OpenCode classification follows the producer's non-PAYG mappings (`minimax`, `muse-code`, `opencode`); every other nonempty provider on the exact legacy cost-row shape stays cash, including OpenRouter, Bedrock, and Azure.  The API-equivalent report and Agents Overview filter cost rows individually while retaining the full token-source inventory.  A mixed-label regression confirms cash and estimate columns each receive their own contribution once.  A deterministic Agents card screenshot also verifies the rendered sentence gap.
 
 Independent review found that the API-equivalent report queried only raw events even for ranges extending beyond retention.  It now combines raw events and older daily rollups using the same UTC-day retention split as Agents Overview.  Regression coverage verifies combined token estimates, subscription estimates, PAYG exclusions on both sides, and disjoint query boundaries.  Hosted baseline workflow `40016502232` generated the new card PNG and passed the full Playwright replay.
+
+A subsequent parent-PR review found provider-alias bucket splitting and token rows displaying dollars as their primary quantity.  The follow-up keeps canonical matching for estimate suppression but writes derived values into the same normalized-name bucket as existing cash rows.  The telemetry panel now displays token quantities and estimates separately.  Regression tests cover a Grok alias without a duplicate xAI bucket and a one-million-token row with a separate three-dollar estimate.  Screenshot fixtures cover the four changed coding-platform cards and the populated telemetry panel.
 
 The audit's Sentry credential checks used the credential available to its container subprocess and returned 403.  Startup injects a separate Infisical child environment, so those checks do not establish the effective app's secret or knob configuration.  Effective Cursor configuration was not verified; absence of Cursor ledger receipts is the confirmed observation.

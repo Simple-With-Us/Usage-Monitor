@@ -211,6 +211,32 @@ test.describe('visual: dashboard', () => {
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('dashboard.png', { ...stableShot, fullPage: true });
   });
+
+  test('token telemetry keeps quantity separate from its dollar estimate', async ({ page }) => {
+    await settle(page);
+    await page.route('**/api/usage-events?*', route => json(route, {
+      days: 30, totalCostUsd: 0, estimatedApiEquivalentUsd: 3,
+      pricedEventCount: 0, unpricedEventCount: 1, unclassifiedCostEventCount: 0,
+      costCoverage: 'unknown', totalRequests: 0, eventCount: 1,
+      groups: [{
+        sourceApp: 'opencode', environment: null, provider: 'openai', canonicalProvider: 'openai',
+        service: 'opencode', projectId: null, metricType: 'usage', unit: 'token',
+        eventCount: 1, pricedEventCount: 0, unpricedEventCount: 1, unclassifiedCostEventCount: 0,
+        costCoverage: 'unknown', totalCostUsd: 0, estimatedApiEquivalentUsd: 3,
+        totalRequests: 0, totalQuantity: 1_000_000, limit: null, limitWindow: null,
+        latestAt: FROZEN_NOW_ISO,
+      }],
+    }));
+    await login(page);
+    await page.goto('/');
+    await pinFonts(page);
+    const panel = page.getByTestId('external-telemetry-panel');
+    const row = panel.getByRole('row').filter({ hasText: 'opencode' });
+    await expect(row.getByText('1,000,000', { exact: true })).toBeVisible();
+    await expect(row.getByText('API-equivalent estimate: $3.00 · excluded from cash spend', { exact: true }))
+      .toBeVisible();
+    await expect(panel).toHaveScreenshot('token-quantity-and-estimate.png', stableShot);
+  });
 });
 
 test.describe('visual: providers page', () => {
@@ -295,7 +321,7 @@ test('visual: coding platform notes preserve sentence gaps', async ({ page }) =>
     ok: true, windowDays: 30, windowLabel: 'Last 30 Days', generatedAt: FROZEN_NOW_ISO,
     macHostname: 'Office Mac', macChip: 'Apple Silicon',
     summary: {
-      activeAgentCount: 1, totalAgentCount: 1, totalTokens: 10000,
+      activeAgentCount: 4, totalAgentCount: 4, totalTokens: 40000,
       totalApiEquivalentCostUsd: 0.04, apiEquivalentCostComplete: true, unpricedModelCount: 0,
       totalSubscriptionCostUsd: 0, totalNetSavingsUsd: 0, savingsMultiplier: 0,
       topModel: null, telemetryIncomplete: false, telemetryIncompleteNote: null,
@@ -319,6 +345,17 @@ test('visual: coding platform notes preserve sentence gaps', async ({ page }) =>
     }],
     modelDistribution: [],
   };
+  overview.platforms.push(...[
+    { id: 'claude-code', name: 'Claude Code', provider: 'Anthropic',
+      dataCapability: 'Full real-time OTLP telemetry',
+      notes: 'Native OTLP metrics report tokens and cost estimates from Claude processes.' },
+    { id: 'openai-codex', name: 'OpenAI Codex', provider: 'OpenAI',
+      dataCapability: 'Incremental local session parsing',
+      notes: 'Local CLI session telemetry.  Cloud and separate Desktop coverage require their own receipts.' },
+    { id: 'fx', name: 'Fx', provider: 'xAI',
+      dataCapability: 'Generation token and cache parsing',
+      notes: 'Reads Fx generation facts.  Input includes cached tokens; reasoning is included in output.' },
+  ].map(platform => ({ ...overview.platforms[0], ...platform })));
   await settle(page);
   await page.route('**/api/agents-overview?*', route => json(route, overview));
   await page.route('**/api/quota-windows', route => json(route, { windows: [] }));
@@ -330,6 +367,13 @@ test('visual: coding platform notes preserve sentence gaps', async ({ page }) =>
     .toHaveJSProperty('textContent', 'Local session usage is reported.\u00a0 Cloud sessions require separate receipts.');
   await expect(card.getByRole('heading', { name: 'OpenCode', exact: true })).toBeVisible();
   await expect(card).toHaveScreenshot('coding-platform-notes.png', stableShot);
+  const claude = page.getByTestId('agent-platform-claude-code');
+  await expect(claude.getByRole('heading', { name: 'Claude Code', exact: true })).toBeVisible();
+  await expect(claude).toHaveScreenshot('claude-code-platform.png', stableShot);
+  await expect(page.getByTestId('agent-platform-openai-codex'))
+    .toHaveScreenshot('codex-platform.png', stableShot);
+  await expect(page.getByTestId('agent-platform-fx'))
+    .toHaveScreenshot('fx-platform.png', stableShot);
 });
 
 test('visual: quota provenance distinguishes conflicting readings', async ({ page }) => {

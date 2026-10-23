@@ -858,6 +858,48 @@ describe("subscription analytics estimates shared across providers", () => {
     prismaMock.$queryRaw.mockResolvedValue(tokens);
   });
 
+  it("puts an alias-derived estimate in the same month-to-date bucket as its stored provider name", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
+      {
+        provider: "Grok",
+        sourceApp: "socratic-trade",
+        service: "api",
+        label: null,
+        projectId: null,
+        metricType: "cost",
+        _sum: { costUsd: 5 },
+        _count: { _all: 1, costUsd: 1 },
+      },
+      {
+        provider: "Grok",
+        sourceApp: "grok-build",
+        service: "grok-cli",
+        label: "token:input",
+        projectId: null,
+        metricType: "usage",
+        _sum: { costUsd: null },
+        _count: { _all: 1, costUsd: 0 },
+      },
+    ]);
+    prismaMock.$queryRaw.mockResolvedValueOnce([{
+      sourceApp: "grok-build",
+      provider: "Grok",
+      service: "grok-cli",
+      keyRef: "grok-4.6",
+      label: "token:input",
+      quantity: 1_000_000,
+    }]);
+
+    const byProvider = await sumMonthToDateExternalCostByProvider(monthStart, monthStart, now);
+    expect([...byProvider.keys()]).toEqual(["grok"]);
+    expect(byProvider.get("grok")).toEqual(expect.objectContaining({
+      usagePushed: 5,
+      estimatedApiEquivalentUsd: 2,
+      pricedEventCount: 1,
+    }));
+    expect(byProvider.has("xai")).toBe(false);
+  });
+
   it("keeps each source's derived summary estimate beside another source's reported cost", async () => {
     prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
       ...sources.map(({ sourceApp, provider, service, cost }) => ({
