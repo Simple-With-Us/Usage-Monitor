@@ -1,4 +1,8 @@
-## Current (2026-09-18 CLAUDE — USAGE_READ_TOKEN cannot enroll an APNs device)
+## Current (2026-10-23 CODEX — Coding Platform Telemetry Completeness)
+
+UM-1624 adds OpenCode and Fx to Agents Overview, prevents overlapping generic metrics from duplicating their collector usage, preserves Sentry's custom TTFT/context attributes, and fixes hub identity collisions for spans missing native IDs.  A bounded production audit confirmed 20,907 OpenCode events and 2.12 billion tokens omitted from the prior overview.  Other gaps remain explicit: stale ledger receipts alongside newer request telemetry, quota-only sources, at-least-once generic turn persistence, and Sentry read access returning 403.  Rollout and evidence: `docs/rollouts/2026-10-23-telemetry-completeness.md`.  Server deployment does not activate or install the Mac hub.
+
+## Prior (2026-09-18 CLAUDE — USAGE_READ_TOKEN cannot enroll an APNs device)
 
 `POST /api/apns/device-tokens` accepted `USAGE_READ_TOKEN` the same as GET, so a
 read-only credential could register a device to receive push alerts. PR #1458

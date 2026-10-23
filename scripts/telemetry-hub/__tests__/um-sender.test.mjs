@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { createTokenResolver } from "../um-sender.mjs";
+import { createTokenResolver, readOverlapPolicy, shouldPushLedgerEvent } from "../um-sender.mjs";
 
 const MEMO_MS = 60_000;
 //  The memo starts at zero, so the clock must start well past it.
@@ -83,5 +83,25 @@ describe("createTokenResolver", () => {
     await assert.rejects(resolve(), (error) => error === failure);
     clock = START + 1;
     assert.equal(await resolve(), "tok-1");
+  });
+});
+
+describe("ledger overlap defaults", () => {
+  const localCollectorPlatforms = ["opencode", "fx"];
+
+  it("skips OpenCode and FX by default", () => {
+    const policy = readOverlapPolicy({});
+    for (const platform of localCollectorPlatforms) {
+      assert.equal(shouldPushLedgerEvent({ platform, provider: "openai" }, policy), false);
+    }
+  });
+
+  it("allows explicit overlap and keeps the allowlist from bypassing the overlap block", () => {
+    const overlapAllowed = readOverlapPolicy({ TELEMETRY_HUB_ALLOW_OVERLAP: "1" });
+    const allowlistedOnly = readOverlapPolicy({ TELEMETRY_HUB_PLATFORM_ALLOWLIST: "opencode,fx" });
+    for (const platform of localCollectorPlatforms) {
+      assert.equal(shouldPushLedgerEvent({ platform, provider: "openai" }, overlapAllowed), true);
+      assert.equal(shouldPushLedgerEvent({ platform, provider: "openai" }, allowlistedOnly), false);
+    }
   });
 });

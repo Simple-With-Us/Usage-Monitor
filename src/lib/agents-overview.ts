@@ -39,9 +39,9 @@ export interface AgentPlatformMeta {
 export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
   {
     id: "claude-code",
-    name: "Claude Code / Desktop",
+    name: "Claude Code",
     provider: "Anthropic",
-    description: "Claude Code CLI, Claude Desktop, and Monet multi-agent sync.",
+    description: "Claude Code telemetry from the native OTLP feed.",
     dataCapability: "Full real-time OTLP telemetry (/api/otlp/v1/metrics)",
     fidelityTier: "realtime_otlp",
     tokenTelemetryKind: "otlp",
@@ -52,7 +52,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     id: "openai-codex",
     name: "OpenAI Codex",
     provider: "OpenAI",
-    description: "Codex CLI & autonomous coding cloud agent.",
+    description: "Local Codex CLI session telemetry.",
     dataCapability: "Incremental session JSONL delta parsing",
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
@@ -164,6 +164,30 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     defaultMonthlySeatCostUsd: 0,
     unavailableReason:
       "Kimi Code does not expose exact local token usage.  This is not zero usage.",
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    provider: "OpenCode",
+    description: "OpenCode local session telemetry.",
+    dataCapability: "Completed assistant-message token parsing",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "Reads completed OpenCode assistant messages.  Reasoning is included in output and retained as metadata; catalog pricing is an API-equivalent estimate.",
+    defaultMonthlySeatCostUsd: 0,
+  },
+  {
+    id: "fx",
+    name: "Fx",
+    provider: "xAI",
+    description: "Fx local generation telemetry.",
+    dataCapability: "Generation token and cache parsing",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "Reads Fx generation facts.  Input includes cached tokens; reasoning is included in output and retained as metadata.",
+    defaultMonthlySeatCostUsd: 0,
   },
 ];
 

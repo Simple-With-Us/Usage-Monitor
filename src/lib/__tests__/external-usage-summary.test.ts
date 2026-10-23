@@ -835,3 +835,121 @@ describe("summarizeExternalUsageEvents derived cost estimates", () => {
     expect(summary.groups).toEqual([]);
   });
 });
+
+describe("subscription analytics estimates shared across providers", () => {
+  const now = new Date("2026-07-03T00:00:00.000Z");
+  const monthStart = new Date("2026-07-01T00:00:00.000Z");
+  const sources = [
+    { sourceApp: "claude-code", provider: "anthropic", service: "claude-code", cost: 10 },
+    { sourceApp: "grok-build", provider: "xai", service: "grok-cli", cost: 8 },
+    { sourceApp: "openai-codex", provider: "openai", service: "codex-cli", cost: 5 },
+  ];
+  const tokens = [
+    { sourceApp: "opencode", provider: "anthropic", service: "opencode", keyRef: "claude-sonnet-4-5", label: "token:input", quantity: 1_000_000 },
+    { sourceApp: "antigravity-statusline", provider: "anthropic", service: "antigravity", keyRef: "claude-sonnet-4-5", label: "token:input", quantity: 1_000_000 },
+    { sourceApp: "fx", provider: "xai", service: "fx", keyRef: "grok-4.6", label: "token:input", quantity: 1_000_000 },
+    { sourceApp: "openai-codex", provider: "openai", service: "codex-cli", keyRef: "claude-sonnet-4-5", label: "token:input", quantity: 1_000_000 },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.$queryRaw.mockResolvedValue(tokens);
+  });
+
+  it("keeps each source's derived summary estimate beside another source's reported cost", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
+      ...sources.map(({ sourceApp, provider, service, cost }) => ({
+        sourceApp,
+        provider,
+        service,
+        environment: null,
+        projectId: null,
+        metricType: "cost",
+        unit: "usd",
+        limit: null,
+        limitWindow: null,
+        _sum: { costUsd: cost, requests: 0, quantity: 0 },
+        _count: { _all: 1, costUsd: 1 },
+        _max: { occurredAt: now },
+      })),
+      ...tokens.map(({ sourceApp, provider, service, quantity }) => ({
+        sourceApp,
+        provider,
+        service,
+        environment: null,
+        projectId: null,
+        metricType: "usage",
+        unit: "token",
+        limit: null,
+        limitWindow: null,
+        _sum: { costUsd: null, requests: 0, quantity },
+        _count: { _all: 1, costUsd: 0 },
+        _max: { occurredAt: now },
+      })),
+    ]);
+    const summary = await summarizeExternalUsageEvents(monthStart, monthStart, now);
+    const estimateFor = (sourceApp: string) =>
+      summary.groups.reduce(
+        (sum, group) => sum + (group.sourceApp === sourceApp ? group.estimatedApiEquivalentUsd : 0),
+        0
+      );
+
+    expect(estimateFor("claude-code")).toBe(10);
+    expect(estimateFor("opencode")).toBe(3);
+    expect(estimateFor("antigravity-statusline")).toBe(3);
+    expect(estimateFor("grok-build")).toBe(8);
+    expect(estimateFor("fx")).toBe(2);
+    expect(estimateFor("openai-codex")).toBe(5);
+    expect(summary.groups.every((group) => group.totalCostUsd === 0)).toBe(true);
+  });
+
+  it("adds derived estimates by source in the month-to-date provider view without adding cash", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
+      ...sources.slice(1).map(({ sourceApp, provider, service, cost }) => ({
+        sourceApp,
+        provider,
+        service,
+        projectId: null,
+        metricType: "cost",
+        _sum: { costUsd: cost },
+        _count: { _all: 1, costUsd: 1 },
+      })),
+      ...tokens.map(({ sourceApp, provider, service }) => ({
+        sourceApp,
+        provider,
+        service,
+        projectId: null,
+        metricType: "usage",
+        _sum: { costUsd: null },
+        _count: { _all: 1, costUsd: 0 },
+      })),
+    ]);
+    prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValueOnce([{
+      sourceApp: "claude-code",
+      provider: "anthropic",
+      service: "claude-code",
+      projectId: null,
+      metricType: "cost",
+      eventCount: 1,
+      pricedEventCount: 1,
+      unpricedEventCount: 0,
+      unclassifiedCostEventCount: 0,
+      totalCostUsd: 10,
+    }]);
+
+    const byProvider = await sumMonthToDateExternalCostByProvider(
+      new Date("2026-06-01T00:00:00.000Z"),
+      monthStart,
+      now
+    );
+    expect(byProvider.get("anthropic")?.estimatedApiEquivalentUsd).toBe(16);
+    expect(byProvider.get("xai")?.estimatedApiEquivalentUsd).toBe(10);
+    expect(byProvider.get("openai")?.estimatedApiEquivalentUsd).toBe(5);
+    for (const bucket of byProvider.values()) {
+      expect(bucket.usagePushed).toBe(0);
+      expect(bucket.subscriptionPushed).toBe(0);
+      expect(bucket.pricedEventCount).toBe(0);
+    }
+  });
+});

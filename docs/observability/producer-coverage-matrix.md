@@ -1,12 +1,14 @@
-# Producer coverage matrix — UM v2 ingest (2026-09-13)
+# Producer coverage matrix — UM v2 ingest (2026-10-23)
 
 Authoritative map of every known producer of `/api/ingest/usage` (and `/api/otlp/v1/metrics`) data, the v2 fields they send, the fields UM accepts, and any gap.  When this list drifts from reality, fix the list, not the contract: the v2 wire is owned by `@jaywedgeworth22/congress-trading-shared` and changes there require a cross-app PR.
+
+The tables describe supported code paths.  Installed configuration and current delivery require separate evidence; see the [October 23 receipt audit](../rollouts/2026-10-23-telemetry-completeness.md).  That audit found working OpenCode ingestion omitted from Agents Overview, stale token-ledger receipts alongside newer request telemetry, and quota-only feeds that must not be presented as exact token coverage.  Copilot was retired operationally by the owner on October 20 (UM-1618); its retained parser and historical rows do not establish a live feed.
 
 ## How the wire works
 
 - v2 batch envelope = `{ schemaVersion: 2, producerId, producerInstanceId?, events: UsageTelemetryV2Event[] }` parsed by `src/lib/usage-telemetry.ts` against `UsageTelemetryV2BatchSchema` and `UsageTelemetryV2EventSchema` from `@jaywedgeworth22/congress-trading-shared`.  `sourceVersion` and `environment` are NOT batch-level fields in the strict v2 schema; `environment` lives on each event.
 - Auth: `Authorization: Bearer ${USAGE_INGEST_TOKEN}` (or per-producer `USAGE_INGEST_PRODUCER_TOKENS` mapping when `USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true`).
-- Idempotency: `eventId` is the producer's durable key; UM re-derives the same length-prefixed SHA-256 from the shared contract when absent.
+- Idempotency: v2 requires the producer's durable `eventId`; UM derives its producer-scoped persistence key with the shared length-prefixed SHA-256 algorithm.  Legacy v1 receipts have a separate fallback key.
 - Persisted result semantics (narrower than request acceptance): `attempted` = submitted events, `persisted` = newly inserted rows, `skippedPrunedDuplicates` = blocked by retention tombstones.  Never derive `persisted` from `activeEvents.length`.
 - Reserved `metadata` keys (producer spoof-proof): the four `_derivedCost*` keys, the `tokenType` split, the `coverage.*` echoes, the `project` mirror, and the per-source anchors.  Producers can add their own keys; see `src/lib/usage-telemetry.ts`.
 
@@ -14,11 +16,23 @@ Authoritative map of every known producer of `/api/ingest/usage` (and `/api/otlp
 
 `POST /api/otlp/v1/metrics` accepts `Content-Type: application/json` (primary) or `application/x-protobuf`.  Does **not** accept gRPC (Claude Code's default `OTEL_EXPORTER_OTLP_PROTOCOL` value) — a gRPC-configured client gets `415` telling it to switch to `http/json` or `http/protobuf`.  Same bearer token as v2 ingest.  Both routes are excluded from the dashboard-session middleware (`src/middleware.ts`'s `api/otlp(?:/|$)` exclusion).
 
-`POST /api/otlp/v1/logs` is a 200 accept-and-drop stub: errors and health stay in Sentry per the owner goal split; only metrics land here.
+`POST /api/otlp/v1/logs` persists allowlisted Claude Code and Codex model-call records into `AiRequest`, including native tokens, model, duration, and TTFT when supplied.  Other log records are accepted and dropped.  Prompt/response bodies and user email are not read by this mapper; request performance never feeds the cash ledger.  Errors and health stay in Sentry.
 
-`POST /api/otlp/v1/metrics` also accepts generic OTel gen_ai client metrics (`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, `gen_ai.usage.cost`) via `src/lib/otlp/gen-ai-mapper.ts`, keyed by `gen_ai.system`/`agent.platform` + `gen_ai.request.model`.  Platforms with an exact local JSONL collector (codex, grok, copilot, deepseek, antigravity) are skipped by default to avoid double counting.  `cursor` and `cursor-agent` are skipped the same way because billed Cursor usage, when a team opts into the Admin API poller below, is that poller and not an estimated gen_ai point.  Allow one side per platform via `OTLP_GEN_AI_PLATFORM_ALLOWLIST` / `OTLP_GEN_AI_ALLOW_OVERLAP=1`.  An allowlist does not override the overlap block.
+`POST /api/otlp/v1/metrics` also accepts generic OTel gen_ai client metrics (`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, `gen_ai.usage.cost`) via `src/lib/otlp/gen-ai-mapper.ts`, keyed by `gen_ai.system`/`agent.platform` + `gen_ai.request.model`.  Platforms with an exact local collector (codex, grok, copilot, deepseek, antigravity, opencode, fx) are skipped by default to avoid double counting.  `cursor` and `cursor-agent` are skipped the same way because billed Cursor usage, when a team opts into the Admin API poller below, is that poller and not an estimated gen_ai point.  Allow one side per platform via `OTLP_GEN_AI_PLATFORM_ALLOWLIST` / `OTLP_GEN_AI_ALLOW_OVERLAP=1`.  An allowlist does not override the overlap block.
 
 `POST /api/otlp/v1/traces` accepts OTLP `resourceSpans` (or a direct `{ turns: [...] }` relay payload) and persists per-turn rows to the `AgentTurn` model (platform, seat, repo, conversation, model, tokens, cost, duration, tools, error, truncated prompt/response with retention limits).  It never writes `ExternalUsageEvent`, so token/cost ledger math cannot double count against `/metrics` or the JSONL collectors.
+
+Claude Code `llm_request` spans instead upsert `AiRequest` on their request identity and can enrich a log-derived row with TTFT.  Only `claude_code.interaction` spans become Claude turns.  Generic `AgentTurn` insertion currently has no durable unique span key, so an HTTP retry can duplicate turn detail even though it does not duplicate the cash ledger.
+
+## Local telemetry hub and Sentry
+
+`scripts/telemetry-hub/` supplies a loopback OTLP JSON receiver, a durable local journal, and independent Usage Monitor and Sentry delivery offsets.  Its receiver accepts traces and logs; `/v1/metrics` returns 501.  Keep native metrics targeting Usage Monitor's metrics route until a durable hub metrics path exists.  Sentry's lack of an OTLP metrics endpoint does not imply Usage Monitor lacks one.
+
+The Sentry path rebuilds spans and logs from the existing attribute allowlist and strips content.  The four custom measurements `ttft_ms`, `context.tokens`, `context.limit`, and `context.utilization_pct` are encoded as string attributes because a real UM-1614 probe found Sentry dropped their numeric OTLP values.  Native recognized token counters remain numeric; the internal journal and Usage Monitor data remain typed.  These strings support indexed filtering; they are not numeric metric series.
+
+The hub's Usage Monitor ledger path skips platforms with another authoritative collector, including OpenCode and Fx.  An explicit overlap override is a deliberate double-counting risk, not an activation prerequisite.  Its generic turn delivery remains at least once because the receiver's `AgentTurn` table lacks a unique event identity.  The hub's local source identity now distinguishes spans missing native IDs with a stable payload hash; spans with native IDs retain their existing identity.
+
+Source code and passing tests do not establish installed hub operation.  The October 23 audit did not inspect or change the Mac's launch configuration, install collectors, redirect exporters, or activate a listener.
 
 ## Producer matrix (v2 ingest)
 

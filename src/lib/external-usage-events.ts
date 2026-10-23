@@ -828,12 +828,22 @@ async function loadAnalyticsTokenRows(
   }
 }
 
-function deriveAnalyticsTokenUsdByProvider(
+function analyticsEstimateSourceKey(provider: string, sourceApp: string): string {
+  return JSON.stringify([
+    canonicalProviderKey(provider),
+    sourceApp.trim().toLowerCase(),
+  ]);
+}
+
+function deriveAnalyticsTokenUsdBySource(
   rows: AnalyticsTokenRow[]
-): Map<string, number> {
+): Map<string, { providerKey: string; usd: number }> {
   const byModel = new Map<
     string,
     {
+      providerKey: string;
+      sourceKey: string;
+      model: string;
       input: number;
       output: number;
       cacheRead: number;
@@ -846,10 +856,22 @@ function deriveAnalyticsTokenUsdByProvider(
     if (!shouldDeriveAnalyticsTokenEstimate(row)) continue;
     if (!Number.isFinite(row.quantity) || row.quantity <= 0) continue;
     const model = row.keyRef?.trim() || "";
-    const key = `${canonicalProviderKey(row.provider)}|${model}`;
+    const providerKey = canonicalProviderKey(row.provider);
+    const sourceKey = analyticsEstimateSourceKey(row.provider, row.sourceApp);
+    const key = JSON.stringify([sourceKey, model]);
     const bucket =
       byModel.get(key) ??
-      { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation1h: 0, unknown: 0 };
+      {
+        providerKey,
+        sourceKey,
+        model,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheCreation: 0,
+        cacheCreation1h: 0,
+        unknown: 0,
+      };
     const tokenType = canonicalTokenType(tokenTypeFromUsageLabel(row.label));
     if (tokenType) {
       bucket[tokenType] += row.quantity;
@@ -859,10 +881,9 @@ function deriveAnalyticsTokenUsdByProvider(
     byModel.set(key, bucket);
   }
 
-  const byProvider = new Map<string, number>();
-  for (const [key, tokens] of byModel) {
-    const provider = key.slice(0, key.indexOf("|"));
-    const model = key.slice(key.indexOf("|") + 1);
+  const bySource = new Map<string, { providerKey: string; usd: number }>();
+  for (const tokens of byModel.values()) {
+    const { providerKey, sourceKey, model } = tokens;
     const resolved = model ? getModelPricing(model) : null;
     if (!resolved) continue;
     const derived = deriveTokenCostUsd(resolved.pricing, tokens);
@@ -870,9 +891,10 @@ function deriveAnalyticsTokenUsdByProvider(
     if (tokens.unknown > 0) {
       usd += deriveTokenCostUsd(resolved.pricing, { input: tokens.unknown }).costUsd;
     }
-    byProvider.set(provider, (byProvider.get(provider) ?? 0) + usd);
+    const existing = bySource.get(sourceKey);
+    bySource.set(sourceKey, { providerKey, usd: (existing?.usd ?? 0) + usd });
   }
-  return byProvider;
+  return bySource;
 }
 
 async function sumDerivedCostEstimates(
@@ -1265,23 +1287,25 @@ async function summarizeExternalUsageEventsUnserialized(
   }
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, upperBound);
-  const derivedByProvider = deriveAnalyticsTokenUsdByProvider(tokenRows);
-  const providersWithReportedEstimate = new Set<string>();
+  const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
+  const sourcesWithReportedEstimate = new Set<string>();
   for (const group of groups.values()) {
     if (group.estimatedApiEquivalentUsd > 0) {
-      providersWithReportedEstimate.add(canonicalProviderKey(group.provider));
+      sourcesWithReportedEstimate.add(
+        analyticsEstimateSourceKey(group.provider, group.sourceApp)
+      );
     }
   }
   const appliedDerived = new Set<string>();
   for (const group of groups.values()) {
     if (!shouldDeriveAnalyticsTokenEstimate(group)) continue;
-    const providerKey = canonicalProviderKey(group.provider);
-    if (providersWithReportedEstimate.has(providerKey)) continue;
-    if (appliedDerived.has(providerKey)) continue;
-    const extra = derivedByProvider.get(providerKey);
+    const sourceKey = analyticsEstimateSourceKey(group.provider, group.sourceApp);
+    if (sourcesWithReportedEstimate.has(sourceKey)) continue;
+    if (appliedDerived.has(sourceKey)) continue;
+    const extra = derivedBySource.get(sourceKey)?.usd;
     if (extra && extra > 0) {
       group.estimatedApiEquivalentUsd += extra;
-      appliedDerived.add(providerKey);
+      appliedDerived.add(sourceKey);
     }
   }
 
@@ -1719,6 +1743,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
 
   const byProvider = new Map<string, ProviderPushedCost>();
   const attributionMap = new Map<string, ExternalCostAttributionRow>();
+  const reportedEstimateBySource = new Map<string, number>();
 
   const addProvider = (
     provider: string,
@@ -1736,6 +1761,11 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     const bucket = byProvider.get(key) ?? emptyProviderPushedCost();
     if (isSubscriptionAnalyticsTelemetry({ sourceApp, service })) {
       bucket.estimatedApiEquivalentUsd += cost;
+      const sourceKey = analyticsEstimateSourceKey(provider, sourceApp);
+      reportedEstimateBySource.set(
+        sourceKey,
+        (reportedEstimateBySource.get(sourceKey) ?? 0) + cost
+      );
       byProvider.set(key, bucket);
       return;
     }
@@ -1865,11 +1895,11 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   }
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, now);
-  const derivedByProvider = deriveAnalyticsTokenUsdByProvider(tokenRows);
-  for (const [providerKey, extra] of derivedByProvider) {
+  const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
+  for (const [sourceKey, { providerKey, usd: extra }] of derivedBySource) {
     if (!(extra > 0)) continue;
+    if ((reportedEstimateBySource.get(sourceKey) ?? 0) > 0) continue;
     const bucket = byProvider.get(providerKey) ?? emptyProviderPushedCost();
-    if (bucket.estimatedApiEquivalentUsd > 0) continue;
     bucket.estimatedApiEquivalentUsd += extra;
     byProvider.set(providerKey, bucket);
   }

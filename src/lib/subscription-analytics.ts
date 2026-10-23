@@ -1,8 +1,8 @@
 /**
  * Subscription-seat analytics telemetry is an API-equivalent estimate, never
- * cash. Claude Code OTLP already lands this way; Codex JSONL and Grok Build
- * session logs and Copilot CLI JSONL join the same bucket once the Mac
- * collectors ingest them.
+ * cash.  Claude Code OTLP already lands this way; Codex JSONL, Grok Build,
+ * Copilot CLI, OpenCode, and Fx session collectors join the same bucket once
+ * their feeds ingest.
  *
  * Keep the Claude discriminator exact so Anthropic API usage (a different
  * sourceApp) still bills as cash. New seats match on sourceApp only.
@@ -15,6 +15,8 @@ export const SUBSCRIPTION_ANALYTICS_SOURCE_APPS = [
   "antigravity-statusline",
   "github-copilot",
   "deepseek-dsh",
+  "opencode",
+  "fx",
 ] as const;
 
 export type SubscriptionAnalyticsSourceApp =
@@ -32,6 +34,8 @@ const SOURCE_APP_ONLY_ANALYTICS = new Set<string>([
   "antigravity-statusline",
   "github-copilot",
   "deepseek-dsh",
+  "opencode",
+  "fx",
 ]);
 
 export function isClaudeCodeAnalyticsTelemetry(input: {
