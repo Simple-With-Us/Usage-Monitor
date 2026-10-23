@@ -213,7 +213,17 @@ test.describe('visual: dashboard', () => {
   });
 
   test('token telemetry keeps quantity separate from its dollar estimate', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 1000 });
     await settle(page);
+    await page.route('**/api/providers?*', route => json(route, [{
+      id: 'visual-openai', name: 'openai', displayName: 'OpenAI',
+      type: 'api', groupId: null, label: null,
+      isActive: true, plan: null, latestSnapshot: null, alerts: [],
+      spentUsd: 0, projectedEomUsd: 0, monthlyBudgetUsd: 100,
+      estimatedMonthlyCostUsd: 0, costCoverage: 'complete', spendCoverage: 'complete',
+      pushedCostCoverage: 'complete', pushedPricedEventCount: 0, pushedUnpricedEventCount: 0,
+      pushedUnclassifiedCostEventCount: 0, budgetStatus: 'ok',
+    }]));
     await page.route('**/api/usage-events?*', route => json(route, {
       days: 30, totalCostUsd: 0, estimatedApiEquivalentUsd: 3,
       pricedEventCount: 0, unpricedEventCount: 1, unclassifiedCostEventCount: 0,
@@ -230,7 +240,19 @@ test.describe('visual: dashboard', () => {
     await login(page);
     await page.goto('/');
     await pinFonts(page);
-    await page.locator('summary').filter({ hasText: 'Charts, telemetry & paid services' }).click();
+    const details = page.locator('#portfolio details');
+    await expect(details).toBeVisible();
+    if (await details.getAttribute('open') === null) {
+      await details.locator('summary').click();
+    }
+    await expect(details).toHaveAttribute('open', '');
+    // Exercise the existing recovery action if initial loading fails.
+    // This fixture verifies the populated token row after delivery succeeds.
+    const loadError = details.getByRole('status').filter({ hasText: 'External app telemetry is temporarily unavailable.' });
+    await expect(details.getByTestId('external-telemetry-panel').or(loadError)).toBeVisible();
+    if (await loadError.isVisible()) {
+      await loadError.getByRole('button', { name: 'Retry', exact: true }).click();
+    }
     const panel = page.getByTestId('external-telemetry-panel');
     const row = panel.getByRole('row').filter({ hasText: 'opencode' });
     await expect(row.getByText('1,000,000', { exact: true })).toBeVisible();
