@@ -37,7 +37,7 @@ The separate seven-day `ExternalUsageEvent` ledger aggregation showed:
 
 Absence from this window does not establish a broken collector or zero activity.  It establishes a receipt gap requiring source-side correlation.  Copilot was operationally retired by the owner on October 20 (UM-1618), so its absence is expected.  Quota receipts establish quota delivery only; they do not establish per-call model, tokens, context, or latency parity.
 
-Sentry verification used the existing runtime token in place without exporting its value.  Project lookup, project received-event statistics, and an organization aggregate event query all returned HTTP 403.  No current Sentry receipt or field retention is claimed from these queries.  UM-1614 contains an earlier real canary probe that verified scrubbing and found custom numeric attribute loss; this change fixes that demonstrated loss in code and tests.
+Sentry verification used the credential available to the audit's container subprocess without exporting its value.  Project lookup, project received-event statistics, and an organization aggregate event query all returned HTTP 403.  Startup injects a separate Infisical child environment, so this does not establish the effective app's credential or knob configuration.  No current Sentry receipt or field retention is claimed from these queries.  UM-1614 contains an earlier real canary probe that verified scrubbing and found custom numeric attribute loss; this change fixes that demonstrated loss in code and tests.
 
 ## Changes
 
@@ -56,7 +56,7 @@ Sentry verification used the existing runtime token in place without exporting i
 3. The hub rejects metrics with 501.  A future durable Usage Monitor metrics channel needs its own offset, retries, admission/auth behavior, and overlap policy.  Native Claude metrics should retain their working direct destination meanwhile.
 4. Generic turn delivery can duplicate `AgentTurn` detail after a network timeout because receiver persistence has no durable event key.  A complete fix requires a compatible receiver identity and migration, not merely the hub's local sent set.
 5. Modern GenAI semantic-convention aliases need a separate compatibility pass.  In particular, cache/reasoning attribute aliases, distinct requested/served models, and whether an input total includes cache must be reconciled across producers before changing ledger semantics.  [OpenTelemetry specifies input totals including cache](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/); guessing uncached versus inclusive totals risks incorrect cost attribution.
-6. Current Sentry delivery and numeric-field retention require a credential with suitable read access.  This runtime credential's three read queries returned 403; no authentication or permissions were changed.
+6. Current Sentry delivery and numeric-field retention remain unverified.  The available audit credential's three read queries returned 403; no authentication or permissions were changed.
 
 ## Verification
 
@@ -71,5 +71,7 @@ PR #1766 deployed as `fd5c8cc041c6e898d19b2bdd963ff48ceed0cfaf`.  Public strict 
 Kody posted its completed review after that merge.  The follow-up requires native span identity instead of a collision-prone fallback, renders note spacing through the existing UI formatter, and preserves OpenCode's native PAYG cost events separately from token estimates.  The wire billing-mode enum remains `actual | estimated | manual`; the collector's `payg | subscription | free` attribution is a separate dimension.  No producer event is rekeyed or rewritten to fix read-time classification.
 
 OpenCode classification follows the producer's non-PAYG mappings (`minimax`, `muse-code`, `opencode`); every other nonempty provider on the exact legacy cost-row shape stays cash, including OpenRouter, Bedrock, and Azure.  The API-equivalent report and Agents Overview filter cost rows individually while retaining the full token-source inventory.  A mixed-label regression confirms cash and estimate columns each receive their own contribution once.  A deterministic Agents card screenshot also verifies the rendered sentence gap.
+
+Independent review found that the API-equivalent report queried only raw events even for ranges extending beyond retention.  It now combines raw events and older daily rollups using the same UTC-day retention split as Agents Overview.  Regression coverage verifies combined token estimates, subscription estimates, PAYG exclusions on both sides, and disjoint query boundaries.  Hosted baseline workflow `40016502232` generated the new card PNG and passed the full Playwright replay.
 
 The audit's Sentry credential checks used the credential available to its container subprocess and returned 403.  Startup injects a separate Infisical child environment, so those checks do not establish the effective app's secret or knob configuration.  Effective Cursor configuration was not verified; absence of Cursor ledger receipts is the confirmed observation.
