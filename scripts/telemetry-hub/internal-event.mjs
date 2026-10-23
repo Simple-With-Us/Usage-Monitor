@@ -243,18 +243,48 @@ export function computeEventId(kind, sourceParts) {
   return sha256Hex([kind, ...sourceParts.map((part) => String(part ?? ""))].join("\u0000"));
 }
 
+function positiveStartTimestamp(span) {
+  const value = span.startTimeUnixNano;
+  let canonical;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    try {
+      const parsed = BigInt(value);
+      if (parsed > 0n) canonical = parsed.toString();
+    } catch {
+      return undefined;
+    }
+  } else if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    canonical = String(value);
+  }
+  if (canonical === undefined || nanosToIso(canonical) === undefined) return undefined;
+  return canonical;
+}
+
 function spanFallbackIdentity(span, mergedAttributes) {
-  const attributes = Array.isArray(span.attributes)
-    ? [...span.attributes].sort((left, right) => {
-        const leftKey = isPlainObject(left) && typeof left.key === "string" ? left.key : "";
-        const rightKey = isPlainObject(right) && typeof right.key === "string" ? right.key : "";
-        if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1;
-        const leftDigest = stableDigest(left);
-        const rightDigest = stableDigest(right);
-        return leftDigest < rightDigest ? -1 : leftDigest > rightDigest ? 1 : 0;
-      })
-    : span.attributes;
-  return stableDigest({ span: { ...span, attributes }, mergedAttributes });
+  const startTimeUnixNano = positiveStartTimestamp(span);
+  if (startTimeUnixNano === undefined) return undefined;
+
+  // Keep fallback identity to stable, non-content source labels.  Hashing the
+  // whole span would make retries with updated counters or content re-key,
+  // and would export a commitment to prompt/response content via eventId.
+  const labelKeys = [
+    "agent.platform",
+    "gen_ai.system",
+    "gen_ai.operation.name",
+    "gen_ai.request.model",
+    "service.name",
+    "service.version",
+    "tool.name",
+  ];
+  const labels = Object.fromEntries(
+    labelKeys.map((key) => [key, readString(mergedAttributes[key], 4000)]),
+  );
+  return stableDigest({
+    startTimeUnixNano,
+    traceId: readString(span.traceId, 128),
+    spanId: readString(span.spanId, 128),
+    labels,
+  });
 }
 
 /**
@@ -288,9 +318,11 @@ export function normalizeSpan(span, resourceAttributes = {}) {
   const hasNativeIdentity =
     typeof span.traceId === "string" && span.traceId.length > 0 &&
     typeof span.spanId === "string" && span.spanId.length > 0;
+  const fallbackIdentity = hasNativeIdentity ? undefined : spanFallbackIdentity(span, flat);
+  if (!hasNativeIdentity && fallbackIdentity === undefined) return null;
   const eventId = hasNativeIdentity
     ? computeEventId("span", [span.traceId, span.spanId, span.startTimeUnixNano ?? "", platform])
-    : computeEventId("span", [spanFallbackIdentity(span, flat), platform]);
+    : computeEventId("span", [fallbackIdentity, platform]);
 
   const tokens = {
     input: readInt(flat["gen_ai.usage.input_tokens"]),

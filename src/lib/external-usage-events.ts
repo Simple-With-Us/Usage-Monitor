@@ -1111,6 +1111,7 @@ async function summarizeExternalUsageEventsUnserialized(
         "environment",
         "provider",
         "service",
+        "label",
         "projectId",
         "metricType",
         "unit",
@@ -1177,6 +1178,9 @@ async function summarizeExternalUsageEventsUnserialized(
     const isAnalytics = isSubscriptionAnalyticsTelemetry({
       sourceApp: row.sourceApp,
       service: row.service,
+      provider: row.provider,
+      metricType: row.metricType,
+      label: row.label,
     });
     addSummaryContribution(groups, {
       sourceApp: row.sourceApp,
@@ -1298,6 +1302,7 @@ async function summarizeExternalUsageEventsUnserialized(
   }
   const appliedDerived = new Set<string>();
   for (const group of groups.values()) {
+    if (group.metricType !== "usage" || group.unit !== "token") continue;
     if (!shouldDeriveAnalyticsTokenEstimate(group)) continue;
     const sourceKey = analyticsEstimateSourceKey(group.provider, group.sourceApp);
     if (sourcesWithReportedEstimate.has(sourceKey)) continue;
@@ -1704,7 +1709,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
   const [rawGroups, rollups] = await Promise.all([
     prisma.externalUsageEvent.groupBy({
-      by: ["provider", "sourceApp", "service", "projectId", "metricType"],
+      by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
       where: {
         occurredAt: { gte: rawSince, lte: now },
         metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
@@ -1749,6 +1754,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     provider: string,
     sourceApp: string,
     service: string | null,
+    label: string | null,
     metricType: string,
     cost: number,
     counts: {
@@ -1759,7 +1765,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   ) => {
     const key = normalizedProviderName(provider);
     const bucket = byProvider.get(key) ?? emptyProviderPushedCost();
-    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service })) {
+    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service, provider, metricType, label })) {
       bucket.estimatedApiEquivalentUsd += cost;
       const sourceKey = analyticsEstimateSourceKey(provider, sourceApp);
       reportedEstimateBySource.set(
@@ -1787,6 +1793,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     provider: string,
     sourceApp: string,
     service: string | null,
+    label: string | null,
     projectId: string | null,
     metricType: string,
     cost: number,
@@ -1798,7 +1805,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   ) => {
     // Attribution deliberately excludes subscription analytics telemetry
     // (estimate only on provider view) and receipt-cash rows.
-    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service })) return;
+    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service, provider, metricType, label })) return;
     const key = `${normalizedProviderName(provider)}|${sourceApp.toLowerCase()}|${projectId ?? ""}|${metricType}`;
     const existing = attributionMap.get(key);
     if (existing) {
@@ -1825,11 +1832,12 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       unclassifiedCostEventCount: 0,
     };
     const cost = row._sum.costUsd ?? 0;
-    addProvider(row.provider, row.sourceApp, row.service, row.metricType, cost, counts);
+    addProvider(row.provider, row.sourceApp, row.service, row.label, row.metricType, cost, counts);
     addAttribution(
       row.provider,
       row.sourceApp,
       row.service,
+      row.label,
       row.projectId,
       row.metricType,
       cost,
@@ -1848,6 +1856,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       candidate.provider,
       candidate.sourceApp,
       candidate.service,
+      candidate.label,
       candidate.metricType,
       cost,
       counts
@@ -1856,6 +1865,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       candidate.provider,
       candidate.sourceApp,
       candidate.service,
+      candidate.label,
       candidate.projectId,
       candidate.metricType,
       cost,
@@ -1879,6 +1889,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       rollup.provider,
       rollup.sourceApp,
       rollup.service,
+      rollup.label,
       rollup.metricType,
       rollup.totalCostUsd,
       counts
@@ -1887,6 +1898,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       rollup.provider,
       rollup.sourceApp,
       rollup.service,
+      rollup.label,
       rollup.projectId,
       rollup.metricType,
       rollup.totalCostUsd,

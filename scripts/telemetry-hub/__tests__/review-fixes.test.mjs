@@ -12,7 +12,12 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { projectScope, scrubInternalEvent, scrubResourceLogs, scrubResourceSpans } from "../allowlist.mjs";
-import { computeEventId, normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
+import {
+  computeEventId,
+  normalizeLogRecord,
+  normalizeOtlpTraces,
+  normalizeSpan,
+} from "../internal-event.mjs";
 import { Journal } from "../journal.mjs";
 import { createReceiver, RECEIVER_RESPONSE_SCHEMA } from "../otlp-receiver.mjs";
 import { createUmSender, readOverlapPolicy, shouldPushLedgerEvent, usageKeyOf } from "../um-sender.mjs";
@@ -214,6 +219,104 @@ describe("the internal event identity", () => {
     assert.ok(first);
     assert.ok(retried);
     assert.equal(first.eventId, retried.eventId);
+  });
+
+  it("keeps fallback identity stable across content, span name, status, and mutable counters", () => {
+    const base = {
+      name: "raw span name",
+      startTimeUnixNano: "1700000000000000000",
+      endTimeUnixNano: "1700000001000000000",
+      status: { code: 1, message: "ok" },
+      attributes: [
+        { key: "agent.platform", value: { stringValue: "a-agent" } },
+        { key: "gen_ai.request.model", value: { stringValue: "model-one" } },
+        { key: "gen_ai.input.messages", value: { stringValue: "prompt one" } },
+        { key: "gen_ai.output.messages", value: { stringValue: "response one" } },
+        { key: "gen_ai.usage.input_tokens", value: { intValue: "10" } },
+        { key: "gen_ai.usage.output_tokens", value: { intValue: "20" } },
+        { key: "gen_ai.usage.cost", value: { doubleValue: 0.01 } },
+        { key: "context.tokens", value: { intValue: "100" } },
+        { key: "context.limit", value: { intValue: "1000" } },
+        { key: "context.utilization_pct", value: { doubleValue: 10 } },
+        { key: "ttft_ms", value: { intValue: "50" } },
+        { key: "duration_ms", value: { intValue: "1000" } },
+      ],
+    };
+    const changed = {
+      ...base,
+      name: "CANARY_RAW_SPAN_PROMPT",
+      endTimeUnixNano: "1700000009000000000",
+      status: { code: 2, message: "CANARY_STATUS_CONTENT" },
+      attributes: base.attributes.map((attribute) => {
+        const nextValues = {
+          "gen_ai.input.messages": "CANARY_PROMPT_CONTENT",
+          "gen_ai.output.messages": "CANARY_RESPONSE_CONTENT",
+          "gen_ai.usage.input_tokens": "9999",
+          "gen_ai.usage.output_tokens": "8888",
+          "gen_ai.usage.cost": 12.34,
+          "context.tokens": "200",
+          "context.limit": "2000",
+          "context.utilization_pct": 70,
+          ttft_ms: "99",
+          duration_ms: "9000",
+        };
+        const next = nextValues[attribute.key];
+        if (next === undefined) return attribute;
+        const value = typeof next === "number" ? { doubleValue: next } : { stringValue: next };
+        return { ...attribute, value };
+      }),
+    };
+
+    const first = normalizeSpan(base);
+    const retried = normalizeSpan(changed);
+    assert.ok(first);
+    assert.ok(retried);
+    assert.equal(first.eventId, retried.eventId);
+    assert.equal(first.eventId.includes("CANARY"), false);
+    assert.equal(retried.eventId.includes("CANARY"), false);
+  });
+
+  it("changes fallback identity for the source start and selected resource labels", () => {
+    const span = {
+      startTimeUnixNano: "1700000000000000000",
+      attributes: [{ key: "gen_ai.operation.name", value: { stringValue: "chat" } }],
+    };
+    const resource = {
+      "agent.platform": "a-agent",
+      "gen_ai.request.model": "model-one",
+      "service.name": "service-one",
+    };
+    const first = normalizeSpan(span, resource);
+    const modelChanged = normalizeSpan(span, { ...resource, "gen_ai.request.model": "model-two" });
+    const platformChanged = normalizeSpan(span, { ...resource, "agent.platform": "other-agent" });
+    const serviceChanged = normalizeSpan(span, { ...resource, "service.name": "service-two" });
+    const startChanged = normalizeSpan({ ...span, startTimeUnixNano: "1700000000000000001" }, resource);
+    const partialTraceChanged = normalizeSpan({ ...span, traceId: "partial-trace-one" }, resource);
+    const partialTraceChangedAgain = normalizeSpan({ ...span, traceId: "partial-trace-two" }, resource);
+
+    for (const event of [first, modelChanged, platformChanged, serviceChanged, startChanged, partialTraceChanged]) {
+      assert.ok(event);
+    }
+    assert.notEqual(first.eventId, modelChanged.eventId);
+    assert.notEqual(first.eventId, platformChanged.eventId);
+    assert.notEqual(first.eventId, serviceChanged.eventId);
+    assert.notEqual(first.eventId, startChanged.eventId);
+    assert.notEqual(partialTraceChanged.eventId, partialTraceChangedAgain.eventId);
+  });
+
+  it("rejects fallback spans without a valid positive source start timestamp", () => {
+    for (const startTimeUnixNano of [undefined, "0", "-1", "not-a-timestamp", "999999999999999999999999999999999999999999999999"]) {
+      const span = {
+        attributes: [{ key: "gen_ai.request.model", value: { stringValue: "model-one" } }],
+        ...(startTimeUnixNano === undefined ? {} : { startTimeUnixNano }),
+      };
+      assert.equal(normalizeSpan(span), null);
+    }
+    const normalized = normalizeOtlpTraces({
+      resourceSpans: [{ scopeSpans: [{ spans: [{ name: "unidentifiable" }] }] }],
+    });
+    assert.deepEqual(normalized.events, []);
+    assert.equal(normalized.ignored, 1);
   });
 
   it("preserves the historical span id for spans with native trace and span ids", () => {
@@ -488,6 +591,27 @@ describe("the um sender", () => {
 });
 
 describe("the otlp receiver", () => {
+  it("ignores unidentifiable spans and rejects a batch with no usable row", async () => {
+    const { journal } = await openJournal();
+    const receiver = createReceiver({ journal, port: 0 });
+    const address = await receiver.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resourceSpans: [{ scopeSpans: [{ spans: [{ name: "unidentifiable span" }] }] }],
+        }),
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "The OTLP payload has no usable row" });
+      const batch = await journal.readBatch("um-turns", 10);
+      assert.deepEqual(batch.events, []);
+    } finally {
+      await receiver.close();
+    }
+  });
+
   it("keeps the good rows of a batch that has one bad row", async () => {
     const { journal } = await openJournal();
     const receiver = createReceiver({ journal, port: 0 });

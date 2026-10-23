@@ -68,6 +68,25 @@ describe("subscription analytics discriminators", () => {
     expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "fx", service: "fx" })).toBe(true);
   });
 
+  it("keeps only the existing OpenCode PAYG message-cost shape in cash", () => {
+    const cost = {
+      sourceApp: "opencode",
+      service: "opencode",
+      metricType: "cost",
+      label: "api-equivalent",
+    };
+    for (const provider of ["anthropic", "openai", "google-ai", "xai", "deepseek"]) {
+      expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(false);
+    }
+    for (const provider of ["minimax", "muse-code", "opencode", "unmapped-vendor"]) {
+      expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(true);
+    }
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", label: "other" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", metricType: "usage", label: "token:input" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", service: "other" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", sourceApp: "fx" })).toBe(true);
+  });
+
   it("does not double-count Claude OTLP costUsd with token derivation", () => {
     expect(
       shouldDeriveAnalyticsTokenEstimate({

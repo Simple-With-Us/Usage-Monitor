@@ -91,6 +91,7 @@ describe("summarizeExternalUsageEvents", () => {
           "environment",
           "provider",
           "service",
+          "label",
           "projectId",
           "metricType",
           "unit",
@@ -605,7 +606,7 @@ describe("summarizeExternalUsageEvents", () => {
     expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
         // Wave H / E1: shared MTD scan always includes projectId.
-        by: ["provider", "sourceApp", "service", "projectId", "metricType"],
+        by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
         where: expect.objectContaining({
           OR: expect.arrayContaining([{ service: null }, { label: null }]),
         }),
@@ -672,7 +673,7 @@ describe("summarizeExternalUsageEvents", () => {
 
     expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
-        by: ["provider", "sourceApp", "service", "projectId", "metricType"],
+        by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
         where: expect.objectContaining({ OR: expect.any(Array) }),
       })
     );
@@ -951,5 +952,112 @@ describe("subscription analytics estimates shared across providers", () => {
       expect(bucket.subscriptionPushed).toBe(0);
       expect(bucket.pricedEventCount).toBe(0);
     }
+  });
+});
+
+describe("OpenCode PAYG cost beside session estimates", () => {
+  const now = new Date("2026-07-03T00:00:00.000Z");
+  const monthStart = new Date("2026-06-01T00:00:00.000Z");
+  const rawCutoff = new Date("2026-07-01T00:00:00.000Z");
+  const raw = [
+    { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 12, quantity: 0 },
+    { sourceApp: "opencode", provider: "muse-code", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", cost: 7, quantity: 0 },
+    { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "token:input", metricType: "usage", unit: "token", cost: null, quantity: 1_000_000 },
+    { sourceApp: "fx", provider: "xai", service: "fx", label: "token:input", metricType: "usage", unit: "token", cost: null, quantity: 1_000_000 },
+  ];
+  const rollups = [
+    { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", totalCostUsd: 5 },
+    { sourceApp: "opencode", provider: "opencode", service: "opencode", label: "api-equivalent", metricType: "cost", unit: "usd", totalCostUsd: 2 },
+  ];
+  const tokenRows = [
+    { sourceApp: "opencode", provider: "anthropic", service: "opencode", keyRef: "claude-sonnet-4-5", label: "token:input", quantity: 1_000_000 },
+    { sourceApp: "fx", provider: "xai", service: "fx", keyRef: "grok-4.6", label: "token:input", quantity: 1_000_000 },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.$queryRaw.mockResolvedValue(tokenRows);
+  });
+
+  it("separates raw and rolled-up PAYG cash from token and subscription estimates in the summary", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce(raw.map((row) => ({
+      ...row,
+      projectId: null,
+      environment: null,
+      limit: null,
+      limitWindow: null,
+      _sum: { costUsd: row.cost, requests: 0, quantity: row.quantity },
+      _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
+      _max: { occurredAt: now },
+    })));
+    prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValueOnce(rollups.map((row) => ({
+      ...row,
+      projectId: null,
+      environment: null,
+      eventCount: 1,
+      pricedEventCount: 1,
+      unpricedEventCount: 0,
+      unclassifiedCostEventCount: 0,
+      totalRequests: 0,
+      totalQuantity: 0,
+      maxLimit: null,
+      limitWindow: null,
+      latestOccurredAt: new Date("2026-06-30T00:00:00.000Z"),
+    })));
+
+    const summary = await summarizeExternalUsageEvents(monthStart, rawCutoff, now);
+    const group = (provider: string, metricType: string) =>
+      summary.groups.find((item) => item.provider === provider && item.metricType === metricType);
+    expect(group("anthropic", "cost")).toEqual(expect.objectContaining({
+      totalCostUsd: 17,
+      pricedEventCount: 2,
+      estimatedApiEquivalentUsd: 0,
+    }));
+    expect(group("anthropic", "usage")?.estimatedApiEquivalentUsd).toBe(3);
+    expect(group("muse-code", "cost")).toEqual(expect.objectContaining({
+      totalCostUsd: 0,
+      estimatedApiEquivalentUsd: 7,
+    }));
+    expect(group("opencode", "cost")?.estimatedApiEquivalentUsd).toBe(2);
+    expect(group("xai", "usage")?.estimatedApiEquivalentUsd).toBe(2);
+  });
+
+  it("keeps the same raw and rollup split in month-to-date cash and attribution", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValue(raw.map((row) => ({
+      ...row,
+      projectId: "project-a",
+      _sum: { costUsd: row.cost },
+      _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
+    })));
+    prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue(rollups.map((row) => ({
+      ...row,
+      projectId: "project-a",
+      eventCount: 1,
+      pricedEventCount: 1,
+      unpricedEventCount: 0,
+      unclassifiedCostEventCount: 0,
+    })));
+
+    const byProvider = await sumMonthToDateExternalCostByProvider(monthStart, rawCutoff, now);
+    expect(byProvider.get("anthropic")).toEqual(expect.objectContaining({
+      usagePushed: 17,
+      estimatedApiEquivalentUsd: 3,
+      pricedEventCount: 2,
+    }));
+    expect(byProvider.get("muse-code")?.estimatedApiEquivalentUsd).toBe(7);
+    expect(byProvider.get("opencode")?.estimatedApiEquivalentUsd).toBe(2);
+    expect(byProvider.get("xai")?.estimatedApiEquivalentUsd).toBe(2);
+    expect(byProvider.get("muse-code")?.usagePushed).toBe(0);
+    expect(byProvider.get("opencode")?.usagePushed).toBe(0);
+    expect(byProvider.get("xai")?.usagePushed).toBe(0);
+
+    const attribution = await sumMonthToDateExternalCostAttribution(monthStart, rawCutoff, now);
+    expect(attribution).toEqual([expect.objectContaining({
+      provider: "anthropic",
+      sourceApp: "opencode",
+      projectId: "project-a",
+      costUsd: 17,
+    })]);
   });
 });

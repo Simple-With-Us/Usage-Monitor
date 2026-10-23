@@ -327,7 +327,7 @@ export function AgentsDashboard() {
                               {platform.provider}
                             </span>
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">{platform.notes}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{withSentenceGaps(platform.notes)}</p>
                         </div>
 
                         {/* Status Badge */}
