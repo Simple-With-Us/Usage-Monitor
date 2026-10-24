@@ -8,8 +8,20 @@ import "server-only";
 // behaved the same way (an unconfigured `new PrismaClient()` only failed when
 // a query actually ran), so deferring construction restores that behavior
 // instead of changing the contract.
-import type { PrismaClient as PrismaClientInstance } from "@prisma/client";
+import { Prisma, type PrismaClient as PrismaClientInstance } from "@prisma/client";
 import { createPrismaClient } from "./create-prisma-client";
+
+const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
+  Object.values(Prisma.ModelName).map(
+    (name) => name.charAt(0).toLowerCase() + name.slice(1)
+  )
+);
+
+function isDeferredPrismaProperty(prop: PropertyKey): boolean {
+  if (typeof prop !== "string") return false;
+  if (prop.startsWith("$") || prop.startsWith("_")) return true;
+  return PRISMA_MODEL_DELEGATE_KEYS.has(prop);
+}
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClientInstance | undefined;
@@ -86,17 +98,13 @@ export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance
   },
   has(target, prop) {
     if (Object.prototype.hasOwnProperty.call(target, prop)) return true;
-    return prop in resolvePrismaClient();
+    return isDeferredPrismaProperty(prop);
   },
   getOwnPropertyDescriptor(target, prop) {
-    const own = Reflect.getOwnPropertyDescriptor(target, prop);
-    if (own) return own;
-    // Report the property as present (and configurable) without constructing
-    // the client: feature detection such as `"$queryRawUnsafe" in prisma` and
-    // vitest's `vi.spyOn` need the property to be discoverable, and a
-    // non-configurable report for a property the target does not own would
-    // violate the proxy invariants.
-    return { value: undefined, writable: true, enumerable: false, configurable: true };
+    // Only report properties installed on the proxy target (e.g. by vi.spyOn).
+    // Do not fabricate descriptors for delegates on the real client: a `value:
+    // undefined` descriptor shadows the real method after mockRestore().
+    return Reflect.getOwnPropertyDescriptor(target, prop);
   },
 });
 
