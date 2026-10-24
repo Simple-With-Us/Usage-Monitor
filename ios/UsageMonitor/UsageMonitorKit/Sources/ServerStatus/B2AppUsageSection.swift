@@ -27,6 +27,11 @@ enum B2DailyPalette {
 
     static let remaining = Color(red: 0.020, green: 0.588, blue: 0.412) // emerald-600
 
+    /// Account-level usage above the bucket sum (deleted buckets,
+    /// unattributed operations).  Renders as its own slice so the bar fills
+    /// truthfully instead of showing phantom headroom.
+    static let unattributed = Color(red: 0.612, green: 0.643, blue: 0.690) // gray-400
+
     static func color(forIndex index: Int) -> Color {
         segments[index % segments.count]
     }
@@ -40,6 +45,24 @@ struct B2DailySegment: Identifiable, Hashable {
     /// Share of the rendered bar (0...1).
     let fraction: Double
     let colorIndex: Int
+    /// Account-level usage above the bucket sum (gray slice, not an app shade).
+    let isUnattributed: Bool
+
+    init(
+        id: String,
+        label: String,
+        value: Double,
+        fraction: Double,
+        colorIndex: Int,
+        isUnattributed: Bool = false
+    ) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.fraction = fraction
+        self.colorIndex = colorIndex
+        self.isUnattributed = isUnattributed
+    }
 }
 
 /// One calendar day's stacked bar.
@@ -63,6 +86,14 @@ struct B2DailyLegendEntry: Identifiable, Hashable {
     let id: String
     let label: String
     let colorIndex: Int
+    let isUnattributed: Bool
+
+    init(id: String, label: String, colorIndex: Int, isUnattributed: Bool = false) {
+        self.id = id
+        self.label = label
+        self.colorIndex = colorIndex
+        self.isUnattributed = isUnattributed
+    }
 }
 
 struct B2AppUsageSection: View {
@@ -213,7 +244,9 @@ struct B2AppUsageSection: View {
                 HStack(spacing: 0) {
                     ForEach(row.segments) { segment in
                         Rectangle()
-                            .fill(B2DailyPalette.color(forIndex: segment.colorIndex))
+                            .fill(segment.isUnattributed
+                                ? B2DailyPalette.unattributed
+                                : B2DailyPalette.color(forIndex: segment.colorIndex))
                             .frame(width: max(0, geo.size.width * CGFloat(segment.fraction)))
                     }
                     if !row.overCap {
@@ -239,7 +272,9 @@ struct B2AppUsageSection: View {
                 ForEach(entries) { entry in
                     HStack(spacing: 4) {
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(B2DailyPalette.color(forIndex: entry.colorIndex))
+                            .fill(entry.isUnattributed
+                                ? B2DailyPalette.unattributed
+                                : B2DailyPalette.color(forIndex: entry.colorIndex))
                             .frame(width: 8, height: 8)
                         Text(entry.label)
                             .font(Theme.Typography.caption)
@@ -294,7 +329,7 @@ struct B2AppUsageSection: View {
         )
 
         return days.map { day in
-            let entries = day.byApp
+            var entries = day.byApp
                 .map { entry -> (id: String, label: String, value: Double) in
                     let appId = entry.key
                     let usage = entry.value
@@ -306,7 +341,20 @@ struct B2AppUsageSection: View {
                 .filter { $0.value > 0 }
                 .sorted { $0.value > $1.value }
 
-            let total = entries.reduce(0) { $0 + $1.value }
+            // The report can carry account-level rows larger than the bucket
+            // rows (deleted buckets, unattributed operations), and the
+            // near-cap alerts already evaluate those account totals — the bar
+            // must not understate them.
+            let byAppSum = entries.reduce(0) { $0 + $1.value }
+            let accountTotal: Double = dailyMetric == .download
+                ? day.accountDownloadedGb
+                : Double(day.accountClassCTotal)
+            let unattributedValue = max(0, accountTotal - byAppSum)
+            if unattributedValue > 0 {
+                entries.append((id: "unattributed", label: "Unattributed", value: unattributedValue))
+            }
+
+            let total = byAppSum + unattributedValue
             let overCap = total > 0 && total > cap
             let scale = max(total, max(cap, 0))
             let segments = entries.map { entry in
@@ -315,7 +363,8 @@ struct B2AppUsageSection: View {
                     label: entry.label,
                     value: entry.value,
                     fraction: scale > 0 ? entry.value / scale : 0,
-                    colorIndex: colorIndexById[entry.id] ?? 0
+                    colorIndex: colorIndexById[entry.id] ?? 0,
+                    isUnattributed: entry.id == "unattributed"
                 )
             }
             return B2DailyRow(
@@ -337,7 +386,8 @@ struct B2AppUsageSection: View {
                     B2DailyLegendEntry(
                         id: segment.id,
                         label: segment.label,
-                        colorIndex: segment.colorIndex
+                        colorIndex: segment.colorIndex,
+                        isUnattributed: segment.isUnattributed
                     )
                 )
             }

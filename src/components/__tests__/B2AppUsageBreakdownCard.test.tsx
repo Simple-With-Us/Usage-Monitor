@@ -181,6 +181,39 @@ describe("B2AppUsageBreakdownCard daily view", () => {
     );
   });
 
+  it("counts account-level usage above the bucket sum as unattributed", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        payload({
+          dailySeries: [
+            {
+              date: "2026-10-21",
+              // Account row exceeds the bucket rows (deleted buckets,
+              // unattributed operations): the bar must reflect the account
+              // total, not just the 0.6 GB of attributed buckets.
+              accountDownloadedGb: 1.2,
+              accountClassCTotal: 900,
+              byApp: {
+                "socratic-trade": { downloadedGb: 0.6, classCTransactions: 900 },
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<B2AppUsageBreakdownCard />);
+
+    const bar = await screen.findByRole("img", { name: /^2026-10-21:/ });
+    expect(bar.getAttribute("aria-label")).toBe(
+      "2026-10-21: Socratic Trade 0.6 GB, Unattributed 0.6 GB, 0.2 GB over the 1 GB free cap",
+    );
+    expect(screen.getByText("Over Cap")).toBeTruthy();
+    // The unattributed slice renders in gray, not as emerald headroom.
+    expect(bar.querySelector(".bg-gray-400")).not.toBeNull();
+    expect(bar.querySelector(".bg-emerald-600")).toBeNull();
+  });
+
   it("keeps the donut and bar views reachable and leaves storage on the old view", async () => {
     fetchMock.mockResolvedValue(jsonResponse(payload()));
 

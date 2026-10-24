@@ -44,6 +44,17 @@ export const DAILY_SEGMENT_CLASSES = [
 /** Headroom left under the cap — same emerald as `QuotaUsageBar`. */
 export const DAILY_REMAINING_CLASS = "bg-emerald-600 dark:bg-emerald-500";
 
+/**
+ * Usage the account-level Backblaze report attributes to a day beyond the sum
+ * of bucket rows (deleted buckets, unattributed operations).  Rendered as its
+ * own gray slice so the bar still fills truthfully instead of showing phantom
+ * headroom.  Never collides with a real app: bucket resolution only ever
+ * returns the `B2AppId` union members.
+ */
+export const DAILY_UNATTRIBUTED_ID = "unattributed";
+export const DAILY_UNATTRIBUTED_LABEL = "Unattributed";
+export const DAILY_UNATTRIBUTED_CLASS = "bg-gray-400";
+
 export interface DailySegment {
   id: string;
   label: string;
@@ -86,6 +97,20 @@ function formatMetricValue(value: number, metric: DailyMetric): string {
   return metric === "download" ? formatGb(value) : formatClassC(value);
 }
 
+function dayAccountTotal(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
+  return metric === "download"
+    ? day.accountDownloadedGb ?? 0
+    : day.accountClassCTotal ?? 0;
+}
+
+function dayByAppSum(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
+  return Object.values(day.byApp ?? {}).reduce(
+    (sum, usage) =>
+      sum + (metric === "download" ? usage?.downloadedGb ?? 0 : usage?.classCTransactions ?? 0),
+    0,
+  );
+}
+
 /**
  * Build the daily stacked-bar rows from the payload's `dailySeries`.
  *
@@ -93,6 +118,12 @@ function formatMetricValue(value: number, metric: DailyMetric): string {
  * cap the used portion is the app segments and the remainder up to the cap is
  * emerald headroom; over the cap the bar fills 100% (segments keep their
  * relative proportions) and the row is flagged as over cap.
+ *
+ * The day's total is `max(account total, sum of byApp)` — the Backblaze
+ * report can carry account-level rows larger than the bucket rows (deleted
+ * buckets, unattributed operations), and the near-cap alerts already evaluate
+ * those account totals, so the bars must not understate them.  Any excess
+ * over the bucket sum renders as an "Unattributed" slice.
  */
 export function buildDailyView(
   dailySeries: B2AppUsageDailyPoint[],
@@ -139,17 +170,31 @@ export function buildDailyView(
       .filter((entry) => entry.value > 0)
       .sort((a, b) => b.value - a.value);
 
-    const total = entries.reduce((sum, entry) => sum + entry.value, 0);
+    const byAppSum = entries.reduce((sum, entry) => sum + entry.value, 0);
+    const accountTotal = dayAccountTotal(day, metric);
+    const unattributedValue = Math.max(0, accountTotal - byAppSum);
+    const allEntries =
+      unattributedValue > 0
+        ? [
+            ...entries,
+            { id: DAILY_UNATTRIBUTED_ID, label: DAILY_UNATTRIBUTED_LABEL, value: unattributedValue },
+          ]
+        : entries;
+
+    const total = byAppSum + unattributedValue;
     const overCap = total > 0 && total > cap;
     const scale = Math.max(total, cap, 0);
-    const segments: DailySegment[] = entries.map((entry) => ({
+    const segments: DailySegment[] = allEntries.map((entry) => ({
       ...entry,
       fraction: scale > 0 ? entry.value / scale : 0,
-      colorClass: colorById.get(entry.id) ?? DAILY_SEGMENT_CLASSES[0],
+      colorClass:
+        entry.id === DAILY_UNATTRIBUTED_ID
+          ? DAILY_UNATTRIBUTED_CLASS
+          : (colorById.get(entry.id) ?? DAILY_SEGMENT_CLASSES[0]),
     }));
 
     const remaining = Math.max(0, cap - total);
-    const appPart = entries
+    const appPart = allEntries
       .map((entry) => `${entry.label} ${formatMetricValue(entry.value, metric)}`)
       .join(", ");
     const ariaLabel = overCap
@@ -161,21 +206,32 @@ export function buildDailyView(
     return { date: day.date, total, cap, remaining, overCap, segments, ariaLabel };
   });
 
-  const legend: DailyLegendEntry[] = usedIds
-    .filter((id) =>
-      days.some((day) => {
-        const usage = day.byApp?.[id as B2AppId];
-        if (!usage) return false;
-        return metric === "download"
-          ? (usage.downloadedGb ?? 0) > 0
-          : (usage.classCTransactions ?? 0) > 0;
-      }),
-    )
-    .map((id) => ({
-      id,
-      label: labelById.get(id) ?? id,
-      colorClass: colorById.get(id) ?? DAILY_SEGMENT_CLASSES[0],
-    }));
+  const legend: DailyLegendEntry[] = [
+    ...usedIds
+      .filter((id) =>
+        days.some((day) => {
+          const usage = day.byApp?.[id as B2AppId];
+          if (!usage) return false;
+          return metric === "download"
+            ? (usage.downloadedGb ?? 0) > 0
+            : (usage.classCTransactions ?? 0) > 0;
+        }),
+      )
+      .map((id) => ({
+        id,
+        label: labelById.get(id) ?? id,
+        colorClass: colorById.get(id) ?? DAILY_SEGMENT_CLASSES[0],
+      })),
+    ...(days.some((day) => dayAccountTotal(day, metric) - dayByAppSum(day, metric) > 0)
+      ? [
+          {
+            id: DAILY_UNATTRIBUTED_ID,
+            label: DAILY_UNATTRIBUTED_LABEL,
+            colorClass: DAILY_UNATTRIBUTED_CLASS,
+          },
+        ]
+      : []),
+  ];
 
   return { rows, legend };
 }
