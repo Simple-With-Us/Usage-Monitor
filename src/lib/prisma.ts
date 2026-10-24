@@ -1,3 +1,5 @@
+import "server-only";
+
 // @prisma/client is CommonJS (`module.exports = { ...require('#main-entry-point') }`
 // in the generated client). Node's ESM named-export interop for a CommonJS
 // module depends on static analysis (cjs-module-lexer) of the module source,

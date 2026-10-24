@@ -90,9 +90,9 @@ export async function register() {
   // mustKeepFunded flag that predated it, then records completion so it
   // never runs again. The owner remains free to turn Must keep funded back
   // on for any provider from the dashboard; this call is a no-op after its
-  // first successful pass. See src/lib/provider-funding-policy.ts.
+  // first successful pass. See src/lib/provider-funding-policy-cleanup.ts.
   const { clearLlmMustKeepFundedFlags } = await import(
-    "@/lib/provider-funding-policy"
+    "@/lib/provider-funding-policy-cleanup"
   );
   await clearLlmMustKeepFundedFlags();
 
