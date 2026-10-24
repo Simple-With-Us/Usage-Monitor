@@ -1,6 +1,7 @@
 name: iOS build (Mac runner)
 
 # Compile-check the iOS app on the self-hosted Mac runner (mac-xcode26-usage).
+# The job also runs the UsageMonitorKit package tests on an iOS Simulator.
 #
 # XCODE BUILDS ONLY (owner directive, 2026-08-12): this is the sole workflow
 # that may target the mac-runner labels; everything else stays on hosted/Linux
@@ -45,7 +46,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -90,16 +91,33 @@ jobs:
           }
           build || { sleep 20; build; }
 
-      - name: Test UsageMonitorWidgetTests on iOS Simulator
+      - name: Select iPhone simulator (UDID)
         run: |
           UDID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for group in data["devices"].values() for d in group if d.get("isAvailable") is not False and d.get("name","").startswith("iPhone")]; print(devices[0]["udid"] if devices else "")')"
           test -n "$UDID"
-          xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || xcrun simctl boot "$UDID"
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Test UsageMonitorWidgetTests on iOS Simulator
+        run: |
+          xcrun simctl bootstatus "$SIM_UDID" -b >/dev/null 2>&1 || xcrun simctl boot "$SIM_UDID"
           xcodebuild test \
             -project ios/UsageMonitor/UsageMonitor.xcodeproj \
             -scheme UsageMonitor \
-            -destination "platform=iOS Simulator,id=$UDID" \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
             -derivedDataPath "${RUNNER_TEMP}/um-ios-tests-${GITHUB_RUN_ID}" \
             -only-testing:UsageMonitorWidgetTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Test UsageMonitorKitTests on iOS Simulator
+        working-directory: ios/UsageMonitor/UsageMonitorKit
+        run: |
+          # The app scheme only runs UsageMonitorWidgetTests, so the package's
+          # own tests never ran in CI.  Run them from the package directory on
+          # the simulator the widget test step already booted.
+          xcodebuild test \
+            -scheme UsageMonitorKit-Package \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -derivedDataPath "${RUNNER_TEMP}/um-kit-tests-${GITHUB_RUN_ID}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
