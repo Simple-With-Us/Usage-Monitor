@@ -32,7 +32,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSqliteDatabasePath } from "./lib/sqlite-database-url.mjs";
 
