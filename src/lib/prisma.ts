@@ -8,7 +8,7 @@ import "server-only";
 // behaved the same way (an unconfigured `new PrismaClient()` only failed when
 // a query actually ran), so deferring construction restores that behavior
 // instead of changing the contract.
-import { Prisma, type PrismaClient as PrismaClientInstance } from "@prisma/client";
+import { Prisma, PrismaClient, type PrismaClient as PrismaClientInstance } from "@prisma/client";
 import { createPrismaClient } from "./create-prisma-client";
 
 const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
@@ -17,10 +17,16 @@ const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
   )
 );
 
-function isDeferredPrismaProperty(prop: PropertyKey): boolean {
-  if (typeof prop !== "string") return false;
-  if (prop.startsWith("$") || prop.startsWith("_")) return true;
-  return PRISMA_MODEL_DELEGATE_KEYS.has(prop);
+/**
+ * Properties the real client is known to have without constructing it:  the
+ * methods on the PrismaClient class ($queryRawUnsafe, $transaction, $connect,
+ * ...) and the generated model delegates.  Instance-only members such as
+ * $extends or _engine are not knowable here, so the `has` trap below asks the
+ * real client about anything outside this set.
+ */
+function isKnownPrismaClientProperty(prop: PropertyKey): boolean {
+  if (typeof prop === "string" && PRISMA_MODEL_DELEGATE_KEYS.has(prop)) return true;
+  return prop in PrismaClient.prototype;
 }
 
 const globalForPrisma = globalThis as unknown as {
@@ -98,7 +104,19 @@ export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance
   },
   has(target, prop) {
     if (Object.prototype.hasOwnProperty.call(target, prop)) return true;
-    return isDeferredPrismaProperty(prop);
+    // Once the client exists, answer exactly as the real client would.
+    const constructed = realPrismaClient ?? globalForPrisma.prisma;
+    if (constructed) return prop in constructed;
+    // Class methods and model delegates are answered without constructing, so
+    // the common `"$queryRawUnsafe" in prisma` check never needs a DATABASE_URL.
+    if (isKnownPrismaClientProperty(prop)) return true;
+    // Anything else needs the real client.  Construction is guarded, so an `in`
+    // check never throws when DATABASE_URL is unset (e.g. during `next build`).
+    try {
+      return prop in resolvePrismaClient();
+    } catch {
+      return false;
+    }
   },
   getOwnPropertyDescriptor(target, prop) {
     // Only report properties installed on the proxy target (e.g. by vi.spyOn).

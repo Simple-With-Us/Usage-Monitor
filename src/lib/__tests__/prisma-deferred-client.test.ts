@@ -12,22 +12,54 @@ describe("prisma deferred singleton proxy", () => {
   });
 
   it("does not construct the client for `in` checks when DATABASE_URL is unset", async () => {
-    const savedUrl = process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL;
+    // vi.stubEnv (not a direct assignment) so afterEach's vi.unstubAllEnvs()
+    // restores the worker's original DATABASE_URL for later test files.
+    vi.stubEnv("DATABASE_URL", undefined);
     vi.resetModules();
 
     const { prisma } = await import("@/lib/prisma");
     expect("$queryRawUnsafe" in prisma).toBe(true);
     expect("provider" in prisma).toBe(true);
+    expect("$notARealMethod" in prisma).toBe(false);
+    expect("notAModel" in prisma).toBe(false);
     expect(() => prisma.provider).toThrow(/DATABASE_URL is required/);
+  });
 
-    process.env.DATABASE_URL = savedUrl;
+  it("answers `in` checks exactly like the real client", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prisma-deferred-in-"));
+    const dbPath = path.join(dir, "test.db");
+    vi.stubEnv("DATABASE_URL", `file:${dbPath}`);
+    setupPrismaSqliteTestDb(dbPath);
+    vi.resetModules();
+
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const real = createPrismaClient({ databaseUrl: `file:${dbPath}` });
+    const { prisma } = await import("@/lib/prisma");
+    const keys = [
+      "$queryRawUnsafe",
+      "$transaction",
+      "$extends",
+      "_engine",
+      "provider",
+      "appSetting",
+      "$notARealMethod",
+      "_notARealField",
+      "notAModel",
+      "then",
+    ];
+    for (const key of keys) expect([key, key in prisma]).toEqual([key, key in real]);
+    expect(typeof prisma.provider.findMany).toBe("function");
+    for (const key of keys) expect([key, key in prisma]).toEqual([key, key in real]);
+
+    await real.$disconnect();
+    await prisma.$disconnect();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("restores real delegates after vi.spyOn().mockRestore()", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prisma-deferred-proxy-"));
     const dbPath = path.join(dir, "test.db");
-    process.env.DATABASE_URL = `file:${dbPath}`;
+    vi.stubEnv("DATABASE_URL", `file:${dbPath}`);
     setupPrismaSqliteTestDb(dbPath);
     vi.resetModules();
 
