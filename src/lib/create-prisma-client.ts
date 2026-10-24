@@ -2,14 +2,9 @@ import "server-only";
 
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { PrismaClient } from "@prisma/client";
+import { sqliteDriverUrl } from "./sqlite-database-url";
 
-/** Strips Prisma-engine query params that SQLite drivers do not understand. */
-export function sqliteDriverUrl(url: string): string {
-  const withoutConnectionLimit = url.replace(/([?&])connection_limit=[^&]*/g, (match, sep) =>
-    sep === "?" ? "?" : ""
-  );
-  return withoutConnectionLimit.replace(/\?$/, "");
-}
+export { sqliteDriverUrl } from "./sqlite-database-url";
 
 export type CreatePrismaClientOptions = {
   /** Overrides `DATABASE_URL` (tests, migrate-safe repro). */

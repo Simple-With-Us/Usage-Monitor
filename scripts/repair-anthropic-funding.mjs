@@ -4,12 +4,11 @@
  * provider plan. Run manually by the operator to clean up noisy balance
  * visibility alerts on existing installations.
  */
-import { existsSync } from "node:fs";
 import { createPrismaClient } from "./lib/create-prisma-client.mjs";
+import { sqliteDatabaseFileExists } from "./lib/sqlite-database-url.mjs";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
-const sqlitePath = databaseUrl.match(/^file:(.+)$/)?.[1];
-if (sqlitePath && !existsSync(sqlitePath)) {
+if (databaseUrl && !sqliteDatabaseFileExists(databaseUrl)) {
   console.log("Anthropic funding repair: database does not exist yet.");
   process.exit(0);
 }

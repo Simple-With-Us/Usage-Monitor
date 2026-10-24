@@ -266,8 +266,8 @@ describe("POST /api/otlp/v1/metrics", () => {
       orderBy: { occurredAt: "asc" },
     });
     expect(rows.map((row) => row.costUsd)).toEqual([
-      expect.closeTo(0.0231),
-      expect.closeTo(0.0269),
+      expect.closeTo(0.0231, 5),
+      expect.closeTo(0.0269, 5),
     ]);
     expect(rows.reduce((sum, row) => sum + (row.costUsd ?? 0), 0)).toBeCloseTo(0.05);
     expect(await prisma.otlpMetricState.count()).toBe(1);

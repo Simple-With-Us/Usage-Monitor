@@ -32,8 +32,9 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseSqliteDatabasePath } from "./lib/sqlite-database-url.mjs";
 
 const DEFAULT_RETENTION = 1; // free-tier disk: one pre-migrate snapshot is enough
 const MAX_RETENTION = 10;
@@ -76,29 +77,7 @@ function applySqliteMemoryPragmas(database) {
 }
 
 function parseDatabasePath(databaseUrl) {
-  if (!databaseUrl?.startsWith("file:")) {
-    throw new Error("DATABASE_URL must be a file: SQLite URL");
-  }
-
-  const withoutQuery = databaseUrl.split(/[?#]/, 1)[0];
-  if (withoutQuery === "file::memory:" || withoutQuery === "file:") {
-    throw new Error("DATABASE_URL must point to a persistent SQLite file");
-  }
-
-  if (withoutQuery.startsWith("file://")) {
-    return fileURLToPath(new URL(withoutQuery));
-  }
-
-  let path;
-  try {
-    path = decodeURIComponent(withoutQuery.slice("file:".length));
-  } catch {
-    throw new Error("DATABASE_URL contains invalid percent encoding");
-  }
-  if (!path || path === ":memory:") {
-    throw new Error("DATABASE_URL must point to a persistent SQLite file");
-  }
-  return isAbsolute(path) ? path : resolve(process.cwd(), path);
+  return parseSqliteDatabasePath(databaseUrl);
 }
 
 function retentionCount(raw) {

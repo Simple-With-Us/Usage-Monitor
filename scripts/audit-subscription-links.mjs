@@ -4,12 +4,11 @@
  * billing-identity invariant. It prints identities and counts, never costs,
  * notes, credentials, or provider configuration.
  */
-import { existsSync } from "node:fs";
 import { createPrismaClient } from "./lib/create-prisma-client.mjs";
+import { sqliteDatabaseFileExists } from "./lib/sqlite-database-url.mjs";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
-const sqlitePath = databaseUrl.match(/^file:(.+)$/)?.[1];
-if (sqlitePath && !existsSync(sqlitePath)) {
+if (databaseUrl && !sqliteDatabaseFileExists(databaseUrl)) {
   console.log("subscription link audit: no existing database; nothing to audit");
   process.exit(0);
 }
