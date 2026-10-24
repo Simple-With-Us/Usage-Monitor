@@ -20,6 +20,7 @@ import type {
   B2AppUsageDailyPoint,
   B2AppUsageSlice,
 } from "@/lib/b2-app-usage-types";
+import { B2_APP_LABELS } from "@/lib/b2-app-usage-types";
 
 type ChartMode = "storage" | "download" | "classC";
 type ChartView = "daily" | "donut" | "bar";
@@ -103,12 +104,54 @@ function dayAccountTotal(day: B2AppUsageDailyPoint, metric: DailyMetric): number
     : day.accountClassCTotal ?? 0;
 }
 
-function dayByAppSum(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
-  return Object.values(day.byApp ?? {}).reduce(
-    (sum, usage) =>
-      sum + (metric === "download" ? usage?.downloadedGb ?? 0 : usage?.classCTransactions ?? 0),
-    0,
-  );
+interface DailyAppValue {
+  id: string;
+  value: number;
+}
+
+/**
+ * The single source of truth for a day's per-app values: finite, positive
+ * entries only.  The bars, the bucket sum and the legend all derive from this
+ * so the "Unattributed" swatch can never appear without a matching slice.
+ */
+export function dayAppValues(day: B2AppUsageDailyPoint, metric: DailyMetric): DailyAppValue[] {
+  return Object.entries(day.byApp ?? {})
+    .map(([id, usage]) => ({
+      id,
+      value:
+        metric === "download" ? usage?.downloadedGb ?? 0 : usage?.classCTransactions ?? 0,
+    }))
+    .filter((entry) => Number.isFinite(entry.value) && entry.value > 0);
+}
+
+const UNATTRIBUTED_EPSILON = 1e-9;
+
+/** Unattributed usage for a day: account total above the filtered bucket sum. */
+export function dayUnattributed(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
+  const accountTotal = dayAccountTotal(day, metric);
+  if (!Number.isFinite(accountTotal)) return 0;
+  const byAppSum = dayAppValues(day, metric).reduce((sum, entry) => sum + entry.value, 0);
+  const excess = accountTotal - byAppSum;
+  // Ignore floating-point dust (0.9 - (0.6 + 0.3) ≈ 1e-16) so a fully
+  // attributed day never grows a zero-width "Unattributed 0 GB" slice.
+  return excess > UNATTRIBUTED_EPSILON * Math.max(1, Math.abs(accountTotal)) ? excess : 0;
+}
+
+/**
+ * Friendly label for an app id: the payload label, else the known
+ * `B2_APP_LABELS` entry, else the id humanized ("new-app" → "New App"),
+ * else "Other app".  The UI never shows a raw machine id.
+ */
+export function dailyAppLabel(appId: string, labelById: Map<string, string>): string {
+  const fromPayload = labelById.get(appId);
+  if (fromPayload) return fromPayload;
+  const known = (B2_APP_LABELS as Record<string, string>)[appId];
+  if (known) return known;
+  const words = appId
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1));
+  return words.length > 0 ? words.join(" ") : "Other app";
 }
 
 /**
@@ -132,7 +175,9 @@ export function buildDailyView(
   cap: number
 ): DailyView {
   const labelById = new Map<string, string>();
-  for (const app of apps) labelById.set(app.id, app.label);
+  for (const app of apps ?? []) {
+    if (app?.id && app.label) labelById.set(app.id, app.label);
+  }
 
   const days = [...(dailySeries ?? [])]
     .filter((day) => Boolean(day?.date))
@@ -147,8 +192,8 @@ export function buildDailyView(
     }
   }
   usedIds.sort((a, b) => {
-    const ai = apps.findIndex((app) => app.id === a);
-    const bi = apps.findIndex((app) => app.id === b);
+    const ai = (apps ?? []).findIndex((app) => app?.id === a);
+    const bi = (apps ?? []).findIndex((app) => app?.id === b);
     return (ai === -1 ? Number.MAX_SAFE_INTEGER : ai) - (bi === -1 ? Number.MAX_SAFE_INTEGER : bi);
   });
 
@@ -158,21 +203,12 @@ export function buildDailyView(
   });
 
   const rows: DailyRow[] = days.map((day) => {
-    const entries = Object.entries(day.byApp ?? {})
-      .map(([appId, usage]) => ({
-        id: appId,
-        label: labelById.get(appId) ?? appId,
-        value:
-          metric === "download"
-            ? usage?.downloadedGb ?? 0
-            : usage?.classCTransactions ?? 0,
-      }))
-      .filter((entry) => entry.value > 0)
+    const entries = dayAppValues(day, metric)
+      .map((entry) => ({ ...entry, label: dailyAppLabel(entry.id, labelById) }))
       .sort((a, b) => b.value - a.value);
 
     const byAppSum = entries.reduce((sum, entry) => sum + entry.value, 0);
-    const accountTotal = dayAccountTotal(day, metric);
-    const unattributedValue = Math.max(0, accountTotal - byAppSum);
+    const unattributedValue = dayUnattributed(day, metric);
     const allEntries =
       unattributedValue > 0
         ? [
@@ -206,23 +242,17 @@ export function buildDailyView(
     return { date: day.date, total, cap, remaining, overCap, segments, ariaLabel };
   });
 
+  // The legend is derived from the rendered rows, so every swatch has a slice.
+  const renderedIds = new Set(rows.flatMap((row) => row.segments.map((segment) => segment.id)));
   const legend: DailyLegendEntry[] = [
     ...usedIds
-      .filter((id) =>
-        days.some((day) => {
-          const usage = day.byApp?.[id as B2AppId];
-          if (!usage) return false;
-          return metric === "download"
-            ? (usage.downloadedGb ?? 0) > 0
-            : (usage.classCTransactions ?? 0) > 0;
-        }),
-      )
+      .filter((id) => renderedIds.has(id))
       .map((id) => ({
         id,
-        label: labelById.get(id) ?? id,
+        label: dailyAppLabel(id, labelById),
         colorClass: colorById.get(id) ?? DAILY_SEGMENT_CLASSES[0],
       })),
-    ...(days.some((day) => dayAccountTotal(day, metric) - dayByAppSum(day, metric) > 0)
+    ...(renderedIds.has(DAILY_UNATTRIBUTED_ID)
       ? [
           {
             id: DAILY_UNATTRIBUTED_ID,
@@ -263,7 +293,7 @@ export default function B2AppUsageBreakdownCard() {
   }, []);
 
   const slices = useMemo(() => {
-    if (!data?.apps.length) return [];
+    if (!data?.apps?.length) return [];
     return data.apps
       .map((app) => {
         let value = 0;
@@ -278,8 +308,8 @@ export default function B2AppUsageBreakdownCard() {
   const dailyMetric: DailyMetric = mode === "classC" ? "classC" : "download";
   const dailyCap =
     dailyMetric === "download"
-      ? data?.caps.downloadGbDailyFree ?? 0
-      : data?.caps.classCDailyFree ?? 0;
+      ? data?.caps?.downloadGbDailyFree ?? 0
+      : data?.caps?.classCDailyFree ?? 0;
 
   const dailyView = useMemo(
     () => buildDailyView(data?.dailySeries ?? [], data?.apps ?? [], dailyMetric, dailyCap),
@@ -337,9 +367,9 @@ export default function B2AppUsageBreakdownCard() {
   }
 
   const alertLine = [
-    data.alerts.classCSpike ? "Class C spike" : null,
-    data.alerts.classCNearCap ? "Class C near cap" : null,
-    data.alerts.downloadNearCap ? "Download near cap" : null,
+    data.alerts?.classCSpike ? "Class C spike" : null,
+    data.alerts?.classCNearCap ? "Class C near cap" : null,
+    data.alerts?.downloadNearCap ? "Download near cap" : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -504,7 +534,7 @@ export default function B2AppUsageBreakdownCard() {
       )}
 
       <ul className="space-y-2 border-t border-gray-100 px-5 py-4 text-xs dark:border-gray-700">
-        {data.apps.map((app) => (
+        {(data.apps ?? []).map((app) => (
           <li key={app.id} className="flex flex-wrap justify-between gap-2">
             <span className="font-medium text-gray-800 dark:text-gray-200">{app.label}</span>
             <span className="text-gray-500 dark:text-gray-400">
@@ -516,9 +546,9 @@ export default function B2AppUsageBreakdownCard() {
           </li>
         ))}
       </ul>
-      {data.warnings.length > 0 ? (
+      {(data.warnings?.length ?? 0) > 0 ? (
         <p className="border-t border-gray-100 px-5 py-3 text-xs text-amber-700 dark:border-gray-700 dark:text-amber-300">
-          {data.warnings.join(" · ")}
+          {(data.warnings ?? []).join(" · ")}
         </p>
       ) : null}
     </section>

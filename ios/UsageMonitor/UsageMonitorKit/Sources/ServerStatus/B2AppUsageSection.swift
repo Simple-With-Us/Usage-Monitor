@@ -303,7 +303,7 @@ struct B2AppUsageSection: View {
             ? Double(breakdown.caps.downloadGbDailyFree)
             : Double(breakdown.caps.classCDailyFree)
         var labels: [String: String] = [:]
-        for app in breakdown.apps {
+        for app in breakdown.apps where !app.label.isEmpty {
             labels[app.id] = app.label
         }
 
@@ -336,9 +336,13 @@ struct B2AppUsageSection: View {
                     let value = dailyMetric == .download
                         ? usage.downloadedGb
                         : Double(usage.classCTransactions)
-                    return (appId, labels[appId] ?? appId, value)
+                    return (
+                        appId,
+                        labels[appId] ?? B2AppUsageBreakdown.displayLabel(forAppId: appId),
+                        value
+                    )
                 }
-                .filter { $0.value > 0 }
+                .filter { $0.value.isFinite && $0.value > 0 }
                 .sorted { $0.value > $1.value }
 
             // The report can carry account-level rows larger than the bucket
@@ -349,7 +353,10 @@ struct B2AppUsageSection: View {
             let accountTotal: Double = dailyMetric == .download
                 ? day.accountDownloadedGb
                 : Double(day.accountClassCTotal)
-            let unattributedValue = max(0, accountTotal - byAppSum)
+            // Ignore floating-point dust (0.9 - (0.6 + 0.3) ≈ 1e-16) so a
+            // fully attributed day never grows an "Unattributed 0 GB" slice.
+            let excess = accountTotal.isFinite ? accountTotal - byAppSum : 0
+            let unattributedValue = excess > 1e-9 * max(1, abs(accountTotal)) ? excess : 0
             if unattributedValue > 0 {
                 entries.append((id: "unattributed", label: "Unattributed", value: unattributedValue))
             }
@@ -411,11 +418,11 @@ struct B2AppUsageSection: View {
         case .download:
             let rounded = (value * 10).rounded() / 10
             if rounded == rounded.rounded() {
-                return "\(Int(rounded).formatted()) GB"
+                return "\(b2SafeRoundedInt(rounded).formatted()) GB"
             }
             return "\(rounded.formatted(.number.precision(.fractionLength(1)))) GB"
         case .classC:
-            return "\(Int(value.rounded()).formatted()) Class C txns"
+            return "\(b2SafeRoundedInt(value).formatted()) Class C txns"
         }
     }
 

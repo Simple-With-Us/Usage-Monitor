@@ -158,4 +158,86 @@ final class B2AppUsageDecodingTests: XCTestCase {
         XCTAssertEqual(day.byApp["usage-monitor"]?.downloadedGb, 0)
         XCTAssertEqual(day.byApp["usage-monitor"]?.classCTransactions, 0)
     }
+
+    func testOutOfRangeTransactionCountsDecodeAsZeroInsteadOfTrapping() throws {
+        let json = """
+        {
+          "configured": true,
+          "asOf": "2026-10-22T00:00:00.000Z",
+          "cacheAgeSeconds": 0,
+          "reportDate": "2026-10-21",
+          "storageSource": "external_billing",
+          "reportSource": "usage_csv",
+          "warnings": [],
+          "caps": { "classCDailyFree": 2500, "downloadGbDailyFree": 1 },
+          "alerts": { "classCNearCap": false, "downloadNearCap": false, "classCSpike": false },
+          "apps": [],
+          "dailySeries": [
+            {
+              "date": "2026-10-21",
+              "accountDownloadedGb": 0.2,
+              "accountClassCTotal": 1e19,
+              "byApp": {
+                "socratic-trade": { "downloadedGb": 0.2, "classCTransactions": -1e300 }
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let payload = try JSONDecoder().decode(B2AppUsageBreakdown.self, from: json)
+        let day = try XCTUnwrap(payload.dailySeries.first)
+        XCTAssertEqual(day.accountClassCTotal, 0)
+        XCTAssertEqual(day.byApp["socratic-trade"]?.classCTransactions, 0)
+        XCTAssertEqual(b2SafeRoundedInt(.nan), 0)
+        XCTAssertEqual(b2SafeRoundedInt(.infinity), 0)
+        XCTAssertEqual(b2SafeRoundedInt(41.6), 42)
+    }
+
+    func testFractionalLatestDayCountsDoNotFailThePayload() throws {
+        let json = """
+        {
+          "configured": true,
+          "asOf": "2026-10-22T00:00:00.000Z",
+          "cacheAgeSeconds": 0,
+          "reportDate": "2026-10-21",
+          "storageSource": "external_billing",
+          "reportSource": "usage_csv",
+          "warnings": [],
+          "caps": { "classCDailyFree": 2500, "downloadGbDailyFree": 1 },
+          "alerts": { "classCNearCap": false, "downloadNearCap": false, "classCSpike": false },
+          "apps": [
+            {
+              "id": "socratic-trade",
+              "label": "Socratic.Trade",
+              "bucketNames": ["jays-socratic-trade-eu"],
+              "storageGb": 150,
+              "latestDay": {
+                "date": "2026-10-21",
+                "storedGb": 150,
+                "downloadedGb": 0.6,
+                "classCTransactions": 900.6,
+                "classBTransactions": 40.2
+              }
+            },
+            { "label": "missing id is dropped, not fatal" }
+          ],
+          "dailySeries": [
+            { "date": "2026-10-21", "accountDownloadedGb": 0.6, "accountClassCTotal": 901, "byApp": {} }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let payload = try JSONDecoder().decode(B2AppUsageBreakdown.self, from: json)
+        XCTAssertEqual(payload.apps.count, 1)
+        XCTAssertEqual(payload.apps[0].latestDay?.classCTransactions, 901)
+        XCTAssertEqual(payload.apps[0].latestDay?.classBTransactions, 40)
+        XCTAssertEqual(payload.dailySeries.count, 1)
+    }
+
+    func testDisplayLabelNeverReturnsRawId() {
+        XCTAssertEqual(B2AppUsageBreakdown.displayLabel(forAppId: "fleet-infra"), "Fleet Infra")
+        XCTAssertEqual(B2AppUsageBreakdown.displayLabel(forAppId: "new-app_x"), "New App X")
+        XCTAssertEqual(B2AppUsageBreakdown.displayLabel(forAppId: ""), "Other app")
+    }
 }
