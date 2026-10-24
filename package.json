@@ -72,7 +72,7 @@
     "@jaywedgeworth22/congress-trading-shared": "github:Simple-With-Us/congress-trading-shared#v2.9.0",
     "@prisma/adapter-better-sqlite3": "^7.0.0",
     "@prisma/client": "^7.0.0",
-    "better-sqlite3": "^12.4.1",
+    "better-sqlite3": "^13.0.0",
     "@sentry/nextjs": "^11.3.0",
     "dd-trace": "^6.19.0",
     "lucide-react": "^1.50.0",
