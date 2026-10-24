@@ -253,6 +253,11 @@ function gitShow(rev, relPath) {
   });
 }
 
+/** Prisma 7 reads DATABASE_URL from prisma.config.ts; historical schema files still list `url`. */
+function stripDatasourceUrlFromSchema(source) {
+  return source.replace(/^\s*url\s*=\s*env\([^)]+\)\s*$/gm, "");
+}
+
 function runMigrateSafe(dbFile) {
   try {
     const stdout = execFileSync("node", [MIGRATE_SAFE], {
@@ -355,7 +360,10 @@ async function main() {
     // --- Scenario 2: additive-only diff ---
     log(`Scenario 2: additive-only diff (schema.prisma@${OLD_SCHEMA_REV} -> current)`);
     const oldSchemaPath = path.join(work, "old-schema.prisma");
-    writeFileSync(oldSchemaPath, gitShow(OLD_SCHEMA_REV, "prisma/schema.prisma"));
+    writeFileSync(
+      oldSchemaPath,
+      stripDatasourceUrlFromSchema(gitShow(OLD_SCHEMA_REV, "prisma/schema.prisma"))
+    );
     const additiveDb = path.join(work, "additive.db");
     pushSchemaDirect(oldSchemaPath, additiveDb);
     seedLitestreamState(additiveDb);
