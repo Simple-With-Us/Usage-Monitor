@@ -20,19 +20,27 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch (error) {
     // EPERM means the process exists but belongs to someone else.
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "EPERM"
+    );
   }
 }
 
 /**
  * Removes fallback DB files in `dir`.  `ownRunId` set:  only that run's files.
- * Unset:  files from runs whose process is gone, plus legacy-named files.
+ * Unset:  files from runs whose process is gone, plus legacy-named files, plus
+ * files carrying `startingRunId` (a run that is only starting cannot have
+ * created files yet, so those were left by an earlier run with a recycled pid).
  * Best effort:  a file that cannot be removed is skipped, never thrown.
  */
 export function removeVitestFallbackDatabases(
   dir: string = DEFAULT_FALLBACK_DB_DIR,
   ownRunId?: number,
-  isAlive: (pid: number) => boolean = isProcessAlive
+  isAlive: (pid: number) => boolean = isProcessAlive,
+  startingRunId?: number
 ): string[] {
   let entries: string[];
   try {
@@ -46,7 +54,10 @@ export function removeVitestFallbackDatabases(
     let remove: boolean;
     if (run) {
       const runId = Number(run[1]);
-      remove = ownRunId === undefined ? !isAlive(runId) : runId === ownRunId;
+      remove =
+        ownRunId === undefined
+          ? runId === startingRunId || !isAlive(runId)
+          : runId === ownRunId;
     } else {
       remove = ownRunId === undefined && LEGACY_DB_FILE.test(name);
     }
@@ -64,7 +75,7 @@ export function removeVitestFallbackDatabases(
 export default function setup(): () => void {
   const runId = process.pid;
   process.env.UM_VITEST_RUN_ID = String(runId);
-  removeVitestFallbackDatabases();
+  removeVitestFallbackDatabases(DEFAULT_FALLBACK_DB_DIR, undefined, isProcessAlive, runId);
   return () => {
     removeVitestFallbackDatabases(DEFAULT_FALLBACK_DB_DIR, runId);
   };

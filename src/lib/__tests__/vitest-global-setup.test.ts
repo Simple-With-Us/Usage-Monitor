@@ -37,6 +37,14 @@ describe("removeVitestFallbackDatabases", () => {
     expect(fs.readdirSync(dir).sort()).toEqual([...live, ...legacy, ...unrelated].sort());
   });
 
+  it("pre-run: removes files left under this run's recycled pid", () => {
+    const dir = seed([...live, ...unrelated]);
+    expect(removeVitestFallbackDatabases(dir, undefined, isAlive, 200).sort()).toEqual(
+      [...live].sort()
+    );
+    expect(fs.readdirSync(dir).sort()).toEqual([...unrelated].sort());
+  });
+
   it("is a no-op when the directory does not exist", () => {
     expect(removeVitestFallbackDatabases(path.join(os.tmpdir(), "no-such-dir-um-1630"))).toEqual([]);
   });

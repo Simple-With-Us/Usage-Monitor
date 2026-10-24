@@ -69,6 +69,20 @@ describe("prisma deferred singleton proxy", () => {
     for (const key of publicKeys) {
       expect([key, key in prisma]).toEqual([key, key in real]);
     }
+    // Every name the proxy advertises before construction exists on the real
+    // client:  each model under both names, plus the per-instance members.
+    const { Prisma } = await import("@prisma/client");
+    const advertised = [
+      ...Object.values(Prisma.ModelName).flatMap((name) => [
+        name,
+        name.charAt(0).toLowerCase() + name.slice(1),
+      ]),
+      "$extends",
+      "$parent",
+    ];
+    for (const key of advertised) {
+      expect([key, key in prisma, key in real]).toEqual([key, true, true]);
+    }
     expect(createSpy).not.toHaveBeenCalled();
 
     // After construction every key, private ones included, matches exactly.

@@ -21,8 +21,10 @@ const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
 );
 
 // Public members set per instance in the constructor, so they are not on
-// PrismaClient.prototype.  prisma-deferred-client.test.ts checks this list
-// against a real client, so a Prisma upgrade that adds one fails the test.
+// PrismaClient.prototype.  prisma-deferred-client.test.ts asserts every name
+// in this list and in PRISMA_MODEL_DELEGATE_KEYS exists on a real client, and
+// that every public own key of a real client is answered here, so a Prisma
+// upgrade that adds or drops one fails the test.
 const PRISMA_INSTANCE_MEMBERS = new Set<string>(["$extends", "$parent"]);
 
 /**
