@@ -40,7 +40,8 @@ import { normalizePrivateKey } from "./asc-key.mjs";
 import {
   buildFloor,
   isDriftTrain,
-  latestMarketingPatch
+  latestMarketingPatch,
+  nextMarketingPatch
 } from "./version-plan.mjs";
 
 function base64url(input) {
@@ -943,7 +944,9 @@ async function main() {
     }
     const trains = trainRes.trains;
 
-    const patch = latestMarketingPatch({ prefix, appStoreVersions, trains });
+    // Print one less than the next FREE patch, so the caller's P + 1 never
+    // lands on a patch a drift train already holds (see nextMarketingPatch).
+    const patch = nextMarketingPatch({ prefix, appStoreVersions, trains }) - 1;
     const drift = trains.filter((t) => isDriftTrain(t.version, t.builds, prefix)).map((t) => t.version);
 
     console.error(
