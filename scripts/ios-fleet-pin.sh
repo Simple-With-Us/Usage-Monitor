@@ -30,7 +30,10 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 
 # Exactly the runtime files that can change what this repo ships, plus the
 # one AppUpdatePrompt.swift that every iOS target must copy byte-for-byte.
-PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift"
+# version-plan.mjs is here because asc-api.mjs imports it:  it holds the
+# version-numbering rules, so an unreviewed edit to it would change what
+# version a ship gets without the pin noticing.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs"
 COPIED_PROMPT_TARGETS="ios/UsageMonitor/App/AppUpdatePrompt.swift ios/UsageMonitor/LocalApp/AppUpdatePrompt.swift"
 
 MODE="check"

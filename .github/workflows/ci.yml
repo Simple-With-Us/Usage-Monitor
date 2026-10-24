@@ -319,6 +319,14 @@ jobs:
           node --test scripts/ios-fleet/test-asc-key.test.mjs
           bash scripts/ios-fleet/test-asc-credentials.sh
 
+      # The fleet's version-numbering rules (AFC-517):  the marketing version
+      # is the next patch on the app's train and the build number is
+      # INDEPENDENT of it, so App Store Connect can no longer show "1.0.N (N)".
+      # The rules live in scripts/ios-fleet/version-plan.mjs (pure, no I/O);
+      # this is their unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet version-numbering rules
+        run: node --test scripts/ios-fleet/version-plan.node-test.mjs
+
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
       # a payload-shape regression in the collector can be caught before the
