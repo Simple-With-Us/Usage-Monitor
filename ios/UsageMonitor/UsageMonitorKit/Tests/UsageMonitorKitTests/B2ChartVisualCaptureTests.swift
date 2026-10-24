@@ -42,16 +42,18 @@ final class B2ChartVisualCaptureTests: XCTestCase {
             (.dark, "b2-daily-chart-dark.png"),
         ]
         for (scheme, name) in captures {
-            let view = B2AppUsageSection(store: store, hasCredential: true) { }
-                .frame(width: Self.captureSize.width, height: Self.captureSize.height)
-                .background(Theme.Colors.background)
-                // The offscreen render has no window, so the color scheme is
-                // pushed into the environment (and the preferred scheme) to
-                // resolve the dynamic `Theme.Colors` tokens.
-                .environment(\.colorScheme, scheme)
-                .preferredColorScheme(scheme)
+            let view = AnyView(
+                B2AppUsageSection(store: store, hasCredential: true) { }
+                    .frame(width: Self.captureSize.width, height: Self.captureSize.height)
+                    .background(Theme.Colors.background)
+                    // The window's `overrideUserInterfaceStyle` resolves the
+                    // dynamic `Theme.Colors` tokens;  the environment values
+                    // keep the SwiftUI tree in the same scheme.
+                    .environment(\.colorScheme, scheme)
+                    .preferredColorScheme(scheme)
+            )
             let url = output.appendingPathComponent(name)
-            try Self.writePNG(of: view, to: url)
+            try await Self.writePNG(of: view, scheme: scheme, to: url)
             XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), name)
             XCTAssertTrue(
                 Self.hasVisibleContent(of: url),
@@ -81,18 +83,58 @@ final class B2ChartVisualCaptureTests: XCTestCase {
         return store
     }
 
-    private static func writePNG<V: View>(of view: V, to url: URL) throws {
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 2
-        guard let image = renderer.uiImage else {
-            XCTFail("ImageRenderer produced no image for \(url.lastPathComponent)")
-            return
+    /// Captures the chart through a real `UIWindow`.  `ImageRenderer` cannot
+    /// draw UIKit-backed controls:  the segmented pickers came out as
+    /// placeholders and the daily legend inside its `UIScrollView` was
+    /// missing altogether.  Hosting the view in a window makes UIKit draw
+    /// its own controls the way the app does.
+    private static func writePNG(of root: AnyView, scheme: ColorScheme, to url: URL) async throws {
+        let window = makeWindow(size: captureSize)
+        window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+
+        let hosting = UIHostingController(rootView: root)
+        hosting.view.frame = window.bounds
+        hosting.view.backgroundColor = .clear
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+
+        hosting.view.setNeedsLayout()
+        hosting.view.layoutIfNeeded()
+        // SwiftUI needs a few run-loop turns to settle the pickers, the bars
+        // and the scroll view before the hierarchy is drawn.
+        try await Task.sleep(for: .milliseconds(300))
+        hosting.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 2
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+        let image = renderer.image { _ in
+            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
+
+        // Tear the window down so the next capture starts from a clean slate.
+        window.isHidden = true
+        window.rootViewController = nil
+
         guard let data = image.pngData() else {
             XCTFail("PNG encoding failed for \(url.lastPathComponent)")
             return
         }
         try data.write(to: url, options: .atomic)
+    }
+
+    /// A window scene only exists when the tests run inside a real app host.
+    /// The package tests run in a host-less XCTest runner, so the plain
+    /// `UIWindow(frame:)` fallback is the normal path there.
+    private static func makeWindow(size: CGSize) -> UIWindow {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let scene = scenes.first(where: { $0.activationState != .unattached }) ?? scenes.first {
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(origin: .zero, size: size)
+            return window
+        }
+        return UIWindow(frame: CGRect(origin: .zero, size: size))
     }
 
     /// Cheap blank-image guard: a downscaled sample of the PNG must contain
