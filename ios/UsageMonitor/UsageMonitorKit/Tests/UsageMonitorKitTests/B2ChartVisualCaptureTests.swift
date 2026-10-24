@@ -84,10 +84,11 @@ final class B2ChartVisualCaptureTests: XCTestCase {
     }
 
     /// Captures the chart through a real `UIWindow`.  `ImageRenderer` cannot
-    /// draw UIKit-backed controls:  the segmented pickers came out as
-    /// placeholders and the daily legend inside its `UIScrollView` was
-    /// missing altogether.  Hosting the view in a window makes UIKit draw
-    /// its own controls the way the app does.
+    /// draw UIKit-backed views, and `drawHierarchy(in:afterScreenUpdates:)`
+    /// needs a render server that the host-less package test runner does not
+    /// have, so the capture draws the layer tree in-process with
+    /// `CALayer.render(in:)`, which still paints the segmented pickers and the
+    /// legend's `UIScrollView` content.
     private static func writePNG(of root: AnyView, scheme: ColorScheme, to url: URL) async throws {
         let window = makeWindow(size: captureSize)
         window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
@@ -106,11 +107,15 @@ final class B2ChartVisualCaptureTests: XCTestCase {
         hosting.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(300))
 
+        // One more layout pass so the layer tree is settled before it is drawn.
+        window.layoutIfNeeded()
+        hosting.view.layoutIfNeeded()
+
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 2
         let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
-        let image = renderer.image { _ in
-            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        let image = renderer.image { context in
+            window.layer.render(in: context.cgContext)
         }
 
         // Tear the window down so the next capture starts from a clean slate.
