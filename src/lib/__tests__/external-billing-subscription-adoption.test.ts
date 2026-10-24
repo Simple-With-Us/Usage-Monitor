@@ -43,8 +43,8 @@ beforeAll(async () => {
   setupPrismaSqliteTestDb(dbPath);
 
   ({ prisma } = await import("@/lib/prisma"));
-  const { PrismaClient } = await import("@prisma/client");
-  contenderPrisma = new PrismaClient();
+  const { createPrismaClient } = await import("@/lib/create-prisma-client");
+  contenderPrisma = createPrismaClient();
   ({ adoptExternalBillingSubscriptions, externalAdoptionGuardKey } =
     await import("../external-billing-subscription-adoption"));
   ({ materializeDueSubscriptions } = await import(

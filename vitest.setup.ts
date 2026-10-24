@@ -10,6 +10,10 @@ process.env.TEST_INFISICAL_CLIENT_SECRET ??=
 process.env.INFISICAL_UM_PROJECT_ID ??=
   "synthetic-test-infisical-project-id";
 
+// Prisma 7 requires a driver adapter at client construction; many unit tests
+// import modules that touch the shared prisma singleton without a per-file DB.
+process.env.DATABASE_URL ??= "file:./prisma/vitest-global.db";
+
 /**
  * Wave H / E1: the process-local MTD external-cost scan memo is correct for
  * production (same DB, short TTL) but must not leak across vitest fixtures that

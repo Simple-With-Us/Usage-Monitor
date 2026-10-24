@@ -5,7 +5,7 @@
  * notes, credentials, or provider configuration.
  */
 import { existsSync } from "node:fs";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
 const sqlitePath = databaseUrl.match(/^file:(.+)$/)?.[1];
@@ -14,7 +14,7 @@ if (sqlitePath && !existsSync(sqlitePath)) {
   process.exit(0);
 }
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 try {
   const columns = await prisma.$queryRawUnsafe('PRAGMA table_info("Subscription")');
   const columnNames = new Set(columns.map((column) => String(column.name)));

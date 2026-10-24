@@ -1,4 +1,5 @@
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "@/lib/create-prisma-client";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,7 +30,7 @@ beforeAll(() => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "maintenance-scripts-test-"));
   const dbPath = path.join(tempDirectory, "test.db");
   setupPrismaSqliteTestDb(dbPath);
-  prisma = new PrismaClient({ datasources: { db: { url: `file:${dbPath}` } } });
+  prisma = createPrismaClient({ databaseUrl: `file:${dbPath}` });
 });
 
 afterAll(async () => {

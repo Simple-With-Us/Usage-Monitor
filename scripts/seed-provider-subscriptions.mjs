@@ -39,9 +39,9 @@
  * is found in the database instead.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 function log(message) {
   console.log(`[seed-provider-subscriptions] ${message}`);

@@ -2,14 +2,14 @@
 /**
  * Safe migration script for Prisma + SQLite deployments.
  *
- * Runs `prisma db push --skip-generate` (never `--accept-data-loss`) and trusts
+ * Runs `prisma db push` (never `--accept-data-loss`) and trusts
  * Prisma's own built-in guard: it refuses to apply a change that would actually
  * drop or truncate non-empty rows (checked against real row counts, not just
  * schema-shape heuristics like "a table was recreated") and applies cleanly
- * otherwise, exiting non-zero only when data would genuinely be lost. Skipping
- * generation is required because the image already contains the client made by
- * `npm ci`; rewriting that shared directory during parallel tests/startup can
- * expose a partially generated client to another process. On refusal this
+ * otherwise, exiting non-zero only when data would genuinely be lost.
+ * Prisma 7 no longer runs `prisma generate` from `db push` (the old
+ * `--skip-generate` flag is gone), so deploy-time pushes cannot race client
+ * generation. On refusal this
  * script exits with instructions for manual review instead of silently forcing
  * the change via --accept-data-loss. Litestream's internal tables are excluded
  * from Prisma schema management in prisma.config.ts.
@@ -49,7 +49,7 @@ async function main() {
   let dbExists = false;
   if (DB_PATH) {
     // Parse the SQLite file path from DATABASE_URL (format: "file:/path/to/db")
-    const match = DB_PATH.match(/^file:(.+)$/);
+    const match = DB_PATH.match(/^file:([^?]+)/);
     if (match) {
       dbExists = existsSync(match[1]);
     }
@@ -57,7 +57,7 @@ async function main() {
 
   if (!dbExists) {
     log("No existing database found — creating schema from scratch (safe).");
-    run("npx prisma db push --skip-generate");
+    run("npx prisma db push");
     log("Database created successfully.");
     return;
   }
@@ -65,7 +65,7 @@ async function main() {
   log("Existing database found — applying schema changes...");
 
   try {
-    const output = run("npx prisma db push --skip-generate");
+    const output = run("npx prisma db push");
     process.stdout.write(output);
     log(
       output.includes("already in sync")
@@ -95,7 +95,7 @@ async function main() {
     console.error(
       "  3. If you're certain the loss is acceptable, manually run:"
     );
-    console.error("       npx prisma db push --accept-data-loss --skip-generate");
+    console.error("       npx prisma db push --accept-data-loss");
     console.error(
       "  4. Or use Prisma Migrate for a proper migration: npx prisma migrate dev"
     );

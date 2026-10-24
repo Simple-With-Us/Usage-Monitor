@@ -11,7 +11,7 @@
  *
  * Keep the key classifier synchronized with src/lib/provider-secret-config.ts.
  */
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import {
   applyProviderSecretMigration,
   inspectProviderSecretMigration,
@@ -48,7 +48,7 @@ function describeActions(candidate) {
     .join("; ");
 }
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 try {
   if (!apply) {

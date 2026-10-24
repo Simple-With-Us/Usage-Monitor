@@ -12,9 +12,7 @@
 // module object sidesteps synthetic named-export detection entirely: the
 // constructor is read back out via a plain property access instead.
 import type { PrismaClient as PrismaClientInstance } from "@prisma/client";
-import prismaClientModule from "@prisma/client";
-
-const { PrismaClient } = prismaClientModule;
+import { createPrismaClient } from "./create-prisma-client";
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClientInstance | undefined;
@@ -29,36 +27,9 @@ function clampedIntEnv(name: string, fallback: number, min: number, max: number)
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
-// --- Single-connection SQLite pool -----------------------------------------
-// Prisma's SQLite "library" engine opens a POOL of connections (default
-// num_cpus*2+1), and the native page-cache / mmap bounds set below are
-// PER-CONNECTION - a PRAGMA issued on one pooled connection does not apply to
-// the others (verified empirically: with a pool >1, concurrent `PRAGMA
-// mmap_size` reads return a mix of the value we set and the default). Forcing
-// `connection_limit=1` makes the bound deterministic and pool-wide, and is
-// itself a native-memory reduction: one connection's cache/mmap instead of N.
-// It is safe here because this is a single Render instance against a local
-// SQLite file whose internal writes are already serialized (see
-// ingest-admission.ts), and no $transaction callback in this codebase issues
-// a query through the global client (only through its `tx` handle), so a
-// single connection cannot self-deadlock. Overridable via
-// SQLITE_CONNECTION_LIMIT for operators who deliberately want more.
-function withConnectionLimit(url: string): string {
-  if (/[?&]connection_limit=/.test(url)) return url; // respect an explicit value
-  const limit = clampedIntEnv("SQLITE_CONNECTION_LIMIT", 1, 1, 64);
-  return `${url}${url.includes("?") ? "&" : "?"}connection_limit=${limit}`;
-}
-
-function createPrismaClient(): PrismaClientInstance {
-  const url = process.env.DATABASE_URL;
-  // With no URL, defer to Prisma's own env-driven construction (and its own
-  // clear "Environment variable not found: DATABASE_URL" error path) rather
-  // than fabricating a datasource override.
-  if (!url) return new PrismaClient();
-  return new PrismaClient({
-    datasources: { db: { url: withConnectionLimit(url) } },
-  });
-}
+// Prisma 7 uses the better-sqlite3 driver adapter (single underlying
+// connection per PrismaClient). Native page-cache / mmap bounds below are
+// applied on that connection in applySqliteNativeMemoryPragmas().
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 

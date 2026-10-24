@@ -57,7 +57,7 @@ jobs:
       # rendering is what made baselines machine-specific before.
       - name: Verify DejaVu fonts are installed
         run: fc-list | grep -qi dejavu || (echo "DejaVu fonts missing on runner" && exit 1)
-      - run: npx prisma db push --skip-generate
+      - run: npx prisma db push
       - run: npm run build
       - run: npx playwright test tests/e2e/visual.spec.ts --update-snapshots
       - name: Commit regenerated baselines

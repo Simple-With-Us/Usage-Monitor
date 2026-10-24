@@ -166,26 +166,20 @@ function assertMigrationNeverGeneratesClient() {
 
   if (
     commands.length !== 2 ||
-    commands.some(
-      (command) => !command.split(/\s+/).includes("--skip-generate")
-    )
+    commands.some((command) => command.split(/\s+/).includes("--skip-generate"))
   ) {
     fail(
-      "every migrate-safe prisma db push invocation must include --skip-generate"
+      "migrate-safe must use plain `prisma db push` (Prisma 7 removed --skip-generate)"
     );
     return;
   }
 
-  if (
-    !source.includes(
-      "npx prisma db push --accept-data-loss --skip-generate"
-    )
-  ) {
-    fail("manual data-loss guidance must preserve --skip-generate");
+  if (!source.includes("npx prisma db push --accept-data-loss")) {
+    fail("manual data-loss guidance must reference `prisma db push --accept-data-loss`");
     return;
   }
 
-  log("Client generation invariant: PASS — every migration push skips generation");
+  log("Client generation invariant: PASS — migration push does not use removed --skip-generate");
 }
 
 function seedLitestreamState(dbFile) {
@@ -282,7 +276,7 @@ function runMigrateSafe(dbFile) {
 function pushSchemaDirect(schemaPath, dbFile) {
   execFileSync(
     "npx",
-    ["prisma", "db", "push", `--schema=${schemaPath}`, "--skip-generate", "--accept-data-loss"],
+    ["prisma", "db", "push", `--schema=${schemaPath}`, "--accept-data-loss"],
     {
       cwd: REPO_ROOT,
       env: { ...process.env, DATABASE_URL: `file:${dbFile}` },
@@ -405,8 +399,8 @@ async function main() {
 
     // Seed application rows through the generated Prisma client so this case
     // exercises the same schema and write path as the production application.
-    const { PrismaClient } = await import("@prisma/client");
-    const seedClient = new PrismaClient({ datasources: { db: { url: `file:${destructiveDb}` } } });
+    const { createPrismaClient } = await import("./lib/create-prisma-client.mjs");
+    const seedClient = createPrismaClient({ databaseUrl: `file:${destructiveDb}` });
     const seedProvider = await seedClient.provider.create({
       data: { name: "repro-provider", displayName: "Repro Provider", label: "some-label" },
     });
