@@ -11,21 +11,31 @@ import "server-only";
 import { Prisma, PrismaClient, type PrismaClient as PrismaClientInstance } from "@prisma/client";
 import { createPrismaClient } from "./create-prisma-client";
 
+// The real client (itself a Proxy) answers `in` for every model under both its
+// delegate name (`provider`) and its model name (`Provider`).
 const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
-  Object.values(Prisma.ModelName).map(
-    (name) => name.charAt(0).toLowerCase() + name.slice(1)
-  )
+  Object.values(Prisma.ModelName).flatMap((name) => [
+    name,
+    name.charAt(0).toLowerCase() + name.slice(1),
+  ])
 );
 
+// Public members set per instance in the constructor, so they are not on
+// PrismaClient.prototype.  prisma-deferred-client.test.ts checks this list
+// against a real client, so a Prisma upgrade that adds one fails the test.
+const PRISMA_INSTANCE_MEMBERS = new Set<string>(["$extends", "$parent"]);
+
 /**
- * Properties the real client is known to have without constructing it:  the
- * methods on the PrismaClient class ($queryRawUnsafe, $transaction, $connect,
- * ...) and the generated model delegates.  Instance-only members such as
- * $extends or _engine are not knowable here, so the `has` trap below asks the
- * real client about anything outside this set.
+ * Properties the real client has, answered without constructing it:  the
+ * PrismaClient class methods ($queryRawUnsafe, $transaction, $connect, ...),
+ * the per-instance public members, and the generated model delegates.
+ * Private `_` internals are not part of the public surface and are not listed.
  */
 function isKnownPrismaClientProperty(prop: PropertyKey): boolean {
-  if (typeof prop === "string" && PRISMA_MODEL_DELEGATE_KEYS.has(prop)) return true;
+  if (typeof prop === "string") {
+    if (PRISMA_MODEL_DELEGATE_KEYS.has(prop)) return true;
+    if (PRISMA_INSTANCE_MEMBERS.has(prop)) return true;
+  }
   return prop in PrismaClient.prototype;
 }
 
@@ -107,16 +117,10 @@ export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance
     // Once the client exists, answer exactly as the real client would.
     const constructed = realPrismaClient ?? globalForPrisma.prisma;
     if (constructed) return prop in constructed;
-    // Class methods and model delegates are answered without constructing, so
-    // the common `"$queryRawUnsafe" in prisma` check never needs a DATABASE_URL.
-    if (isKnownPrismaClientProperty(prop)) return true;
-    // Anything else needs the real client.  Construction is guarded, so an `in`
-    // check never throws when DATABASE_URL is unset (e.g. during `next build`).
-    try {
-      return prop in resolvePrismaClient();
-    } catch {
-      return false;
-    }
+    // Before that, answer from the client's known public surface.  An `in`
+    // check never constructs the client, opens the database, or needs a
+    // DATABASE_URL (e.g. during `next build`).
+    return isKnownPrismaClientProperty(prop);
   },
   getOwnPropertyDescriptor(target, prop) {
     // Only report properties installed on the proxy target (e.g. by vi.spyOn).

@@ -10,20 +10,31 @@ describe("removeVitestFallbackDatabases", () => {
     for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("removes only the per-worker fallback DBs and their sidecars", () => {
+  function seed(names: string[]): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vitest-fallback-db-"));
     dirs.push(dir);
-    const fallback = [
-      "vitest-worker-1.db",
-      "vitest-worker-1.db-wal",
-      "vitest-worker-1.db-shm",
-      "vitest-worker-12.db-journal",
-    ];
-    const kept = ["schema.prisma", "dev.db", "vitest-worker-x.db", "vitest-global.db"];
-    for (const name of [...fallback, ...kept]) fs.writeFileSync(path.join(dir, name), "");
+    for (const name of names) fs.writeFileSync(path.join(dir, name), "");
+    return dir;
+  }
 
-    expect(removeVitestFallbackDatabases(dir).sort()).toEqual([...fallback].sort());
-    expect(fs.readdirSync(dir).sort()).toEqual([...kept].sort());
+  const live = ["vitest-worker-200-1.db", "vitest-worker-200-1.db-wal"];
+  const dead = ["vitest-worker-100-1.db", "vitest-worker-100-1.db-shm", "vitest-worker-100-3.db-journal"];
+  const legacy = ["vitest-worker-2.db", "vitest-worker-2.db-wal"];
+  const unrelated = ["schema.prisma", "dev.db", "vitest-worker-x.db", "vitest-global.db"];
+  const isAlive = (pid: number) => pid === 200;
+
+  it("pre-run: removes dead runs and legacy files, keeps a live concurrent run", () => {
+    const dir = seed([...live, ...dead, ...legacy, ...unrelated]);
+    expect(removeVitestFallbackDatabases(dir, undefined, isAlive).sort()).toEqual(
+      [...dead, ...legacy].sort()
+    );
+    expect(fs.readdirSync(dir).sort()).toEqual([...live, ...unrelated].sort());
+  });
+
+  it("teardown: removes only this run's files", () => {
+    const dir = seed([...live, ...dead, ...legacy, ...unrelated]);
+    expect(removeVitestFallbackDatabases(dir, 100, isAlive).sort()).toEqual([...dead].sort());
+    expect(fs.readdirSync(dir).sort()).toEqual([...live, ...legacy, ...unrelated].sort());
   });
 
   it("is a no-op when the directory does not exist", () => {
