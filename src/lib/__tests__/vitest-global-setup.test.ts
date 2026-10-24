@@ -37,12 +37,14 @@ describe("removeVitestFallbackDatabases", () => {
     expect(fs.readdirSync(dir).sort()).toEqual([...live, ...legacy, ...unrelated].sort());
   });
 
-  it("pre-run: removes files left under this run's recycled pid", () => {
-    const dir = seed([...live, ...unrelated]);
-    expect(removeVitestFallbackDatabases(dir, undefined, isAlive, 200).sort()).toEqual(
-      [...live].sort()
-    );
-    expect(fs.readdirSync(dir).sort()).toEqual([...unrelated].sort());
+  it("pre-run with startingRunId: reclaims the recycled pid, keeps a live concurrent run", () => {
+    const concurrent = ["vitest-worker-300-1.db", "vitest-worker-300-2.db-wal"];
+    const dir = seed([...live, ...concurrent, ...dead, ...unrelated]);
+    const isAliveWithConcurrent = (pid: number) => pid === 200 || pid === 300;
+    expect(
+      removeVitestFallbackDatabases(dir, undefined, isAliveWithConcurrent, 200).sort()
+    ).toEqual([...live, ...dead].sort());
+    expect(fs.readdirSync(dir).sort()).toEqual([...concurrent, ...unrelated].sort());
   });
 
   it("is a no-op when the directory does not exist", () => {
