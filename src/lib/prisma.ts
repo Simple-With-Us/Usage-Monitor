@@ -1,18 +1,13 @@
 import "server-only";
 
-// @prisma/client is CommonJS (`module.exports = { ...require('#main-entry-point') }`
-// in the generated client). Node's ESM named-export interop for a CommonJS
-// module depends on static analysis (cjs-module-lexer) of the module source,
-// and that spread-based re-export is exactly the shape that analysis cannot
-// always resolve - on Node 24 this intermittently leaves a named
-// `import { PrismaClient } from "@prisma/client"` binding undefined, throwing
-// "PrismaClient is not a constructor" only in some dynamic-import paths (a
-// fresh `await import("@/lib/prisma")` in a test file's beforeAll, in
-// particular). scripts/ensure-subscription-link-unique-index.mjs carries the
-// same fix for the equivalent startup-script hazard (PR #409); this default
-// import is the runtime-code sibling of that fix. Default-importing the
-// module object sidesteps synthetic named-export detection entirely: the
-// constructor is read back out via a plain property access instead.
+// The client itself is built by createPrismaClient(), which owns the Prisma 7
+// driver-adapter wiring and the DATABASE_URL check. Construction is deferred
+// to first use so that importing this module never needs a database URL:
+// `next build` collects page data for API routes, and a route that merely
+// imports the client must not fail a build that has no DATABASE_URL. Prisma 6
+// behaved the same way (an unconfigured `new PrismaClient()` only failed when
+// a query actually ran), so deferring construction restores that behavior
+// instead of changing the contract.
 import type { PrismaClient as PrismaClientInstance } from "@prisma/client";
 import { createPrismaClient } from "./create-prisma-client";
 
@@ -33,11 +28,77 @@ function clampedIntEnv(name: string, fallback: number, min: number, max: number)
 // connection per PrismaClient). Native page-cache / mmap bounds below are
 // applied on that connection in applySqliteNativeMemoryPragmas().
 
-export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+// The real client, constructed on first use and memoized for the lifetime of
+// this module instance.
+let realPrismaClient: PrismaClientInstance | undefined;
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
+function resolvePrismaClient(): PrismaClientInstance {
+  if (realPrismaClient) return realPrismaClient;
+  // A dev-mode reload re-imports this module; reuse the client cached on
+  // globalThis so the SQLite connection (and its pragmas) survive the reload.
+  const client = globalForPrisma.prisma ?? createPrismaClient();
+  realPrismaClient = client;
+  if (process.env.NODE_ENV !== "production") {
+    globalForPrisma.prisma = client;
+  }
+  return client;
 }
+
+type PrismaClientPropertyBag = Record<PropertyKey, unknown>;
+
+/**
+ * Binds a client method to the real client. Prisma's `$queryRawUnsafe`,
+ * `$transaction` and the model delegates are read off the client instance, so
+ * they must keep their receiver; the bound copy also carries the original's
+ * `mock` property over, so a test that reaches for `prisma.$queryRawUnsafe.mock`
+ * still sees the spy's call log.
+ */
+function bindClientMethod(value: unknown, thisArg: unknown): unknown {
+  if (typeof value !== "function") return value;
+  const bound = (value as (...args: unknown[]) => unknown).bind(thisArg);
+  const mock = (value as { mock?: unknown }).mock;
+  if (mock !== undefined) {
+    (bound as { mock?: unknown }).mock = mock;
+  }
+  return bound;
+}
+
+/**
+ * `prisma` stays a `PrismaClient` for every call site, but the underlying
+ * client is created on the first property access instead of at import time.
+ * The proxy forwards reads to the real client and binds methods to it, so
+ * `prisma.$queryRawUnsafe(...)`, `prisma.$transaction(...)` and model
+ * delegates such as `prisma.provider.findMany(...)` keep working unchanged.
+ */
+export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance, {
+  get(target, prop) {
+    // A property installed directly on the proxy target wins over the real
+    // client, so `vi.spyOn(prisma, "$queryRawUnsafe")` keeps patching the
+    // method the rest of this module calls.
+    if (Object.prototype.hasOwnProperty.call(target, prop)) {
+      const own = (target as unknown as PrismaClientPropertyBag)[prop];
+      if (typeof own !== "function") return own;
+      return bindClientMethod(own, resolvePrismaClient());
+    }
+    const client = resolvePrismaClient();
+    const value = (client as unknown as PrismaClientPropertyBag)[prop];
+    return bindClientMethod(value, client);
+  },
+  has(target, prop) {
+    if (Object.prototype.hasOwnProperty.call(target, prop)) return true;
+    return prop in resolvePrismaClient();
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    const own = Reflect.getOwnPropertyDescriptor(target, prop);
+    if (own) return own;
+    // Report the property as present (and configurable) without constructing
+    // the client: feature detection such as `"$queryRawUnsafe" in prisma` and
+    // vitest's `vi.spyOn` need the property to be discoverable, and a
+    // non-configurable report for a property the target does not own would
+    // violate the proxy invariants.
+    return { value: undefined, writable: true, enumerable: false, configurable: true };
+  },
+});
 
 // --- Native (non-heap) SQLite memory bounds --------------------------------
 // Prisma's default "library" engine for SQLite embeds its own SQLite driver
