@@ -81,6 +81,7 @@ async function addExternalEvent(input: {
   sourceApp?: string;
   service?: string | null;
   label?: string | null;
+  billingMode?: string;
 }) {
   eventSeq += 1;
   await prisma.externalUsageEvent.create({
@@ -90,7 +91,7 @@ async function addExternalEvent(input: {
       provider: input.provider,
       service: input.service ?? null,
       label: input.label ?? null,
-      billingMode: "actual",
+      billingMode: input.billingMode ?? "actual",
       metricType: input.metricType ?? "usage",
       confidence: "exact",
       costUsd: input.costUsd,
@@ -107,14 +108,20 @@ async function addRollup(input: {
   totalCostUsd: number;
   groupKey?: string;
   metricType?: string;
+  sourceApp?: string;
+  service?: string | null;
+  label?: string | null;
+  billingMode?: string;
 }) {
   await prisma.externalUsageEventDailyRollup.create({
     data: {
       day: new Date(`${input.day}T00:00:00.000Z`),
       groupKey: input.groupKey ?? `test-rollup-${input.day}-${input.provider}-${input.projectId ?? "none"}`,
-      sourceApp: "test-producer",
+      sourceApp: input.sourceApp ?? "test-producer",
       provider: input.provider,
-      billingMode: "actual",
+      service: input.service ?? null,
+      label: input.label ?? null,
+      billingMode: input.billingMode ?? "actual",
       metricType: input.metricType ?? "usage",
       confidence: "exact",
       totalCostUsd: input.totalCostUsd,
@@ -286,6 +293,69 @@ describe("UM-1622: gauge totalRequests (Backblaze storage MB) never pages as req
 });
 
 describe("S5: push-channel baseline crosses the month boundary via daily rollups", () => {
+  it("uses raw and rolled-up OpenCode PAYG cost while excluding seat estimates", async () => {
+    const provider = await createProvider("anthropic");
+    const project = await prisma.project.create({
+      data: { name: "OpenCode Project", monthlyBudgetUsd: 100 },
+    });
+    for (let day = 20; day <= 31; day += 1) {
+      const date = `2026-07-${String(day).padStart(2, "0")}`;
+      await addRollup({
+        day: date,
+        provider: "anthropic",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        totalCostUsd: 10,
+      });
+      await addRollup({
+        day: date,
+        provider: "muse-code",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        totalCostUsd: 1000,
+        groupKey: `seat-estimate-${date}`,
+      });
+    }
+    for (const [date, costUsd] of [
+      ["2026-08-01T10:00:00.000Z", 10],
+      ["2026-08-02T10:00:00.000Z", 160],
+    ] as const) {
+      await addExternalEvent({
+        provider: "anthropic",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        costUsd,
+        occurredAt: date,
+      });
+    }
+
+    const at = new Date("2026-08-03T12:00:00.000Z");
+    const providerResults = await loadSpendAnomaliesByProviderId(at, CONFIG, [
+      { id: provider.id, name: provider.name },
+    ]);
+    const projectResults = await loadSpendAnomaliesByProjectId(at, CONFIG, [
+      { id: project.id, name: project.name },
+    ]);
+    expect(providerResults.get(provider.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metric: "cost", observed: 160, baselineCenter: 10 }),
+    ]));
+    expect(projectResults.get(project.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metric: "cost", observed: 160, baselineCenter: 10 }),
+    ]));
+  });
+
   it("detects a day-2-of-month spike for a push-only provider using prior-month rollups", async () => {
     const provider = await createProvider("Anthropic");
     // Prior month: steady ~$10/day (inside the trailing windowDays window).

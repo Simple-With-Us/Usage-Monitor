@@ -271,12 +271,11 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     typeof flat["error.type"] === "string" ||
     typeof flat["error"] === "string";
 
-  const eventId = computeEventId("span", [
-    span.traceId ?? "",
-    span.spanId ?? "",
-    span.startTimeUnixNano ?? "",
-    platform,
-  ]);
+  const hasNativeIdentity =
+    typeof span.traceId === "string" && span.traceId.length > 0 &&
+    typeof span.spanId === "string" && span.spanId.length > 0;
+  if (!hasNativeIdentity) return null;
+  const eventId = computeEventId("span", [span.traceId, span.spanId, span.startTimeUnixNano ?? "", platform]);
 
   const tokens = {
     input: readInt(flat["gen_ai.usage.input_tokens"]),

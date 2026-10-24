@@ -315,6 +315,7 @@ export function AgentsDashboard() {
                 return (
                   <div
                     key={platform.id}
+                    data-testid={`agent-platform-${platform.id}`}
                     className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col justify-between transition-all"
                   >
                     <div>
@@ -327,7 +328,7 @@ export function AgentsDashboard() {
                               {platform.provider}
                             </span>
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">{platform.notes}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{withSentenceGaps(platform.notes)}</p>
                         </div>
 
                         {/* Status Badge */}

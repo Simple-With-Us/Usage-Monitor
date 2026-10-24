@@ -397,6 +397,7 @@ export async function loadSpendAnomaliesByProjectId(
       take: MAX_ROLLUP_ROWS,
       select: {
         projectId: true,
+        provider: true,
         sourceApp: true,
         service: true,
         label: true,

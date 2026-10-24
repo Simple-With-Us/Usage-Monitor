@@ -14,6 +14,10 @@ const prismaMock = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/cursor-admin-poller", () => ({ CURSOR_ADMIN_SOURCE_APP: "cursor-admin" }));
+vi.mock("@/lib/ingest-admission", () => ({
+  withInternalUsageWriteAdmission: vi.fn((operation: () => unknown) => operation()),
+}));
 
 import {
   computeAgentsOverview,
@@ -38,6 +42,7 @@ type UsageGroupByRow = Pick<
   Prisma.ExternalUsageEventGroupByOutputType,
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
+  service?: string | null;
   _sum?: { quantity?: number | null; costUsd?: number | null };
 };
 
@@ -49,6 +54,7 @@ type RollupGroupByRow = Pick<
   Prisma.ExternalUsageEventDailyRollupGroupByOutputType,
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
+  service?: string | null;
   _sum?: { totalQuantity?: number | null; totalCostUsd?: number | null };
 };
 
@@ -138,6 +144,7 @@ describe("agents-overview", () => {
           {
             sourceApp: "claude-code",
             provider: "anthropic",
+            service: "claude-code",
             keyRef: "claude-sonnet",
             label: null,
             _sum: { costUsd: 0.6 },
@@ -156,7 +163,7 @@ describe("agents-overview", () => {
     const result = await computeAgentsOverview(30);
     expect(result.ok).toBe(true);
     expect(result.summary.totalTokens).toBe(170_000);
-    expect(result.platforms.length).toBe(10);
+    expect(result.platforms.length).toBe(12);
     // 30-day window sits inside the raw-event retention window, so rollups
     // must not be queried (they would double-count the same days).
     expect(rollupSpy).not.toHaveBeenCalled();
@@ -229,6 +236,148 @@ describe("agents-overview", () => {
     expect(codexFromRollup?.totalTokens).toBe(50_000);
   });
 
+  it("includes OpenCode and Fx token events in totals, model mix, and platform cards", async () => {
+    expect(platformIdForSourceApp("opencode")).toBe("opencode");
+    expect(platformIdForSourceApp("fx")).toBe("fx");
+
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:input",
+            _sum: { quantity: 120_000 },
+          },
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:output",
+            _sum: { quantity: 30_000 },
+          },
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:cacheRead",
+            _sum: { quantity: 15_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:input",
+            _sum: { quantity: 200_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:output",
+            _sum: { quantity: 40_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:cacheRead",
+            _sum: { quantity: 20_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:cacheCreation",
+            _sum: { quantity: 5_000 },
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+
+    expect(result.summary.totalTokens).toBe(430_000);
+    expect(result.modelDistribution.map((model) => model.model)).toEqual([
+      "grok-4",
+      "claude-sonnet-4-5",
+    ]);
+    const opencode = result.platforms.find((platform) => platform.id === "opencode");
+    expect(opencode?.totalTokens).toBe(165_000);
+    expect(opencode?.usageIsReliable).toBe(true);
+    expect(opencode?.modelsUsed.map((model) => model.model)).toEqual(["claude-sonnet-4-5"]);
+    const fx = result.platforms.find((platform) => platform.id === "fx");
+    expect(fx?.totalTokens).toBe(265_000);
+    expect(fx?.cacheReadTokens).toBe(20_000);
+    expect(fx?.cacheCreationTokens).toBe(5_000);
+    expect(fx?.usageIsReliable).toBe(true);
+    expect(fx?.modelsUsed.map((model) => model.model)).toEqual(["grok-4"]);
+
+    const usageQuery = prismaMock.externalUsageEvent.groupBy.mock.calls.find(
+      ([args]) => metricTypeFromWhere(args.where) === "usage",
+    )?.[0];
+    const sourceFilter = JSON.stringify(usageQuery?.where?.OR);
+    expect(sourceFilter).toContain('"opencode"');
+    expect(sourceFilter).toContain('"fx"');
+  });
+
+  it("keeps OpenCode PAYG cash out of raw and rolled-up reported seat estimates", async () => {
+    vi.spyOn(retention, "getExternalEventRawCutoff").mockReturnValue(
+      new Date("2026-08-01T00:00:00.000Z"),
+    );
+    const cash = {
+      sourceApp: "opencode",
+      provider: "openrouter",
+      service: "opencode",
+      keyRef: "claude-sonnet-4-5",
+      label: "api-equivalent",
+    };
+    const seatEstimate = { ...cash, provider: "muse-code" };
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([{
+          ...cash,
+          label: "token:input",
+          _sum: { quantity: 500_000 },
+        }]);
+      }
+      if (metricTypeFromWhere(args.where) === "cost") {
+        return usageGroupByRows([
+          { ...cash, _sum: { costUsd: 5 } },
+          { ...seatEstimate, _sum: { costUsd: 7 } },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockImplementation(async (args: RollupGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return rollupGroupByRows([{
+          ...cash,
+          label: "token:input",
+          _sum: { totalQuantity: 500_000 },
+        }]);
+      }
+      if (metricTypeFromWhere(args.where) === "cost") {
+        return rollupGroupByRows([
+          { ...cash, _sum: { totalCostUsd: 4 } },
+          { ...seatEstimate, _sum: { totalCostUsd: 2 } },
+        ]);
+      }
+      return [];
+    });
+
+    const result = await computeAgentsOverview(3650);
+    const opencode = result.platforms.find((platform) => platform.id === "opencode");
+    expect(opencode?.totalTokens).toBe(1_000_000);
+    expect(opencode?.reportedCostUsd).toBe(9);
+    expect(opencode?.estimatedCostUsd).toBe(9);
+    expect(opencode?.tokenDerivedCostUsd).toBe(3);
+    expect(result.burn5h.costEstimate5hUsd).toBe(7);
+  });
+
   it("prefers Claude Code OTLP reported cost over token-derived PAYG when both exist", async () => {
     prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
       const metricType = metricTypeFromWhere(args.where);
@@ -248,6 +397,7 @@ describe("agents-overview", () => {
           {
             sourceApp: "claude-code",
             provider: "anthropic",
+            service: "claude-code",
             keyRef: "claude-sonnet-5",
             label: null,
             _sum: { costUsd: 0.25 },
@@ -390,6 +540,7 @@ describe("agents-overview", () => {
             {
               sourceApp: "claude-code",
               provider: "anthropic",
+              service: "claude-code",
               keyRef: "claude-sonnet",
               label: null,
               _sum: { costUsd: 0.5 },

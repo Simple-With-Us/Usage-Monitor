@@ -101,7 +101,7 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
   const visibleGroups = showAll ? usageSummary.groups : usageSummary.groups.slice(0, 8);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+    <div data-testid="external-telemetry-panel" className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
@@ -137,9 +137,9 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
           </p>
           {estimatedApiEquivalent > 0 && (
             <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              Claude API-equivalent estimate: {usd(estimatedApiEquivalent)}
+              API-equivalent estimate: {usd(estimatedApiEquivalent)}
               <span className="block text-[10px] font-normal">
-                Excluded from cash spend · verify Anthropic Console billing
+                Excluded from cash spend · verify provider billing
               </span>
             </p>
           )}
@@ -202,6 +202,10 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                   group.unit || (requestBased ? "requests" : group.metricType);
                 const hasEstimatedApiEquivalent =
                   group.estimatedApiEquivalentUsd > 0;
+                const tokenUsageWithEstimate =
+                  hasEstimatedApiEquivalent &&
+                  group.metricType === "usage" &&
+                  normalizedUnit === "token";
                 const groupReceiptCash = group.receiptCashPaidUsd ?? 0;
                 const hasReceiptCash = groupReceiptCash > 0;
                 const usagePercent =
@@ -243,7 +247,7 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                       <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                         {hasReceiptCash
                           ? usd(groupReceiptCash)
-                          : hasEstimatedApiEquivalent
+                          : hasEstimatedApiEquivalent && !tokenUsageWithEstimate
                           ? usd(group.estimatedApiEquivalentUsd)
                           : formatNumber(displayedUsage)}
                       </p>
@@ -257,6 +261,8 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                       >
                         {hasReceiptCash
                           ? "Receipt cash paid · max-reconciled with observed usage"
+                          : tokenUsageWithEstimate
+                          ? `API-equivalent estimate: ${usd(group.estimatedApiEquivalentUsd)} · excluded from cash spend`
                           : hasEstimatedApiEquivalent
                           ? "API-equivalent estimate · excluded from cash spend"
                           : costLabel(

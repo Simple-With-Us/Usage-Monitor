@@ -55,6 +55,38 @@ describe("subscription analytics discriminators", () => {
     ).toBe(false);
   });
 
+  it("treats OpenCode and Fx session estimates as analytics, not cash", () => {
+    expect(
+      isSubscriptionAnalyticsTelemetry({ sourceApp: "opencode", service: "opencode" }),
+    ).toBe(true);
+    expect(
+      isSubscriptionAnalyticsTelemetry({ sourceApp: "fx", service: "fx" }),
+    ).toBe(true);
+    expect(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS).toContain("opencode");
+    expect(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS).toContain("fx");
+    expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "opencode", service: "opencode" })).toBe(true);
+    expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "fx", service: "fx" })).toBe(true);
+  });
+
+  it("keeps only the existing OpenCode PAYG message-cost shape in cash", () => {
+    const cost = {
+      sourceApp: "opencode",
+      service: "opencode",
+      metricType: "cost",
+      label: "api-equivalent",
+    };
+    for (const provider of ["anthropic", "openai", "google-ai", "xai", "deepseek", "openrouter", "bedrock", "azure"]) {
+      expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(false);
+    }
+    for (const provider of ["minimax", "muse-code", "opencode", " "]) {
+      expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider })).toBe(true);
+    }
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", label: "other" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", metricType: "usage", label: "token:input" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", service: "other" })).toBe(true);
+    expect(isSubscriptionAnalyticsTelemetry({ ...cost, provider: "anthropic", sourceApp: "fx" })).toBe(true);
+  });
+
   it("does not double-count Claude OTLP costUsd with token derivation", () => {
     expect(
       shouldDeriveAnalyticsTokenEstimate({
@@ -74,6 +106,8 @@ describe("subscription analytics discriminators", () => {
       "antigravity-statusline",
       "github-copilot",
       "deepseek-dsh",
+      "opencode",
+      "fx",
     ]);
   });
 });

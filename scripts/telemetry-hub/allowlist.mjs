@@ -66,6 +66,12 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
 ]);
 
 const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
+const SENTRY_STRING_NUMERIC_ATTRIBUTES = new Set([
+  "ttft_ms",
+  "context.tokens",
+  "context.limit",
+  "context.utilization_pct",
+]);
 
 /**
  * Producer free-text fields.  These are CONTENT: they belong to the UM path
@@ -142,6 +148,17 @@ export function otlpAttribute(key, value) {
 }
 
 /**
+ * Sentry drops these custom attributes when OTLP sends numeric AnyValues (UM-1614, observed 2026-10-21).  Keep
+ * their values queryable as strings on the Sentry path while leaving the journal and UM's typed event numeric.
+ */
+function sentryAttribute(key, value) {
+  if (SENTRY_STRING_NUMERIC_ATTRIBUTES.has(key) && typeof value === "number" && Number.isFinite(value)) {
+    return { key, value: { stringValue: String(value) } };
+  }
+  return otlpAttribute(key, value);
+}
+
+/**
  * The core policy gate: an attribute survives only if its key is on the
  * allowlist.  A key that is not allowed is dropped WHOLE, together with its
  * value, so there is nothing left to redact (S2, S3).
@@ -158,7 +175,7 @@ export function scrubOtlpAttributes(attributes, options) {
     if (!keyIsAllowed(key, dropKeys)) continue;
     const scalar = scalarFromAnyValue(entry.value);
     if (scalar === undefined) continue;
-    const attribute = otlpAttribute(key, scalar);
+    const attribute = sentryAttribute(key, scalar);
     if (attribute) out.push(attribute);
   }
   return out;
@@ -176,12 +193,12 @@ export function scrubAttributeMap(map, options) {
     if (!keyIsAllowed(key, dropKeys)) continue;
     if (value === undefined || value === null) continue;
     if (typeof value === "string" || typeof value === "boolean") {
-      const attribute = otlpAttribute(key, value);
+      const attribute = sentryAttribute(key, value);
       if (attribute) out.push(attribute);
       continue;
     }
     if (typeof value === "number" && Number.isFinite(value)) {
-      const attribute = otlpAttribute(key, value);
+      const attribute = sentryAttribute(key, value);
       if (attribute) out.push(attribute);
     }
   }
@@ -428,7 +445,7 @@ export function internalEventAttributes(event, options) {
   ];
   for (const [key, value] of typed) {
     if (value === undefined || value === null) continue;
-    const attribute = otlpAttribute(key, value);
+    const attribute = sentryAttribute(key, value);
     if (attribute) merged.set(key, attribute);
   }
   if (Array.isArray(event.toolNames) && event.toolNames.length > 0) {

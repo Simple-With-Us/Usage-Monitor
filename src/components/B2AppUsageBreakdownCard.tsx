@@ -14,18 +14,263 @@ import {
   Legend,
 } from "recharts";
 import { Database } from "lucide-react";
-import type { B2AppUsageBreakdownPayload, B2AppId } from "@/lib/b2-app-usage-types";
+import type {
+  B2AppUsageBreakdownPayload,
+  B2AppId,
+  B2AppUsageDailyPoint,
+  B2AppUsageSlice,
+} from "@/lib/b2-app-usage-types";
+import { B2_APP_LABELS } from "@/lib/b2-app-usage-types";
 
 type ChartMode = "storage" | "download" | "classC";
-type ChartStyle = "donut" | "bar";
+type ChartView = "daily" | "donut" | "bar";
+type DailyMetric = "download" | "classC";
 
 const COLORS = ["#0ea5e9", "#8b5cf6", "#14b8a6", "#f59e0b", "#94a3b8"];
+
+/**
+ * The daily stacked bars reuse the quota-bar palette from `QuotaUsageBar`
+ * (FleetQuotaMatrixCard): the used portion is red, the headroom left under
+ * the daily free cap is emerald.  Every app gets its own red-family shade so
+ * a day reads as a stack of apps instead of one anonymous blob.
+ */
+export const DAILY_SEGMENT_CLASSES = [
+  "bg-red-500",
+  "bg-red-600",
+  "bg-red-700",
+  "bg-red-400",
+  "bg-red-800",
+];
+
+/** Headroom left under the cap — same emerald as `QuotaUsageBar`. */
+export const DAILY_REMAINING_CLASS = "bg-emerald-600 dark:bg-emerald-500";
+
+/**
+ * Usage the account-level Backblaze report attributes to a day beyond the sum
+ * of bucket rows (deleted buckets, unattributed operations).  Rendered as its
+ * own gray slice so the bar still fills truthfully instead of showing phantom
+ * headroom.  Never collides with a real app: bucket resolution only ever
+ * returns the `B2AppId` union members.
+ */
+export const DAILY_UNATTRIBUTED_ID = "unattributed";
+export const DAILY_UNATTRIBUTED_LABEL = "Unattributed";
+export const DAILY_UNATTRIBUTED_CLASS = "bg-gray-400";
+
+export interface DailySegment {
+  id: string;
+  label: string;
+  value: number;
+  /** Share of the rendered bar (0..1). */
+  fraction: number;
+  colorClass: string;
+}
+
+export interface DailyRow {
+  date: string;
+  total: number;
+  cap: number;
+  remaining: number;
+  overCap: boolean;
+  segments: DailySegment[];
+  ariaLabel: string;
+}
+
+export interface DailyLegendEntry {
+  id: string;
+  label: string;
+  colorClass: string;
+}
+
+export interface DailyView {
+  rows: DailyRow[];
+  legend: DailyLegendEntry[];
+}
+
+function formatGb(value: number): string {
+  return `${Number(value.toFixed(1)).toLocaleString("en-US")} GB`;
+}
+
+function formatClassC(value: number): string {
+  return `${Math.round(value).toLocaleString("en-US")} Class C txns`;
+}
+
+function formatMetricValue(value: number, metric: DailyMetric): string {
+  return metric === "download" ? formatGb(value) : formatClassC(value);
+}
+
+function dayAccountTotal(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
+  return metric === "download"
+    ? day.accountDownloadedGb ?? 0
+    : day.accountClassCTotal ?? 0;
+}
+
+interface DailyAppValue {
+  id: string;
+  value: number;
+}
+
+/**
+ * The single source of truth for a day's per-app values: finite, positive
+ * entries only.  The bars, the bucket sum and the legend all derive from this
+ * so the "Unattributed" swatch can never appear without a matching slice.
+ */
+export function dayAppValues(day: B2AppUsageDailyPoint, metric: DailyMetric): DailyAppValue[] {
+  return Object.entries(day.byApp ?? {})
+    .map(([id, usage]) => ({
+      id,
+      value:
+        metric === "download" ? usage?.downloadedGb ?? 0 : usage?.classCTransactions ?? 0,
+    }))
+    .filter((entry) => Number.isFinite(entry.value) && entry.value > 0);
+}
+
+const UNATTRIBUTED_EPSILON = 1e-9;
+
+/** Unattributed usage for a day: account total above the filtered bucket sum. */
+export function dayUnattributed(day: B2AppUsageDailyPoint, metric: DailyMetric): number {
+  const accountTotal = dayAccountTotal(day, metric);
+  if (!Number.isFinite(accountTotal)) return 0;
+  const byAppSum = dayAppValues(day, metric).reduce((sum, entry) => sum + entry.value, 0);
+  const excess = accountTotal - byAppSum;
+  // Ignore floating-point dust (0.9 - (0.6 + 0.3) ≈ 1e-16) so a fully
+  // attributed day never grows a zero-width "Unattributed 0 GB" slice.
+  return excess > UNATTRIBUTED_EPSILON * Math.max(1, Math.abs(accountTotal)) ? excess : 0;
+}
+
+/**
+ * Friendly label for an app id: the payload label, else the known
+ * `B2_APP_LABELS` entry, else the id humanized ("new-app" → "New App"),
+ * else "Other app".  The UI never shows a raw machine id.
+ */
+export function dailyAppLabel(appId: string, labelById: Map<string, string>): string {
+  const fromPayload = labelById.get(appId);
+  if (fromPayload) return fromPayload;
+  const known = (B2_APP_LABELS as Record<string, string>)[appId];
+  if (known) return known;
+  const words = appId
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1));
+  return words.length > 0 ? words.join(" ") : "Other app";
+}
+
+/**
+ * Build the daily stacked-bar rows from the payload's `dailySeries`.
+ *
+ * Newest day first.  Each bar is scaled against the daily free cap: under the
+ * cap the used portion is the app segments and the remainder up to the cap is
+ * emerald headroom; over the cap the bar fills 100% (segments keep their
+ * relative proportions) and the row is flagged as over cap.
+ *
+ * The day's total is `max(account total, sum of byApp)` — the Backblaze
+ * report can carry account-level rows larger than the bucket rows (deleted
+ * buckets, unattributed operations), and the near-cap alerts already evaluate
+ * those account totals, so the bars must not understate them.  Any excess
+ * over the bucket sum renders as an "Unattributed" slice.
+ */
+export function buildDailyView(
+  dailySeries: B2AppUsageDailyPoint[],
+  apps: B2AppUsageSlice[],
+  metric: DailyMetric,
+  cap: number
+): DailyView {
+  const labelById = new Map<string, string>();
+  for (const app of apps ?? []) {
+    if (app?.id && app.label) labelById.set(app.id, app.label);
+  }
+
+  const days = [...(dailySeries ?? [])]
+    .filter((day) => Boolean(day?.date))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // Stable per-app shade: assign in payload order first, then anything the
+  // daily series knows about but the app list does not.
+  const usedIds: string[] = [];
+  for (const day of days) {
+    for (const appId of Object.keys(day.byApp ?? {})) {
+      if (!usedIds.includes(appId)) usedIds.push(appId);
+    }
+  }
+  usedIds.sort((a, b) => {
+    const ai = (apps ?? []).findIndex((app) => app?.id === a);
+    const bi = (apps ?? []).findIndex((app) => app?.id === b);
+    return (ai === -1 ? Number.MAX_SAFE_INTEGER : ai) - (bi === -1 ? Number.MAX_SAFE_INTEGER : bi);
+  });
+
+  const colorById = new Map<string, string>();
+  usedIds.forEach((id, index) => {
+    colorById.set(id, DAILY_SEGMENT_CLASSES[index % DAILY_SEGMENT_CLASSES.length]);
+  });
+
+  const rows: DailyRow[] = days.map((day) => {
+    const entries = dayAppValues(day, metric)
+      .map((entry) => ({ ...entry, label: dailyAppLabel(entry.id, labelById) }))
+      .sort((a, b) => b.value - a.value);
+
+    const byAppSum = entries.reduce((sum, entry) => sum + entry.value, 0);
+    const unattributedValue = dayUnattributed(day, metric);
+    const allEntries =
+      unattributedValue > 0
+        ? [
+            ...entries,
+            { id: DAILY_UNATTRIBUTED_ID, label: DAILY_UNATTRIBUTED_LABEL, value: unattributedValue },
+          ]
+        : entries;
+
+    const total = byAppSum + unattributedValue;
+    const overCap = total > 0 && total > cap;
+    const scale = Math.max(total, cap, 0);
+    const segments: DailySegment[] = allEntries.map((entry) => ({
+      ...entry,
+      fraction: scale > 0 ? entry.value / scale : 0,
+      colorClass:
+        entry.id === DAILY_UNATTRIBUTED_ID
+          ? DAILY_UNATTRIBUTED_CLASS
+          : (colorById.get(entry.id) ?? DAILY_SEGMENT_CLASSES[0]),
+    }));
+
+    const remaining = Math.max(0, cap - total);
+    const appPart = allEntries
+      .map((entry) => `${entry.label} ${formatMetricValue(entry.value, metric)}`)
+      .join(", ");
+    const ariaLabel = overCap
+      ? `${day.date}: ${appPart}, ${formatMetricValue(total - cap, metric)} over the ${formatMetricValue(cap, metric)} free cap`
+      : appPart
+        ? `${day.date}: ${appPart}, ${formatMetricValue(remaining, metric)} left of ${formatMetricValue(cap, metric)} free cap`
+        : `${day.date}: no usage, ${formatMetricValue(cap, metric)} free cap`;
+
+    return { date: day.date, total, cap, remaining, overCap, segments, ariaLabel };
+  });
+
+  // The legend is derived from the rendered rows, so every swatch has a slice.
+  const renderedIds = new Set(rows.flatMap((row) => row.segments.map((segment) => segment.id)));
+  const legend: DailyLegendEntry[] = [
+    ...usedIds
+      .filter((id) => renderedIds.has(id))
+      .map((id) => ({
+        id,
+        label: dailyAppLabel(id, labelById),
+        colorClass: colorById.get(id) ?? DAILY_SEGMENT_CLASSES[0],
+      })),
+    ...(renderedIds.has(DAILY_UNATTRIBUTED_ID)
+      ? [
+          {
+            id: DAILY_UNATTRIBUTED_ID,
+            label: DAILY_UNATTRIBUTED_LABEL,
+            colorClass: DAILY_UNATTRIBUTED_CLASS,
+          },
+        ]
+      : []),
+  ];
+
+  return { rows, legend };
+}
 
 export default function B2AppUsageBreakdownCard() {
   const [data, setData] = useState<B2AppUsageBreakdownPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<ChartMode>("storage");
-  const [style, setStyle] = useState<ChartStyle>("donut");
+  const [mode, setMode] = useState<ChartMode>("download");
+  const [view, setView] = useState<ChartView>("daily");
 
   useEffect(() => {
     let cancelled = false;
@@ -48,7 +293,7 @@ export default function B2AppUsageBreakdownCard() {
   }, []);
 
   const slices = useMemo(() => {
-    if (!data?.apps.length) return [];
+    if (!data?.apps?.length) return [];
     return data.apps
       .map((app) => {
         let value = 0;
@@ -59,6 +304,20 @@ export default function B2AppUsageBreakdownCard() {
       })
       .filter((row) => row.value > 0);
   }, [data, mode]);
+
+  const dailyMetric: DailyMetric = mode === "classC" ? "classC" : "download";
+  const dailyCap =
+    dailyMetric === "download"
+      ? data?.caps?.downloadGbDailyFree ?? 0
+      : data?.caps?.classCDailyFree ?? 0;
+
+  const dailyView = useMemo(
+    () => buildDailyView(data?.dailySeries ?? [], data?.apps ?? [], dailyMetric, dailyCap),
+    [data, dailyMetric, dailyCap],
+  );
+
+  // Storage has no daily series, so it keeps the existing donut/bar view.
+  const effectiveView: ChartView = mode === "storage" && view === "daily" ? "donut" : view;
 
   const modeLabel =
     mode === "storage"
@@ -108,12 +367,14 @@ export default function B2AppUsageBreakdownCard() {
   }
 
   const alertLine = [
-    data.alerts.classCSpike ? "Class C spike" : null,
-    data.alerts.classCNearCap ? "Class C near cap" : null,
-    data.alerts.downloadNearCap ? "Download near cap" : null,
+    data.alerts?.classCSpike ? "Class C spike" : null,
+    data.alerts?.classCNearCap ? "Class C near cap" : null,
+    data.alerts?.downloadNearCap ? "Download near cap" : null,
   ]
     .filter(Boolean)
     .join(" · ");
+
+  const hasDailyHeadroom = dailyView.rows.some((row) => !row.overCap);
 
   return (
     <section
@@ -158,21 +419,86 @@ export default function B2AppUsageBreakdownCard() {
             <option value="classC">Class C</option>
           </select>
           <select
-            aria-label="Chart style"
+            aria-label="Chart view"
             className="rounded-md border border-gray-200 bg-white px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-900"
-            value={style}
-            onChange={(e) => setStyle(e.target.value as ChartStyle)}
+            value={effectiveView}
+            onChange={(e) => setView(e.target.value as ChartView)}
           >
+            {mode === "storage" ? null : <option value="daily">Daily</option>}
             <option value="donut">Donut</option>
             <option value="bar">Bar</option>
           </select>
         </div>
       </div>
 
-      {slices.length > 1 ? (
+      {effectiveView === "daily" ? (
+        dailyView.rows.length > 0 ? (
+          <div className="space-y-3 px-5 pb-4">
+            {dailyView.rows.map((row) => (
+              <div key={row.date} role="img" aria-label={row.ariaLabel} className="space-y-1">
+                <div className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="font-medium text-gray-800 dark:text-gray-200">{row.date}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="text-gray-500 dark:text-gray-400">
+                      {row.overCap
+                        ? `${formatMetricValue(row.total - row.cap, dailyMetric)} over`
+                        : `${formatMetricValue(row.total, dailyMetric)} used`}
+                    </span>
+                    {row.overCap ? (
+                      <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-800 dark:bg-red-950/50 dark:text-red-300">
+                        Over Cap
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="relative w-full h-2.5 rounded-sm overflow-visible bg-gray-200 dark:bg-gray-700">
+                  <div className="flex h-full w-full rounded-sm overflow-hidden">
+                    {row.segments.map((segment) => (
+                      <div
+                        key={segment.id}
+                        className={`h-full ${segment.colorClass}`}
+                        style={{ width: `${segment.fraction * 100}%` }}
+                      />
+                    ))}
+                    {row.overCap ? null : (
+                      <div className={`h-full ${DAILY_REMAINING_CLASS} flex-1`} />
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+              {dailyView.legend.map((entry) => (
+                <li key={entry.id} className="flex items-center gap-1.5">
+                  <span
+                    className={`h-2 w-2 rounded-sm ${entry.colorClass}`}
+                    aria-hidden="true"
+                  />
+                  <span>{entry.label}</span>
+                </li>
+              ))}
+              {hasDailyHeadroom ? (
+                <li className="flex items-center gap-1.5">
+                  <span
+                    className={`h-2 w-2 rounded-sm ${DAILY_REMAINING_CLASS}`}
+                    aria-hidden="true"
+                  />
+                  <span>Left</span>
+                </li>
+              ) : null}
+            </ul>
+          </div>
+        ) : (
+          <p className="px-5 pb-4 text-xs text-gray-500 dark:text-gray-400">
+            {data.configured
+              ? "No daily usage data yet."
+              : "Configure the Backblaze monitor key to enable B2 breakdown."}
+          </p>
+        )
+      ) : slices.length > 1 ? (
         <div className="h-56 px-2 pb-2">
           <ResponsiveContainer width="100%" height="100%">
-            {style === "donut" ? (
+            {effectiveView === "donut" ? (
               <PieChart>
                 <Pie
                   data={slices}
@@ -208,7 +534,7 @@ export default function B2AppUsageBreakdownCard() {
       )}
 
       <ul className="space-y-2 border-t border-gray-100 px-5 py-4 text-xs dark:border-gray-700">
-        {data.apps.map((app) => (
+        {(data.apps ?? []).map((app) => (
           <li key={app.id} className="flex flex-wrap justify-between gap-2">
             <span className="font-medium text-gray-800 dark:text-gray-200">{app.label}</span>
             <span className="text-gray-500 dark:text-gray-400">
@@ -220,9 +546,9 @@ export default function B2AppUsageBreakdownCard() {
           </li>
         ))}
       </ul>
-      {data.warnings.length > 0 ? (
+      {(data.warnings?.length ?? 0) > 0 ? (
         <p className="border-t border-gray-100 px-5 py-3 text-xs text-amber-700 dark:border-gray-700 dark:text-amber-300">
-          {data.warnings.join(" · ")}
+          {(data.warnings ?? []).join(" · ")}
         </p>
       ) : null}
     </section>

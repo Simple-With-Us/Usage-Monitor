@@ -1,11 +1,12 @@
 /**
  * Subscription-seat analytics telemetry is an API-equivalent estimate, never
- * cash. Claude Code OTLP already lands this way; Codex JSONL and Grok Build
- * session logs and Copilot CLI JSONL join the same bucket once the Mac
- * collectors ingest them.
+ * cash.  Claude Code OTLP already lands this way; Codex JSONL, Grok Build,
+ * Copilot CLI, OpenCode, and Fx session collectors join the same bucket once
+ * their feeds ingest.
  *
  * Keep the Claude discriminator exact so Anthropic API usage (a different
- * sourceApp) still bills as cash. New seats match on sourceApp only.
+ * sourceApp) still bills as cash.  OpenCode also carries real PAYG message-cost
+ * rows, so its cost discriminator must inspect the event shape.
  */
 
 export const SUBSCRIPTION_ANALYTICS_SOURCE_APPS = [
@@ -15,6 +16,8 @@ export const SUBSCRIPTION_ANALYTICS_SOURCE_APPS = [
   "antigravity-statusline",
   "github-copilot",
   "deepseek-dsh",
+  "opencode",
+  "fx",
 ] as const;
 
 export type SubscriptionAnalyticsSourceApp =
@@ -34,32 +37,53 @@ const SOURCE_APP_ONLY_ANALYTICS = new Set<string>([
   "deepseek-dsh",
 ]);
 
-export function isClaudeCodeAnalyticsTelemetry(input: {
+const OPENCODE_NON_PAYG_PROVIDERS = new Set(["minimax", "muse-code", "opencode"]);
+
+type AnalyticsTelemetryShape = {
   sourceApp: string;
   service?: string | null;
-}): boolean {
+  provider?: string | null;
+  metricType?: string | null;
+  label?: string | null;
+};
+
+function isOpencodePaygCost(input: AnalyticsTelemetryShape): boolean {
+  const app = input.sourceApp?.trim().toLowerCase();
+  // Existing OpenCode PAYG message-cost rows use the shared estimated-cost
+  // wire shape.  Changing it would conflict with persisted event IDs, so
+  // use the parser's exact non-PAYG mappings.  Every other nonempty provider
+  // is PAYG there, including OpenRouter, Bedrock, and Azure providers.
+  // The cost row has providerId metadata but no billing-mode metadata, and
+  // daily rollups retain neither; this shape survives both storage forms.
+  return (
+    app === "opencode" &&
+    input.service?.trim().toLowerCase() === "opencode" &&
+    input.metricType === "cost" &&
+    input.label === "api-equivalent" &&
+    !!input.provider?.trim() &&
+    !OPENCODE_NON_PAYG_PROVIDERS.has(input.provider.trim().toLowerCase())
+  );
+}
+
+export function isClaudeCodeAnalyticsTelemetry(input: AnalyticsTelemetryShape): boolean {
   return (
     input.sourceApp?.trim().toLowerCase() === "claude-code" &&
     input.service?.trim().toLowerCase() === "claude-code"
   );
 }
 
-export function isSubscriptionAnalyticsTelemetry(input: {
-  sourceApp: string;
-  service?: string | null;
-}): boolean {
+export function isSubscriptionAnalyticsTelemetry(input: AnalyticsTelemetryShape): boolean {
   if (isClaudeCodeAnalyticsTelemetry(input)) return true;
   const app = input.sourceApp?.trim().toLowerCase();
+  if (app === "opencode") return !isOpencodePaygCost(input);
+  if (app === "fx") return true;
   return Boolean(app && SOURCE_APP_ONLY_ANALYTICS.has(app));
 }
 
 /** Token derivation fill-in: Claude already stores OTLP costUsd as the
  * estimate, so adding tokens x price would double-count. Other seats post
  * tokens (and optional vendor ticks) and need the catalog estimate. */
-export function shouldDeriveAnalyticsTokenEstimate(input: {
-  sourceApp: string;
-  service?: string | null;
-}): boolean {
+export function shouldDeriveAnalyticsTokenEstimate(input: AnalyticsTelemetryShape): boolean {
   if (isClaudeCodeAnalyticsTelemetry(input)) return false;
   return isSubscriptionAnalyticsTelemetry(input);
 }

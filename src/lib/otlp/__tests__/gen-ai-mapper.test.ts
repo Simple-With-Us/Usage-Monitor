@@ -80,6 +80,8 @@ describe("shouldMapGenAiPlatform", () => {
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(false);
     expect(shouldMapGenAiPlatform("cursor")).toBe(false);
     expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(false);
+    expect(shouldMapGenAiPlatform("fx")).toBe(false);
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
     for (const app of OVERLAP_SOURCE_APPS) {
       expect(shouldMapGenAiPlatform(app)).toBe(false);
@@ -89,13 +91,17 @@ describe("shouldMapGenAiPlatform", () => {
   it("maps overlap platforms when OTLP_GEN_AI_ALLOW_OVERLAP is on", () => {
     vi.stubEnv("OTLP_GEN_AI_ALLOW_OVERLAP", "1");
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(true);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(true);
+    expect(shouldMapGenAiPlatform("fx")).toBe(true);
   });
 
   it("honors an explicit platform allowlist and still blocks overlap platforms", () => {
-    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "botfleet,muse-code,cursor-agent");
+    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "botfleet,muse-code,cursor-agent,opencode,fx");
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
     expect(shouldMapGenAiPlatform("muse-code")).toBe(true);
     expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(false);
+    expect(shouldMapGenAiPlatform("fx")).toBe(false);
     expect(shouldMapGenAiPlatform("openai")).toBe(false);
   });
 
