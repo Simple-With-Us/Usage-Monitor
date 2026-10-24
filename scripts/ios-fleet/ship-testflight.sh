@@ -568,12 +568,20 @@ asc_latest_marketing_patch() {
   # exported ASC_* vars would be discarded with the subshell.  The temp key
   # this stages is released when the query ends.
   if [[ "${AUTH_MODE:-none}" != "api_key" ]]; then
-    load_secrets >/dev/null 2>&1 || true
+    if ! load_secrets >/dev/null; then
+    logerr "asc: load_secrets failed; cannot verify against App Store Connect"
+    return 1
+  fi
     loaded_here=1
   fi
   set +e
   out=$(asc_client latest-marketing-patch "$BUNDLE_ID" "$prefix" "$plat" 2>/dev/null)
   rc=$?
+  if [[ $rc -eq 4 ]]; then
+    set -e
+    logerr "asc-patch: App Store Connect rejected the credential (HTTP 401/403)"
+    return 4
+  fi
   set -e
   if [[ "$loaded_here" == 1 ]]; then asc_cleanup; fi
   if [[ $rc -ne 0 || ! "$out" =~ ^[0-9]+$ ]]; then
@@ -602,7 +610,10 @@ asc_build_floor() {
     return 1
   fi
   if [[ "${AUTH_MODE:-none}" != "api_key" ]]; then
-    load_secrets >/dev/null 2>&1 || true
+    if ! load_secrets >/dev/null; then
+    logerr "asc: load_secrets failed; cannot verify against App Store Connect"
+    return 1
+  fi
     loaded_here=1
   fi
   errfile="$(mktemp "${TMPDIR:-/tmp}/ios-fleet-floor.XXXXXX" 2>/dev/null || true)"
@@ -615,6 +626,19 @@ asc_build_floor() {
   set +e
   out=$(asc_client build-floor "$BUNDLE_ID" "$version" "$plat" 2>"$err_target")
   rc=$?
+  # Keep the client's build-floor lines:  they carry Apple's HTTP status,
+  # which the fatal message below tells the operator to look for.
+  if [[ -s "$err_target" ]]; then
+    while IFS= read -r _fl; do
+      case "$_fl" in build-floor:*|latest-build-seq:*) logerr "asc-floor: ${_fl}" ;; esac
+    done <"$err_target"
+  fi
+  if [[ $rc -eq 4 ]]; then
+    set -e
+    logerr "asc-floor: App Store Connect rejected the credential (HTTP 401/403)"
+    rm -f "$err_target" >/dev/null 2>&1 || true
+    return 4
+  fi
   set -e
   if [[ "$loaded_here" == 1 ]]; then asc_cleanup; fi
   err="$(cat "$err_target" 2>/dev/null || true)"
@@ -984,6 +1008,11 @@ else
     set +e
     _patch="$(asc_latest_marketing_patch "$MARKETING_PREFIX" "$ASC_PLATFORM")"
     _rc=$?
+    if [[ $_rc -eq 4 ]]; then
+      die "App Store Connect rejected the API key (HTTP 401/403) while reading the next marketing version.
+  Fix the key (ASC_* in env or Infisical /asc; fleet-secrets doctor) and re-run.
+  --allow-unverified-seq does not cover a rejected credential:  the upload would fail with it too."
+    fi
     set -e
     if [[ $_rc -ne 0 || ! "$_patch" =~ ^[0-9]+$ ]]; then
       if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
@@ -1030,6 +1059,11 @@ else
     set +e
     _floor_line="$(asc_build_floor "$MARKETING" "$ASC_PLATFORM")"
     _rc=$?
+    if [[ $_rc -eq 4 ]]; then
+      die "App Store Connect rejected the API key (HTTP 401/403) while reading the build floor.
+  Fix the key (ASC_* in env or Infisical /asc; fleet-secrets doctor) and re-run.
+  --allow-unverified-seq does not cover a rejected credential:  the upload would fail with it too."
+    fi
     set -e
     if [[ $_rc -ne 0 || -z "$_floor_line" ]]; then
       if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
