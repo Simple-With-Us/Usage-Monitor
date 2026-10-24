@@ -1,12 +1,8 @@
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { PrismaClient } from "@prisma/client";
+import { sqliteDriverUrl } from "./sqlite-database-url.mjs";
 
-export function sqliteDriverUrl(url) {
-  const withoutConnectionLimit = url.replace(/([?&])connection_limit=[^&]*/g, (match, sep) =>
-    sep === "?" ? "?" : ""
-  );
-  return withoutConnectionLimit.replace(/\?$/, "");
-}
+export { sqliteDriverUrl } from "./sqlite-database-url.mjs";
 
 export function createPrismaClient({ databaseUrl } = {}) {
   const url = databaseUrl ?? process.env.DATABASE_URL;

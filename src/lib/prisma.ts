@@ -8,8 +8,38 @@ import "server-only";
 // behaved the same way (an unconfigured `new PrismaClient()` only failed when
 // a query actually ran), so deferring construction restores that behavior
 // instead of changing the contract.
-import type { PrismaClient as PrismaClientInstance } from "@prisma/client";
+import { Prisma, PrismaClient, type PrismaClient as PrismaClientInstance } from "@prisma/client";
 import { createPrismaClient } from "./create-prisma-client";
+
+// The real client (itself a Proxy) answers `in` for every model under both its
+// delegate name (`provider`) and its model name (`Provider`).
+const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
+  Object.values(Prisma.ModelName).flatMap((name) => [
+    name,
+    name.charAt(0).toLowerCase() + name.slice(1),
+  ])
+);
+
+// Public members set per instance in the constructor, so they are not on
+// PrismaClient.prototype.  prisma-deferred-client.test.ts asserts every name
+// in this list and in PRISMA_MODEL_DELEGATE_KEYS exists on a real client, and
+// that every public own key of a real client is answered here, so a Prisma
+// upgrade that adds or drops one fails the test.
+const PRISMA_INSTANCE_MEMBERS = new Set<string>(["$extends", "$parent"]);
+
+/**
+ * Properties the real client has, answered without constructing it:  the
+ * PrismaClient class methods ($queryRawUnsafe, $transaction, $connect, ...),
+ * the per-instance public members, and the generated model delegates.
+ * Private `_` internals are not part of the public surface and are not listed.
+ */
+function isKnownPrismaClientProperty(prop: PropertyKey): boolean {
+  if (typeof prop === "string") {
+    if (PRISMA_MODEL_DELEGATE_KEYS.has(prop)) return true;
+    if (PRISMA_INSTANCE_MEMBERS.has(prop)) return true;
+  }
+  return prop in PrismaClient.prototype;
+}
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClientInstance | undefined;
@@ -86,17 +116,19 @@ export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance
   },
   has(target, prop) {
     if (Object.prototype.hasOwnProperty.call(target, prop)) return true;
-    return prop in resolvePrismaClient();
+    // Once the client exists, answer exactly as the real client would.
+    const constructed = realPrismaClient ?? globalForPrisma.prisma;
+    if (constructed) return prop in constructed;
+    // Before that, answer from the client's known public surface.  An `in`
+    // check never constructs the client, opens the database, or needs a
+    // DATABASE_URL (e.g. during `next build`).
+    return isKnownPrismaClientProperty(prop);
   },
   getOwnPropertyDescriptor(target, prop) {
-    const own = Reflect.getOwnPropertyDescriptor(target, prop);
-    if (own) return own;
-    // Report the property as present (and configurable) without constructing
-    // the client: feature detection such as `"$queryRawUnsafe" in prisma` and
-    // vitest's `vi.spyOn` need the property to be discoverable, and a
-    // non-configurable report for a property the target does not own would
-    // violate the proxy invariants.
-    return { value: undefined, writable: true, enumerable: false, configurable: true };
+    // Only report properties installed on the proxy target (e.g. by vi.spyOn).
+    // Do not fabricate descriptors for delegates on the real client: a `value:
+    // undefined` descriptor shadows the real method after mockRestore().
+    return Reflect.getOwnPropertyDescriptor(target, prop);
   },
 });
 

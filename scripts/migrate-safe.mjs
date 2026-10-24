@@ -27,7 +27,7 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync } from "fs";
+import { sqliteDatabaseFileExists } from "./lib/sqlite-database-url.mjs";
 
 const DB_PATH = process.env.DATABASE_URL;
 
@@ -46,14 +46,7 @@ function run(cmd) {
 async function main() {
   // If the database file doesn't exist yet (first deploy), `prisma db push`
   // is always safe — it will create all tables from scratch.
-  let dbExists = false;
-  if (DB_PATH) {
-    // Parse the SQLite file path from DATABASE_URL (format: "file:/path/to/db")
-    const match = DB_PATH.match(/^file:([^?]+)/);
-    if (match) {
-      dbExists = existsSync(match[1]);
-    }
-  }
+  const dbExists = DB_PATH ? sqliteDatabaseFileExists(DB_PATH) : false;
 
   if (!dbExists) {
     log("No existing database found — creating schema from scratch (safe).");
