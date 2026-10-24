@@ -44,6 +44,7 @@ jobs:
         run: bash scripts/ios-b2-screenshots.sh
 
       - name: Capture widget configurations
+        if: success() || failure()
         run: bash scripts/ios-widget-screenshots.sh
 
       - name: Upload widget screenshot artifacts

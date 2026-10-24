@@ -43,14 +43,19 @@ final class B2ChartVisualCaptureTests: XCTestCase {
         ]
         for (scheme, name) in captures {
             let view = AnyView(
-                B2AppUsageSection(store: store, hasCredential: true) { }
-                    .frame(width: Self.captureSize.width, height: Self.captureSize.height)
-                    .background(Theme.Colors.background)
-                    // The window's `overrideUserInterfaceStyle` resolves the
-                    // dynamic `Theme.Colors` tokens;  the environment values
-                    // keep the SwiftUI tree in the same scheme.
-                    .environment(\.colorScheme, scheme)
-                    .preferredColorScheme(scheme)
+                // `B2AppUsageSection`'s body is several bare `Section`s, which
+                // outside a `List` is a multi-child view;  wrap it so the
+                // frame/background modifiers apply to one view.
+                VStack(alignment: .leading, spacing: 0) {
+                    B2AppUsageSection(store: store, hasCredential: true) { }
+                }
+                .frame(width: Self.captureSize.width, height: Self.captureSize.height)
+                .background(Theme.Colors.background)
+                // The window's `overrideUserInterfaceStyle` resolves the
+                // dynamic `Theme.Colors` tokens;  the environment values
+                // keep the SwiftUI tree in the same scheme.
+                .environment(\.colorScheme, scheme)
+                .preferredColorScheme(scheme)
             )
             let url = output.appendingPathComponent(name)
             try await Self.writePNG(of: view, scheme: scheme, to: url)
