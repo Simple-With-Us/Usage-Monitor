@@ -10,6 +10,7 @@ export default defineConfig({
     hookTimeout: 60_000,
     testTimeout: 60_000,
     setupFiles: ["./vitest.setup.ts"],
+    globalSetup: ["./vitest.global-setup.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
