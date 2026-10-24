@@ -6,7 +6,10 @@ on:
       - 'ios/UsageMonitor/UsageMonitorWidget/**'
       - 'ios/UsageMonitor/UsageMonitorWidgetTests/**'
       - 'ios/UsageMonitor/project.yml'
+      - 'ios/UsageMonitor/UsageMonitorKit/Sources/ServerStatus/**'
+      - 'ios/UsageMonitor/UsageMonitorKit/Tests/UsageMonitorKitTests/B2ChartVisualCaptureTests.swift'
       - 'scripts/ios-widget-screenshots.sh'
+      - 'scripts/ios-b2-screenshots.sh'
       - '.github/workflows/ios-widget-screenshots.yml'
   workflow_dispatch:
 
@@ -37,6 +40,9 @@ jobs:
         working-directory: ios/UsageMonitor
         run: xcodegen generate
 
+      - name: Capture B2 daily chart (light and dark)
+        run: bash scripts/ios-b2-screenshots.sh
+
       - name: Capture widget configurations
         run: bash scripts/ios-widget-screenshots.sh
 
@@ -46,4 +52,12 @@ jobs:
         with:
           name: ios-widget-screenshots
           path: artifacts/ios-widget-screenshots/*.png
+          if-no-files-found: error
+
+      - name: Upload B2 chart screenshot artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-b2-screenshots
+          path: artifacts/ios-b2-screenshots/*.png
           if-no-files-found: error

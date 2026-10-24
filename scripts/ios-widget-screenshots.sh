@@ -28,7 +28,10 @@ if command -v xcodegen >/dev/null 2>&1; then
   (cd "$ROOT/ios/UsageMonitor" && xcodegen generate)
 fi
 
+# xcodebuild only forwards TEST_RUNNER_-prefixed variables into the simulator
+# test process (the prefix is stripped there), so both spellings are exported.
 export WIDGET_SCREENSHOT_DIR="$OUT"
+export TEST_RUNNER_WIDGET_SCREENSHOT_DIR="$OUT"
 
 echo "Running widget visual capture tests (PNG output -> $OUT)..."
 xcodebuild test \
@@ -40,6 +43,15 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   | tail -40
+
+# The capture test skips itself when it cannot see the output directory, so an
+# artifact with nothing but the simulator frame would otherwise pass silently.
+widget_pngs="$(find "$OUT" -name '*.png' ! -name 'simulator-booted.png' | sort)"
+if [[ -z "$widget_pngs" ]]; then
+  echo "No widget screenshots were written to $OUT." >&2
+  echo "The capture test most likely skipped: check that WIDGET_SCREENSHOT_DIR reaches the simulator test process." >&2
+  exit 1
+fi
 
 # Mirror one full-screen simctl capture so the artifact also includes a booted-simulator frame.
 xcrun simctl io "$UDID" screenshot "$OUT/simulator-booted.png" || true
