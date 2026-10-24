@@ -1,8 +1,18 @@
 # syntax=docker/dockerfile:1.28
 FROM node:24.22.0-bookworm-slim AS build
 
+# python3 + make + g++ are required by the builder stage only.  better-sqlite3
+# 13.0.3 dropped its `install` script (`prebuild-install || node-gyp rebuild --release`),
+# so npm falls back to its default `node-gyp rebuild`.  node-gyp needs a Python
+# interpreter to run its configure step, and the C++ toolchain (make, g++) is needed
+# if the compile proceeds, neither of which is in the slim base image — so `npm ci`
+# died with "Could not find any Python installation to use" and the image never built.
+# Do NOT "fix" this with `npm ci --ignore-scripts`: the builder relies on npm's
+# postinstall to run `prisma generate`, and skipping install scripts would leave
+# the Prisma client ungenerated.
+# The runtime stage below stays slim; only the builder carries the toolchain.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates curl \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
