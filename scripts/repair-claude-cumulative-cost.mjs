@@ -10,7 +10,7 @@
  * Apply only after a verified DB backup, while the app scheduler is stopped:
  *   node scripts/repair-claude-cumulative-cost.mjs --apply --backup-acknowledged
  */
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import {
   applyClaudeCumulativeCostRepair,
   planClaudeCumulativeCostRepair,
@@ -30,7 +30,7 @@ if (apply && !backupAcknowledged) {
   throw new Error("--apply requires --backup-acknowledged after verifying a current DB backup");
 }
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 try {
   const plan = await planClaudeCumulativeCostRepair(prisma);
   console.log(JSON.stringify({ ...plan.report, mode: apply ? "apply" : "dry-run" }, null, 2));

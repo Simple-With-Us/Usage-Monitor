@@ -32,7 +32,7 @@ jobs:
       - run: echo "DATABASE_URL=file:${RUNNER_TEMP}/api-usage-monitor-e2e.db" >> "$GITHUB_ENV"
       - run: npm ci --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
-      - run: npx prisma db push --skip-generate
+      - run: npx prisma db push
       - run: npm run build
       - run: npx playwright test
       # On failure, keep the actual/diff screenshots: the job log only says

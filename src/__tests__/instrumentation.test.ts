@@ -23,7 +23,7 @@ vi.mock("@/lib/provider-retirement", () => ({
     mocks.deactivateDecommissionedBuiltInProviders,
 }));
 
-vi.mock("@/lib/provider-funding-policy", () => ({
+vi.mock("@/lib/provider-funding-policy-cleanup", () => ({
   clearLlmMustKeepFundedFlags: mocks.clearLlmMustKeepFundedFlags,
 }));
 

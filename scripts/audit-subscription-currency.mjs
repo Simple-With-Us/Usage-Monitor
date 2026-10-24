@@ -10,9 +10,9 @@
  *   npm run audit:subscription-currency -- --json
  */
 
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 const jsonOutput = process.argv.includes("--json");
 
 async function main() {

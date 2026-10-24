@@ -16,10 +16,10 @@
  *   node scripts/add-user-billing-receipts.mjs
  */
 
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import crypto from "node:crypto";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 function log(message) {
   console.log(`[add-user-receipts] ${message}`);

@@ -27,11 +27,6 @@
       "matchUpdateTypes": ["major"],
       "matchPackageNames": ["prisma", "@prisma/client"],
       "groupName": "prisma"
-    },
-    {
-      "description": "Hold vitest-family majors below 5 while @cloudflare/vitest-pool-workers (0.23.0) peers vitest ^4.1.0.  Remove this rule once a pool-workers release accepts vitest 5.",
-      "matchPackageNames": ["vitest", "@vitest/**"],
-      "allowedVersions": "<5.0.0"
     }
   ],
   "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }

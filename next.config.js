@@ -9,6 +9,8 @@ const nextConfig = {
   outputFileTracingRoot: path.join(__dirname),
   serverExternalPackages: [
     "@prisma/client",
+    "@prisma/adapter-better-sqlite3",
+    "better-sqlite3",
     "dd-trace",
     "@datadog/native-metrics",
     "@datadog/pprof",

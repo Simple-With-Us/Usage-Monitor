@@ -5,7 +5,7 @@
  * visibility alerts on existing installations.
  */
 import { existsSync } from "node:fs";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
 const sqlitePath = databaseUrl.match(/^file:(.+)$/)?.[1];
@@ -14,7 +14,7 @@ if (sqlitePath && !existsSync(sqlitePath)) {
   process.exit(0);
 }
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 async function run() {
   console.log("Checking Anthropic funding policy...");
