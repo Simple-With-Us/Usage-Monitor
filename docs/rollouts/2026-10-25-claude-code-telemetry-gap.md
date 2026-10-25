@@ -69,7 +69,7 @@ The historical native rows (214,382 of them, all written by the Mac's CLI and De
 
 The dropped events are counted as `duplicates` in the v2 ACK, because the usage they describe is already in the ledger.
 
-The Mac's Claude Code resource attributes now carry `host.name=Mac.Jays.Services`, which is what makes the machine-scoped comparison work for the native feed; the value is the machine's own hostname, the same string the transcript feed writes.
+The Mac's Claude Code resource attributes now carry a `host.name` attribute, which is what makes the machine-scoped comparison work for the native feed; the value is the machine's own hostname, the same string the transcript feed writes, and the hostname itself stays out of this public repository.
 
 The Claude Desktop app is configured from the Anthropic admin console rather than from `~/.claude/settings.json`, so its new native rows will not carry `host.name` until that console carries it; those rows then cover nothing, which is the safe direction (a possible double count with the transcript rows, visible in the ledger, rather than a silent drop of another machine's usage).
 
