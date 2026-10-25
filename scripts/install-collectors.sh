@@ -91,7 +91,11 @@ CLAUDE_LABEL="com.jays.claude-usage-collector"
 CLAUDE_PLIST="$AGENTS_DIR/$CLAUDE_LABEL.plist"
 if [[ -f "$CLAUDE_PLIST" ]]; then
   if [[ -n "${USAGE_MONITOR_INGEST_URL:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null
+    # PlistBuddy's "Set" fails when the key is absent and "Add" fails when it
+    # is present, so try both: an absent key must not abort the installer.
+    if ! /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:USAGE_MONITOR_INGEST_URL string $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1 || true
+    fi
     echo "set USAGE_MONITOR_INGEST_URL for $CLAUDE_LABEL"
   elif [[ -z "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$CLAUDE_PLIST" 2>/dev/null)" ]]; then
     echo "warning: $CLAUDE_LABEL has no USAGE_MONITOR_INGEST_URL; export it and re-run with --plists"
