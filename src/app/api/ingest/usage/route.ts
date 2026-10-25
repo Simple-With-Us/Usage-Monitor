@@ -11,6 +11,7 @@ import {
   MAX_USAGE_TELEMETRY_BODY_BYTES,
   parseUsageTelemetryBatch,
   parseUsageTelemetryV2Batch,
+  type ParsedUsageTelemetryEvent,
   type UsageTelemetryV2EventRejection,
 } from "@/lib/usage-telemetry";
 import { applyIngestCostDerivation } from "@/lib/pricing/derive-ingest-cost";
@@ -46,6 +47,7 @@ import {
 } from "@/lib/bounded-request-body";
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
+import { dropEventsCoveredByNative } from "@/lib/native-telemetry-coverage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -176,7 +178,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    let events;
+    let events: ParsedUsageTelemetryEvent[];
     let v2Rejected = 0;
     let v2Rejections: UsageTelemetryV2EventRejection[] = [];
     try {
@@ -258,6 +260,17 @@ export async function POST(request: NextRequest) {
       "unauthorized",
       "Credential is not authorized for this producer"
     );
+  }
+
+  // Native-vs-local coverage (UM-1636): when a producer's native feed is
+  // healthy it already carries the same calls a local transcript collector
+  // would send, so the transcript-sourced events are dropped instead of
+  // double-counted.  When the native feed is dead the transcript events are
+  // kept and the gap is filled.  The dropped events are counted as duplicates
+  // in the ACK, because the usage they describe IS already in the ledger.
+  const nativeCoverage = await dropEventsCoveredByNative(events);
+  if (nativeCoverage.skippedNativeCovered > 0) {
+    events = nativeCoverage.events;
   }
 
   // Default-off LiteLLM cost derivation (INGEST_COST_DERIVATION_ENABLED):
@@ -442,7 +455,10 @@ export async function POST(request: NextRequest) {
       }
       const duplicates = Math.max(
         0,
-        persistResult.attempted - persistResult.persisted - persistResult.skippedPrunedDuplicates
+        persistResult.attempted -
+          persistResult.persisted -
+          persistResult.skippedPrunedDuplicates +
+          nativeCoverage.skippedNativeCovered
       );
       return NextResponse.json(
         {
@@ -450,8 +466,11 @@ export async function POST(request: NextRequest) {
           schemaVersion: 2,
           // `received` counts every submitted event (valid + rejected), so the
           // shared ACK invariant holds: persisted + duplicates + pruned +
-          // rejected === received.
-          received: persistResult.attempted + v2Rejected,
+          // rejected === received.  The native-covered events are counted as
+          // duplicates: they were not stored twice because the native feed
+          // already carries that usage.
+          received:
+            persistResult.attempted + v2Rejected + nativeCoverage.skippedNativeCovered,
           persisted: persistResult.persisted,
           duplicates,
           pruned: persistResult.skippedPrunedDuplicates,

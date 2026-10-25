@@ -356,7 +356,7 @@ function breakdownHasTokens(breakdown) {
 }
 
 
-export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt } = {}) {
+export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt, extraMetadata } = {}) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
   const lines = text.split("\n");
@@ -395,6 +395,7 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt }
         model,
         breakdown,
         extraId: `L${lineNo}:${model}`,
+        ...(extraMetadata ? { extraMetadata } : {}),
       })
     );
   }

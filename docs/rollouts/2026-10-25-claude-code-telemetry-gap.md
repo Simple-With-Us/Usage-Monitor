@@ -53,11 +53,43 @@ The consequence is large: roughly one day of the owner's heaviest coding tool's 
 
 The exact source still exists: the Mac transcripts under `~/.claude/projects/**.jsonl` carry per-message `usage` for every request.  `scripts/claude-usage-collector.disabled.mjs` in this repo already parses that shape and is disabled precisely because the native OTLP path used to cover the same usage.  Re-enabling it needs one decision that has not been made yet: how to keep the transcript collector and the native exporter from double counting if the native path ever comes back.
 
+## The local transcript feed (the fix for the missing tokens)
+
+`scripts/claude-usage-collector.disabled.mjs` shipped in this repo already parsed the shape that is still available: the Mac's `~/.claude/projects/**.jsonl` transcripts carry the exact per-request usage for every assistant message, including the model, the input, output, cache read and cache write counts.
+
+That collector was disabled by audit #1509 because the native OTLP exporter covered the same usage and running both would double-count.  The condition behind that audit no longer holds, so the collector was renamed back, re-shaped as a gap filler, and installed on the Mac as `com.jays.claude-usage-collector` (a 15 minute launchd job).
+
+The double-counting problem is solved on the receiver side rather than by an operator promise: every transcript event carries `metadata.collector = "transcript"` and the machine identity in `metadata["host.name"]`, and `/api/ingest/usage` drops a transcript event when the native feed already covers it.
+
+The rule is machine-scoped, so the Mac's native feed never silences another machine's transcript feed.
+
+Two review findings shaped that rule, and both are worth keeping in mind: the machine identity is compared trimmed and lower-cased, because the OTLP resource attribute is written by an operator and the transcript feed writes `os.hostname()`, so a case difference would silently double-count the same usage; and a native row that cannot be attributed to a machine covers nothing, because a wildcard would silently drop another machine's transcript usage.
+
+The historical native rows (214,382 of them, all written by the Mac's CLI and Desktop app) carried no machine identity, so they were stamped once with the machine they came from, and the wildcard case no longer decides anything.
+
+The dropped events are counted as `duplicates` in the v2 ACK, because the usage they describe is already in the ledger.
+
+The Mac's Claude Code resource attributes now carry a `host.name` attribute, which is what makes the machine-scoped comparison work for the native feed; the value is the machine's own hostname, the same string the transcript feed writes, and the hostname itself stays out of this public repository.
+
+The Claude Desktop app is configured from the Anthropic admin console rather than from `~/.claude/settings.json`, so its new native rows will not carry `host.name` until that console carries it; those rows then cover nothing, which is the safe direction (a possible double count with the transcript rows, visible in the ledger, rather than a silent drop of another machine's usage).
+
+## The server's own Claude Code feed
+
+This box runs Claude Code CLI sessions of its own, under the Claude projects directory, and there is no OTLP exporter for them at all, so that usage never reached Usage Monitor.
+
+The same collector runs here every 15 minutes (a cron row, as the `jay` user, with the producer-scoped token from a mode-600 secrets file), and the ledger now holds about 123,000 exact per-request rows from it, covering Oct 22 21:11 through Oct 25 05:20.
+
+Before it was enabled, the sessions were checked for a BotFleet overlap: 27,295 sampled working directories, none of them a BotFleet workspace, so the feed does not collide with the producer `botfleet`.
+
+A first backfill of that size is a burst, and it showed the receiver's limit: the ingest path answers 503 while another write owns the database and 500 when a write runs past its timeout, while every other producer kept landing with its own retries.
+
+The steady-state cost is small, because the replay overlap is one hour rather than a whole day, and an idle box sends nothing at all.
 ## Next steps
 
-1. Decide the native-vs-transcript precedence for Claude Code, then re-enable the transcript collector as a gap filler rather than as a second full feed.
+1. The native-vs-transcript precedence is now decided and implemented on the receiver (native wins, the transcript fills the gap), so the transcript collector runs as a gap filler rather than as a second full feed.
 2. Keep the staleness rule on token rows; it is what makes the next version of this failure loud.
 3. UM-1614's Mac hub stays the place where the Sentry-side scrubbed signal is produced; it is still not installed on the Mac.
+4. The server's own Claude Code feed is live (see above); what is left is to keep the receiver kind to a first backfill, because a burst of that size starves the other producers for as long as it lasts.
 
 ## Verification
 
