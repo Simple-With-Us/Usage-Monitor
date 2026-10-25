@@ -135,6 +135,23 @@ describe("native telemetry coverage", () => {
     expect(result.events).toHaveLength(0);
   });
 
+  it("never treats this feed's own earlier rows as native telemetry", async () => {
+    // A transcript row stored by an earlier pass would otherwise cover the
+    // next transcript event in the same window and drop it from the ledger.
+    mockNativeRows([
+      {
+        occurredAt: at("2026-10-25T10:00:30.000Z"),
+        metadata: { "host.name": "workstation-1", collector: "transcript" },
+      },
+    ]);
+    const events = [
+      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
+    ];
+    const result = await dropEventsCoveredByNative(events);
+    expect(result.skippedNativeCovered).toBe(0);
+    expect(result.events).toHaveLength(1);
+  });
+
   it("never drops another producer's events", async () => {
     mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },

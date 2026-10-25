@@ -38,8 +38,15 @@ export const HOST_NAME_KEY = "host.name";
 /** Producers where a native feed and a local transcript feed can coexist. */
 const NATIVE_COVERAGE_PRODUCERS: ReadonlySet<string> = new Set(["claude-code"]);
 
-/** How wide one coverage lookup is, so no single query holds the database. */
-const COVERAGE_LOOKUP_CHUNK_MS = 60 * 60 * 1000;
+/**
+ * How wide one coverage lookup is.
+ *
+ * The lookup is chunked so no single query walks a multi-day range, and the
+ * chunks are wide enough that a backfill batch does not turn into dozens of
+ * queries inside one ingest request, which would hold the ingest admission
+ * lease long enough to make the write behind it time out.
+ */
+const COVERAGE_LOOKUP_CHUNK_MS = 6 * 60 * 60 * 1000;
 
 export function isTranscriptSourcedEvent(
   event: Pick<ParsedUsageTelemetryEvent, "sourceApp" | "metadata">
@@ -137,6 +144,10 @@ export async function dropEventsCoveredByNative(
       select: { occurredAt: true, metadata: true },
     });
     for (const row of rows) {
+      // A row this feed stored earlier is not native telemetry: it would
+      // cover the next transcript event in the same window and silently drop
+      // it from the ledger.
+      if (readTranscriptMarker(row.metadata) === TRANSCRIPT_COLLECTOR_MARKER) continue;
       const host = readHostName(row.metadata);
       // Machine-scoped, and never a wildcard: the Mac's native feed must not
       // silence the server's transcript feed, and the server has no native
