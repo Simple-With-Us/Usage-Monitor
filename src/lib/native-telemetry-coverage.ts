@@ -55,11 +55,21 @@ export function readTranscriptMarker(metadata: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** Read the machine identity out of a metadata bag of unknown shape. */
+/**
+ * Read the machine identity out of a metadata bag of unknown shape.
+ *
+ * The comparison is done on a normalized value: the OTLP resource attribute is
+ * written by an operator (or by a tool that copies a shell hostname) and the
+ * transcript feed writes `os.hostname()`, so case and surrounding whitespace
+ * must not decide whether the native feed covers a transcript event.  A
+ * mismatch would silently double-count the same usage.
+ */
 export function readHostName(metadata: unknown): string | undefined {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
   const value = (metadata as Record<string, unknown>)[HOST_NAME_KEY];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return normalized ? normalized : undefined;
 }
 
 export interface NativeCoverageResult {
@@ -121,13 +131,15 @@ export async function dropEventsCoveredByNative(
     const covered = nativeRows.some(
       (row) =>
         Math.abs(row.at - at) <= NATIVE_COVERAGE_WINDOW_MS &&
-        // Machine-scoped when both sides know their machine: the Mac's native
-        // feed must not silence the server's transcript feed, and the server
-        // has no native feed at all.  A native row that carries no machine
-        // identity cannot be attributed, so it covers every machine near it
-        // (that is the historical shape: the native rows Claude Code wrote
-        // before the Mac's OTEL_RESOURCE_ATTRIBUTES carried host.name).
-        (row.host === undefined || host === undefined || row.host === host)
+        // Machine-scoped, and never a wildcard: the Mac's native feed must
+        // not silence the server's transcript feed, and the server has no
+        // native feed at all.  A native row without a machine identity cannot
+        // be attributed to a machine, so it covers nothing; the historical
+        // native rows were stamped with their machine once (see the rollout
+        // note), so the wildcard case no longer decides anything.
+        row.host !== undefined &&
+        host !== undefined &&
+        row.host === host
     );
     if (covered) skippedNativeCovered += 1;
     return !covered;

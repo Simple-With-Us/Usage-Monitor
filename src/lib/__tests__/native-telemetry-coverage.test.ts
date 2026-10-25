@@ -94,11 +94,9 @@ describe("native telemetry coverage", () => {
     expect(result.events).toHaveLength(1);
   });
 
-  it("lets a native row without a machine identity cover every machine near it", async () => {
-    // The native rows Claude Code wrote before the Mac carried host.name have
-    // no machine identity, so they cannot be attributed and cover everything
-    // near them (the historical shape, and the safe direction against a
-    // double count).
+  it("never lets a native row without a machine identity cover anything", async () => {
+    // A native row that cannot be attributed to a machine must not silence
+    // another machine's transcript events.
     findMany.mockResolvedValue([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: {} },
     ]);
@@ -107,7 +105,22 @@ describe("native telemetry coverage", () => {
       event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "fleet-hetzner-nbg1" }),
     ];
     const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(2);
+    expect(result.skippedNativeCovered).toBe(0);
+    expect(result.events).toHaveLength(2);
+  });
+
+  it("compares machine identities case-insensitively", async () => {
+    // The OTLP resource attribute is written by an operator and the transcript
+    // feed writes os.hostname(), so a case difference must not decide
+    // whether the native feed covers the event.
+    findMany.mockResolvedValue([
+      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "Mac.Jays.Services" } },
+    ]);
+    const events = [
+      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "mac.jays.services" }),
+    ];
+    const result = await dropEventsCoveredByNative(events);
+    expect(result.skippedNativeCovered).toBe(1);
     expect(result.events).toHaveLength(0);
   });
 
