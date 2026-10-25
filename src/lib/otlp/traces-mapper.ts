@@ -158,13 +158,43 @@ function flattenSpanAttributes(
   return flat;
 }
 
+// AgentTurn.platform is a CODING-PLATFORM dimension (claude-code, codex,
+// cursor-agent), and OTLP ingest credentials are scoped per producer, so a
+// turn labelled with the model vendor instead of the harness both mislabels
+// the turn and makes a correctly scoped credential's whole trace batch fail
+// authorization (403 "Credential is not authorized for platform
+// \"anthropic\"").  Claude Code's trace spans name their harness in the span
+// prefix (`claude_code.interaction`, `claude_code.llm_request`, ...) while
+// `gen_ai.system` names the vendor ("anthropic"), so resolve the harness
+// identity first for those spans.  An explicit `agent.platform` attribute
+// always wins, and non-Claude producers keep the previous resolution order.
+const HARNESS_BY_SPAN_PREFIX: ReadonlyArray<readonly [string, string]> = [
+  ["claude_code.", "claude-code"],
+];
+
+function resolveTurnPlatform(
+  attrs: Record<string, string | number | boolean | undefined>,
+  spanName: string | undefined
+): string {
+  const explicit = asNonEmptyString(attrs["agent.platform"]);
+  if (explicit) return normalizePlatform(explicit);
+  if (spanName) {
+    for (const [prefix, harness] of HARNESS_BY_SPAN_PREFIX) {
+      if (spanName.startsWith(prefix)) return harness;
+    }
+  }
+  if (asNonEmptyString(attrs["service.name"])?.toLowerCase() === "claude-code") {
+    return "claude-code";
+  }
+  return normalizePlatform(attrs["gen_ai.system"] ?? attrs["gen_ai.agent.name"]);
+}
+
 function turnFromSpanAttrs(
   attrs: Record<string, string | number | boolean | undefined>,
-  span: OtlpSpan
+  span: OtlpSpan,
+  spanName?: string
 ): AgentTurnInput | null {
-  const platform = normalizePlatform(
-    attrs["agent.platform"] ?? attrs["gen_ai.system"] ?? attrs["gen_ai.agent.name"]
-  );
+  const platform = resolveTurnPlatform(attrs, spanName);
   // Skip spans that carry none of the agent/gen_ai dimensions — they are not
   // agent turns (e.g. a stray http span forwarded by a broad exporter).
   const looksLikeTurn =
@@ -272,7 +302,7 @@ export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
           if (!aiRequest) ignored += 1;
           continue;
         }
-        const turn = turnFromSpanAttrs(merged, span);
+        const turn = turnFromSpanAttrs(merged, span, spanName);
         if (!turn) {
           ignored += 1;
           continue;

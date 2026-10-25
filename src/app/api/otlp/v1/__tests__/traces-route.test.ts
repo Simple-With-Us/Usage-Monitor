@@ -101,4 +101,94 @@ describe("POST /api/otlp/v1/traces", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  it("lets a claude-code scoped credential write its own Claude Code trace batch", async () => {
+    // Regression (UM-1636): Claude Code's spans carry gen_ai.system =
+    // "anthropic", so the turn dimension resolved to the model vendor and a
+    // producer-scoped credential ("claude-code") was refused for the whole
+    // batch with 403 — the trace feed died while metrics and logs of the
+    // same sessions still landed.
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "claude-code:claude-scoped-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                resource: {
+                  attributes: [
+                    { key: "service.name", value: { stringValue: "claude-code" } },
+                    { key: "seat", value: { stringValue: "CLAUDE" } },
+                  ],
+                },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "claude_code.interaction",
+                        startTimeUnixNano: "1751500000000000000",
+                        endTimeUnixNano: "1751500002000000000",
+                        attributes: [
+                          { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                          { key: "session.id", value: { stringValue: "sess-77" } },
+                          { key: "model", value: { stringValue: "claude-opus-5-5" } },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer claude-scoped-token" }
+        )
+      );
+      expect(res.status).toBe(202);
+      const turns = await prisma.agentTurn.findMany();
+      expect(turns).toHaveLength(1);
+      expect(turns[0].platform).toBe("claude-code");
+      expect(turns[0].seat).toBe("CLAUDE");
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
+
+  it("still refuses a scoped credential for a turn dimension it does not own", async () => {
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "codex:codex-scoped-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                resource: {
+                  attributes: [{ key: "agent.platform", value: { stringValue: "cursor-agent" } }],
+                },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "chat",
+                        startTimeUnixNano: "1751500000000000000",
+                        endTimeUnixNano: "1751500001000000000",
+                        attributes: [
+                          { key: "session.id", value: { stringValue: "sess-78" } },
+                          { key: "model", value: { stringValue: "gpt-5" } },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer codex-scoped-token" }
+        )
+      );
+      expect(res.status).toBe(403);
+      expect(await prisma.agentTurn.count()).toBe(0);
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
 });

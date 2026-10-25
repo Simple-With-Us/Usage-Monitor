@@ -228,6 +228,13 @@ export async function POST(request: NextRequest) {
       (e) => !credential.allowedSourceApps!.has(e.sourceApp)
     );
     if (unauthorizedEvent) {
+      void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+        recordIngestScopeRejected({
+          route: "otlp/v1/metrics",
+          dimension: "sourceApp",
+          value: unauthorizedEvent.sourceApp,
+        })
+      );
       return NextResponse.json(
         { error: `Credential is not authorized for sourceApp "${unauthorizedEvent.sourceApp}"` },
         { status: 403 }
