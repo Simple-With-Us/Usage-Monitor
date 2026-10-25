@@ -38,16 +38,27 @@ export interface ProducerStreamRule {
   metricType: string;
   /** Silent longer than this many hours counts as stale. */
   maxAgeHours: number;
+  /**
+   * Judge the stream by its newest TOKEN-bearing row (`unit = "token"`)
+   * instead of any row of that metricType.  A producer can keep emitting
+   * non-token rows while its token feed is dead: Claude Code's OTLP exporter
+   * kept delivering `session.count` / `active_time.total` (unit `request` and
+   * unit-less) after `claude_code.token.usage` and `claude_code.cost.usage`
+   * stopped on 2026-10-23, so the stream looked fresh for two days while
+   * ~25k requests' worth of tokens were missing.  Token coverage is what these
+   * rules exist to protect, so they must not be satisfied by a heartbeat.
+   */
+  requiresTokens?: boolean;
 }
 
 export const PRODUCER_STREAM_RULES: readonly ProducerStreamRule[] = [
   // Session-token collectors (every 15 min); quiet only when the tool is idle.
-  { sourceApp: "openai-codex", metricType: "usage", maxAgeHours: 72 },
-  { sourceApp: "grok-build", metricType: "usage", maxAgeHours: 96 },
-  { sourceApp: "claude-code", metricType: "usage", maxAgeHours: 48 },
-  { sourceApp: "botfleet", metricType: "usage", maxAgeHours: 96 },
-  { sourceApp: "deepseek-dsh", metricType: "usage", maxAgeHours: 120 },
-  { sourceApp: "opencode", metricType: "usage", maxAgeHours: 96 },
+  { sourceApp: "openai-codex", metricType: "usage", maxAgeHours: 72, requiresTokens: true },
+  { sourceApp: "grok-build", metricType: "usage", maxAgeHours: 96, requiresTokens: true },
+  { sourceApp: "claude-code", metricType: "usage", maxAgeHours: 48, requiresTokens: true },
+  { sourceApp: "botfleet", metricType: "usage", maxAgeHours: 96, requiresTokens: true },
+  { sourceApp: "deepseek-dsh", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
+  { sourceApp: "opencode", metricType: "usage", maxAgeHours: 96, requiresTokens: true },
   // Timer-driven quota collectors: a gap here is always a broken collector.
   { sourceApp: "openai-codex", metricType: "quota", maxAgeHours: 6 },
   { sourceApp: "grok-build", metricType: "quota", maxAgeHours: 6 },
@@ -97,7 +108,13 @@ export async function findStaleProducerStreams(
   const stale: StaleProducerStream[] = [];
   for (const rule of rules) {
     const latest = await prisma.externalUsageEvent.findFirst({
-      where: { sourceApp: rule.sourceApp, metricType: rule.metricType },
+      where: {
+        sourceApp: rule.sourceApp,
+        metricType: rule.metricType,
+        // A heartbeat row (session.count, active_time, commit.count) must not
+        // satisfy a token-coverage rule.
+        ...(rule.requiresTokens ? { unit: "token" } : {}),
+      },
       orderBy: { occurredAt: "desc" },
       select: { occurredAt: true },
     });
@@ -111,11 +128,12 @@ export function formatStaleStreamsMessage(stale: readonly StaleProducerStream[])
   title: string;
   body: string;
 } {
-  const lines = stale.map((s) =>
-    s.lastSeenAt
-      ? `${s.sourceApp} ${s.metricType}: quiet ${s.ageHours}h (limit ${s.maxAgeHours}h), last ${s.lastSeenAt}`
-      : `${s.sourceApp} ${s.metricType}: no rows at all`
-  );
+  const lines = stale.map((s) => {
+    const stream = s.requiresTokens ? `${s.sourceApp} ${s.metricType} (token rows)` : `${s.sourceApp} ${s.metricType}`;
+    return s.lastSeenAt
+      ? `${stream}: quiet ${s.ageHours}h (limit ${s.maxAgeHours}h), last ${s.lastSeenAt}`
+      : `${stream}: no rows at all`;
+  });
   return {
     title: `Usage Monitor: ${stale.length} producer stream${stale.length === 1 ? "" : "s"} quiet`,
     body: lines.join("\n"),

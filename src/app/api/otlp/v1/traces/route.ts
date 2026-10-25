@@ -129,6 +129,13 @@ export async function POST(request: NextRequest) {
     if (credential.allowedSourceApps) {
       const unauthorized = mapped.turns.find((t) => !credential.allowedSourceApps!.has(t.platform));
       if (unauthorized) {
+        void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+          recordIngestScopeRejected({
+            route: "otlp/v1/traces",
+            dimension: "platform",
+            value: unauthorized.platform,
+          })
+        );
         return NextResponse.json(
           { error: `Credential is not authorized for platform "${unauthorized.platform}"` },
           { status: 403 }
@@ -138,6 +145,13 @@ export async function POST(request: NextRequest) {
         (r) => !credential.allowedSourceApps!.has(r.harness)
       );
       if (unauthorizedRequest) {
+        void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+          recordIngestScopeRejected({
+            route: "otlp/v1/traces",
+            dimension: "harness",
+            value: unauthorizedRequest.harness,
+          })
+        );
         return NextResponse.json(
           { error: `Credential is not authorized for harness "${unauthorizedRequest.harness}"` },
           { status: 403 }

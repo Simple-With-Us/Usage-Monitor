@@ -246,6 +246,13 @@ export async function POST(request: NextRequest) {
     credential?.allowedSourceApps &&
     events.some((e) => !credential.allowedSourceApps!.has(e.sourceApp))
   ) {
+    void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+      recordIngestScopeRejected({
+        route: "ingest/usage",
+        dimension: "sourceApp",
+        value: events.find((e) => !credential.allowedSourceApps!.has(e.sourceApp))?.sourceApp,
+      })
+    );
     return respondError(
       403,
       "unauthorized",

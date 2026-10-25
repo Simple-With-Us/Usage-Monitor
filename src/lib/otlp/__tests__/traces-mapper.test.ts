@@ -109,6 +109,74 @@ describe("mapDirectTurnsRequest", () => {
     expect(turn.contentExpiresAt).toBeInstanceOf(Date);
   });
 
+  it("labels Claude Code trace turns with the harness, not the model vendor", () => {
+    // Claude Code's spans carry gen_ai.system="anthropic" and name the harness
+    // in the span prefix / service.name.  AgentTurn.platform must stay a
+    // coding-platform value so a producer-scoped OTLP credential (producer
+    // "claude-code") can write its own turns; labelling the turn "anthropic"
+    // made the whole trace batch 403 at /api/otlp/v1/traces.
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [
+              { key: "service.name", value: { stringValue: "claude-code" } },
+              { key: "seat", value: { stringValue: "CLAUDE" } },
+            ],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "claude_code.interaction",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500002000000000",
+                  attributes: [
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                    { key: "session.id", value: { stringValue: "sess-1" } },
+                    { key: "model", value: { stringValue: "claude-opus-5-5" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0].platform).toBe("claude-code");
+    expect(result.turns[0].seat).toBe("CLAUDE");
+    expect(result.turns[0].conversationId).toBe("sess-1");
+  });
+
+  it("keeps an explicit agent.platform over the Claude Code harness default", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: "service.name", value: { stringValue: "claude-code" } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "claude_code.interaction",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500001000000000",
+                  attributes: [
+                    { key: "agent.platform", value: { stringValue: "claude-code-desktop" } },
+                    { key: "session.id", value: { stringValue: "sess-2" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.turns[0].platform).toBe("claude-code-desktop");
+  });
+
   it("ignores malformed entries and caps the batch", () => {
     const result = mapDirectTurnsRequest({
       turns: [null, "nope", { platform: "cursor-agent", model: "gpt-5" }],
