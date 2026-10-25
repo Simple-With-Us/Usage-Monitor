@@ -53,11 +53,28 @@ The consequence is large: roughly one day of the owner's heaviest coding tool's 
 
 The exact source still exists: the Mac transcripts under `~/.claude/projects/**.jsonl` carry per-message `usage` for every request.  `scripts/claude-usage-collector.disabled.mjs` in this repo already parses that shape and is disabled precisely because the native OTLP path used to cover the same usage.  Re-enabling it needs one decision that has not been made yet: how to keep the transcript collector and the native exporter from double counting if the native path ever comes back.
 
+## The local transcript feed (the fix for the missing tokens)
+
+`scripts/claude-usage-collector.disabled.mjs` shipped in this repo already parsed the shape that is still available: the Mac's `~/.claude/projects/**.jsonl` transcripts carry the exact per-request usage for every assistant message, including the model, the input, output, cache read and cache write counts.
+
+That collector was disabled by audit #1509 because the native OTLP exporter covered the same usage and running both would double-count.  The condition behind that audit no longer holds, so the collector was renamed back, re-shaped as a gap filler, and installed on the Mac as `com.jays.claude-usage-collector` (a 15 minute launchd job).
+
+The double-counting problem is solved on the receiver side rather than by an operator promise: every transcript event carries `metadata.collector = "transcript"` and the machine identity in `metadata["host.name"]`, and `/api/ingest/usage` drops a transcript event when the native feed already covers it.
+
+The rule is machine-scoped when both sides know their machine, so the Mac's native feed never silences another machine's transcript feed, and a native row without a machine identity (the shape Claude Code wrote before the Mac carried `host.name`) covers every machine near it.
+
+The dropped events are counted as `duplicates` in the v2 ACK, because the usage they describe is already in the ledger.
+
+The Mac's Claude Code resource attributes now carry `host.name=jay-macbook`, which is what makes the machine-scoped comparison work for the native feed.
+
+The Claude Desktop app's own native rows carry no machine identity, because that app is configured from the Anthropic admin console rather than from `~/.claude/settings.json`; until that console carries `host.name`, those rows cover every machine near them.
+
 ## Next steps
 
-1. Decide the native-vs-transcript precedence for Claude Code, then re-enable the transcript collector as a gap filler rather than as a second full feed.
+1. The native-vs-transcript precedence is now decided and implemented on the receiver (native wins, the transcript fills the gap), so the transcript collector runs as a gap filler rather than as a second full feed.
 2. Keep the staleness rule on token rows; it is what makes the next version of this failure loud.
 3. UM-1614's Mac hub stays the place where the Sentry-side scrubbed signal is produced; it is still not installed on the Mac.
+4. The same collector should run on this server: `~/.claude/projects` here holds 431 transcripts and about 31,000 token events a day from Claude Code runs on this box, and that feed has no OTLP exporter at all, so it is invisible to Usage Monitor today.  Before it is enabled, check whether those sessions are BotFleet children (BotFleet reports its own child turns under the producer `botfleet`, and the collector excludes only sessions whose path says so).
 
 ## Verification
 

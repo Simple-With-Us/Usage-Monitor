@@ -53,9 +53,9 @@ export function collectorStatePath(producerId, stateRoot, suffix) {
 export async function resolveCollectorArgs(
   argv,
   producerId,
-  { stateRoot, now = new Date() } = {},
+  { stateRoot, now = new Date(), defaultLookbackDays } = {},
 ) {
-  const args = parseCollectorArgs(argv, now);
+  const args = parseCollectorArgs(argv, now, defaultLookbackDays === undefined ? {} : { defaultLookbackDays });
   if (args.explicitSince) return args;
   try {
     const raw = await readFile(collectorStatePath(producerId, stateRoot), "utf8");
@@ -93,7 +93,7 @@ export async function recordCollectorSuccess(
   await rename(tempPath, path);
 }
 
-export function parseCollectorArgs(argv, now = new Date()) {
+export function parseCollectorArgs(argv, now = new Date(), { defaultLookbackDays = DEFAULT_COLLECTOR_LOOKBACK_DAYS } = {}) {
   const dryRun = argv.includes("--dry-run");
   const debug = argv.includes("--debug");
   let days = null;
@@ -112,7 +112,7 @@ export function parseCollectorArgs(argv, now = new Date()) {
   } else if (Number.isFinite(days) && days > 0) {
     since = new Date(now.getTime() - days * 86_400_000);
   } else {
-    since = new Date(now.getTime() - DEFAULT_COLLECTOR_LOOKBACK_DAYS * 86_400_000);
+    since = new Date(now.getTime() - defaultLookbackDays * 86_400_000);
   }
   if (Number.isNaN(since.getTime())) {
     throw new Error(`Invalid --since ${sinceIso}`);

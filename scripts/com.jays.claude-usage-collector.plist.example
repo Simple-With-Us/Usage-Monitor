@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/claude-usage-collector.mjs.
+
+  Must run on the Mac that has ~/.claude/projects.  Install like the Codex
+  collector: copy to ~/Library/LaunchAgents, replace ABSOLUTE/PATH
+  placeholders, then bootstrap.
+
+  StartInterval 900 = 15 minutes.  The first run defaults to a three-day
+  bootstrap (the Mac holds 4,000+ transcript files); later runs resume from a
+  durable successful-through watermark with a 24-hour idempotent overlap.
+  On-demand: run the node script with --dry-run first, or --days 30 to
+  backfill.
+
+  The collector sends the exact per-request usage that the Mac's Claude Code
+  transcripts carry.  The receiver drops a transcript event when the native
+  OTLP feed already covers it (src/lib/native-telemetry-coverage.ts), so the
+  two feeds never double-count.
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.claude-usage-collector
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.claude-usage-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/claude-usage-collector.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/claude-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/claude-usage-collector.log</string>
+</dict>
+</plist>
