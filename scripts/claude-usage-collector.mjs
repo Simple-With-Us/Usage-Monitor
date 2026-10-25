@@ -29,7 +29,7 @@
 //
 // Env:
 //   USAGE_INGEST_TOKEN or CLAUDE_INGEST_TOKEN
-//   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
+//   USAGE_MONITOR_INGEST_URL (required; the deployment's ingest endpoint)
 //   CLAUDE_HOME (default ~/.claude)
 
 import { hostname } from "node:os";
@@ -59,9 +59,17 @@ import {
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
 const PRODUCER_ID = process.env.CLAUDE_PRODUCER_ID || CLAUDE_PRODUCER_ID;
-const INGEST_URL =
-  process.env.USAGE_MONITOR_INGEST_URL ||
-  "https://usage.jays.services/api/ingest/usage";
+// The ingest endpoint is deployment-specific, so it is never hardcoded here:
+// the operator supplies it (the Mac's LaunchAgent and the server's runner
+// both set it), and a missing value fails loudly instead of quietly pointing
+// at one deployment.
+const INGEST_URL = process.env.USAGE_MONITOR_INGEST_URL?.trim();
+if (!INGEST_URL) {
+  console.error(
+    "[claude-usage-collector] USAGE_MONITOR_INGEST_URL is not set; refusing to guess an ingest endpoint."
+  );
+  process.exit(2);
+}
 
 /** Marks these rows as coming from the local transcript feed. */
 export const TRANSCRIPT_COLLECTOR_MARKER = "transcript";

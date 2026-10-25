@@ -34,6 +34,9 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- The deployment's ingest endpoint; the collector refuses to guess one. -->
+    <key>USAGE_MONITOR_INGEST_URL</key>
+    <string>https://USAGE-MONITOR-HOST/api/ingest/usage</string>
   </dict>
   <key>StartInterval</key>
   <integer>900</integer>
