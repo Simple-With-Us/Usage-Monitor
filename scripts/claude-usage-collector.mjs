@@ -87,6 +87,18 @@ export const TRANSCRIPT_COLLECTOR_MARKER = "transcript";
  */
 export const DEFAULT_CLAUDE_LOOKBACK_DAYS = 3;
 
+/**
+ * Replay overlap in minutes.
+ *
+ * The shared default is 24 hours, which is right for the small session
+ * collectors but wrong here: the Mac's transcripts carry tens of thousands of
+ * token events a day, so re-sending a whole day on every 15-minute pass would
+ * put that many duplicate rows through the ingest path every time.  A
+ * transcript is written seconds after the request it describes, so an hour of
+ * overlap is a wide margin for a late write.
+ */
+export const CLAUDE_STATE_OVERLAP_MINUTES = 60;
+
 function log(message) {
   console.log(`[claude-usage-collector] ${message}`);
 }
@@ -135,6 +147,7 @@ async function main() {
     args = await resolveCollectorArgs(process.argv, PRODUCER_ID, {
       now: passStartedAt,
       defaultLookbackDays: DEFAULT_CLAUDE_LOOKBACK_DAYS,
+      stateOverlapMinutes: CLAUDE_STATE_OVERLAP_MINUTES,
     });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
