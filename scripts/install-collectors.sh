@@ -93,13 +93,17 @@ if [[ -f "$CLAUDE_PLIST" ]]; then
   if [[ -n "${USAGE_MONITOR_INGEST_URL:-}" ]]; then
     # PlistBuddy's "Set" fails when the key is absent and "Add" fails when it
     # is present, so try both: an absent key must not abort the installer.
+    if ! /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$CLAUDE_PLIST" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$CLAUDE_PLIST" >/dev/null 2>&1 || true
+    fi
     wrote=1
     if ! /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1; then
       if ! /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:USAGE_MONITOR_INGEST_URL string $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1; then
         wrote=0
       fi
     fi
-    if [[ "$wrote" == 1 ]]; then
+    stored="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$CLAUDE_PLIST" 2>/dev/null || true)"
+    if [[ "$wrote" == 1 && "$stored" == "$USAGE_MONITOR_INGEST_URL" ]]; then
       echo "set USAGE_MONITOR_INGEST_URL for $CLAUDE_LABEL"
     else
       echo "error: could not set USAGE_MONITOR_INGEST_URL for $CLAUDE_LABEL" >&2
