@@ -1,4 +1,3 @@
-import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { ParsedUsageTelemetryEvent } from "@/lib/usage-telemetry";
 
@@ -39,8 +38,8 @@ export const HOST_NAME_KEY = "host.name";
 /** Producers where a native feed and a local transcript feed can coexist. */
 const NATIVE_COVERAGE_PRODUCERS: ReadonlySet<string> = new Set(["claude-code"]);
 
-/** The JSON path of the machine identity inside a row's metadata. */
-const JSON_PATH = '$."host.name"';
+/** How wide one coverage lookup is, so no single query holds the database. */
+const COVERAGE_LOOKUP_CHUNK_MS = 60 * 60 * 1000;
 
 export function isTranscriptSourcedEvent(
   event: Pick<ParsedUsageTelemetryEvent, "sourceApp" | "metadata">
@@ -101,30 +100,57 @@ export async function dropEventsCoveredByNative(
   const from = new Date(Math.min(...times) - NATIVE_COVERAGE_WINDOW_MS);
   const to = new Date(Math.max(...times) + NATIVE_COVERAGE_WINDOW_MS);
 
-  // The native rows are looked up with the same machine identities the batch
-  // carries, so the lookup returns only the rows that could cover a transcript
-  // event.  A truncated lookup would silently under-cover: a backfill batch
-  // spans days, and the newest native rows alone say nothing about the older
-  // part of the batch.
-  const hosts = [...new Set(transcriptEvents.map((event) => readHostName(event.metadata)).filter((host): host is string => !!host))];
-  if (hosts.length === 0) {
+  // The native rows are looked up in hour-sized chunks, and only the rows
+  // whose machine is one of the batch's own machines count.
+  //
+  // Two things matter here.  A truncated lookup would silently under-cover: a
+  // backfill batch spans days, and the newest native rows alone say nothing
+  // about the older part of the batch.  And a single wide lookup holds the
+  // database open long enough to make the writer behind it time out, so the
+  // range is walked in bounded pieces instead.
+  const hosts = new Set(
+    transcriptEvents
+      .map((event) => readHostName(event.metadata))
+      .filter((host): host is string => !!host)
+  );
+  if (hosts.size === 0) {
     // No transcript event names its machine, so no native row can be
     // attributed to one either.
     return { events, skippedNativeCovered: 0, nativeRowsConsidered: 0 };
   }
 
-  const nativeRows = await prisma.$queryRaw<Array<{ occurredAt: Date }>>(Prisma.sql`
-    SELECT occurredAt FROM ExternalUsageEvent
-    WHERE sourceApp IN (${Prisma.join([...NATIVE_COVERAGE_PRODUCERS])})
-      AND metricType = 'usage'
-      AND unit = 'token'
-      AND occurredAt >= ${from}
-      AND occurredAt <= ${to}
-      AND json_extract(metadata, ${JSON_PATH}) IS NOT NULL
-      AND json_extract(metadata, ${JSON_PATH}) IN (${Prisma.join(hosts)})
-  `);
-
-  const nativeTimes = nativeRows.map((row) => new Date(row.occurredAt).getTime());
+  const nativeTimes: number[] = [];
+  const eventFromMs = Math.min(...times);
+  const eventToMs = Math.max(...times);
+  for (let cursor = eventFromMs; cursor <= eventToMs; cursor += COVERAGE_LOOKUP_CHUNK_MS) {
+    const chunkTo = Math.min(cursor + COVERAGE_LOOKUP_CHUNK_MS, eventToMs);
+    const rows = await prisma.externalUsageEvent.findMany({
+      where: {
+        sourceApp: { in: [...NATIVE_COVERAGE_PRODUCERS] },
+        metricType: "usage",
+        unit: "token",
+        occurredAt: {
+          gte: new Date(cursor - NATIVE_COVERAGE_WINDOW_MS),
+          lte: new Date(chunkTo + NATIVE_COVERAGE_WINDOW_MS),
+        },
+      },
+      select: { occurredAt: true, metadata: true },
+    });
+    for (const row of rows) {
+      const host = readHostName(row.metadata);
+      // Machine-scoped, and never a wildcard: the Mac's native feed must not
+      // silence the server's transcript feed, and the server has no native
+      // feed at all.  A native row without a machine identity cannot be
+      // attributed to a machine, so it covers nothing.
+      //
+      // The historical native rows are not left in that state: the rows
+      // Claude Code wrote before the Mac carried `host.name` were stamped
+      // once with the machine they came from, so the unattributable case does
+      // not arise in the ledger and the wildcard is not needed.
+      if (!host || !hosts.has(host)) continue;
+      nativeTimes.push(row.occurredAt.getTime());
+    }
+  }
 
   if (nativeTimes.length === 0) {
     return { events, skippedNativeCovered: 0, nativeRowsConsidered: 0 };

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const queryRaw = vi.fn();
+const findMany = vi.fn();
 vi.mock("@/lib/prisma", () => ({
-  prisma: { $queryRaw: (...args: unknown[]) => queryRaw(...args) },
+  prisma: { externalUsageEvent: { findMany: (...args: unknown[]) => findMany(...args) } },
 }));
 
 import {
@@ -23,12 +23,7 @@ const at = (iso: string) => new Date(iso);
 function mockNativeRows(
   rows: Array<{ occurredAt: Date; metadata: Record<string, string> }>
 ) {
-  queryRaw.mockImplementation((query: { values: unknown[] }) =>
-    rows.filter((row) => {
-      const host = String(row.metadata["host.name"] ?? "").trim().toLowerCase();
-      return host !== "" && query.values.includes(host);
-    })
-  );
+  findMany.mockResolvedValue(rows);
 }
 
 
@@ -52,7 +47,7 @@ function event(
 
 describe("native telemetry coverage", () => {
   beforeEach(() => {
-    queryRaw.mockReset();
+    findMany.mockReset();
   });
 
   it("recognizes a transcript-sourced event by its marker", () => {
@@ -83,7 +78,7 @@ describe("native telemetry coverage", () => {
   });
 
   it("drops a transcript event the native feed already covers", async () => {
-    queryRaw.mockResolvedValue([
+    mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
     ]);
     const events = [
@@ -141,7 +136,7 @@ describe("native telemetry coverage", () => {
   });
 
   it("never drops another producer's events", async () => {
-    queryRaw.mockResolvedValue([
+    mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
     ]);
     const events = [
@@ -157,12 +152,19 @@ describe("native telemetry coverage", () => {
     await dropEventsCoveredByNative([
       event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
     ]);
-    // The lookup is a raw, host-scoped query: it returns only the native rows
-    // that could cover one of the batch's own machines.
-    const sql = (queryRaw.mock.calls[0][0] as { text: string; values: unknown[] });
-    expect(sql.text).toContain("json_extract(metadata");
-    expect(sql.text).toContain("occurredAt >=");
-    const values = (sql as unknown as { values: unknown[] }).values;
-    expect(values.some((value) => value instanceof Date)).toBe(true);
+    // The lookup is bounded on both ends: it asks for the native token rows
+    // of that source app inside the batch's own window, and nothing else.
+    const where = (findMany.mock.calls[0][0] as {
+      where: { sourceApp: { in: string[] }; metricType: string; unit: string; occurredAt: { gte: Date; lte: Date } };
+    }).where;
+    expect(where.sourceApp.in).toContain("claude-code");
+    expect(where.metricType).toBe("usage");
+    expect(where.unit).toBe("token");
+    expect(where.occurredAt.gte.getTime()).toBe(
+      at("2026-10-25T10:00:00.000Z").getTime() - NATIVE_COVERAGE_WINDOW_MS
+    );
+    expect(where.occurredAt.lte.getTime()).toBe(
+      at("2026-10-25T10:00:00.000Z").getTime() + NATIVE_COVERAGE_WINDOW_MS
+    );
   });
 });
