@@ -73,12 +73,23 @@ The Mac's Claude Code resource attributes now carry a `host.name` attribute, whi
 
 The Claude Desktop app is configured from the Anthropic admin console rather than from `~/.claude/settings.json`, so its new native rows will not carry `host.name` until that console carries it; those rows then cover nothing, which is the safe direction (a possible double count with the transcript rows, visible in the ledger, rather than a silent drop of another machine's usage).
 
+## The server's own Claude Code feed
+
+This box runs Claude Code CLI sessions of its own, under the Claude projects directory, and there is no OTLP exporter for them at all, so that usage never reached Usage Monitor.
+
+The same collector runs here every 15 minutes (a cron row, as the `jay` user, with the producer-scoped token from a mode-600 secrets file), and the ledger now holds about 123,000 exact per-request rows from it, covering Oct 22 21:11 through Oct 25 05:20.
+
+Before it was enabled, the sessions were checked for a BotFleet overlap: 27,295 sampled working directories, none of them a BotFleet workspace, so the feed does not collide with the producer `botfleet`.
+
+A first backfill of that size is a burst, and it showed the receiver's limit: the ingest path answers 503 while another write owns the database and 500 when a write runs past its timeout, while every other producer kept landing with its own retries.
+
+The steady-state cost is small, because the replay overlap is one hour rather than a whole day, and an idle box sends nothing at all.
 ## Next steps
 
 1. The native-vs-transcript precedence is now decided and implemented on the receiver (native wins, the transcript fills the gap), so the transcript collector runs as a gap filler rather than as a second full feed.
 2. Keep the staleness rule on token rows; it is what makes the next version of this failure loud.
 3. UM-1614's Mac hub stays the place where the Sentry-side scrubbed signal is produced; it is still not installed on the Mac.
-4. The same collector should run on this server: `~/.claude/projects` here holds 431 transcripts and about 31,000 token events a day from Claude Code runs on this box, and that feed has no OTLP exporter at all, so it is invisible to Usage Monitor today.  Before it is enabled, check whether those sessions are BotFleet children (BotFleet reports its own child turns under the producer `botfleet`, and the collector excludes only sessions whose path says so).
+4. The server's own Claude Code feed is live (see above); what is left is to keep the receiver kind to a first backfill, because a burst of that size starves the other producers for as long as it lasts.
 
 ## Verification
 
