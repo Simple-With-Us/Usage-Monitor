@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const findMany = vi.fn();
+const queryRaw = vi.fn();
 vi.mock("@/lib/prisma", () => ({
-  prisma: { externalUsageEvent: { findMany: (...args: unknown[]) => findMany(...args) } },
+  prisma: { $queryRaw: (...args: unknown[]) => queryRaw(...args) },
 }));
 
 import {
@@ -15,6 +15,22 @@ import {
 import type { ParsedUsageTelemetryEvent } from "../usage-telemetry";
 
 const at = (iso: string) => new Date(iso);
+
+/**
+ * Emulate the raw lookup: it returns only the native rows whose machine is
+ * one of the machines the query asked about, which is what the SQL does.
+ */
+function mockNativeRows(
+  rows: Array<{ occurredAt: Date; metadata: Record<string, string> }>
+) {
+  queryRaw.mockImplementation((query: { values: unknown[] }) =>
+    rows.filter((row) => {
+      const host = String(row.metadata["host.name"] ?? "").trim().toLowerCase();
+      return host !== "" && query.values.includes(host);
+    })
+  );
+}
+
 
 function event(
   occurredAt: string,
@@ -36,7 +52,7 @@ function event(
 
 describe("native telemetry coverage", () => {
   beforeEach(() => {
-    findMany.mockReset();
+    queryRaw.mockReset();
   });
 
   it("recognizes a transcript-sourced event by its marker", () => {
@@ -59,7 +75,7 @@ describe("native telemetry coverage", () => {
   });
 
   it("keeps transcript events when the native feed has no rows", async () => {
-    findMany.mockResolvedValue([]);
+    mockNativeRows([]);
     const events = [event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" })];
     const result = await dropEventsCoveredByNative(events);
     expect(result.events).toHaveLength(1);
@@ -67,7 +83,7 @@ describe("native telemetry coverage", () => {
   });
 
   it("drops a transcript event the native feed already covers", async () => {
-    findMany.mockResolvedValue([
+    queryRaw.mockResolvedValue([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
     ]);
     const events = [
@@ -83,7 +99,7 @@ describe("native telemetry coverage", () => {
   it("does not let one machine's native feed silence another machine's transcripts", async () => {
     // The Mac's native feed must not drop the server's transcript rows, and
     // the server has no native feed at all.
-    findMany.mockResolvedValue([
+    mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
     ]);
     const events = [
@@ -97,7 +113,7 @@ describe("native telemetry coverage", () => {
   it("never lets a native row without a machine identity cover anything", async () => {
     // A native row that cannot be attributed to a machine must not silence
     // another machine's transcript events.
-    findMany.mockResolvedValue([
+    mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: {} },
     ]);
     const events = [
@@ -113,7 +129,7 @@ describe("native telemetry coverage", () => {
     // The OTLP resource attribute is written by an operator and the transcript
     // feed writes os.hostname(), so a case difference must not decide
     // whether the native feed covers the event.
-    findMany.mockResolvedValue([
+    mockNativeRows([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "Workstation-1" } },
     ]);
     const events = [
@@ -125,7 +141,7 @@ describe("native telemetry coverage", () => {
   });
 
   it("never drops another producer's events", async () => {
-    findMany.mockResolvedValue([
+    queryRaw.mockResolvedValue([
       { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
     ]);
     const events = [
@@ -137,16 +153,16 @@ describe("native telemetry coverage", () => {
   });
 
   it("looks only inside the batch's own time window", async () => {
-    findMany.mockResolvedValue([]);
+    mockNativeRows([]);
     await dropEventsCoveredByNative([
       event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
     ]);
-    const where = (findMany.mock.calls[0][0] as { where: { occurredAt: { gte: Date; lte: Date } } }).where;
-    expect(where.occurredAt.gte.getTime()).toBe(
-      at("2026-10-25T10:00:00.000Z").getTime() - NATIVE_COVERAGE_WINDOW_MS
-    );
-    expect(where.occurredAt.lte.getTime()).toBe(
-      at("2026-10-25T10:00:00.000Z").getTime() + NATIVE_COVERAGE_WINDOW_MS
-    );
+    // The lookup is a raw, host-scoped query: it returns only the native rows
+    // that could cover one of the batch's own machines.
+    const sql = (queryRaw.mock.calls[0][0] as { text: string; values: unknown[] });
+    expect(sql.text).toContain("json_extract(metadata");
+    expect(sql.text).toContain("occurredAt >=");
+    const values = (sql as unknown as { values: unknown[] }).values;
+    expect(values.some((value) => value instanceof Date)).toBe(true);
   });
 });

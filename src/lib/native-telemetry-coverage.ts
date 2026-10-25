@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { ParsedUsageTelemetryEvent } from "@/lib/usage-telemetry";
 
@@ -38,8 +39,8 @@ export const HOST_NAME_KEY = "host.name";
 /** Producers where a native feed and a local transcript feed can coexist. */
 const NATIVE_COVERAGE_PRODUCERS: ReadonlySet<string> = new Set(["claude-code"]);
 
-/** Upper bound on the native rows pulled for one coverage decision. */
-const MAX_NATIVE_ROWS = 500;
+/** The JSON path of the machine identity inside a row's metadata. */
+const JSON_PATH = '$."host.name"';
 
 export function isTranscriptSourcedEvent(
   event: Pick<ParsedUsageTelemetryEvent, "sourceApp" | "metadata">
@@ -100,58 +101,45 @@ export async function dropEventsCoveredByNative(
   const from = new Date(Math.min(...times) - NATIVE_COVERAGE_WINDOW_MS);
   const to = new Date(Math.max(...times) + NATIVE_COVERAGE_WINDOW_MS);
 
-  const candidates = await prisma.externalUsageEvent.findMany({
-    where: {
-      sourceApp: { in: [...NATIVE_COVERAGE_PRODUCERS] },
-      metricType: "usage",
-      unit: "token",
-      occurredAt: { gte: from, lte: to },
-    },
-    orderBy: { occurredAt: "desc" },
-    take: MAX_NATIVE_ROWS,
-    select: { occurredAt: true, metadata: true },
-  });
+  // The native rows are looked up with the same machine identities the batch
+  // carries, so the lookup returns only the rows that could cover a transcript
+  // event.  A truncated lookup would silently under-cover: a backfill batch
+  // spans days, and the newest native rows alone say nothing about the older
+  // part of the batch.
+  const hosts = [...new Set(transcriptEvents.map((event) => readHostName(event.metadata)).filter((host): host is string => !!host))];
+  if (hosts.length === 0) {
+    // No transcript event names its machine, so no native row can be
+    // attributed to one either.
+    return { events, skippedNativeCovered: 0, nativeRowsConsidered: 0 };
+  }
 
-  const nativeRows = candidates
-    .filter((row) => readTranscriptMarker(row.metadata) !== TRANSCRIPT_COLLECTOR_MARKER)
-    .map((row) => ({
-      at: row.occurredAt.getTime(),
-      host: readHostName(row.metadata),
-    }));
+  const nativeRows = await prisma.$queryRaw<Array<{ occurredAt: Date }>>(Prisma.sql`
+    SELECT occurredAt FROM ExternalUsageEvent
+    WHERE sourceApp IN (${Prisma.join([...NATIVE_COVERAGE_PRODUCERS])})
+      AND metricType = 'usage'
+      AND unit = 'token'
+      AND occurredAt >= ${from}
+      AND occurredAt <= ${to}
+      AND json_extract(metadata, ${JSON_PATH}) IS NOT NULL
+      AND json_extract(metadata, ${JSON_PATH}) IN (${Prisma.join(hosts)})
+  `);
 
-  if (nativeRows.length === 0) {
-    return { events, skippedNativeCovered: 0, nativeRowsConsidered: candidates.length };
+  const nativeTimes = nativeRows.map((row) => new Date(row.occurredAt).getTime());
+
+  if (nativeTimes.length === 0) {
+    return { events, skippedNativeCovered: 0, nativeRowsConsidered: 0 };
   }
 
   let skippedNativeCovered = 0;
   const kept = events.filter((event) => {
     if (!isTranscriptSourcedEvent(event)) return true;
     const at = event.occurredAt.getTime();
-    const host = readHostName(event.metadata);
-    const covered = nativeRows.some(
-      (row) =>
-        Math.abs(row.at - at) <= NATIVE_COVERAGE_WINDOW_MS &&
-        // Machine-scoped, and never a wildcard: the Mac's native feed must
-        // not silence the server's transcript feed, and the server has no
-        // native feed at all.  A native row without a machine identity cannot
-        // be attributed to a machine, so it covers nothing.
-        //
-        // The historical native rows are not left in that state: the 214,382
-        // rows Claude Code wrote before the Mac carried `host.name` were
-        // stamped once with the machine they came from (every one of them
-        // was written by the Mac's CLI or its Desktop app), so the
-        // unattributable case does not arise in the ledger and the wildcard
-        // is not needed.  A native row that still carries no machine
-        // identity therefore means a producer that never named its machine,
-        // and letting it cover every machine would silently drop another
-        // machine's transcript usage.
-        row.host !== undefined &&
-        host !== undefined &&
-        row.host === host
+    const covered = nativeTimes.some(
+      (nativeAt) => Math.abs(nativeAt - at) <= NATIVE_COVERAGE_WINDOW_MS
     );
     if (covered) skippedNativeCovered += 1;
     return !covered;
   });
 
-  return { events: kept, skippedNativeCovered, nativeRowsConsidered: candidates.length };
+  return { events: kept, skippedNativeCovered, nativeRowsConsidered: nativeTimes.length };
 }
