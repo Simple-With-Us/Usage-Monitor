@@ -4,8 +4,16 @@
   Template launchd job for scripts/claude-usage-collector.mjs.
 
   Must run on the Mac that has ~/.claude/projects.  Install like the Codex
-  collector: copy to ~/Library/LaunchAgents, replace ABSOLUTE/PATH
-  placeholders, then bootstrap.
+  collector: copy to ~/Library/LaunchAgents, then replace every placeholder
+  below, then bootstrap.
+
+  Placeholders to replace before install:
+    /ABSOLUTE/PATH/TO/node                      the node binary
+    /ABSOLUTE/PATH/TO/Usage-Monitor/scripts/... the collector script
+    /ABSOLUTE/PATH/TO/HOME/Library/Logs/...     the log file
+    USAGE-MONITOR-HOST                          the Usage Monitor host, so
+                                                 USAGE_MONITOR_INGEST_URL
+                                                 never keeps the fake host
 
   StartInterval 900 = 15 minutes.  The first run defaults to a three-day
   bootstrap (the Mac holds 4,000+ transcript files); later runs resume from a

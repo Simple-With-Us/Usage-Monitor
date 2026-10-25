@@ -61,14 +61,16 @@ const DEBUG = process.argv.includes("--debug");
 const PRODUCER_ID = process.env.CLAUDE_PRODUCER_ID || CLAUDE_PRODUCER_ID;
 // The ingest endpoint is deployment-specific, so it is never hardcoded here:
 // the operator supplies it (the Mac's LaunchAgent and the server's runner
-// both set it), and a missing value fails loudly instead of quietly pointing
-// at one deployment.
-const INGEST_URL = process.env.USAGE_MONITOR_INGEST_URL?.trim();
-if (!INGEST_URL) {
-  console.error(
-    "[claude-usage-collector] USAGE_MONITOR_INGEST_URL is not set; refusing to guess an ingest endpoint."
-  );
-  process.exit(2);
+// both set it), and a missing value fails loudly inside main() instead of
+// quietly pointing at one deployment.  A dry run never needs it.
+function resolveIngestUrl(env = process.env) {
+  const url = env.USAGE_MONITOR_INGEST_URL?.trim();
+  if (!url) {
+    throw new Error(
+      "USAGE_MONITOR_INGEST_URL is not set; refusing to guess an ingest endpoint."
+    );
+  }
+  return url;
 }
 
 /** Marks these rows as coming from the local transcript feed. */
@@ -156,10 +158,16 @@ async function main() {
     return;
   }
   const token = resolveCollectorToken(["CLAUDE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  let ingestUrl;
+  try {
+    ingestUrl = resolveIngestUrl();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   try {
     const ack = await postUsageBatches({
       events,
-      ingestUrl: INGEST_URL,
+      ingestUrl,
       ingestToken: token,
       producerId: PRODUCER_ID,
       dryRun: DRY || args.dryRun,

@@ -134,9 +134,17 @@ export async function dropEventsCoveredByNative(
         // Machine-scoped, and never a wildcard: the Mac's native feed must
         // not silence the server's transcript feed, and the server has no
         // native feed at all.  A native row without a machine identity cannot
-        // be attributed to a machine, so it covers nothing; the historical
-        // native rows were stamped with their machine once (see the rollout
-        // note), so the wildcard case no longer decides anything.
+        // be attributed to a machine, so it covers nothing.
+        //
+        // The historical native rows are not left in that state: the 214,382
+        // rows Claude Code wrote before the Mac carried `host.name` were
+        // stamped once with the machine they came from (every one of them
+        // was written by the Mac's CLI or its Desktop app), so the
+        // unattributable case does not arise in the ledger and the wildcard
+        // is not needed.  A native row that still carries no machine
+        // identity therefore means a producer that never named its machine,
+        // and letting it cover every machine would silently drop another
+        // machine's transcript usage.
         row.host !== undefined &&
         host !== undefined &&
         row.host === host
