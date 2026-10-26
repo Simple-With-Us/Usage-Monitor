@@ -197,7 +197,7 @@ export async function POST(request: NextRequest) {
       aiRequests = result.inserted + result.merged;
       if (aiRequests > 0) {
         const { fanoutAiRequests } = await import("@/lib/usage-fanout");
-        void fanoutAiRequests(mapped.aiRequests, "otlp/v1/traces");
+        void fanoutAiRequests(result.persistedInputs ?? mapped.aiRequests, "otlp/v1/traces");
       }
     }
 

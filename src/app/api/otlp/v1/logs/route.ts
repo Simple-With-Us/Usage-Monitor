@@ -122,7 +122,7 @@ export async function POST(request: NextRequest) {
     const result = await persistAiRequests(mapped.requests);
     if (result.inserted + result.merged > 0) {
       const { fanoutAiRequests } = await import("@/lib/usage-fanout");
-      void fanoutAiRequests(mapped.requests, "otlp/v1/logs");
+      void fanoutAiRequests(result.persistedInputs ?? mapped.requests, "otlp/v1/logs");
     }
     return NextResponse.json(
       {

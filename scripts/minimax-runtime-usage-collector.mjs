@@ -154,9 +154,14 @@ export async function collectMinimaxRuntimeEvents({
           LIMIT ?`
       )
       .all(sinceMs, limit);
+    // When the pass hits the row cap there may be newer unprocessed rows, so
+    // the caller must not advance the checkpoint watermark past them.
+    const truncated = rows.length >= limit;
     const events = [];
     for (const row of rows) events.push(...runtimeRowToEvents(row));
-    return filterEventsSince(events, since);
+    const filtered = filterEventsSince(events, since);
+    filtered.truncated = truncated;
+    return filtered;
   } finally {
     db.close();
   }
@@ -200,7 +205,8 @@ async function main() {
   }
   if (events.length === 0) {
     log("nothing to send");
-    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: true })) {
+    const scanComplete = events.truncated !== true;
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete })) {
       await recordCollectorSuccess(MINIMAX_RUNTIME_STATE_KEY, passStartedAt);
     }
     return;
@@ -231,7 +237,8 @@ async function main() {
       })}`
     );
     if (ack.rejected > 0) fail(`Ingest reported rejections: ${ack.rejected}`);
-    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: true })) {
+    const scanComplete = events.truncated !== true;
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete })) {
       await recordCollectorSuccess(MINIMAX_RUNTIME_STATE_KEY, passStartedAt);
     }
   } catch (error) {

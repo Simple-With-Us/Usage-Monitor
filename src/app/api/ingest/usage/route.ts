@@ -544,7 +544,7 @@ async function persistIngestAiRequests(
     const result = await persistAiRequests(requests);
     if (result.inserted + result.merged > 0) {
       const { fanoutAiRequests } = await import("@/lib/usage-fanout");
-      void fanoutAiRequests(requests, "ingest/usage");
+      void fanoutAiRequests(result.persistedInputs ?? requests, "ingest/usage");
     }
   } catch (error) {
     console.error(
