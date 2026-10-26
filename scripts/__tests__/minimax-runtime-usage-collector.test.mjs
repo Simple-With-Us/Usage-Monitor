@@ -178,6 +178,16 @@ describe("minimax-runtime-usage-collector", () => {
     expect(later[0].producerKeyRef).toBeUndefined();
   });
 
+  it("marks the pass truncated when the row limit cuts it short", async () => {
+    const events = await collectMinimaxRuntimeEvents({
+      dbPath,
+      since: new Date(BASE_MS - 1000),
+      limit: 1,
+    });
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.truncated).toBe(true);
+  });
+
   it("returns nothing when the database does not exist", async () => {
     await expect(
       collectMinimaxRuntimeEvents({ dbPath: join(dir, "missing.sqlite"), since: new Date(0) })
