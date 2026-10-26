@@ -8,6 +8,7 @@ vi.mock("@/lib/sentry-fleet", () => ({
 
 import {
   fanoutAgentTurns,
+  fanoutAiRequests,
   fanoutPersistedUsage,
   fanoutPollSnapshot,
 } from "@/lib/usage-fanout";
@@ -73,6 +74,47 @@ describe("fanoutPollSnapshot", () => {
       12.5,
       expect.objectContaining({ provider: "openai" })
     );
+  });
+});
+
+describe("fanoutAiRequests", () => {
+  it("is a no-op for an empty batch", async () => {
+    await fanoutAiRequests([], "otlp/v1/logs");
+    expect(recordFleetInfraMetric).not.toHaveBeenCalled();
+  });
+
+  it("emits counts and mean duration/TTFT per harness and model, without content", async () => {
+    await fanoutAiRequests(
+      [
+        { harness: "codex", servedModel: "gpt-5-codex", durationMs: 1000, ttftMs: 200 },
+        { harness: "codex", servedModel: "gpt-5-codex", durationMs: 3000, ttftMs: 400, error: "boom" },
+        { harness: "claude-code", requestedModel: "claude-opus-5-5", durationMs: 500 },
+      ],
+      "otlp/v1/logs"
+    );
+    expect(recordFleetInfraMetric).toHaveBeenCalledWith(
+      "ai.request",
+      2,
+      expect.objectContaining({ harness: "codex", model: "gpt-5-codex", errors: 1 })
+    );
+    expect(recordFleetInfraMetric).toHaveBeenCalledWith(
+      "ai.request.duration_ms",
+      2000,
+      expect.objectContaining({ harness: "codex", model: "gpt-5-codex" })
+    );
+    expect(recordFleetInfraMetric).toHaveBeenCalledWith(
+      "ai.request.ttft_ms",
+      300,
+      expect.objectContaining({ harness: "codex" })
+    );
+    expect(recordFleetInfraMetric).toHaveBeenCalledWith(
+      "ai.request_total",
+      3,
+      expect.objectContaining({ route: "otlp/v1/logs" })
+    );
+    const serialized = JSON.stringify(recordFleetInfraMetric.mock.calls);
+    expect(serialized).not.toContain("boom");
+    expect(serialized).not.toContain("cost");
   });
 });
 

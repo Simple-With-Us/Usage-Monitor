@@ -59,6 +59,9 @@ export const PRODUCER_STREAM_RULES: readonly ProducerStreamRule[] = [
   { sourceApp: "botfleet", metricType: "usage", maxAgeHours: 96, requiresTokens: true },
   { sourceApp: "deepseek-dsh", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
   { sourceApp: "opencode", metricType: "usage", maxAgeHours: 96, requiresTokens: true },
+  // MiniMax desktop runtime ledger (UM-1637): the Mac writes turns most
+  // days, but the app can sit unused over a long weekend.
+  { sourceApp: "minimax-code", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
   // Timer-driven quota collectors: a gap here is always a broken collector.
   { sourceApp: "openai-codex", metricType: "quota", maxAgeHours: 6 },
   { sourceApp: "grok-build", metricType: "quota", maxAgeHours: 6 },

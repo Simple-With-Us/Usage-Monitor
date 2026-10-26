@@ -541,7 +541,11 @@ async function persistIngestAiRequests(
   if (requests.length === 0) return;
   try {
     const { persistAiRequests } = await import("@/lib/ai-requests");
-    await persistAiRequests(requests);
+    const result = await persistAiRequests(requests);
+    if (result.inserted + result.merged > 0) {
+      const { fanoutAiRequests } = await import("@/lib/usage-fanout");
+      void fanoutAiRequests(result.persistedInputs ?? requests, "ingest/usage");
+    }
   } catch (error) {
     console.error(
       "[ingest/usage] failed to persist AI requests:",

@@ -134,13 +134,12 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     name: "MiniMax Code",
     provider: "MiniMax",
     description: "MiniMax Code CLI / agent seat.",
-    dataCapability: "Exact Token Plan quota windows; process detection; no per-turn token feed",
-    fidelityTier: "unavailable",
-    tokenTelemetryKind: "none",
-    notes: "The official mmx CLI exposes exact rolling and weekly remaining-percent quota.  Token usage is not reported because MiniMax has no exact local per-turn feed.",
+    dataCapability: "Exact Token Plan quota windows plus exact per-turn tokens from the desktop runtime ledger",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "The official mmx CLI exposes exact rolling and weekly remaining-percent quota.  Per-turn tokens come from the desktop runtime's local_runtime_token_usage ledger (scripts/minimax-runtime-usage-collector.mjs): exact input, output, cache-read and cache-write counts per agent turn.  The Mac build leaves the model column empty, so those rows carry no model and no reported cost; Usage Monitor derives an API-equivalent estimate from the tokens.",
     defaultMonthlySeatCostUsd: 0,
-    unavailableReason:
-      "MiniMax Code has no exact local per-turn token feed.  This is not zero usage.",
   },
   {
     id: "deepseek-dsh",

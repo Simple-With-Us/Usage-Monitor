@@ -237,7 +237,7 @@ export async function recordFleetInfraMetric(
   // `Date.now() - tickStartedAt` is an integer.  Anything ending in
   // `_ms`, `duration_*`, or `*_ratio` is a gauge; everything else is a
   // counter (the typical Sentry Application Metrics shape).
-  const isGauge = /(?:^|[._])(?:duration_ms|duration|ratio|latency)\b/.test(name);
+  const isGauge = /(?:^|[._])(?:duration_ms|ttft_ms|duration|ratio|latency)\b/.test(name);
   const kind = isGauge ? "gauge" : "counter";
   const tags: FleetInfraTags = {
     app: "usage-monitor",

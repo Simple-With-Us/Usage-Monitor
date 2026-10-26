@@ -55,6 +55,8 @@ export interface PersistAiRequestsResult {
   inserted: number;
   merged: number;
   duplicates: number;
+  /** Inputs that produced a new row or merged new fields (duplicates excluded). */
+  persistedInputs: AiRequestInput[];
 }
 
 function mergeSources(existing: string, source: string): string {
@@ -162,15 +164,19 @@ async function stitchCodexCompletion(input: AiRequestInput): Promise<"inserted" 
 }
 
 export async function persistAiRequests(inputs: AiRequestInput[]): Promise<PersistAiRequestsResult> {
-  const result: PersistAiRequestsResult = { inserted: 0, merged: 0, duplicates: 0 };
+  const result: PersistAiRequestsResult = { inserted: 0, merged: 0, duplicates: 0, persistedInputs: [] };
   // Oldest first, so a Codex api_request in the same batch precedes its completion.
   const ordered = [...inputs].sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
   for (const input of ordered) {
     const outcome =
       input.kind === "codex-completion" ? await stitchCodexCompletion(input) : await upsertCoalesce(input);
-    if (outcome === "inserted") result.inserted += 1;
-    else if (outcome === "merged") result.merged += 1;
-    else result.duplicates += 1;
+    if (outcome === "inserted") {
+      result.inserted += 1;
+      result.persistedInputs.push(input);
+    } else if (outcome === "merged") {
+      result.merged += 1;
+      result.persistedInputs.push(input);
+    } else result.duplicates += 1;
   }
   return result;
 }
