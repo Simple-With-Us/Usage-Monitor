@@ -40,6 +40,18 @@ kill_owned_app() {
   kill_owned_process "$APP_EXECUTABLE"
 }
 
+bundle_version() {
+  local count=""
+  count="$(/usr/bin/git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || true)"
+  printf '%s\n' "${count:-1}"
+}
+
+short_version() {
+  local count=""
+  count="$(bundle_version)"
+  printf '1.0.%s\n' "$count"
+}
+
 build_and_stage() {
   swift build --package-path "$PACKAGE_DIR" --configuration debug --jobs 2
   local build_bin_dir build_binary build_resources
@@ -107,9 +119,9 @@ build_and_stage() {
   <key>CFBundleIconFile</key>
   <string>$ICON_FILE</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>$(short_version)</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$(bundle_version)</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>

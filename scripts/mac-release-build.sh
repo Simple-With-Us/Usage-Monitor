@@ -19,9 +19,9 @@
 # verifies bundle structure but an ad-hoc signature proves nothing about the
 # Developer ID team.
 #
-# Versions: CFBundleShortVersionString is APP_SHORT_VERSION below, so cutting
-# a release is one edit.  CFBundleVersion is `git rev-list --count HEAD`,
-# which only ever goes up.
+# Versions: CFBundleShortVersionString is 1.0.<commit_count> and
+# CFBundleVersion is `git rev-list --count HEAD`, unifying the macOS and iOS
+# build numbering standard across the fleet.
 #
 # Auto-update: a staged bundle always carries the Sparkle feed and public key
 # in its Info.plist (SUFeedURL, SUPublicEDKey, automatic checks/install, hourly
@@ -52,8 +52,7 @@ ZIP_FILE="$DIST_DIR/UsageMonitor.zip"
 DMG_FILE="$DIST_DIR/UsageMonitor.dmg"
 ICON_SOURCE="$ROOT_DIR/public/brand/icon-512.png"
 
-# Cutting a Mac release version is this one edit.
-APP_SHORT_VERSION="1.0.0"
+# Cutting a Mac release version is automatic from commit count (1.0.<commit_count>).
 
 # --- Auto-update (Sparkle 2) -------------------------------------------------
 SPARKLE_FEED_URL_DEFAULT="https://github.com/Simple-With-Us/Usage-Monitor/releases/latest/download/appcast.xml"
@@ -109,6 +108,12 @@ bundle_version() {
   printf '%s\n' "${count:-1}"
 }
 
+short_version() {
+  local count
+  count="$(bundle_version)"
+  printf '1.0.%s\n' "$count"
+}
+
 # Info.plist entries for Sparkle.  Updates are checked hourly, then downloaded
 # and installed without asking (AppUpdater installs the moment Usage Monitor is
 # not frontmost).  An archive must pass its EdDSA check before it is even
@@ -150,7 +155,7 @@ write_info_plist() {
   <key>CFBundleIconFile</key>
   <string>$icon_file</string>
   <key>CFBundleShortVersionString</key>
-  <string>$APP_SHORT_VERSION</string>
+  <string>$(short_version)</string>
   <key>CFBundleVersion</key>
   <string>$build</string>
   <key>CFBundleIdentifier</key>
@@ -166,7 +171,7 @@ write_info_plist() {
 </dict>
 </plist>
 PLIST
-  echo "version $APP_SHORT_VERSION (build $build)"
+  echo "version $(short_version) (build $build)"
 }
 
 write_icon() {
@@ -428,7 +433,7 @@ release_dist() {
   echo "Release artifacts in $DIST_DIR"
   echo "  UsageMonitor.zip  $zip_sha"
   echo "  UsageMonitor.dmg  $dmg_sha"
-  echo "  version $APP_SHORT_VERSION (build $(bundle_version))"
+  echo "  version $(short_version) (build $(bundle_version))"
 }
 
 case "$MODE" in
