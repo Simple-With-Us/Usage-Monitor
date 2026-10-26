@@ -360,6 +360,15 @@ export async function recordIngestEventsRejected(
   } catch {
     // Best-effort diagnostic counter; Usage Monitor remains the ledger.
   }
+  try {
+    const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");
+    const attrs: Record<string, string> = {};
+    if (attributes.route) attrs.route = attributes.route;
+    if (attributes.outcome) attrs.outcome = attributes.outcome;
+    await recordFleetInfraMetric("ingest.events_rejected", safeCount, attrs);
+  } catch {
+    // best-effort
+  }
 }
 
 /**
@@ -403,6 +412,18 @@ export async function recordIngestScopeRejected(
     metrics?.count?.("ingest.scope_rejected", 1, { attributes: attrs });
   } catch {
     // Best-effort diagnostic counter; never let observability break ingest.
+  }
+  // fleet-infra mirror, like ingest.failed: a refused producer is a fleet
+  // health signal, not just this app's.
+  try {
+    const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");
+    const attrs: Record<string, string> = {};
+    if (attributes.route) attrs.route = attributes.route;
+    if (attributes.dimension) attrs.dimension = attributes.dimension;
+    if (attributes.value) attrs.value = attributes.value;
+    await recordFleetInfraMetric("ingest.scope_rejected", 1, attrs);
+  } catch {
+    // best-effort
   }
 }
 

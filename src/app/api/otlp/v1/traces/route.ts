@@ -195,6 +195,10 @@ export async function POST(request: NextRequest) {
       const { persistAiRequests } = await import("@/lib/ai-requests");
       const result = await persistAiRequests(mapped.aiRequests);
       aiRequests = result.inserted + result.merged;
+      if (aiRequests > 0) {
+        const { fanoutAiRequests } = await import("@/lib/usage-fanout");
+        void fanoutAiRequests(mapped.aiRequests, "otlp/v1/traces");
+      }
     }
 
     return NextResponse.json(

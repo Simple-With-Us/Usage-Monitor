@@ -78,6 +78,7 @@ describe("PRODUCER_STREAM_RULES", () => {
       "deepseek-dsh",
       "opencode",
       "botfleet",
+      "minimax-code",
     ]) {
       expect(find(app)?.requiresTokens).toBe(true);
     }

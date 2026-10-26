@@ -83,35 +83,35 @@ for plist in "$AGENTS_DIR"/com.jays.*collector.plist; do
   echo "repointed + reloaded $label"
 done
 
-# The Claude Code transcript collector (UM-1636) needs the deployment's
-# ingest endpoint in its environment: the collector refuses to guess one, and
-# it never hardcodes a hostname.  The operator supplies the value; when it is
-# missing, say so instead of leaving a job that fails every run.
-CLAUDE_LABEL="com.jays.claude-usage-collector"
-CLAUDE_PLIST="$AGENTS_DIR/$CLAUDE_LABEL.plist"
-if [[ -f "$CLAUDE_PLIST" ]]; then
+# The collectors that refuse to guess an ingest endpoint (UM-1636/UM-1637)
+# need the deployment's endpoint in their environment; they never hardcode a
+# hostname.  The operator supplies the value; when it is missing, say so
+# instead of leaving a job that fails every run.
+for ENDPOINT_LABEL in "com.jays.claude-usage-collector" "com.jays.minimax-runtime-usage-collector"; do
+  ENDPOINT_PLIST="$AGENTS_DIR/$ENDPOINT_LABEL.plist"
+  [[ -f "$ENDPOINT_PLIST" ]] || continue
   if [[ -n "${USAGE_MONITOR_INGEST_URL:-}" ]]; then
     # PlistBuddy's "Set" fails when the key is absent and "Add" fails when it
     # is present, so try both: an absent key must not abort the installer.
-    if ! /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$CLAUDE_PLIST" >/dev/null 2>&1; then
-      /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$CLAUDE_PLIST" >/dev/null 2>&1 || true
+    if ! /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$ENDPOINT_PLIST" >/dev/null 2>&1 || true
     fi
     wrote=1
-    if ! /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1; then
-      if ! /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:USAGE_MONITOR_INGEST_URL string $USAGE_MONITOR_INGEST_URL" "$CLAUDE_PLIST" >/dev/null 2>&1; then
+    if ! /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
+      if ! /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:USAGE_MONITOR_INGEST_URL string $USAGE_MONITOR_INGEST_URL" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
         wrote=0
       fi
     fi
-    stored="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$CLAUDE_PLIST" 2>/dev/null || true)"
+    stored="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$ENDPOINT_PLIST" 2>/dev/null || true)"
     if [[ "$wrote" == 1 && "$stored" == "$USAGE_MONITOR_INGEST_URL" ]]; then
-      echo "set USAGE_MONITOR_INGEST_URL for $CLAUDE_LABEL"
+      echo "set USAGE_MONITOR_INGEST_URL for $ENDPOINT_LABEL"
     else
-      echo "error: could not set USAGE_MONITOR_INGEST_URL for $CLAUDE_LABEL" >&2
+      echo "error: could not set USAGE_MONITOR_INGEST_URL for $ENDPOINT_LABEL" >&2
     fi
-  elif [[ -z "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$CLAUDE_PLIST" 2>/dev/null)" ]]; then
-    echo "warning: $CLAUDE_LABEL has no USAGE_MONITOR_INGEST_URL; export it and re-run with --plists"
+  elif [[ -z "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$ENDPOINT_PLIST" 2>/dev/null)" ]]; then
+    echo "warning: $ENDPOINT_LABEL has no USAGE_MONITOR_INGEST_URL; export it and re-run with --plists"
   fi
-fi
+done
 
 # subscription-quota LaunchAgent: run it through the Keychain wrapper.  The
 # installed plist points at $DEST already, so the loop above skips it.
