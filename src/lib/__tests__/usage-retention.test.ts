@@ -401,19 +401,19 @@ describe("usage-retention wrapper", () => {
     expect(prismaMock.externalUsageEventDailyRollup.upsert).toHaveBeenCalledTimes(3);
   });
 
-  it("does not consume the scheduled retention interval when a run throws", async () => {
+  it("does not consume the scheduled retention interval when a run throws a transient write error", async () => {
     vi.resetModules();
     const fresh = await import("../usage-retention");
     prismaMock.provider.findMany.mockResolvedValue([]);
     prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockRejectedValueOnce(
-      new Error("rehash failed")
+      Object.assign(new Error("Operation has timed out"), { code: "P1008" })
     );
 
     await expect(
       fresh.runScheduledDataRetentionMaintenance(new Date("2026-07-04T12:00:00.000Z"))
-    ).rejects.toThrow("rehash failed");
+    ).rejects.toMatchObject({ code: "P1008" });
 
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
     const retried = await fresh.runScheduledDataRetentionMaintenance(
@@ -427,5 +427,28 @@ describe("usage-retention wrapper", () => {
       new Date("2026-07-04T12:30:00.000Z")
     );
     expect(skipped).toEqual({ skipped: true, reason: "interval" });
+  });
+
+  it("keeps the scheduled retention interval when a run throws a non-transient error", async () => {
+    vi.resetModules();
+    const fresh = await import("../usage-retention");
+    prismaMock.provider.findMany.mockResolvedValue([]);
+    prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEventDailyRollup.findMany.mockRejectedValueOnce(
+      new Error("rehash failed")
+    );
+
+    await expect(
+      fresh.runScheduledDataRetentionMaintenance(new Date("2026-07-04T12:00:00.000Z"))
+    ).rejects.toThrow("rehash failed");
+
+    // A persistent breakage stays throttled to the retention interval
+    // instead of re-running -- and aborting the rest of the maintenance
+    // tick -- every 15 minutes.
+    const throttled = await fresh.runScheduledDataRetentionMaintenance(
+      new Date("2026-07-04T12:15:00.000Z")
+    );
+    expect(throttled).toEqual({ skipped: true, reason: "interval" });
   });
 });

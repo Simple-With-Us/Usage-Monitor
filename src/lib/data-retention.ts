@@ -1143,11 +1143,17 @@ export async function runScheduledDataRetentionMaintenance(
   try {
     return await scheduledRetentionInFlight;
   } catch (error) {
-    // A thrown run did no scheduled work: do not let it consume the
-    // interval, or one transient failure also skips retention for hours
-    // and the next attempt faces a larger backlog.  The next scheduler
-    // tick (15 minutes) retries instead.
-    if (lastScheduledRetentionStartedAt === startedAtMs) {
+    // A run that failed on a TRANSIENT writer error likely did no durable
+    // harm: do not let it consume the interval, or one contention blip also
+    // skips retention for hours and the next attempt faces a larger backlog.
+    // The next scheduler tick (15 minutes) retries instead.  A NON-transient
+    // failure keeps its stamp, so a persistent breakage stays throttled to
+    // the retention interval instead of re-running -- and aborting the rest
+    // of the maintenance tick -- every 15 minutes.
+    if (
+      lastScheduledRetentionStartedAt === startedAtMs &&
+      isRetryableRetentionWriteError(error)
+    ) {
       lastScheduledRetentionStartedAt = 0;
     }
     throw error;
