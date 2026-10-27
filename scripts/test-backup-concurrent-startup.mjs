@@ -121,6 +121,11 @@ test("the wrapper startup cleanup is age-guarded the same way", () => {
     /sqlite-pre-migration-backup-timing\.mjs" --guard-minutes/,
     "wrapper must read the same guard minutes as the Node backup script"
   );
+  assert.match(
+    wrapperSource,
+    /stale_guard_min=10/,
+    "wrapper must fall back to a safe default when the timing helper fails"
+  );
 
   const guardMin = stalePartialGuardMinutesForFind();
   const dir = mkdtempSync(join(tmpdir(), "um-wrapper-clean-"));

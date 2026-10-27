@@ -1,5 +1,5 @@
 /**
- * Shared pre-migration backup timing knobs. Used by backup-sqlite-before-migrate.mjs
+ * Shared pre-migration backup timing knobs.  Used by backup-sqlite-before-migrate.mjs
  * and start-with-litestream.sh so stale-partial cleanup uses the same deadline.
  */
 
