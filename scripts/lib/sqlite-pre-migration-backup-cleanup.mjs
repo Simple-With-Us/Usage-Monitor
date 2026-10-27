@@ -2,6 +2,10 @@ import { readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { isStalePartialMtime } from "./sqlite-pre-migration-backup-timing.mjs";
 
+function isENOENT(error) {
+  return error && typeof error === "object" && error.code === "ENOENT";
+}
+
 export function removeStalePartials(backupDirectory, prefix, log = () => {}, env = process.env) {
   const nowMs = Date.now();
   for (const entry of readdirSync(backupDirectory, { withFileTypes: true })) {
@@ -13,11 +17,18 @@ export function removeStalePartials(backupDirectory, prefix, log = () => {}, env
       continue;
     }
     const path = join(backupDirectory, entry.name);
-    const { mtimeMs } = statSync(path);
-    if (!isStalePartialMtime(mtimeMs, nowMs, env)) {
-      continue;
+    try {
+      const { mtimeMs } = statSync(path);
+      if (!isStalePartialMtime(mtimeMs, nowMs, env)) {
+        continue;
+      }
+      unlinkSync(path);
+      log(`removed stale partial ${entry.name}`);
+    } catch (error) {
+      if (isENOENT(error)) {
+        continue;
+      }
+      throw error;
     }
-    unlinkSync(path);
-    log(`removed stale partial ${entry.name}`);
   }
 }

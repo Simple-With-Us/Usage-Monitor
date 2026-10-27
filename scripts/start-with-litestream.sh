@@ -222,16 +222,16 @@ if [[ -d "/data/.pre-migration-backups" ]]; then
   # Only collect partials older than twice the resolved snapshot deadline: a
   # partial being written by a live snapshot child (possibly in another
   # container sharing this volume) is younger and must survive startup cleanup.
-  # Default matches 2× the 5-minute snapshot deadline when the helper cannot run.
-  stale_guard_min=10
-  if stale_guard_out="$(
-    node "${REPO_ROOT}/scripts/lib/sqlite-pre-migration-backup-timing.mjs" --guard-minutes 2>/dev/null
-  )" && [[ "${stale_guard_out}" =~ ^[0-9]+$ ]]; then
-    stale_guard_min="${stale_guard_out}"
+  stale_guard_out=""
+  stale_guard_status=0
+  stale_guard_out="$(
+    node "${REPO_ROOT}/scripts/lib/sqlite-pre-migration-backup-timing.mjs" --guard-minutes
+  )" || stale_guard_status=$?
+  if (( stale_guard_status != 0 )) || [[ ! "${stale_guard_out}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: stale-partial guard could not be computed; stale .partial cleanup is SKIPPED this boot."
   else
-    log "WARNING: could not read stale partial guard minutes; using default ${stale_guard_min}."
+    find /data/.pre-migration-backups -maxdepth 1 -type f -name '*.partial' -mmin +"${stale_guard_out}" -delete 2>/dev/null || true
   fi
-  find /data/.pre-migration-backups -maxdepth 1 -type f -name '*.partial' -mmin +"${stale_guard_min}" -delete 2>/dev/null || true
 fi
 
 log "creating and verifying pre-migration SQLite backup when a database exists."

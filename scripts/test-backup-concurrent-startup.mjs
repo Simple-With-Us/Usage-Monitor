@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -123,8 +124,13 @@ test("the wrapper startup cleanup is age-guarded the same way", () => {
   );
   assert.match(
     wrapperSource,
+    /stale-partial guard could not be computed/,
+    "wrapper must log ERROR and skip cleanup when the timing helper fails"
+  );
+  assert.doesNotMatch(
+    wrapperSource,
     /stale_guard_min=10/,
-    "wrapper must fall back to a safe default when the timing helper fails"
+    "wrapper must not use a hidden default guard when the timing helper fails"
   );
 
   const guardMin = stalePartialGuardMinutesForFind();
@@ -156,4 +162,49 @@ test("the wrapper startup cleanup is age-guarded the same way", () => {
   assert.equal(find.status, 0, "find cleanup should run");
   assert.ok(existsSync(young), "young in-flight partial must survive");
   assert.ok(!existsSync(old), "stale partial must be collected");
+});
+
+function wrapperStalePartialCleanupSnippet(dataRoot) {
+  const wrapperSource = readFileSync(WRAPPER, "utf8");
+  const start = wrapperSource.indexOf('if [[ -d "/data/.pre-migration-backups" ]]; then');
+  const end = wrapperSource.indexOf('log "creating and verifying pre-migration SQLite backup');
+  assert.ok(start >= 0 && end > start, "wrapper stale-partial cleanup block must exist");
+  return wrapperSource
+    .slice(start, end)
+    .replaceAll("/data/.pre-migration-backups", `${dataRoot}/.pre-migration-backups`);
+}
+
+test("wrapper skips stale .partial cleanup when the guard helper fails", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "um-wrapper-skip-"));
+  const backupDir = join(dataRoot, ".pre-migration-backups");
+  mkdirSync(backupDir, { recursive: true });
+  const stalePartial = join(backupDir, "prod.db.pre-migration-old.partial");
+  writeFileSync(stalePartial, "orphan");
+  const old = new Date(Date.now() - 20 * 60_000);
+  utimesSync(stalePartial, old, old);
+
+  const cleanupBlock = wrapperStalePartialCleanupSnippet(dataRoot);
+  const r = spawnSync(
+    "bash",
+    [
+      "-c",
+      `set -euo pipefail
+REPO_ROOT="/nonexistent-repo-um-1633"
+log() { echo "[start-with-litestream] $*"; }
+${cleanupBlock}`,
+    ],
+    { encoding: "utf8" }
+  );
+
+  assert.equal(r.status, 0, `wrapper cleanup block must not abort startup: ${r.stderr}`);
+  const combined = `${r.stdout}\n${r.stderr}`;
+  assert.match(
+    combined,
+    /ERROR: stale-partial guard could not be computed/,
+    "must log ERROR when guard helper fails"
+  );
+  assert.ok(
+    existsSync(stalePartial),
+    "no partials may be deleted when the guard cannot be computed"
+  );
 });

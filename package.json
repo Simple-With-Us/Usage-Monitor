@@ -51,7 +51,7 @@
     "test:receipt-inbox-worker": "vitest run --config workers/receipt-inbox/vitest.config.mjs",
     "test:migrate-safe": "node scripts/test-migrate-safe-repro.mjs",
     "test:sqlite-backup": "node scripts/test-sqlite-pre-migration-backup.mjs",
-    "test:backup-concurrent-startup": "node --test scripts/test-backup-concurrent-startup.mjs",
+    "test:backup-concurrent-startup": "node --test scripts/test-backup-concurrent-startup.mjs scripts/__tests__/sqlite-pre-migration-backup-cleanup.test.mjs",
     "test:backup-staged-errors": "node scripts/test-backup-staged-errors.mjs",
     "test:r2-archive": "node scripts/test-r2-weekly-archive.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
