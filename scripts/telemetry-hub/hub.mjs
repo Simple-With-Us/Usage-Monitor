@@ -24,9 +24,10 @@
 // telemetry and journals it, it never advances a delivery offset, and it
 // prints counts and key names only.  It never prints a producer value.
 
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createLogger } from "./internal-event.mjs";
 import { Journal } from "./journal.mjs";
@@ -195,9 +196,38 @@ export async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-const invokedDirectly = process.argv[1]
-  ? import.meta.url === pathToFileURL(process.argv[1]).href
-  : false;
+/**
+ * Is this module the program that node was started with?
+ *
+ * Node resolves the URL of the entry module to its REAL path, so
+ * `import.meta.url` points at the file on disk, while `process.argv[1]`
+ * keeps the path as it was typed.  When the two paths differ by a symlink
+ * — a lane under /Users/jay/apps/lanes, a checkout under /tmp, any
+ * symlinked install — a plain comparison says "not the entry module", the
+ * hub then starts, does nothing, and exits 0 in silence.  A LaunchAgent
+ * pointed at such a path looks healthy and collects nothing.
+ *
+ * Both sides are therefore resolved to their real paths before they are
+ * compared.
+ *
+ * @param {string|undefined} argv1  `process.argv[1]`
+ * @param {string|undefined} metaUrl  `import.meta.url`
+ * @returns {boolean}
+ */
+export function isInvokedDirectly(argv1, metaUrl) {
+  if (!argv1 || !metaUrl) return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    try {
+      return metaUrl === pathToFileURL(argv1).href;
+    } catch {
+      return false;
+    }
+  }
+}
+
+const invokedDirectly = isInvokedDirectly(process.argv[1], import.meta.url);
 if (invokedDirectly) {
   main().then(
     (code) => {

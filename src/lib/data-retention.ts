@@ -19,6 +19,47 @@ const DEFAULT_SNAPSHOT_RAW_DATA_RETENTION_DAYS = 14;
 const DEFAULT_BATCH_SIZE = 250;
 const DEFAULT_RETENTION_INTERVAL_HOURS = 6;
 
+// A retention batch runs as ONE transaction, so a transient SQLite
+// busy/timeout (Prisma P1008 under ingest writer contention, e.g. a WAL
+// checkpoint landing mid-batch) rolls the whole batch back and is safe to
+// re-run verbatim.  This mirrors the busy classification in
+// fleet-budget/ledger.ts; anything else stays fatal to the tick, per the
+// runUsageMaintenance contract.
+const RETENTION_WRITE_RETRY_DELAYS_MS = [200, 600];
+
+function isRetryableRetentionWriteError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  if (
+    candidate.code === "P1008" ||
+    candidate.code === "P2034" ||
+    candidate.code === "P2024"
+  ) {
+    return true;
+  }
+  return (
+    (candidate.code === "P2010" || candidate.code === "P2028") &&
+    typeof candidate.message === "string" &&
+    /database is locked|database is busy|SQLITE_BUSY|timed out|timeout/i.test(
+      candidate.message
+    )
+  );
+}
+
+async function withRetentionWriteRetry<T>(work: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      const delayMs = RETENTION_WRITE_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined || !isRetryableRetentionWriteError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 interface UsageSnapshotRow {
   id: string;
   providerId: string;
@@ -573,7 +614,8 @@ async function pruneUsageSnapshots(
     const groups = groupSnapshotRows(rows);
     const ids = rows.map((row) => row.id);
     await withInternalUsageWriteAdmission(() =>
-      prisma.$transaction(async (tx) => {
+      withRetentionWriteRetry(() =>
+        prisma.$transaction(async (tx) => {
         for (const group of groups) {
           const existing = await tx.usageSnapshotDailyRollup.findUnique({
             where: { providerId_day: { providerId: group.providerId, day: group.day } },
@@ -613,7 +655,8 @@ async function pruneUsageSnapshots(
           });
         }
         await tx.usageSnapshot.deleteMany({ where: { id: { in: ids } } });
-      })
+        })
+      )
     );
 
     result.scanned += rows.length;
@@ -637,7 +680,7 @@ async function pruneExternalUsageEvents(
     // selection happened before this transaction, retention could aggregate
     // the old attribution and then delete the newly-attributed raw row.
     const batch = await withInternalUsageWriteAdmission(() =>
-      prisma.$transaction(async (tx) => {
+      withRetentionWriteRetry(() => prisma.$transaction(async (tx) => {
       const rows = await tx.externalUsageEvent.findMany({
         where: { occurredAt: { lt: cutoff } },
         orderBy: { occurredAt: "asc" },
@@ -737,7 +780,7 @@ async function pruneExternalUsageEvents(
           rollupsTouched: groups.length,
           tombstonesWritten: rows.length,
         };
-      }, { timeout: 30_000 })
+      }, { timeout: 30_000 }))
     );
 
     if (batch.scanned === 0) break;
@@ -1094,10 +1137,26 @@ export async function runScheduledDataRetentionMaintenance(
     return { skipped: true, reason: "interval" };
   }
 
-  lastScheduledRetentionStartedAt = now.getTime();
+  const startedAtMs = now.getTime();
+  lastScheduledRetentionStartedAt = startedAtMs;
   scheduledRetentionInFlight = runDataRetentionMaintenance(now);
   try {
     return await scheduledRetentionInFlight;
+  } catch (error) {
+    // A run that failed on a TRANSIENT writer error likely did no durable
+    // harm: do not let it consume the interval, or one contention blip also
+    // skips retention for hours and the next attempt faces a larger backlog.
+    // The next scheduler tick (15 minutes) retries instead.  A NON-transient
+    // failure keeps its stamp, so a persistent breakage stays throttled to
+    // the retention interval instead of re-running -- and aborting the rest
+    // of the maintenance tick -- every 15 minutes.
+    if (
+      lastScheduledRetentionStartedAt === startedAtMs &&
+      isRetryableRetentionWriteError(error)
+    ) {
+      lastScheduledRetentionStartedAt = 0;
+    }
+    throw error;
   } finally {
     scheduledRetentionInFlight = null;
   }
