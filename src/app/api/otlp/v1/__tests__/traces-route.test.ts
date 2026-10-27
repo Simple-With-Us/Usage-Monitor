@@ -8,6 +8,8 @@ import { getNamedRateLimiter } from "@/lib/rate-limit";
 
 let dbPath: string;
 let POST: typeof import("../traces/route").POST;
+let USAGE_POST: typeof import("../../../ingest/usage/route").POST;
+let METRICS_POST: typeof import("../metrics/route").POST;
 let prisma: typeof import("@/lib/prisma").prisma;
 
 beforeAll(async () => {
@@ -17,6 +19,8 @@ beforeAll(async () => {
   process.env.USAGE_INGEST_TOKEN = "test-token-123";
   setupPrismaSqliteTestDb(dbPath);
   ({ POST } = await import("../traces/route"));
+  ({ POST: USAGE_POST } = await import("../../../ingest/usage/route"));
+  ({ POST: METRICS_POST } = await import("../metrics/route"));
   ({ prisma } = await import("@/lib/prisma"));
 }, 60_000);
 
@@ -150,6 +154,83 @@ describe("POST /api/otlp/v1/traces", () => {
       expect(turns[0].seat).toBe("CLAUDE");
     } finally {
       delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
+
+  it("lets an openrouter scoped credential write OpenRouter Broadcast traces", async () => {
+    process.env.OTLP_TRACES_PRODUCER_TOKENS = "openrouter:openrouter-trace-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "chat openai/gpt-5",
+                        attributes: [
+                          { key: "openrouter.trace.id", value: { stringValue: "or-trace-1" } },
+                          { key: "gen_ai.system", value: { stringValue: "openai" } },
+                          { key: "gen_ai.request.model", value: { stringValue: "openai/gpt-5" } },
+                          { key: "gen_ai.usage.input_tokens", value: { intValue: "10" } },
+                          { key: "gen_ai.usage.output_tokens", value: { intValue: "4" } },
+                        ],
+                      },
+                      {
+                        name: "chat anthropic/claude-sonnet",
+                        attributes: [
+                          { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                          {
+                            key: "gen_ai.request.model",
+                            value: { stringValue: "anthropic/claude-sonnet" },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer openrouter-trace-token" }
+        )
+      );
+
+      expect(res.status).toBe(202);
+      const turns = await prisma.agentTurn.findMany();
+      expect(turns).toHaveLength(2);
+      expect(turns[0]).toMatchObject({
+        platform: "openrouter",
+        model: "openai/gpt-5",
+        inputTokens: 10,
+        outputTokens: 4,
+      });
+      expect(await prisma.externalUsageEvent.count()).toBe(0);
+
+      const authHeaders = {
+        "content-type": "application/json",
+        authorization: "Bearer openrouter-trace-token",
+      };
+      const usageResponse = await USAGE_POST(
+        new NextRequest("https://usage.jays.services/api/ingest/usage", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ events: [] }),
+        })
+      );
+      const metricsResponse = await METRICS_POST(
+        new NextRequest("https://usage.jays.services/api/otlp/v1/metrics", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ resourceMetrics: [] }),
+        })
+      );
+      expect(usageResponse.status).toBe(401);
+      expect(metricsResponse.status).toBe(401);
+    } finally {
+      delete process.env.OTLP_TRACES_PRODUCER_TOKENS;
     }
   });
 
