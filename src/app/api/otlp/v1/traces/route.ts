@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import {
-  resolveUsageIngestCredential,
+  resolveOtlpTracesCredential,
   tokenFromRequest,
 } from "@/lib/ingest-auth";
 import {
@@ -31,10 +31,11 @@ import { fanoutAgentTurns } from "@/lib/usage-fanout";
 // llm-burn) cannot double count against /api/otlp/v1/metrics or the local
 // JSONL collectors that already feed the ledger.
 //
-// Auth/rate-limit/admission mirror the sibling metrics route: same bearer
-// scheme (USAGE_INGEST_TOKEN / per-producer scoped tokens), identity-keyed
-// rate limiting, and the shared process-global SQLite admission token
-// (503 + Retry-After instead of queueing). Only application/json is
+// Auth accepts ordinary usage-ingest credentials plus trace-only producer
+// credentials from OTLP_TRACES_PRODUCER_TOKENS.  Trace-only credentials are
+// never accepted by cash-ledger or metrics routes.  Rate limiting remains
+// identity-keyed, and this route shares the process-global SQLite admission token
+// (503 + Retry-After instead of queueing).  Only application/json is
 // accepted; protobuf/gRPC get a 415 pointing at json.
 
 export const runtime = "nodejs";
@@ -48,11 +49,14 @@ const otlpTracesUnauthenticatedRateLimiter = getNamedRateLimiter(
 );
 
 export async function POST(request: NextRequest) {
-  if (!process.env.USAGE_INGEST_TOKEN?.trim()) {
+  if (
+    !process.env.USAGE_INGEST_TOKEN?.trim() &&
+    !process.env.OTLP_TRACES_PRODUCER_TOKENS?.trim()
+  ) {
     return NextResponse.json({ error: "Usage ingest is not configured" }, { status: 503 });
   }
 
-  const credential = resolveUsageIngestCredential(request);
+  const credential = resolveOtlpTracesCredential(request);
   if (!credential) {
     if (!otlpTracesUnauthenticatedRateLimiter.check(getLoginBackstopKey(request))) {
       return NextResponse.json(
