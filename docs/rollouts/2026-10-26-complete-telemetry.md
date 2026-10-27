@@ -37,6 +37,14 @@ This follows the existing fanout contract (Usage Monitor stays the ledger; Sentr
 
 `ingest.scope_rejected` and `ingest.events_rejected` are now mirrored to fleet-infra as well, like `ingest.failed` already was, and a `ttft_ms` metric name is now classified as a gauge in the mirror.
 
+## Sentry receipt, verified
+
+With the `SENTRY_ADMIN` credential from the Mac's global API keys file (org read on `simple-with-us`), the fleet-infra project was queried directly after the deploy.
+
+In the first day it held 160 `ai.request` events, 148 `ai.request_total`, 101 `ai.request.duration_ms`, and 95 `ai.request.ttft_ms`, alongside the existing `usage.persisted` stream, all timestamped after the deploy.
+
+That closes the verification gap earlier audits hit: the app-side Sentry credentials available to a container subprocess returned 403 and 404 for project reads, so receipt could not be confirmed from there.  The admin credential is the read path for future telemetry audits; it stays where it is and is never moved into this repository or the app's environment.
+
 ## What is still missing, honestly
 
 - The MiniMax model gap (UM-1615) is a producer-side bug in the desktop runtime: the column exists and is never written on the Mac build.  Until the runtime writes it, Mac MiniMax rows have tokens and agent names but no model.
