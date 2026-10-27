@@ -219,7 +219,13 @@ du -sh /data/* 2>/dev/null || true
 
 if [[ -d "/data/.pre-migration-backups" ]]; then
   log "cleaning up old partial pre-migration backups to prevent disk full errors."
-  rm -f /data/.pre-migration-backups/*.partial 2>/dev/null || true
+  # Only collect partials older than twice the resolved snapshot deadline: a
+  # partial being written by a live snapshot child (possibly in another
+  # container sharing this volume) is younger and must survive startup cleanup.
+  stale_guard_min="$(
+    node "${REPO_ROOT}/scripts/lib/sqlite-pre-migration-backup-timing.mjs" --guard-minutes
+  )"
+  find /data/.pre-migration-backups -maxdepth 1 -type f -name '*.partial' -mmin +"${stale_guard_min}" -delete 2>/dev/null || true
 fi
 
 log "creating and verifying pre-migration SQLite backup when a database exists."
