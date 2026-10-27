@@ -24,6 +24,7 @@
       "projectRelAlt": "clients/ios/Congress.Trade.xcodeproj"
     },
     "usage": {
+      "fixedMarketingVersion": "0.1.0",
       "displayName": "Usage Monitor",
       "bundleId": "com.simplewithus.usage.client.ios",
       "appleId": 6820881005,
@@ -38,6 +39,7 @@
       "notes": "Server-backed client. ASC SKU usage-client-monitor. Self-host free server code. Bundle ID is com.simplewithus.usage.client.ios (owner ruling 2026-10-11: the live ASC record's bundle ID carries a trailing .ios and an ASC bundle ID is immutable, so the app aligns to the record rather than the record to the app). Earlier IDs were services.jays.usage.client.monitor, com.simplewithus.usagemonitor.ios, then com.simplewithus.usage.client. appleId 6820881005 is the new record created for it."
     },
     "usage-local": {
+      "fixedMarketingVersion": "0.1.0",
       "displayName": "Local Monitor",
       "bundleId": "com.simplewithus.usage.local.ios",
       "appleId": 6820885210,
