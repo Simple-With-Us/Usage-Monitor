@@ -180,10 +180,12 @@ const OPENROUTER_TRACE_MARKER = "openrouter.trace.id";
 
 function resolveTurnPlatform(
   attrs: Record<string, string | number | boolean | undefined>,
-  spanName: string | undefined
+  spanName: string | undefined,
+  gatewayPlatform?: string
 ): string {
   const explicit = asNonEmptyString(attrs["agent.platform"]);
   if (explicit) return normalizePlatform(explicit);
+  if (gatewayPlatform) return gatewayPlatform;
   if (asNonEmptyString(attrs[OPENROUTER_TRACE_MARKER])) return "openrouter";
   if (spanName) {
     for (const [prefix, harness] of HARNESS_BY_SPAN_PREFIX) {
@@ -199,9 +201,10 @@ function resolveTurnPlatform(
 function turnFromSpanAttrs(
   attrs: Record<string, string | number | boolean | undefined>,
   span: OtlpSpan,
-  spanName?: string
+  spanName?: string,
+  gatewayPlatform?: string
 ): AgentTurnInput | null {
-  const platform = resolveTurnPlatform(attrs, spanName);
+  const platform = resolveTurnPlatform(attrs, spanName, gatewayPlatform);
   // Skip spans that carry none of the agent/gen_ai dimensions — they are not
   // agent turns (e.g. a stray http span forwarded by a broad exporter).
   const looksLikeTurn =
@@ -298,6 +301,15 @@ export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
       scopeSpans?: Array<{ spans?: OtlpSpan[] }>;
     };
     const resourceAttrs = flattenSpanAttributes(r?.resource?.attributes);
+    const gatewayPlatform =
+      asNonEmptyString(resourceAttrs[OPENROUTER_TRACE_MARKER]) ||
+      (r?.scopeSpans ?? []).some((scope) =>
+        ((scope as { spans?: OtlpSpan[] })?.spans ?? []).some((span) =>
+          Boolean(asNonEmptyString(flattenSpanAttributes(span?.attributes)[OPENROUTER_TRACE_MARKER]))
+        )
+      )
+        ? "openrouter"
+        : undefined;
     for (const scope of r?.scopeSpans ?? []) {
       for (const span of (scope as { spans?: OtlpSpan[] })?.spans ?? []) {
         if (!span || typeof span !== "object") {
@@ -316,7 +328,7 @@ export function mapOtlpTracesRequest(body: unknown): MapTracesResult {
           if (!aiRequest) ignored += 1;
           continue;
         }
-        const turn = turnFromSpanAttrs(merged, span, spanName);
+        const turn = turnFromSpanAttrs(merged, span, spanName, gatewayPlatform);
         if (!turn) {
           ignored += 1;
           continue;
