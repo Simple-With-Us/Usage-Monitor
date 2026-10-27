@@ -30,7 +30,8 @@ test("removeStalePartials removes only stale partials", () => {
   utimesSync(stale, oldDate, oldDate);
 
   const removed = [];
-  removeStalePartials(dir, "prod.db.pre-migration-", (msg) => removed.push(msg));
+  const env = { ...process.env, SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS: "300000" };
+  removeStalePartials(dir, "prod.db.pre-migration-", (msg) => removed.push(msg), env);
 
   assert.equal(removed.length, 1);
   assert.match(removed[0], /removed stale partial/);
