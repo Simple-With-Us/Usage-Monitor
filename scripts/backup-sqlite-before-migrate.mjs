@@ -50,6 +50,10 @@ function log(message) {
   console.log(`[sqlite-pre-migration-backup] ${message}`);
 }
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function clampedIntEnv(name, fallback, min, max) {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
@@ -132,13 +136,33 @@ function pruneToRetention(backupDirectory, prefix, retention) {
 }
 
 function assertIntegrity(path) {
-  const database = new DatabaseSync(path, {
-    readOnly: true,
-    timeout: 30_000,
-  });
+  let database;
   try {
-    applySqliteMemoryPragmas(database);
-    const rows = database.prepare("PRAGMA integrity_check").all();
+    database = new DatabaseSync(path, {
+      readOnly: true,
+      timeout: 30_000,
+    });
+  } catch (error) {
+    throw new Error(
+      `backup integrity check could not open ${path}: ${errorMessage(error)}`
+    );
+  }
+  try {
+    try {
+      applySqliteMemoryPragmas(database);
+    } catch (error) {
+      throw new Error(
+        `backup could not apply memory pragmas for ${path}: ${errorMessage(error)}`
+      );
+    }
+    let rows;
+    try {
+      rows = database.prepare("PRAGMA integrity_check").all();
+    } catch (error) {
+      throw new Error(
+        `backup integrity_check failed for ${path}: ${errorMessage(error)}`
+      );
+    }
     if (
       rows.length !== 1 ||
       Object.values(rows[0] ?? {}).length !== 1 ||
@@ -190,15 +214,34 @@ function ensurePrivateBackupDirectory(path) {
 
 function snapshotChild(databasePath, snapshotPath) {
   process.umask(0o077);
-  const source = new DatabaseSync(databasePath, {
-    readOnly: true,
-    timeout: 30_000,
-  });
+  let source;
   try {
-    applySqliteMemoryPragmas(source);
+    source = new DatabaseSync(databasePath, {
+      readOnly: true,
+      timeout: 30_000,
+    });
+  } catch (error) {
+    throw new Error(
+      `snapshot could not open source ${databasePath}: ${errorMessage(error)}`
+    );
+  }
+  try {
+    try {
+      applySqliteMemoryPragmas(source);
+    } catch (error) {
+      throw new Error(
+        `snapshot could not apply memory pragmas for ${databasePath}: ${errorMessage(error)}`
+      );
+    }
     // VACUUM INTO holds one consistent read transaction.  Unlike sqlite3_backup_step,
     // concurrent commits from the old app cannot restart the copy from page one.
-    source.prepare("VACUUM INTO ?").run(snapshotPath);
+    try {
+      source.prepare("VACUUM INTO ?").run(snapshotPath);
+    } catch (error) {
+      throw new Error(
+        `snapshot VACUUM INTO ${snapshotPath} failed: ${errorMessage(error)}`
+      );
+    }
   } finally {
     source.close();
   }
@@ -294,14 +337,27 @@ async function main() {
 }
 
 const args = process.argv.slice(2);
-const execution = args[0] === "--snapshot-child"
-  ? Promise.resolve().then(() => {
-      if (args.length !== 3 || !isAbsolute(args[1]) || !isAbsolute(args[2])) {
-        throw new Error("internal snapshot child requires absolute source and destination paths");
-      }
-      snapshotChild(args[1], args[2]);
-    })
-  : main();
+const execution =
+  args[0] === "--snapshot-child"
+    ? Promise.resolve().then(() => {
+        if (args.length !== 3 || !isAbsolute(args[1]) || !isAbsolute(args[2])) {
+          throw new Error(
+            "internal snapshot child requires absolute source and destination paths"
+          );
+        }
+        snapshotChild(args[1], args[2]);
+      })
+    : args[0] === "--assert-integrity-only"
+      ? Promise.resolve().then(() => {
+          // Used only by scripts/test-backup-staged-errors.mjs (not deploy).
+          if (args.length !== 2 || !isAbsolute(args[1])) {
+            throw new Error(
+              "internal integrity-only child requires one absolute backup path"
+            );
+          }
+          assertIntegrity(args[1]);
+        })
+      : main();
 
 execution.catch((error) => {
   console.error(

@@ -32,6 +32,9 @@ name: Auto-merge PRs
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
+  # Re-evaluate the approval gate when the reviewer submits or a review is dismissed.
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: write
@@ -77,8 +80,46 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enable auto-merge (squash + delete branch)
+      # Arm only while the fleet reviewer's latest review on the PR's CURRENT head
+      # commit is APPROVED (a skipped check, a COMMENTED review, a stale approval or a
+      # lookup failure all leave auto-merge unarmed).  Same rule as the fleet's reusable
+      # armer in AI-Fleet-Coordinator.
+      - name: Require a current-head approval from the fleet reviewer
+        id: approval
         if: steps.identity.outputs.arm == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          echo "ok=0" >> "$GITHUB_OUTPUT"
+          if ! reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" --jq '.[] | [.user.login, .commit_id, .state] | @tsv'); then
+            echo "::notice::Review lookup failed; not arming auto-merge."
+            exit 0
+          fi
+          latest=$(printf '%s\n' "$reviews" | awk -F'\t' -v sha="$HEAD_SHA" '$1=="kody-ai[bot]" && $2==sha && ($3=="APPROVED"||$3=="CHANGES_REQUESTED"||$3=="DISMISSED") {s=$3} END{print s}')
+          if [ "$latest" = "APPROVED" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No current-head Kody approval (latest: ${latest:-none}); not arming auto-merge."
+          fi
+
+      # A push after an approval leaves a previously armed merge in place, so when
+      # this workflow is the armer (a merge identity exists) and the current head has
+      # no approval, cancel any armed merge.  Cancelling uses only the repository
+      # token; it never arms.
+      - name: Disarm when the current head is not approved
+        if: steps.identity.outputs.arm == '1' && steps.approval.outputs.ok != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || echo "::notice::No armed merge to cancel, or cancel not allowed."
+
+      - name: Enable auto-merge (squash + delete branch)
+        if: steps.identity.outputs.arm == '1' && steps.approval.outputs.ok == '1'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -93,3 +134,20 @@ jobs:
               exit 0
             }
           fi
+
+  # A PR that is a draft or carries the opt-out label is skipped by the job above, so a
+  # merge armed earlier would stay armed.  This job only cancels (repository token, never
+  # arms) and runs for exactly those PRs.
+  disarm-opted-out:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.draft == true ||
+      contains(github.event.pull_request.labels.*.name, 'do-not-automerge'))
+    steps:
+      - name: Cancel any armed auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || echo "::notice::No armed merge to cancel, or cancel not allowed."
