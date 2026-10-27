@@ -44,7 +44,7 @@ class ActorGuard(unittest.TestCase):
         self.assertEqual(self.gate("jaywedgeworth22"), 0)
 
     def test_actor_with_shell_metachar_does_not_break_gate(self):
-        self.assertNotEqual(self.gate("evil$(true)[bot]"), 0)
+        self.assertNotEqual(self.gate('evil"[bot]'), 0)
 
     def test_read_only_runner_and_scanner_unchanged(self):
         source = SOURCE.read_text()
