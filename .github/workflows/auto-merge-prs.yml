@@ -77,8 +77,34 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enable auto-merge (squash + delete branch)
+      # Arm only while the fleet reviewer's latest review on the PR's CURRENT head
+      # commit is APPROVED (a skipped check, a COMMENTED review, a stale approval or a
+      # lookup failure all leave auto-merge unarmed).  Same rule as the fleet's reusable
+      # armer in AI-Fleet-Coordinator.
+      - name: Require a current-head approval from the fleet reviewer
+        id: approval
         if: steps.identity.outputs.arm == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          echo "ok=0" >> "$GITHUB_OUTPUT"
+          if ! reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" --jq '.[] | [.user.login, .commit_id, .state] | @tsv'); then
+            echo "::notice::Review lookup failed; not arming auto-merge."
+            exit 0
+          fi
+          latest=$(printf '%s\n' "$reviews" | awk -F'\t' -v sha="$HEAD_SHA" '$1=="kody-ai[bot]" && $2==sha && ($3=="APPROVED"||$3=="CHANGES_REQUESTED"||$3=="DISMISSED") {s=$3} END{print s}')
+          if [ "$latest" = "APPROVED" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No current-head Kody approval (latest: ${latest:-none}); not arming auto-merge."
+          fi
+
+      - name: Enable auto-merge (squash + delete branch)
+        if: steps.identity.outputs.arm == '1' && steps.approval.outputs.ok == '1'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
