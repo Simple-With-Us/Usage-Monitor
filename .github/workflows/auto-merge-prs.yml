@@ -134,3 +134,20 @@ jobs:
               exit 0
             }
           fi
+
+  # A PR that is a draft or carries the opt-out label is skipped by the job above, so a
+  # merge armed earlier would stay armed.  This job only cancels (repository token, never
+  # arms) and runs for exactly those PRs.
+  disarm-opted-out:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.draft == true ||
+      contains(github.event.pull_request.labels.*.name, 'do-not-automerge'))
+    steps:
+      - name: Cancel any armed auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || echo "::notice::No armed merge to cancel, or cancel not allowed."
