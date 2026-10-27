@@ -12,7 +12,7 @@ export function logSlowScanTimingIfNeeded(
   if (durationMs < SLOW_SCAN_TIMING_LOG_THRESHOLD_MS) {
     return;
   }
-  const payload: SlowScanTimingPayload = { durationMs, ...extra };
+  const payload: SlowScanTimingPayload = { ...extra, durationMs };
   console.info(label, JSON.stringify(payload));
 }
 

@@ -23,6 +23,23 @@ describe("slow-scan timing diagnostic", () => {
     clock.mockRestore();
   });
 
+  it("keeps measured durationMs when extra supplies a colliding durationMs", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const measuredMs = SLOW_SCAN_TIMING_LOG_THRESHOLD_MS + 500;
+    const clock = vi.spyOn(performance, "now").mockReturnValue(measuredMs);
+
+    logSlowScanTimingIfNeeded("[external-events-mtd-scan]", 0, {
+      durationMs: 42,
+      rawGroups: 1,
+    });
+
+    expect(info).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(String(info.mock.calls[0][1]));
+    expect(payload.durationMs).toBe(measuredMs);
+    expect(payload.rawGroups).toBe(1);
+    clock.mockRestore();
+  });
+
   it("emits one bounded log at or above the threshold with allowed numeric fields only", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const clock = vi.spyOn(performance, "now").mockReturnValue(
