@@ -105,13 +105,18 @@ resolve_codesign_identity() {
 bundle_version() {
   local count
   count="$(/usr/bin/git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || true)"
-  printf '%s\n' "${count:-1}"
+  [[ "$count" =~ ^[0-9]+$ ]] || { echo "error: could not read commit count from $ROOT_DIR" >&2; exit 1; }
+  # Fail closed: a shallow or gitless checkout must not stamp build 1 below the floor.
+  printf '%s\n' "$count"
 }
 
 short_version() {
-  local count
-  count="$(bundle_version)"
-  printf '1.0.%s\n' "$count"
+  # Mac Sparkle path (UM-1639): marketing 1.0.<commit_count> shares the
+  # CFBundleVersion integer so a release is traceable to one git count.
+  # iOS TestFlight ships still go through scripts/ios-fleet/version-plan.mjs,
+  # which refuses the retired 1.0.N (N) form (AFC-517) and overwrites the
+  # xcodeproj at ship time.
+  printf '1.0.%s\n' "$(bundle_version)"
 }
 
 # Info.plist entries for Sparkle.  Updates are checked hourly, then downloaded
@@ -140,8 +145,9 @@ write_sparkle_plist_entries() {
 }
 
 write_info_plist() {
-  local build icon_file="AppIcon.png"
+  local build short icon_file="AppIcon.png"
   build="$(bundle_version)"
+  short="1.0.${build}"
   [[ -f "$ICON_SOURCE" ]] && icon_file="AppIcon.icns"
   /usr/bin/tee "$INFO_PLIST" >/dev/null <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -155,7 +161,7 @@ write_info_plist() {
   <key>CFBundleIconFile</key>
   <string>$icon_file</string>
   <key>CFBundleShortVersionString</key>
-  <string>$(short_version)</string>
+  <string>$short</string>
   <key>CFBundleVersion</key>
   <string>$build</string>
   <key>CFBundleIdentifier</key>

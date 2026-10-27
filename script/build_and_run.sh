@@ -43,13 +43,14 @@ kill_owned_app() {
 bundle_version() {
   local count=""
   count="$(/usr/bin/git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || true)"
-  printf '%s\n' "${count:-1}"
+  [[ "$count" =~ ^[0-9]+$ ]] || { echo "error: could not read commit count from $ROOT_DIR" >&2; exit 1; }
+  # Fail closed: a shallow or gitless checkout must not stamp build 1 below the floor.
+  printf '%s\n' "$count"
 }
 
 short_version() {
-  local count=""
-  count="$(bundle_version)"
-  printf '1.0.%s\n' "$count"
+  # Derive marketing from the same count as CFBundleVersion (UM-1639).
+  printf '1.0.%s\n' "$(bundle_version)"
 }
 
 build_and_stage() {
