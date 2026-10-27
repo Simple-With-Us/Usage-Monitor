@@ -66,11 +66,44 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
 ]);
 
 const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
-const SENTRY_STRING_NUMERIC_ATTRIBUTES = new Set([
-  "ttft_ms",
-  "context.tokens",
-  "context.limit",
-  "context.utilization_pct",
+
+/**
+ * Sentry's own typed span columns.
+ *
+ * Measured Oct-21-2026 against the throwaway Sentry project with one probe
+ * span per shape: a numeric value is stored ONLY on these keys, and a
+ * string on one of them is dropped whole.  Every other key is a string
+ * column for Sentry, and a number on such a key is dropped whole too.  So
+ * the hub keeps a number a number on these keys and sends every other
+ * allowlisted value as a string.  Sending it the other way round loses the
+ * value, which is how `duration_ms`, `ttft_ms`, `context.limit` and
+ * `context.utilization_pct` never reached the stored span.
+ */
+const SENTRY_NUMERIC_ATTRIBUTES = new Set([
+  "gen_ai.usage.input_tokens",
+  "gen_ai.usage.output_tokens",
+  "gen_ai.usage.cache_read_input_tokens",
+  "gen_ai.usage.cache_creation_input_tokens",
+  "gen_ai.usage.total_tokens",
+  "http.response.status_code",
+]);
+
+/**
+ * Sentry filters any attribute whose key carries the word "token" when the
+ * value is a string: the stored value becomes the literal marker
+ * `[Filtered]`.  A number on such a key is dropped instead, so a key with
+ * "token" in its name can only reach Sentry on one of the typed columns
+ * above.  `gen_ai.usage.reasoning_tokens` is not one of them, so it can
+ * never arrive under that name, and neither can `context.tokens`.
+ *
+ * These two attributes therefore travel under a different name on the
+ * Sentry wire.  The producer contract does not move: the internal event
+ * keeps the original keys and the Usage Monitor path reads them unchanged,
+ * so only the Sentry payload is affected.
+ */
+const SENTRY_ATTRIBUTE_RENAMES = new Map([
+  ["context.tokens", "context.used"],
+  ["gen_ai.usage.reasoning_tokens", "gen_ai.usage.reasoning_count"],
 ]);
 
 /**
@@ -148,14 +181,35 @@ export function otlpAttribute(key, value) {
 }
 
 /**
- * Sentry drops these custom attributes when OTLP sends numeric AnyValues (UM-1614, observed 2026-10-21).  Keep
- * their values queryable as strings on the Sentry path while leaving the journal and UM's typed event numeric.
+ * Build one attribute for the Sentry path.
+ *
+ * The type follows Sentry's own columns, not the type of the value: the
+ * typed numeric columns keep their numbers, and every other allowlisted
+ * attribute is sent as a string, because a number or a boolean on a string
+ * column is dropped by Sentry.  A key that Sentry filters by name is
+ * renamed first, so the value survives under the new name.
  */
 function sentryAttribute(key, value) {
-  if (SENTRY_STRING_NUMERIC_ATTRIBUTES.has(key) && typeof value === "number" && Number.isFinite(value)) {
-    return { key, value: { stringValue: String(value) } };
+  const outKey = SENTRY_ATTRIBUTE_RENAMES.get(key) ?? key;
+  if (SENTRY_NUMERIC_ATTRIBUTES.has(outKey)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return otlpAttribute(outKey, value);
+    }
+    //  A numeric string still belongs on a numeric column, so it is
+    //  parsed rather than sent as text and dropped by Sentry.
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed !== "") {
+        const parsed = Number(trimmed);
+        if (Number.isFinite(parsed)) return otlpAttribute(outKey, parsed);
+      }
+    }
+    return undefined;
   }
-  return otlpAttribute(key, value);
+  if (typeof value === "string") return otlpAttribute(outKey, value);
+  if (typeof value === "boolean") return otlpAttribute(outKey, value ? "true" : "false");
+  if (typeof value === "number" && Number.isFinite(value)) return otlpAttribute(outKey, String(value));
+  return undefined;
 }
 
 /**
@@ -446,7 +500,10 @@ export function internalEventAttributes(event, options) {
   for (const [key, value] of typed) {
     if (value === undefined || value === null) continue;
     const attribute = sentryAttribute(key, value);
-    if (attribute) merged.set(key, attribute);
+    //  The map is keyed by the attribute's OWN key, so a renamed attribute
+    //  and the producer attribute it renames collapse into one entry
+    //  instead of shipping the same wire key twice.
+    if (attribute) merged.set(attribute.key, attribute);
   }
   if (Array.isArray(event.toolNames) && event.toolNames.length > 0) {
     const names = event.toolNames
@@ -454,13 +511,13 @@ export function internalEventAttributes(event, options) {
       .map((name) => name.trim())
       .join(",");
     if (names) {
-      const attribute = otlpAttribute("gen_ai.tool.name", names.slice(0, MAX_TOOL_NAME_CHARS));
-      if (attribute) merged.set("gen_ai.tool.name", attribute);
+      const attribute = sentryAttribute("gen_ai.tool.name", names.slice(0, MAX_TOOL_NAME_CHARS));
+      if (attribute) merged.set(attribute.key, attribute);
     }
   }
   if (typeof event.toolStatus === "string" && event.toolStatus.trim()) {
-    const attribute = otlpAttribute("gen_ai.tool.status", event.toolStatus);
-    if (attribute) merged.set("gen_ai.tool.status", attribute);
+    const attribute = sentryAttribute("gen_ai.tool.status", event.toolStatus);
+    if (attribute) merged.set(attribute.key, attribute);
   }
   return [...merged.values()];
 }
