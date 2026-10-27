@@ -75,6 +75,73 @@ describe("mapOtlpTracesRequest", () => {
     expect(result.turns).toHaveLength(0);
     expect(result.ignored).toBe(1);
   });
+
+  it("labels OpenRouter Broadcast spans with the gateway and accepts legacy token aliases", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat openai/gpt-5",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500001250000000",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-1" } },
+                    { key: "gen_ai.system", value: { stringValue: "openai" } },
+                    { key: "gen_ai.request.model", value: { stringValue: "openai/gpt-5" } },
+                    { key: "gen_ai.response.id", value: { stringValue: "gen-1" } },
+                    { key: "gen_ai.usage.prompt_tokens", value: { intValue: "120" } },
+                    { key: "gen_ai.usage.completion_tokens", value: { intValue: "35" } },
+                    { key: "gen_ai.usage.cost", value: { doubleValue: 0.14 } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({ ignored: 0 });
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0]).toMatchObject({
+      platform: "openrouter",
+      seat: "openrouter",
+      model: "openai/gpt-5",
+      generationId: "gen-1",
+      inputTokens: 120,
+      outputTokens: 35,
+      costUsd: 0.14,
+      durationMs: 1250,
+    });
+  });
+
+  it("keeps an explicit coding platform over the OpenRouter gateway marker", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-2" } },
+                    { key: "agent.platform", value: { stringValue: "opencode" } },
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.turns[0].platform).toBe("opencode");
+  });
 });
 
 describe("mapDirectTurnsRequest", () => {
