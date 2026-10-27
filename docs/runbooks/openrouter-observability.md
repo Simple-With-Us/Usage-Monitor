@@ -8,7 +8,7 @@ Use the Sentry project dedicated to agent sessions.  Do not use the Usage Monit
 
 In Sentry, open **Settings → Projects → agent-sessions → SDK Setup → Client Keys (DSN) → OpenTelemetry**.  Copy the OTLP traces endpoint ending in `/integration/otlp/v1/traces` and the DSN from that page.
 
-In OpenRouter, open **Settings → Observability**, enable Broadcast, and add a **Sentry** destination with those two values.  Enable Privacy Mode so prompts and completions are excluded while token counts, cost, timing, model, provider, and status remain available.  Start with sampling `1.0`; reduce it only after receipt and field coverage are measured.
+In OpenRouter, open **Settings → Observability**, enable Broadcast, and add a **Sentry** destination with those two values.  Enable Privacy Mode so prompts and completions are excluded while token counts, cost, timing, model, provider, and status remain available.  Begin with a reviewed API-key subset and a sampling rate sized to the destination budget; increase it only after receipt, field coverage, and rate-limit headroom are measured.
 
 Enter these values directly in OpenRouter.  Do not paste the DSN, OTLP endpoint, OpenRouter management key, or Usage Monitor bearer token into chat, tickets, commits, or logs.
 
@@ -16,13 +16,15 @@ Enter these values directly in OpenRouter.  Do not paste the DSN, OTLP endpoint
 
 Add a second OpenRouter Broadcast destination of type **OpenTelemetry Collector**:
 
-- Endpoint: `https://usage.jays.services/api/otlp/v1/traces`
-- Headers: `Authorization: Bearer <producer-scoped token for openrouter>`
+- Endpoint: `<Usage Monitor OTLP traces endpoint from the private operations inventory>`
+- Headers: `Authorization: Bearer <trace-only token for openrouter>`
 - Privacy Mode: enabled
-- Sampling: `1.0` during verification
-- API-key filter: all OpenRouter keys that serve coding platforms, or an explicit reviewed subset
+- Sampling: sized to remain below the receiver's per-token request budget
+- API-key filter: an explicit reviewed subset during verification
 
-The token must be configured in Usage Monitor's producer-token map with source app `openrouter`.  Use the existing secret-management and deployment path; never commit the token.
+Configure the token as `openrouter:<token>` in `OTLP_TRACES_PRODUCER_TOKENS`.  Never register it in `USAGE_INGEST_PRODUCER_TOKENS`: that map also authorizes cash-ledger and metrics writes.  Use the existing secret-management and deployment path, then restart the Usage Monitor container because the token maps are loaded at process startup; never commit the token.
+
+The trace receiver admits at most 10 requests per second for one credential.  Before widening the API-key filter or increasing sampling, measure Broadcast request rate and either keep it within that budget, raise the reviewed receiver budget, or issue additional trace-only tokens with independent rate buckets.
 
 This trace route writes `AgentTurn` only.  It does not write `ExternalUsageEvent`, so it cannot double-count the OpenRouter account spend and credits collected by `src/lib/adapters/openrouter.ts`.  OpenRouter spans carry the underlying model vendor in `gen_ai.system`; the receiver recognizes `openrouter.trace.id` and records the platform as `openrouter` unless the producer supplies an explicit `agent.platform`.
 

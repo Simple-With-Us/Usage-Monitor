@@ -38,7 +38,7 @@ Source code and passing tests do not establish installed hub operation.  The Oct
 
 ## OpenRouter Broadcast
 
-OpenRouter request traces use two independent Broadcast destinations: the Sentry `agent-sessions` project for privacy-redacted searchable traces, and Usage Monitor's `/api/otlp/v1/traces` endpoint for `AgentTurn` detail.  The latter never writes `ExternalUsageEvent`, so `src/lib/adapters/openrouter.ts` remains the account cash and credit authority without double counting.  See [`docs/runbooks/openrouter-observability.md`](../runbooks/openrouter-observability.md) for the destination fields, privacy requirement, and receipt checks.
+OpenRouter request traces use two independent Broadcast destinations: the Sentry `agent-sessions` project for privacy-redacted searchable traces, and Usage Monitor's private OTLP traces endpoint for `AgentTurn` detail.  The latter uses a trace-only `OTLP_TRACES_PRODUCER_TOKENS` credential and never writes `ExternalUsageEvent`, so `src/lib/adapters/openrouter.ts` remains the account cash and credit authority without double counting.  See [`docs/runbooks/openrouter-observability.md`](../runbooks/openrouter-observability.md) for the destination fields, privacy requirement, and receipt checks.
 
 OpenRouter's OTLP span reports the underlying model provider in `gen_ai.system`.  The traces mapper therefore recognizes `openrouter.trace.id` as the gateway marker and assigns platform `openrouter`; an explicit `agent.platform` still wins when a caller can supply a reliable coding-harness identity.
 

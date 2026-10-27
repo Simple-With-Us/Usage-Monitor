@@ -118,6 +118,36 @@ describe("mapOtlpTracesRequest", () => {
     });
   });
 
+  it("applies an OpenRouter gateway marker to unmarked sibling spans", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat openai/gpt-5",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-3" } },
+                    { key: "gen_ai.system", value: { stringValue: "openai" } },
+                  ],
+                },
+                {
+                  name: "chat anthropic/claude-sonnet",
+                  attributes: [
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.turns.map((turn) => turn.platform)).toEqual(["openrouter", "openrouter"]);
+  });
+
   it("keeps an explicit coding platform over the OpenRouter gateway marker", () => {
     const result = mapOtlpTracesRequest({
       resourceSpans: [
