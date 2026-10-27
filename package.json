@@ -51,6 +51,7 @@
     "test:receipt-inbox-worker": "vitest run --config workers/receipt-inbox/vitest.config.mjs",
     "test:migrate-safe": "node scripts/test-migrate-safe-repro.mjs",
     "test:sqlite-backup": "node scripts/test-sqlite-pre-migration-backup.mjs",
+    "test:backup-staged-errors": "node scripts/test-backup-staged-errors.mjs",
     "test:r2-archive": "node scripts/test-r2-weekly-archive.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
     "test:oracle-deploy": "node scripts/test-oracle-deploy-config.mjs",
