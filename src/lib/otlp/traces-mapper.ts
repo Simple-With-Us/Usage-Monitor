@@ -172,12 +172,19 @@ const HARNESS_BY_SPAN_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ["claude_code.", "claude-code"],
 ];
 
+// OpenRouter Broadcast describes the model vendor in `gen_ai.system`, not the
+// gateway that emitted the trace.  Its stable OTLP marker is
+// `openrouter.trace.id`; prefer that gateway identity so one OpenRouter feed
+// does not fragment AgentTurn.platform into openai/anthropic/google buckets.
+const OPENROUTER_TRACE_MARKER = "openrouter.trace.id";
+
 function resolveTurnPlatform(
   attrs: Record<string, string | number | boolean | undefined>,
   spanName: string | undefined
 ): string {
   const explicit = asNonEmptyString(attrs["agent.platform"]);
   if (explicit) return normalizePlatform(explicit);
+  if (asNonEmptyString(attrs[OPENROUTER_TRACE_MARKER])) return "openrouter";
   if (spanName) {
     for (const [prefix, harness] of HARNESS_BY_SPAN_PREFIX) {
       if (spanName.startsWith(prefix)) return harness;
@@ -207,9 +214,13 @@ function turnFromSpanAttrs(
   if (!looksLikeTurn) return null;
 
   const inputTokens =
-    asSafeInt(attrs["gen_ai.usage.input_tokens"]) ?? asSafeInt(attrs["input_tokens"]);
+    asSafeInt(attrs["gen_ai.usage.input_tokens"]) ??
+    asSafeInt(attrs["gen_ai.usage.prompt_tokens"]) ??
+    asSafeInt(attrs["input_tokens"]);
   const outputTokens =
-    asSafeInt(attrs["gen_ai.usage.output_tokens"]) ?? asSafeInt(attrs["output_tokens"]);
+    asSafeInt(attrs["gen_ai.usage.output_tokens"]) ??
+    asSafeInt(attrs["gen_ai.usage.completion_tokens"]) ??
+    asSafeInt(attrs["output_tokens"]);
   const cacheTokens =
     asSafeInt(attrs["gen_ai.usage.cache_tokens"]) ??
     asSafeInt(attrs["gen_ai.usage.cache_read_tokens"]) ??
@@ -252,7 +263,10 @@ function turnFromSpanAttrs(
     repo: asNonEmptyString(attrs["repo"]) ?? asNonEmptyString(attrs["project.name"]) ?? asNonEmptyString(attrs["project"]),
     conversationId:
       asNonEmptyString(attrs["gen_ai.conversation.id"]) ?? asNonEmptyString(attrs["session.id"]),
-    generationId: asNonEmptyString(attrs["gen_ai.generation.id"]) ?? asNonEmptyString(attrs["generation.id"]),
+    generationId:
+      asNonEmptyString(attrs["gen_ai.generation.id"]) ??
+      asNonEmptyString(attrs["gen_ai.response.id"]) ??
+      asNonEmptyString(attrs["generation.id"]),
     model: asNonEmptyString(attrs["gen_ai.request.model"]) ?? asNonEmptyString(attrs["model"]),
     inputTokens,
     outputTokens,

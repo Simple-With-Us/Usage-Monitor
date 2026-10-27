@@ -153,6 +153,52 @@ describe("POST /api/otlp/v1/traces", () => {
     }
   });
 
+  it("lets an openrouter scoped credential write OpenRouter Broadcast traces", async () => {
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "openrouter:openrouter-scoped-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "chat openai/gpt-5",
+                        attributes: [
+                          { key: "openrouter.trace.id", value: { stringValue: "or-trace-1" } },
+                          { key: "gen_ai.system", value: { stringValue: "openai" } },
+                          { key: "gen_ai.request.model", value: { stringValue: "openai/gpt-5" } },
+                          { key: "gen_ai.usage.input_tokens", value: { intValue: "10" } },
+                          { key: "gen_ai.usage.output_tokens", value: { intValue: "4" } },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer openrouter-scoped-token" }
+        )
+      );
+
+      expect(res.status).toBe(202);
+      const turns = await prisma.agentTurn.findMany();
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({
+        platform: "openrouter",
+        model: "openai/gpt-5",
+        inputTokens: 10,
+        outputTokens: 4,
+      });
+      expect(await prisma.externalUsageEvent.count()).toBe(0);
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
+
   it("still refuses a scoped credential for a turn dimension it does not own", async () => {
     process.env.USAGE_INGEST_PRODUCER_TOKENS = "codex:codex-scoped-token";
     try {
