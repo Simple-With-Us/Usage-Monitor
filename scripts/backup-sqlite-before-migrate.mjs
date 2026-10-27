@@ -152,7 +152,7 @@ function assertIntegrity(path) {
       applySqliteMemoryPragmas(database);
     } catch (error) {
       throw new Error(
-        `backup integrity_check failed for ${path}: ${errorMessage(error)}`
+        `backup could not apply memory pragmas for ${path}: ${errorMessage(error)}`
       );
     }
     let rows;
@@ -226,7 +226,13 @@ function snapshotChild(databasePath, snapshotPath) {
     );
   }
   try {
-    applySqliteMemoryPragmas(source);
+    try {
+      applySqliteMemoryPragmas(source);
+    } catch (error) {
+      throw new Error(
+        `snapshot could not apply memory pragmas for ${databasePath}: ${errorMessage(error)}`
+      );
+    }
     // VACUUM INTO holds one consistent read transaction.  Unlike sqlite3_backup_step,
     // concurrent commits from the old app cannot restart the copy from page one.
     try {

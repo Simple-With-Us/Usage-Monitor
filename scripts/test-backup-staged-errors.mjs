@@ -42,8 +42,10 @@ function createWalSourceDb(dir, { rowCount = 0 } = {}) {
 // Source-level: every stage of the child is wrapped with a stage+path message.
 for (const label of [
   "snapshot could not open source",
+  "snapshot could not apply memory pragmas for",
   "snapshot VACUUM INTO",
   "backup integrity check could not open",
+  "backup could not apply memory pragmas for",
   "backup integrity_check failed for",
 ]) {
   assert.ok(source.includes(label), `staged error label missing: ${label}`);
@@ -55,7 +57,10 @@ for (const label of [
   const r = runChild(["--snapshot-child", missing, join(tmpdir(), "x.partial")]);
   assert.equal(r.status, 1, `child should fail: ${r.stderr}`);
   assert.match(r.stderr, /snapshot could not open source/);
-  assert.match(r.stderr, new RegExp(missing.replace(/[/.]/g, "\\$&")));
+  assert.ok(
+    r.stderr.includes(missing),
+    `stderr should include missing source path: ${missing}`
+  );
 }
 
 // Live: VACUUM INTO failure (target directory does not exist) names the stage,
