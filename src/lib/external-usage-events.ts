@@ -32,6 +32,7 @@ import {
   isSubscriptionAnalyticsTelemetry,
   shouldDeriveAnalyticsTokenEstimate,
 } from "@/lib/subscription-analytics";
+import { logSlowScanTimingIfNeeded } from "@/lib/slow-scan-timing";
 import {
   MTD_SCAN_MEMO_TTL_MS,
   clearMtdScanMemo,
@@ -1709,45 +1710,58 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     }
   }
 
-  const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
-  const [rawGroups, rollups] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
-      where: {
-        occurredAt: { gte: rawSince, lte: now },
-        metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-        ...NON_RECEIPT_CANDIDATE_WHERE,
-      },
-      _sum: { costUsd: true },
-      _count: { _all: true, costUsd: true },
-    }),
-    monthStart < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
+  const mtdScanStartedAt = performance.now();
+  const { receiptCandidates, rawGroups, rollups } = await (async () => {
+    try {
+      const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
+      const [rawGroups, rollups] = await Promise.all([
+        prisma.externalUsageEvent.groupBy({
+          by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
           where: {
-            day: { gte: monthStart, lt: rawCutoff },
+            occurredAt: { gte: rawSince, lte: now },
             metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-            latestOccurredAt: { lte: now },
+            ...NON_RECEIPT_CANDIDATE_WHERE,
           },
-          select: {
-            provider: true,
-            sourceApp: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            projectId: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            eventCount: true,
-            pricedEventCount: true,
-            unpricedEventCount: true,
-            unclassifiedCostEventCount: true,
-            totalCostUsd: true,
-          },
-        })
-      : Promise.resolve([]),
-  ]);
+          _sum: { costUsd: true },
+          _count: { _all: true, costUsd: true },
+        }),
+        monthStart < rawCutoff
+          ? prisma.externalUsageEventDailyRollup.findMany({
+              where: {
+                day: { gte: monthStart, lt: rawCutoff },
+                metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
+                latestOccurredAt: { lte: now },
+              },
+              select: {
+                provider: true,
+                sourceApp: true,
+                service: true,
+                label: true,
+                keyRef: true,
+                billingMode: true,
+                projectId: true,
+                metricType: true,
+                unit: true,
+                confidence: true,
+                eventCount: true,
+                pricedEventCount: true,
+                unpricedEventCount: true,
+                unclassifiedCostEventCount: true,
+                totalCostUsd: true,
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt, {
+        rawGroups: rawGroups.length,
+        rollupRows: rollups.length,
+      });
+      return { receiptCandidates, rawGroups, rollups };
+    } catch (error) {
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt);
+      throw error;
+    }
+  })();
 
   const byProvider = new Map<string, ProviderPushedCost>();
   const attributionMap = new Map<string, ExternalCostAttributionRow>();
