@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
       - run: npm ci --ignore-scripts
       - run: npx --no-install vitest run workers/receipt-inbox/index.test.mjs workers/receipt-lifecycle-auditor/index.test.mjs --maxWorkers=1 --no-file-parallelism
       - run: python3 scripts/test-deploy-mapped-worker.py

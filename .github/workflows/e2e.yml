@@ -28,7 +28,7 @@ jobs:
       - run: node scripts/test-e2e-visual-snapshot-files.mjs
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26"
       - run: echo "DATABASE_URL=file:${RUNNER_TEMP}/api-usage-monitor-e2e.db" >> "$GITHUB_ENV"
       - run: npm ci --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
