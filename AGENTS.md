@@ -52,9 +52,10 @@ Run `bash .codex/setup.sh` during cloud provisioning and `bash .codex/maintenanc
 resume. Cloud agent-phase coordination runs through the fleet CLIs — `simple-chat`
 (`~/.local/bin/simple-chat`) for Zulip reads and posts, `simple-board` for Linear — and
 GitHub access uses `GH_TOKEN`; setup-only secrets are removed before the agent runs.
-Slack was retired fleet-wide on 2026-10-07, so no Slack token, channel or helper script
-belongs in the coordination path any more. Apple Notes is
-Mac-only; cloud completion notes must include a handoff body for local publication.
+The cloud bootstrap scripts still carry the pre-retirement Slack path and are migrated
+separately, so their coordination check reports incomplete until that lands; the
+coordination path itself is `simple-chat`.  Apple Notes is Mac-only; cloud completion notes
+must include a handoff body for local publication.
 
 Next.js + Prisma (**SQLite**, not Postgres) app at `usage.jays.services`, hosted through Coolify.  Private deployment details are maintained outside this public repository; legacy Oracle scripts are historical.  It tracks API usage/cost three ways: **poll adapters**
 (`src/lib/adapters/*`, one per provider) that snapshot into `UsageSnapshot`; **pushed
