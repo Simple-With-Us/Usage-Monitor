@@ -8,7 +8,7 @@
 # The Infisical CLI's default `infisical secrets` table-prints every secret
 # value, and `--plain` / `--output json` dump them too.  That is a confirmed
 # leak vector: it puts live credentials into scrollback, CI logs, and agent
-# transcripts.  Fleet canon (AGENT-SYNC.md § Secret handoff) says to prefer a
+# transcripts.  Fleet canon (FLEET-PROTOCOL.md § Secret handoff) says to prefer a
 # repo helper over the raw CLI; this repo referenced one but never had it.
 #
 # Every subcommand here is value-blind by construction:
