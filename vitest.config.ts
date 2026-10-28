@@ -26,6 +26,8 @@ export default defineConfig({
       // credential step in CI.  Vitest cannot run them:  they are node:test
       // suites, and a file with no Vitest suite in it is a failed file.
       "**/scripts/ios-fleet/**",
+      // Node's test runner owns backup cleanup repro suites (see test:backup-concurrent-startup).
+      "**/scripts/__tests__/**",
     ],
     coverage: {
       provider: "v8",

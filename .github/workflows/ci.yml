@@ -247,6 +247,9 @@ jobs:
       - name: Test pre-migration SQLite backup
         run: npm run test:sqlite-backup
 
+      - name: Test concurrent startup partial cleanup
+        run: npm run test:backup-concurrent-startup
+
       # Fourth instance of the drift class the two comments below/above describe
       # -- in `npm run verify`, no CI step -- and the one flagged as out of scope
       # by #1381. Placed here to match the order `npm run verify` chains these,

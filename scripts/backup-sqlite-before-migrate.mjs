@@ -35,16 +35,16 @@ import {
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSqliteDatabasePath } from "./lib/sqlite-database-url.mjs";
+import { removeStalePartials } from "./lib/sqlite-pre-migration-backup-cleanup.mjs";
+import {
+  backupTimeoutMs,
+  clampedIntEnv,
+} from "./lib/sqlite-pre-migration-backup-timing.mjs";
 
 const DEFAULT_RETENTION = 1; // free-tier disk: one pre-migrate snapshot is enough
 const MAX_RETENTION = 10;
 const BACKUP_DIRECTORY = ".pre-migration-backups";
-const BACKUP_TIMEOUT_MS = clampedIntEnv(
-  "SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS",
-  5 * 60_000,
-  1_000,
-  15 * 60_000
-);
+const BACKUP_TIMEOUT_MS = backupTimeoutMs();
 
 function log(message) {
   console.log(`[sqlite-pre-migration-backup] ${message}`);
@@ -52,14 +52,6 @@ function log(message) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function clampedIntEnv(name, fallback, min, max) {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
 // Native (non-heap) memory bound on the read-only connections this script
@@ -112,18 +104,6 @@ function managedBackups(backupDirectory, prefix) {
       return { path, mtimeMs: statSync(path).mtimeMs };
     })
     .sort((left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path));
-}
-
-function removeStalePartials(backupDirectory, prefix) {
-  for (const entry of readdirSync(backupDirectory, { withFileTypes: true })) {
-    if (
-      entry.isFile() &&
-      entry.name.startsWith(prefix) &&
-      entry.name.endsWith(".partial")
-    ) {
-      unlinkSync(join(backupDirectory, entry.name));
-    }
-  }
 }
 
 function pruneToRetention(backupDirectory, prefix, retention) {
@@ -298,7 +278,7 @@ async function main() {
   ensurePrivateBackupDirectory(backupDirectory);
 
   const prefix = backupPrefix(databasePath);
-  removeStalePartials(backupDirectory, prefix);
+  removeStalePartials(backupDirectory, prefix, log);
   // First repair any prior retention overflow, but preserve the full bounded
   // set while creating the replacement. If the new backup fails, the previous
   // verified backups remain available instead of being pruned preemptively.
