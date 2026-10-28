@@ -49,9 +49,11 @@ Hosting and routing (apexes, hostnames, hosts, deploy paths): consult the privat
 ## Codex Cloud protocol bootstrap
 
 Run `bash .codex/setup.sh` during cloud provisioning and `bash .codex/maintenance.sh` on
-resume. Cloud agent-phase coordination requires regular runtime variables
-`SLACK_BOT_TOKEN` and `GH_TOKEN`; setup-only secrets are removed before the agent runs.
-Use `scripts/codex-coordination.sh` for Slack reads/posts and GitHub access. Apple Notes is
+resume. Cloud agent-phase coordination runs through the fleet CLIs — `simple-chat`
+(`~/.local/bin/simple-chat`) for Zulip reads and posts, `simple-board` for Linear — and
+GitHub access uses `GH_TOKEN`; setup-only secrets are removed before the agent runs.
+Slack was retired fleet-wide on 2026-10-07, so no Slack token, channel or helper script
+belongs in the coordination path any more. Apple Notes is
 Mac-only; cloud completion notes must include a handoff body for local publication.
 
 Next.js + Prisma (**SQLite**, not Postgres) app at `usage.jays.services`, hosted through Coolify.  Private deployment details are maintained outside this public repository; legacy Oracle scripts are historical.  It tracks API usage/cost three ways: **poll adapters**
@@ -639,7 +641,7 @@ Look first at Linear (`https://linear.app/simple-with-us`, through the `simple-b
 - **Start of work:** `simple-board claim` the Linear issue (In Progress), branch `<seat>/<id>-<slug>`, and open the work topic `<ID> <subject>` in `#Work-In-Progress` (`[<YOUR_SEAT>·session8]` + `repo:` + what you will do).
 - **End of work:** the PR says `Fixes <ID>` (finished) or `Refs <ID>` (partial); mark Completed/Deployed with `simple-board status`, post the closeout in the same topic, then resolve that topic.
 - Keep **Linear and the PR matching and accurate**.  Writes need `AGENT_SEAT`.  The effort logs are retired stub pointers.
-- Post shape: `[<YOUR_SEAT>·session8]` or `[<YOUR_SEAT>·session8-><PEER_SEAT>]`, then `repo:` first.  A directed post also @-mentions the peer (`@**<Display Name>**`); the bracket label alone wakes nobody.  Wake every seat only with `@**all**` in `#Work-In-Progress` › `fleet` (`simple-chat post --topic fleet --fleet`), when every seat must act;  it notifies Jay too.  Every seat's bot is a member and the realm's `can_mention_many_users_group` is `role:members`, so each can send it.  If Zulip ever refuses it (`STREAM_WILDCARD_MENTION_NOT_ALLOWED`), @-mention each bot that must act instead (`--to`), and use `simple-chat dm --owner` for an emergency.  Skim every message for your tag / your repos / your topics; full-read on match.
+- Post shape: `simple-chat` writes your `[<YOUR_SEAT>·session8]` tag for you — never hand-write it.  A post is `[<YOUR_SEAT>·session8]` or `[<YOUR_SEAT>·session8-><PEER_SEAT>]`, then `repo:` first, and a reply is a new post to the same channel and topic.  A directed post also @-mentions the peer (`@**<Display Name>**`); the bracket label alone wakes nobody — add `--to <SEAT>` to wake one peer.  Wake every seat only with `@**all**` in `#Work-In-Progress` › `fleet` (`simple-chat post --topic fleet --fleet`), when every seat must act;  it notifies Jay too.  Every seat's bot is a member and the realm's `can_mention_many_users_group` is `role:members`, so each can send it.  If Zulip ever refuses it (`STREAM_WILDCARD_MENTION_NOT_ALLOWED`), @-mention each bot that must act instead (`--to`), and use `simple-chat dm --owner` for an emergency.  Skim every message for your tag / your repos / your topics; full-read on match.
 - Tooling: the `simple-chat` CLI (`~/.local/bin/simple-chat`) and ST-MCP for everything — `post`, `reply`, `read`, `listen`, `wait`, `inbox`, `topics`, `react`, `follow`, `mute`, `resolve`, `dm --owner`.
 Details: `~/apps/FLEET-PROTOCOL.md` § Chat: The Zulip Contract, § Posting, and § Linear and the Claim Lifecycle.
 
@@ -679,7 +681,7 @@ If you create, change, load, bootout, or retire a LaunchAgent, cron row, login i
   Also spawn a child for a smaller slice when it would save context, run in
   parallel, or be cheaper at a different tier.  Do not serialize out of habit.
   Skip only one-step work where spawn overhead exceeds the task.  Sub-teams
-  follow the same board + #agent-sync rules as top-level agents.
+  follow the same Linear + #Work-In-Progress rules as top-level agents.
 - **Right-size the model for EVERY task, including each sub-agent — even if
   that tier is lower or higher than the model you are running.**  Pick the most
   economical model that completes that task very effectively.  Small = mechanical
@@ -731,7 +733,7 @@ Owner copy rules (Title Case headings/buttons; sentence-case values; lowercase c
 **Title:** `[APP, Agent] short topic` — app acronym(s) + agent **first**.
 Examples: `[UM, Grok] TestFlight first ship` · `[ST, CT, Monet] R2 peer digests`.
 Acronyms: `UM` `ST` `CT` `CTS` `FLEET`. Multi-app: list each (`[ST, CT, Grok] …`).
-Agent display Title Case (`Grok`/`Monet`/`Claude`/…), not ALL-CAPS Slack tags.
+Agent display Title Case (`Grok`/`Monet`/`Claude`/…), not ALL-CAPS chat tags.
 
 **Second body row:** local stamp `Sun, Aug 9, 3:52pm` (create **or** last update —
 refresh on every change). Helper auto-injects/refreshes it.
