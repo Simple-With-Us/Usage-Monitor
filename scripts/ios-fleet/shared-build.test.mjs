@@ -22,6 +22,19 @@ test('extra floors raise the counter above 999', () => {
   assert.deepEqual(next({...input, extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
   assert.deepEqual(next({...input, iosBuilds: ['1100'], extraFloors: [1500]}), {build: '1501', ignoredIos: 0});
 });
+test('paired inventories and the feed floor join one max (review round)', () => {
+  // The client concatenates the paired app's builds into the same lists and
+  // the shell passes the appcast max as an extra floor; the planner takes the
+  // max across all three, plus the 999 floor, plus one.
+  assert.deepEqual(
+    next({iosBuilds: ['1100', '1500'], macBuilds: ['1200'], extraFloors: [1400], complete: true}),
+    {build: '1501', ignoredIos: 0}
+  );
+  assert.deepEqual(
+    next({iosBuilds: ['1200'], macBuilds: ['1300'], extraFloors: [1400], complete: true}),
+    {build: '1401', ignoredIos: 0}
+  );
+});
 test('iOS timestamp builds are ignored and counted', () => {
   assert.deepEqual(
     next({...input, iosBuilds: ['202610190645', '202610180127']}),

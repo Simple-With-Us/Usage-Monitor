@@ -419,6 +419,29 @@ export function ascErrorText(res) {
   return `HTTP ${res?.status} ${e.code || ""} ${e.detail || e.title || ""}`.trim();
 }
 
+// One paged /v1/builds answer for next-shared-build: the validated next-page
+// URL, or "" when the list ends.  parsed must be a non-null non-array object,
+// links (when present) a non-null non-array object, and links.next (when
+// non-null) a string.  Anything else throws the exact message the client
+// prints before exiting 2.  Exported so a test can drive it without App
+// Store Connect.
+export function nextBuildsPageUrl(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("next-shared-build: malformed pagination");
+  }
+  const links = parsed.links;
+  if (links === undefined || links === null) return "";
+  if (typeof links !== "object" || Array.isArray(links)) {
+    throw new Error("next-shared-build: malformed pagination");
+  }
+  const next = links.next;
+  if (next === undefined || next === null) return "";
+  if (typeof next !== "string") {
+    throw new Error("next-shared-build: malformed pagination");
+  }
+  return next;
+}
+
 export function maskEmail(email) {
   const [user, domain] = String(email).split("@");
   return `${String(user).slice(0, 1)}***@${domain}`;
@@ -1161,16 +1184,44 @@ async function main() {
       let url = `/v1/builds?filter[app]=${forAppId}&filter[preReleaseVersion.platform]=${platform}&limit=200`;
       for (let page = 0; page < 100 && url; page++) {
         const res = await ascGet(url);
-        if (!res.ok || !Array.isArray(res.parsed?.data)) { console.error("next-shared-build: inventory unavailable"); process.exit(2); }
+        if (!res.ok) { console.error("next-shared-build: inventory unavailable"); process.exit(2); }
+        let next = "";
+        try {
+          next = nextBuildsPageUrl(res.parsed);
+        } catch (err) {
+          console.error(err.message);
+          process.exit(2);
+        }
+        if (!Array.isArray(res.parsed.data)) { console.error("next-shared-build: inventory unavailable"); process.exit(2); }
         for (const b of res.parsed.data) out.push(b?.attributes?.version);
-        url = res.parsed.links?.next || "";
+        url = next;
       }
       if (url) { console.error("next-shared-build: incomplete pagination"); process.exit(2); }
       return out;
     }
-    const iosBuilds = await allBuilds(appId, "IOS");
-    let macBuilds = await allBuilds(appId, "MAC_OS");
-    if (macAppId) macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    // The counter is shared across the pair: both platforms of both apps join
+    // it, so either app's iOS or macOS builds hold the floor up.  The
+    // inventories are independent reads, so they are fetched concurrently;
+    // each still pages to the same cap and fails closed past it.
+    let iosBuilds;
+    let macBuilds;
+    if (macAppId) {
+      const [iosA, macA, iosB, macB] = await Promise.all([
+        allBuilds(appId, "IOS"),
+        allBuilds(appId, "MAC_OS"),
+        allBuilds(macAppId, "IOS"),
+        allBuilds(macAppId, "MAC_OS")
+      ]);
+      iosBuilds = iosA.concat(iosB);
+      macBuilds = macA.concat(macB);
+    } else {
+      const [iosA, macA] = await Promise.all([
+        allBuilds(appId, "IOS"),
+        allBuilds(appId, "MAC_OS")
+      ]);
+      iosBuilds = iosA;
+      macBuilds = macA;
+    }
     try {
       const planned = nextSharedBuild({iosBuilds, macBuilds, extraFloors, complete: true});
       console.error(`next-shared-build: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; ignored ${planned.ignoredIos} iOS timestamp build(s); next is ${planned.build}`);
