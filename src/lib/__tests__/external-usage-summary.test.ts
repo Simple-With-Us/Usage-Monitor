@@ -15,6 +15,71 @@ import {
   summarizeExternalUsageEvents,
 } from "../external-usage-events";
 
+// The MTD raw scan reads event rows through $queryRaw in (occurredAt, id)
+// keyset chunks and folds them in JS (scanMonthToDateRawGroups), so the
+// fixtures below stub $queryRaw instead of the old single groupBy. A
+// groupBy-shaped fixture expands into the raw rows that fold back into
+// exactly that group: `_count._all` rows, the first `_count.costUsd` of
+// them priced, the group's whole `_sum.costUsd` riding on the first priced
+// row (the rest carry 0, so the folded sum is exact).
+interface MtdGroupFixture {
+  provider: string;
+  sourceApp: string;
+  service: string | null;
+  label?: string | null;
+  projectId?: string | null;
+  metricType: string;
+  _sum: { costUsd: number | null };
+  _count: { _all: number; costUsd?: number };
+}
+
+let mtdRowSeq = 0;
+function expandMtdGroups(groups: MtdGroupFixture[]) {
+  const rows: Array<Record<string, unknown>> = [];
+  for (const group of groups) {
+    const priced = group._count.costUsd ?? 0;
+    for (let i = 0; i < group._count._all; i++) {
+      rows.push({
+        provider: group.provider,
+        sourceApp: group.sourceApp,
+        service: group.service,
+        label: group.label ?? null,
+        projectId: group.projectId ?? null,
+        metricType: group.metricType,
+        costUsd: i < priced ? (i === 0 ? group._sum.costUsd : 0) : null,
+        occurredAt: new Date("2026-07-02T00:00:00.000Z"),
+        id: `mtd-raw-${mtdRowSeq++}`,
+      });
+    }
+  }
+  return rows;
+}
+
+// Route $queryRaw by statement shape: the analytics-token scan (selects
+// "keyRef") gets tokenRows, the MTD cost scan (selects "costUsd") shifts
+// the next queued row set per cursor-less first chunk and answers [] to
+// cursor follow-ups, anything else gets [].
+function stubRawScanQueries(opts: {
+  mtdRowSets?: Array<Array<Record<string, unknown>>>;
+  tokenRows?: Array<Record<string, unknown>>;
+}) {
+  const mtdQueue = [...(opts.mtdRowSets ?? [])];
+  prismaMock.$queryRaw.mockImplementation((arg: unknown) => {
+    const text =
+      typeof (arg as { sql?: unknown })?.sql === "string"
+        ? ((arg as { sql: string }).sql as string)
+        : "";
+    if (text.includes('"keyRef"')) {
+      return Promise.resolve(opts.tokenRows ?? []);
+    }
+    if (text.includes('"costUsd"')) {
+      if (text.includes('"id" >')) return Promise.resolve([]);
+      return Promise.resolve(mtdQueue.shift() ?? []);
+    }
+    return Promise.resolve([]);
+  });
+}
+
 describe("summarizeExternalUsageEvents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -342,26 +407,50 @@ describe("summarizeExternalUsageEvents", () => {
   });
 
   it("excludes raw and rolled-up Claude estimates from provider and project cash totals", async () => {
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "anthropic",
-        sourceApp: "socratic-trade",
-        service: "messages",
-        projectId: null,
-        metricType: "cost",
-        _sum: { costUsd: 10 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "claude-code",
-        service: "claude-code",
-        projectId: null,
-        metricType: "cost",
-        _sum: { costUsd: 5_000 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-    ]);
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          {
+            provider: "anthropic",
+            sourceApp: "socratic-trade",
+            service: "messages",
+            projectId: null,
+            metricType: "cost",
+            _sum: { costUsd: 10 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "claude-code",
+            service: "claude-code",
+            projectId: null,
+            metricType: "cost",
+            _sum: { costUsd: 5_000 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+        ]),
+        expandMtdGroups([
+          {
+            provider: "anthropic",
+            sourceApp: "socratic-trade",
+            service: "messages",
+            projectId: "project-a",
+            metricType: "cost",
+            _sum: { costUsd: 10 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "claude-code",
+            service: "claude-code",
+            projectId: "project-a",
+            metricType: "cost",
+            _sum: { costUsd: 5_000 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+        ]),
+      ],
+    });
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValueOnce([
       {
         provider: "anthropic",
@@ -417,26 +506,6 @@ describe("summarizeExternalUsageEvents", () => {
       unclassifiedCostEventCount: 0,
     });
 
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "anthropic",
-        sourceApp: "socratic-trade",
-        service: "messages",
-        projectId: "project-a",
-        metricType: "cost",
-        _sum: { costUsd: 10 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "claude-code",
-        service: "claude-code",
-        projectId: "project-a",
-        metricType: "cost",
-        _sum: { costUsd: 5_000 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-    ]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValueOnce([
       {
         provider: "anthropic",
@@ -479,24 +548,28 @@ describe("summarizeExternalUsageEvents", () => {
   });
 
   it("splits subscriptionPushed into the materializer-owned and manual-adjustment slices", async () => {
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "anthropic",
-        sourceApp: "subscription",
-        service: null,
-        metricType: "subscription",
-        _sum: { costUsd: 124.99 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "manual-billing-adjustment",
-        service: null,
-        metricType: "subscription",
-        _sum: { costUsd: -50 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-    ]);
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          {
+            provider: "anthropic",
+            sourceApp: "subscription",
+            service: null,
+            metricType: "subscription",
+            _sum: { costUsd: 124.99 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "manual-billing-adjustment",
+            service: null,
+            metricType: "subscription",
+            _sum: { costUsd: -50 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+        ]),
+      ],
+    });
     // monthStart === rawCutoff below, so the code path never queries rollups
     // (monthStart < rawCutoff is false) — no mock needed for that call, and
     // stubbing an unconsumed mockResolvedValueOnce here would otherwise leak
@@ -551,40 +624,44 @@ describe("summarizeExternalUsageEvents", () => {
         ...receiptBase,
       },
     ]);
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "anthropic",
-        sourceApp: "socratic-trade",
-        service: "messages",
-        metricType: "cost",
-        _sum: { costUsd: 10 },
-        _count: { _all: 2, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "claude-code",
-        service: "claude-code",
-        metricType: "cost",
-        _sum: { costUsd: 999 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "subscription",
-        service: null,
-        metricType: "subscription",
-        _sum: { costUsd: 200 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "anthropic",
-        sourceApp: "manual-billing-adjustment",
-        service: null,
-        metricType: "subscription",
-        _sum: { costUsd: -25 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-    ]);
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          {
+            provider: "anthropic",
+            sourceApp: "socratic-trade",
+            service: "messages",
+            metricType: "cost",
+            _sum: { costUsd: 10 },
+            _count: { _all: 2, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "claude-code",
+            service: "claude-code",
+            metricType: "cost",
+            _sum: { costUsd: 999 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "subscription",
+            service: null,
+            metricType: "subscription",
+            _sum: { costUsd: 200 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "anthropic",
+            sourceApp: "manual-billing-adjustment",
+            service: null,
+            metricType: "subscription",
+            _sum: { costUsd: -25 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+        ]),
+      ],
+    });
 
     const byProvider = await sumMonthToDateExternalCostByProvider(
       new Date("2026-07-01T00:00:00.000Z"),
@@ -603,15 +680,19 @@ describe("summarizeExternalUsageEvents", () => {
         }),
       })
     );
-    expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        // Wave H / E1: shared MTD scan always includes projectId.
-        by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
-        where: expect.objectContaining({
-          OR: expect.arrayContaining([{ service: null }, { label: null }]),
-        }),
-      })
-    );
+    // Wave H / E1: the shared MTD scan always selects projectId, and the
+    // receipt complement (rows the candidate query does NOT own) is part of
+    // the raw SQL — service/label null branches included.
+    const scanSql = prismaMock.$queryRaw.mock.calls
+      .map(([arg]) => (arg as { sql?: string })?.sql ?? "")
+      .find(
+        (text) =>
+          text.includes('FROM "ExternalUsageEvent"') && text.includes('"costUsd"')
+      );
+    expect(scanSql).toBeDefined();
+    expect(scanSql).toContain('"service" IS NULL');
+    expect(scanSql).toContain('"label" IS NULL');
+    expect(scanSql).toContain('ORDER BY "occurredAt" ASC, "id" ASC');
     expect(byProvider.get("anthropic")).toEqual({
       usagePushed: 60,
       subscriptionPushed: 175,
@@ -654,29 +735,48 @@ describe("summarizeExternalUsageEvents", () => {
         ...receiptBase,
       },
     ]);
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "openai",
-        sourceApp: "socratic-trade",
-        service: "responses",
-        projectId: "project-a",
-        metricType: "cost",
-        _sum: { costUsd: 12 },
-        _count: { _all: 2, costUsd: 1 },
-      },
-    ]);
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          {
+            provider: "openai",
+            sourceApp: "socratic-trade",
+            service: "responses",
+            projectId: "project-a",
+            metricType: "cost",
+            _sum: { costUsd: 12 },
+            _count: { _all: 2, costUsd: 1 },
+          },
+        ]),
+      ],
+    });
 
     const attribution = await sumMonthToDateExternalCostAttribution(
       new Date("2026-07-01T00:00:00.000Z"),
       new Date("2026-07-01T00:00:00.000Z")
     );
 
-    expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
-        where: expect.objectContaining({ OR: expect.any(Array) }),
-      })
-    );
+    // The scan selects exactly the reduced grouping dimensions (provider,
+    // sourceApp, service, label, projectId, metricType) plus costUsd and
+    // the keyset cursor columns — nothing wider reaches the fold.
+    const scanSql = prismaMock.$queryRaw.mock.calls
+      .map(([arg]) => (arg as { sql?: string })?.sql ?? "")
+      .find(
+        (text) =>
+          text.includes('FROM "ExternalUsageEvent"') && text.includes('"costUsd"')
+      );
+    expect(scanSql).toBeDefined();
+    for (const column of [
+      '"provider"',
+      '"sourceApp"',
+      '"service"',
+      '"label"',
+      '"projectId"',
+      '"metricType"',
+      '"costUsd"',
+    ]) {
+      expect(scanSql).toContain(column);
+    }
     expect(attribution).toEqual([
       {
         provider: "openai",
@@ -855,40 +955,44 @@ describe("subscription analytics estimates shared across providers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
-    prismaMock.$queryRaw.mockResolvedValue(tokens);
+    stubRawScanQueries({ tokenRows: tokens });
   });
 
   it("puts an alias-derived estimate in the same month-to-date bucket as its stored provider name", async () => {
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      {
-        provider: "Grok",
-        sourceApp: "socratic-trade",
-        service: "api",
-        label: null,
-        projectId: null,
-        metricType: "cost",
-        _sum: { costUsd: 5 },
-        _count: { _all: 1, costUsd: 1 },
-      },
-      {
-        provider: "Grok",
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          {
+            provider: "Grok",
+            sourceApp: "socratic-trade",
+            service: "api",
+            label: null,
+            projectId: null,
+            metricType: "cost",
+            _sum: { costUsd: 5 },
+            _count: { _all: 1, costUsd: 1 },
+          },
+          {
+            provider: "Grok",
+            sourceApp: "grok-build",
+            service: "grok-cli",
+            label: "token:input",
+            projectId: null,
+            metricType: "usage",
+            _sum: { costUsd: null },
+            _count: { _all: 1, costUsd: 0 },
+          },
+        ]),
+      ],
+      tokenRows: [{
         sourceApp: "grok-build",
+        provider: "Grok",
         service: "grok-cli",
+        keyRef: "grok-4.6",
         label: "token:input",
-        projectId: null,
-        metricType: "usage",
-        _sum: { costUsd: null },
-        _count: { _all: 1, costUsd: 0 },
-      },
-    ]);
-    prismaMock.$queryRaw.mockResolvedValueOnce([{
-      sourceApp: "grok-build",
-      provider: "Grok",
-      service: "grok-cli",
-      keyRef: "grok-4.6",
-      label: "token:input",
-      quantity: 1_000_000,
-    }]);
+        quantity: 1_000_000,
+      }],
+    });
 
     const byProvider = await sumMonthToDateExternalCostByProvider(monthStart, monthStart, now);
     expect([...byProvider.keys()]).toEqual(["grok"]);
@@ -948,26 +1052,31 @@ describe("subscription analytics estimates shared across providers", () => {
   });
 
   it("adds derived estimates by source in the month-to-date provider view without adding cash", async () => {
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValueOnce([
-      ...sources.slice(1).map(({ sourceApp, provider, service, cost }) => ({
-        sourceApp,
-        provider,
-        service,
-        projectId: null,
-        metricType: "cost",
-        _sum: { costUsd: cost },
-        _count: { _all: 1, costUsd: 1 },
-      })),
-      ...tokens.map(({ sourceApp, provider, service }) => ({
-        sourceApp,
-        provider,
-        service,
-        projectId: null,
-        metricType: "usage",
-        _sum: { costUsd: null },
-        _count: { _all: 1, costUsd: 0 },
-      })),
-    ]);
+    stubRawScanQueries({
+      mtdRowSets: [
+        expandMtdGroups([
+          ...sources.slice(1).map(({ sourceApp, provider, service, cost }) => ({
+            sourceApp,
+            provider,
+            service,
+            projectId: null,
+            metricType: "cost",
+            _sum: { costUsd: cost },
+            _count: { _all: 1, costUsd: 1 },
+          })),
+          ...tokens.map(({ sourceApp, provider, service }) => ({
+            sourceApp,
+            provider,
+            service,
+            projectId: null,
+            metricType: "usage",
+            _sum: { costUsd: null },
+            _count: { _all: 1, costUsd: 0 },
+          })),
+        ]),
+      ],
+      tokenRows: tokens,
+    });
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValueOnce([{
       sourceApp: "claude-code",
       provider: "anthropic",
@@ -1022,7 +1131,7 @@ describe("OpenCode PAYG cost beside session estimates", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
-    prismaMock.$queryRaw.mockResolvedValue(tokenRows);
+    stubRawScanQueries({ tokenRows });
   });
 
   it("merges distinct cost labels into one public group without counting either amount twice", async () => {
@@ -1108,12 +1217,26 @@ describe("OpenCode PAYG cost beside session estimates", () => {
   });
 
   it("keeps the same raw and rollup split in month-to-date cash and attribution", async () => {
-    prismaMock.externalUsageEvent.groupBy.mockResolvedValue(raw.map((row) => ({
-      ...row,
-      projectId: "project-a",
-      _sum: { costUsd: row.cost },
-      _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
-    })));
+    stubRawScanQueries({
+      // Both public calls below load the material (the memo misses across
+      // them, as it did for the old persistent groupBy stub), so the same
+      // row set is queued once per scan.
+      mtdRowSets: [
+        expandMtdGroups(raw.map((row) => ({
+          ...row,
+          projectId: "project-a",
+          _sum: { costUsd: row.cost },
+          _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
+        }))),
+        expandMtdGroups(raw.map((row) => ({
+          ...row,
+          projectId: "project-a",
+          _sum: { costUsd: row.cost },
+          _count: { _all: 1, costUsd: row.cost === null ? 0 : 1 },
+        }))),
+      ],
+      tokenRows,
+    });
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue(rollups.map((row) => ({
       ...row,
       projectId: "project-a",

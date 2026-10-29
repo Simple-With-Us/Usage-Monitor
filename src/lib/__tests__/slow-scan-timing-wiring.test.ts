@@ -31,10 +31,14 @@ beforeEach(async () => {
 });
 
 describe("slow-scan timing wiring", () => {
-  it("logs MTD cold scan aggregates only when the groupBy path is slow", async () => {
+  it("logs MTD cold scan aggregates only when the scan path is slow", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const clock = vi.spyOn(performance, "now");
-    const groupBy = vi.spyOn(prisma.externalUsageEvent, "groupBy").mockResolvedValue([]);
+    // The MTD raw scan is a chunked $queryRaw walk, not a groupBy (see
+    // RAW_EVENT_SCAN_CHUNK_ROWS in external-usage-events.ts); spy on the
+    // query path it actually takes. The test DB is empty, so the real scan
+    // returns no rows and the payload stays zero-shaped.
+    const rawQuery = vi.spyOn(prisma, "$queryRaw");
 
     const { sumMonthToDateExternalCostByProvider } = await import(
       "../external-usage-events"
@@ -53,7 +57,7 @@ describe("slow-scan timing wiring", () => {
     const result = await sumMonthToDateExternalCostByProvider(monthStart, rawCutoff, now);
 
     expect(result).toBeInstanceOf(Map);
-    expect(groupBy).toHaveBeenCalled();
+    expect(rawQuery).toHaveBeenCalled();
     const mtdLog = info.mock.calls.find((call) => call[0] === "[external-events-mtd-scan]");
     expect(mtdLog).toBeDefined();
     const payload = JSON.parse(String(mtdLog![1]));
@@ -64,7 +68,7 @@ describe("slow-scan timing wiring", () => {
     });
 
     clock.mockRestore();
-    groupBy.mockRestore();
+    rawQuery.mockRestore();
   });
 
   it("keeps deliverProviderAlerts silent on the injected-db path", async () => {

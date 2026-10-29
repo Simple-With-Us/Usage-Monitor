@@ -1067,19 +1067,70 @@ export interface R2WeeklyArchiveStatus {
  */
 const R2_ARCHIVE_MAX_AGE_SECONDS = 8 * 24 * 60 * 60;
 
+interface R2ArchiveStatusFileShape {
+  ok?: unknown;
+  key?: unknown;
+  checkedAt?: unknown;
+  completedAt?: unknown;
+  prunedCount?: unknown;
+  reason?: unknown;
+}
+
+// Liveness (2026-10-29): /api/health reads this status file on every probe.
+// The file changes at most weekly, but the old code re-read and re-parsed it
+// synchronously per probe, which made the fleet's cheapest liveness signal
+// depend on a data read from the /data volume — the same volume the boot
+// backup's integrity_check and Litestream compaction saturate. Memoize the
+// parsed file keyed on (path, mtimeMs, size): an unchanged file costs one
+// stat (metadata only, no data read), and any rewrite invalidates
+// immediately, so the status is never staler than the file itself. The age
+// fields are still computed per call by the caller below.
+let r2ArchiveStatusFileMemo: {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  parsed: R2ArchiveStatusFileShape;
+} | null = null;
+
+function readR2ArchiveStatusFile(
+  statusPath: string
+): R2ArchiveStatusFileShape | null {
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(statusPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  const memo = r2ArchiveStatusFileMemo;
+  if (
+    memo &&
+    memo.path === statusPath &&
+    memo.mtimeMs === stat.mtimeMs &&
+    memo.size === stat.size
+  ) {
+    return memo.parsed;
+  }
+  const parsed = JSON.parse(
+    readFileSync(statusPath, "utf8")
+  ) as R2ArchiveStatusFileShape;
+  r2ArchiveStatusFileMemo = {
+    path: statusPath,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    parsed,
+  };
+  return parsed;
+}
+
 export function getR2WeeklyArchiveStatus(): R2WeeklyArchiveStatus | null {
   const statusPath =
     process.env.R2_ARCHIVE_STATUS_PATH?.trim() || "/data/.r2-archive-status.json";
   try {
-    if (!existsSync(statusPath)) return null;
-    const parsed = JSON.parse(readFileSync(statusPath, "utf8")) as {
-      ok?: unknown;
-      key?: unknown;
-      checkedAt?: unknown;
-      completedAt?: unknown;
-      prunedCount?: unknown;
-      reason?: unknown;
-    };
+    const parsed = readR2ArchiveStatusFile(statusPath);
+    if (parsed === null) return null;
 
     const completedAt =
       typeof parsed.completedAt === "string" ? parsed.completedAt : null;
