@@ -54,6 +54,7 @@ check() {
 
 run_gate() {
   # run_gate <event> [extra args...] -> prints "key=value" lines
+  # Single --path-prefix: the pre-2026-10-29 call shape, kept working.
   local event="$1"; shift
   bash "$GATE" \
     --event "$event" \
@@ -62,6 +63,28 @@ run_gate() {
     --state-dir "$STATE" \
     "$@" 2>&1
 }
+
+run_gate_paths() {
+  # run_gate_paths <event> <prefix>... -- <app>... -> prints "key=value" lines
+  # Repeatable --path-prefix: one entry per workflow on.push.paths pattern.
+  local event="$1"; shift
+  local prefix_args=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do
+    prefix_args[${#prefix_args[@]}]="--path-prefix"
+    prefix_args[${#prefix_args[@]}]="$1"; shift
+  done
+  [[ "${1:-}" == "--" ]] && shift
+  bash "$GATE" \
+    --event "$event" \
+    "${prefix_args[@]}" \
+    --repo-root "$REPO" \
+    --state-dir "$STATE" \
+    "$@" 2>&1
+}
+
+# Mirror of ios-ship.yml on.push.paths. Test 17 asserts it never drifts from
+# the workflow's own list or the gate step's --path-prefix args.
+SHIP_PREFIXES=('ios/**' '.github/workflows/ios-ship.yml' 'scripts/ios-*.sh' 'scripts/ios-fleet/**' 'scripts/ios-fleet-pin.sh' 'scripts/ios-fleet.sha256')
 
 field() {
   # field <output> <key>
@@ -140,6 +163,85 @@ set_state demo "$(git -C "$REPO" rev-parse HEAD)"
 echo "== 8. deciding 'skip' is never an error exit =="
 run_gate schedule demo >/dev/null
 check "exit code on skip" 0 "$?"
+
+echo "== 9. a tooling-only merge since the last ship DOES ship (the missed-push backstop) =="
+commit "scripts/ios-fleet/ship-testflight.sh" "# tooling fix" "fix(ios-fleet): tooling-only, push trigger would have shipped" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "scripts/ios-fleet/ change -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 10. a workflow-file-only merge DOES ship =="
+commit ".github/workflows/ios-ship.yml" "# ship workflow tweak" "ci(ios-ship): workflow-only, push trigger would have shipped" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "workflow file change -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 11. project.yml (under ios/) and the ios-*.sh glob DO ship =="
+commit "ios/UsageMonitor/project.yml" "# xcodegen" "ios: project.yml change" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "project.yml change -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+commit "scripts/ios-nightly.sh" "#!/usr/bin/env bash" "ios: new ios-*.sh helper" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "scripts/ios-*.sh change -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 12. pin files DO ship; nearby non-matching scripts do NOT =="
+commit "scripts/ios-fleet.sha256" "pin" "ios: pin refresh" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "scripts/ios-fleet.sha256 change -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+commit "scripts/other.sh" "# unrelated helper" "chore: unrelated script" >/dev/null
+commit "server/api.ts" "backend change 2" "feat(server): unrelated to iOS" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "scripts/other.sh + server only -> should_ship" 0 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 13. unrelated-only changes still skip with the full prefix set =="
+commit "README.md" "readme tweak" "docs: readme" >/dev/null
+commit "src/server.ts" "backend" "feat(server): more backend" >/dev/null
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "README + server only -> should_ship" 0 "$(field "$out" should_ship)"
+
+echo "== 14. HEAD already shipped still skips with the full prefix set =="
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+out="$(run_gate_paths schedule "${SHIP_PREFIXES[@]}" -- demo)"
+check "HEAD already shipped -> should_ship" 0 "$(field "$out" should_ship)"
+
+echo "== 15. '!' exclusions filter like the push trigger =="
+commit "ios/Generated/build.swift" "// generated" "ios: generated file only" >/dev/null
+out="$(run_gate_paths schedule 'ios/**' '!ios/Generated/**' -- demo)"
+check "excluded-only change -> should_ship" 0 "$(field "$out" should_ship)"
+out="$(run_gate_paths schedule 'ios/**' -- demo)"
+check "same change without the exclusion -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 16. the old single-prefix call keeps working =="
+commit "scripts/ios-fleet/ship-testflight.sh" "# tooling fix 2" "fix(ios-fleet): tooling-only again" >/dev/null
+out="$(run_gate schedule demo)"
+check "single ios/ prefix ignores tooling-only -> should_ship" 0 "$(field "$out" should_ship)"
+commit "ios/App/Next.swift" "// ui 2" "fix(ios): visible change 2" >/dev/null
+out="$(run_gate schedule demo)"
+check "single ios/ prefix still ships ios changes -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 17. gate prefixes match the workflow's own on.push.paths =="
+SYNC_OUT="$(python3 - "$SCRIPT_DIR/../.github/workflows/ios-ship.yml" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+push = text.split('push:', 1)[1].split('workflow_dispatch:', 1)[0]
+push_paths = sorted(m.group(1) for m in re.finditer(r"^\s*-\s*['\"]([^'\"]+)['\"]\s*$", push, re.M))
+step = text.split('Scheduled ship gate', 1)[1].split('- name:', 1)[0]
+gate_prefixes = sorted(m.group(1) for m in re.finditer(r"--path-prefix\s+['\"]([^'\"]+)['\"]", step))
+print("push=" + ",".join(push_paths))
+print("gate=" + ",".join(gate_prefixes))
+PY
+)"
+PUSH_LIST="$(printf '%s\n' "$SYNC_OUT" | sed -n 's/^push=//p')"
+GATE_LIST="$(printf '%s\n' "$SYNC_OUT" | sed -n 's/^gate=//p')"
+check "gate step passes every push path" "$PUSH_LIST" "$GATE_LIST"
+MIRROR_LIST="$(printf '%s\n' "${SHIP_PREFIXES[@]}" | LC_ALL=C sort | tr '\n' ',' | sed 's/,$//')"
+check "test mirror matches push paths" "$PUSH_LIST" "$MIRROR_LIST"
 
 echo
 echo "passed=${PASS} failed=${FAIL}"
