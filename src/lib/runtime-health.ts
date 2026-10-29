@@ -1095,34 +1095,41 @@ let r2ArchiveStatusFileMemo: {
 function readR2ArchiveStatusFile(
   statusPath: string
 ): R2ArchiveStatusFileShape | null {
-  let stat: ReturnType<typeof statSync>;
+  // Open once and fstat/read the same descriptor: a stat-then-read-by-path
+  // pair would be a check/use race (and CodeQL flags it as one).
+  let fd: number;
   try {
-    stat = statSync(statusPath);
+    fd = openSync(statusPath, "r");
   } catch (error) {
     if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
       return null;
     }
     throw error;
   }
-  const memo = r2ArchiveStatusFileMemo;
-  if (
-    memo &&
-    memo.path === statusPath &&
-    memo.mtimeMs === stat.mtimeMs &&
-    memo.size === stat.size
-  ) {
-    return memo.parsed;
+  try {
+    const stat = fstatSync(fd);
+    const memo = r2ArchiveStatusFileMemo;
+    if (
+      memo &&
+      memo.path === statusPath &&
+      memo.mtimeMs === stat.mtimeMs &&
+      memo.size === stat.size
+    ) {
+      return memo.parsed;
+    }
+    const parsed = JSON.parse(
+      readFileSync(fd, "utf8")
+    ) as R2ArchiveStatusFileShape;
+    r2ArchiveStatusFileMemo = {
+      path: statusPath,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      parsed,
+    };
+    return parsed;
+  } finally {
+    closeSync(fd);
   }
-  const parsed = JSON.parse(
-    readFileSync(statusPath, "utf8")
-  ) as R2ArchiveStatusFileShape;
-  r2ArchiveStatusFileMemo = {
-    path: statusPath,
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-    parsed,
-  };
-  return parsed;
 }
 
 export function getR2WeeklyArchiveStatus(): R2WeeklyArchiveStatus | null {
