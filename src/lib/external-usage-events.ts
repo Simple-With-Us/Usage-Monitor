@@ -826,13 +826,29 @@ function rawEventScanCursorFromRow(row: {
   occurredAt: Date | string;
   id: string;
 }): RawEventScanCursor {
-  return {
-    occurredAt:
-      row.occurredAt instanceof Date
-        ? row.occurredAt
-        : new Date(String(row.occurredAt)),
-    id: row.id,
-  };
+  // Prisma stores DateTime in SQLite as ISO text with an explicit offset
+  // ("2026-10-15T12:00:00.000+00:00") and the adapter hands it back as a
+  // Date or that same string — both parse unambiguously. Normalize
+  // defensively anyway (review, PR #1820): a space-separated value would
+  // parse as LOCAL time via new Date(), silently shifting the keyset
+  // boundary, so rewrite it to the UTC ISO form; a value with no offset
+  // is read as UTC, matching how the column is written. An unparseable
+  // value fails the scan loudly instead of binding a NaN cursor.
+  let occurredAt: Date;
+  if (row.occurredAt instanceof Date) {
+    occurredAt = row.occurredAt;
+  } else {
+    const raw = String(row.occurredAt).trim();
+    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+    occurredAt = new Date(hasOffset ? iso : `${iso}Z`);
+  }
+  if (Number.isNaN(occurredAt.getTime())) {
+    throw new Error(
+      `raw event scan: unparseable occurredAt cursor value ${JSON.stringify(row.occurredAt)}`
+    );
+  }
+  return { occurredAt, id: String(row.id) };
 }
 
 /**
