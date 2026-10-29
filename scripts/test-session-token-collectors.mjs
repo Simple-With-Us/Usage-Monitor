@@ -290,16 +290,18 @@ assert(
   "BotFleet child-path detection matches Claude's projects-folder encoding",
 );
 assert(
-  isBotFleetSessionPath("/srv/bf/data/workspaces/abc/rollout.jsonl", {
-    BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces",
+  !isBotFleetSessionPath("/Users/jay/.claude/projects/-Users-jay-Code-my-botfleet-workspaces-notes/s.jsonl", {}) &&
+    !isBotFleetSessionPath("/Users/jay/Code/botfleet-workspaces-tool/x.jsonl", {}),
+  "BotFleet child-path detection ignores ordinary folders that merely mention the name",
+);
+assert(
+  isBotFleetSessionPath("/srv/bf/data/workspaces/abc/", {
+    BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces/",
   }) &&
-    isBotFleetSessionPath("/home/u/.claude/projects/-srv-bf-data-workspaces-abc/s.jsonl", {
-      BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces/",
-    }) &&
-    !isBotFleetSessionPath("/srv/bf/data/workspaces-old/abc/rollout.jsonl", {
+    !isBotFleetSessionPath("/srv/bf/data/workspaces-old/abc/", {
       BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces",
     }),
-  "BotFleet child-path detection honours BOTFLEET_WORKSPACES_DIRS",
+  "BotFleet child-path detection honours BOTFLEET_WORKSPACES_DIRS on real paths",
 );
 
 const traversalRoot = await mkdtemp(join(tmpdir(), "collector-traversal-"));
@@ -841,10 +843,15 @@ const claudeFixture = [
 ].join("\n");
 
 const claudeEvents = parseClaudeSessionJsonl(claudeFixture, { sessionKey: "test/claude-session.jsonl" });
-assert(claudeEvents.length === 4, `claude event count ${claudeEvents.length}`);
+// Four token types; the input is split into the row the old parser stored
+// (1500 - 300) and the remainder it never counted (300).
+assert(claudeEvents.length === 5, `claude event count ${claudeEvents.length}`);
 assert(claudeEvents[0].producerKeyRef === "claude-opus-5", "claude model parsed");
 // Anthropic's input_tokens already excludes cache reads and writes.
-assert(claudeEvents.find((e) => e.label === "token:input")?.quantity === 1500, "claude uncached input quantity");
+assert(
+  claudeEvents.filter((e) => e.label === "token:input").reduce((sum, e) => sum + e.quantity, 0) === 1500,
+  "claude uncached input quantity",
+);
 assert(claudeEvents.find((e) => e.label === "token:cacheRead")?.quantity === 300, "claude cache read quantity");
 assert(claudeEvents.find((e) => e.label === "token:cacheCreation")?.quantity === 200, "claude cache write quantity");
 assert(claudeEvents.find((e) => e.label === "token:output")?.quantity === 450, "claude output quantity");

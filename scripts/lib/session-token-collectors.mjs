@@ -392,11 +392,21 @@ export function claudeUsageBreakdown(usage) {
  * stored stays byte-identical.  The last line moves as a streaming message
  * gains blocks between passes, which would mint a new eventId.  A line with no
  * `message.id` is counted as before.
+ *
+ * `seenMessageIds` may be shared across the files of one collector pass, so a
+ * call copied into a forked or resumed session's transcript is counted once;
+ * the caller walks the files oldest first, so the original keeps its id.
+ *
+ * An `agent.launcher` in `extraMetadata` is not stamped on a sidechain
+ * (subagent) line: BotFleet bills only its own main-thread turns, so a
+ * subagent call must never be offered to the monitor's BotFleet coverage drop.
  */
-export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt, extraMetadata } = {}) {
+export function parseClaudeSessionJsonl(
+  text,
+  { sessionKey, fallbackOccurredAt, extraMetadata, seenMessageIds = new Set() } = {}
+) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
-  const seenMessageIds = new Set();
   const lines = text.split("\n");
   for (let lineNo = 0; lineNo < lines.length; lineNo += 1) {
     const line = lines[lineNo].trim();
@@ -424,25 +434,47 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt, 
     const effort = obj.effort || "standard";
 
     const breakdown = claudeUsageBreakdown(usage);
+    const sidechain = obj.isSidechain === true || (typeof obj.agentId === "string" && !!obj.agentId);
+    const { "agent.launcher": launcher, ...baseMetadata } = extraMetadata ?? {};
     const metadata = {
-      ...(extraMetadata ?? {}),
+      ...baseMetadata,
+      ...(launcher && !sidechain ? { "agent.launcher": launcher } : {}),
       ...(sessionId ? { [SESSION_ID_METADATA_KEY]: sessionId } : {}),
     };
+    const common = {
+      producerId: CLAUDE_PRODUCER_ID,
+      provider: "anthropic",
+      service: "claude-code",
+      sessionKey: sessionKey ?? "claude",
+      occurredAtIso,
+      model,
+      ...(requestId ? { providerRequestId: requestId } : {}),
+      ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
+    };
+    // The input row keeps the quantity the old inclusive split gave it, so a
+    // stored row replays byte-identical (the eventId hashes the quantity).
+    // The old split took cache reads off the input whenever they were no
+    // larger than it; that missing part is sent as its own row, so the call
+    // still totals Anthropic's full uncached input without a double count.
+    const legacy = splitInclusiveCache({ input: breakdown.input, cacheRead: breakdown.cacheRead });
+    const inputExclusiveDelta = breakdown.input - legacy.input;
 
     events.push(
       ...tokenEventsFromBreakdown({
-        producerId: CLAUDE_PRODUCER_ID,
-        provider: "anthropic",
-        service: "claude-code",
-        sessionKey: sessionKey ?? "claude",
-        occurredAtIso,
-        model,
-        breakdown,
+        ...common,
+        breakdown: { ...breakdown, input: legacy.input },
         extraId: `L${lineNo}:${model}`,
-        ...(requestId ? { providerRequestId: requestId } : {}),
-        ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
       })
     );
+    if (inputExclusiveDelta > 0) {
+      events.push(
+        ...tokenEventsFromBreakdown({
+          ...common,
+          breakdown: { input: inputExclusiveDelta, output: 0, cacheRead: 0, cacheCreation: 0 },
+          extraId: `L${lineNo}:${model}:input-exclusive`,
+        })
+      );
+    }
   }
   return events;
 }

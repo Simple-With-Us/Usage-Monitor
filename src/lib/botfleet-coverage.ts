@@ -26,10 +26,21 @@ import {
  *     (`turnStartedAt` .. the turn's settle time, with a small margin).
  *
  * Anything short of that is kept: an untagged child, a BotFleet turn without a
- * child session id or start time, or a child row that arrives before BotFleet
- * reported its turn.  Those stay as duplicates, which the owner prefers to a
- * hole in the ledger.
+ * child session id or start time, a turn that reported no usage, or a child
+ * row that arrives before BotFleet reported its turn.  Those stay as
+ * duplicates, which the owner prefers to a hole in the ledger.
+ *
+ * OFF BY DEFAULT (BOTFLEET_CHILD_COVERAGE_DROP=1 turns it on).  Same session
+ * and same time is still not proof that BotFleet billed a given call: the
+ * Claude CLI can run a turn of its own inside a BotFleet turn (a background
+ * task notification), and BotFleet discards that turn's usage.  Until BotFleet
+ * names the exact calls it billed, every tagged row is kept; the tag alone
+ * lets a reader separate the two producers exactly.
  */
+
+export function botFleetCoverageDropEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.BOTFLEET_CHILD_COVERAGE_DROP === "1";
+}
 
 export const BOTFLEET_SOURCE_APP = "botfleet";
 export const BOTFLEET_LAUNCHER = "botfleet";
@@ -38,9 +49,10 @@ export const BOTFLEET_LAUNCHER = "botfleet";
 export const BOTFLEET_CHILD_SESSION_KEY = "childSessionId";
 export const BOTFLEET_TURN_STARTED_KEY = "turnStartedAt";
 
-/** Clock margin around a BotFleet turn: the child's own timestamps and
- *  BotFleet's are taken on the same machine, so a minute is generous. */
-export const BOTFLEET_TURN_MARGIN_MS = 60_000;
+/** Rounding margin around a BotFleet turn.  The child's timestamps and
+ *  BotFleet's come from the same machine's clock, so this only absorbs
+ *  millisecond rounding; a wider margin would reach calls outside the turn. */
+export const BOTFLEET_TURN_MARGIN_MS = 2_000;
 
 /** The longest BotFleet turn the lookup considers.  A turn's event is stored
  *  at its settle time, which can be well after the child calls it covers. */
@@ -65,8 +77,20 @@ export interface BotFleetTurnSpan {
 }
 
 /** The child-session span a stored BotFleet turn covers, or null when the
- *  turn does not name its child session and start time. */
-export function botFleetTurnSpan(row: { occurredAt: Date; metadata: unknown }): BotFleetTurnSpan | null {
+ *  turn does not name its child session and start time, or billed nothing.
+ *  A failed or unreported turn (usageReported false, a usageGap, quantity 0)
+ *  covers no call: the child's rows are then the only record of that usage. */
+export function botFleetTurnSpan(row: {
+  occurredAt: Date;
+  metadata: unknown;
+  quantity?: number | null;
+}): BotFleetTurnSpan | null {
+  const meta =
+    row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+      ? (row.metadata as Record<string, unknown>)
+      : null;
+  if (!meta || meta.usageReported !== true || meta.usageGap != null) return null;
+  if (!(typeof row.quantity === "number" && row.quantity > 0)) return null;
   const childSessionId = readMetadataString(row.metadata, BOTFLEET_CHILD_SESSION_KEY);
   const startedAt = readMetadataString(row.metadata, BOTFLEET_TURN_STARTED_KEY);
   if (!childSessionId || !startedAt) return null;
@@ -89,8 +113,10 @@ export interface BotFleetCoverageResult {
 
 /** Drop the tagged child events a stored BotFleet turn provably covers. */
 export async function dropEventsCoveredByBotFleet(
-  events: ParsedUsageTelemetryEvent[]
+  events: ParsedUsageTelemetryEvent[],
+  env: Record<string, string | undefined> = process.env
 ): Promise<BotFleetCoverageResult> {
+  if (!botFleetCoverageDropEnabled(env)) return { events, skippedBotFleetCovered: 0 };
   const tagged = events.filter(isBotFleetTaggedChildEvent);
   if (tagged.length === 0) return { events, skippedBotFleetCovered: 0 };
 
@@ -112,7 +138,7 @@ export async function dropEventsCoveredByBotFleet(
         // Half-open chunks, so a row on a boundary is read once.
         occurredAt: { gte: new Date(cursor), ...(chunkTo < toMs ? { lt: new Date(chunkTo) } : { lte: new Date(chunkTo) }) },
       },
-      select: { occurredAt: true, metadata: true },
+      select: { occurredAt: true, metadata: true, quantity: true },
     });
     for (const row of rows) {
       const span = botFleetTurnSpan(row);

@@ -284,10 +284,10 @@ export const BOTFLEET_LAUNCHER_METADATA = Object.freeze({ "agent.launcher": "bot
 
 /** Claude Code names a project folder after its cwd with every character
  *  outside [A-Za-z0-9] replaced by "-", so `~/.botfleet/workspaces/x` becomes
- *  `-Users-jay--botfleet-workspaces-x`. */
-export function claudeProjectSlug(path) {
-  return path.replace(/[^A-Za-z0-9]/g, "-");
-}
+ *  `-Users-jay--botfleet-workspaces-x`.  Only that exact form, as the name of
+ *  a folder directly under `projects/`, counts; the slug is lossy, so a
+ *  configured root is matched against the transcript's real cwd instead. */
+const CLAUDE_BOTFLEET_PROJECT_FOLDER = /\/projects\/[^/]*--botfleet-workspaces-[^/]+\//;
 
 /** Extra BotFleet workspace roots, for a BotFleet whose data dir is not
  *  `~/.botfleet` (BotFleet-server sets OMB_DATA_DIR, so its workspaces live in
@@ -303,12 +303,9 @@ export function isBotFleetSessionPath(path, env = process.env) {
   if (
     path.includes("/.botfleet/workspaces/") ||
     path.includes(".botfleet-workspaces-") ||
-    // The Claude projects-folder form of `/.botfleet/workspaces/`.
-    path.includes("-botfleet-workspaces-")
+    CLAUDE_BOTFLEET_PROJECT_FOLDER.test(path)
   ) {
     return true;
   }
-  return botFleetWorkspaceRoots(env).some(
-    (root) => path.startsWith(`${root}/`) || path.includes(`${claudeProjectSlug(root)}-`)
-  );
+  return botFleetWorkspaceRoots(env).some((root) => path.startsWith(`${root}/`));
 }

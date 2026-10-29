@@ -474,11 +474,14 @@ describe("parseClaudeSessionJsonl", () => {
       },
     });
     const events = parseClaudeSessionJsonl(line, { sessionKey: "test/claude-session.jsonl" });
-    expect(events).toHaveLength(4);
+    // Four token types, the input split into its stored row and the remainder.
+    expect(events).toHaveLength(5);
     expect(events[0].producerKeyRef).toBe("claude-3-7-sonnet");
-    // Anthropic's input_tokens excludes cache reads and writes, so nothing is
-    // subtracted from it.
-    expect(events.find((e) => e.label === "token:input")?.quantity).toBe(1500);
+    // Anthropic's input_tokens excludes cache reads and writes, so the call's
+    // input rows total the full 1500.
+    expect(
+      events.filter((e) => e.label === "token:input").reduce((sum, e) => sum + e.quantity, 0)
+    ).toBe(1500);
     expect(events.find((e) => e.label === "token:cacheRead")?.quantity).toBe(300);
   });
 
@@ -534,6 +537,58 @@ describe("parseClaudeSessionJsonl", () => {
     expect(new Set(events.map((e) => e.providerRequestId))).toEqual(new Set(["req_A", "req_B"]));
     expect(events.every((e) => e.metadata["session.id"] === "sess-1")).toBe(true);
     expect(events.every((e) => e.metadata.collector === "transcript")).toBe(true);
+  });
+
+  it("keeps the old input row's id and sends the uncounted input as its own row", () => {
+    // cacheRead <= input: the old inclusive split sent input 5000 - 1200 = 3800.
+    const line = JSON.stringify({
+      timestamp: "2026-10-29T14:00:00.000Z",
+      message: {
+        id: "msg_1",
+        model: "claude-opus-4",
+        usage: { input_tokens: 5000, output_tokens: 10, cache_read_input_tokens: 1200 },
+      },
+    });
+    const events = parseClaudeSessionJsonl(line, { sessionKey: "s" });
+    const inputs = events.filter((e) => e.label === "token:input");
+    expect(inputs.map((e) => e.quantity).sort((a, b) => a - b)).toEqual([1200, 3800]);
+    // The 3800 row is the row the old parser stored, byte for byte.
+    const legacy = tokenEventsFromBreakdown({
+      producerId: CLAUDE_PRODUCER_ID,
+      provider: "anthropic",
+      service: "claude-code",
+      sessionKey: "s",
+      occurredAtIso: "2026-10-29T14:00:00.000Z",
+      model: "claude-opus-4",
+      breakdown: splitInclusiveCache({ input: 5000, output: 10, cacheRead: 1200 }),
+      extraId: "L0:claude-opus-4",
+    });
+    expect(events.find((e) => e.quantity === 3800)?.eventId).toBe(
+      legacy.find((e) => e.label === "token:input")?.eventId
+    );
+    expect(inputs.reduce((sum, e) => sum + e.quantity, 0)).toBe(5000);
+  });
+
+  it("does not offer a subagent (sidechain) call to the BotFleet coverage drop", () => {
+    const usage = { input_tokens: 5, output_tokens: 40 };
+    const text = [
+      JSON.stringify({ sessionId: "s1", timestamp: "2026-10-29T14:00:00.000Z", message: { id: "a", model: "m", usage } }),
+      JSON.stringify({ sessionId: "s1", isSidechain: true, timestamp: "2026-10-29T14:00:01.000Z", message: { id: "b", model: "m", usage } }),
+    ].join("\n");
+    const events = parseClaudeSessionJsonl(text, { sessionKey: "s", extraMetadata: { "agent.launcher": "botfleet" } });
+    const byMessageLine = (prefix) => events.filter((e) => e.timestamp === undefined && e.occurredAt.startsWith(prefix));
+    expect(byMessageLine("2026-10-29T14:00:00").every((e) => e.metadata["agent.launcher"] === "botfleet")).toBe(true);
+    expect(byMessageLine("2026-10-29T14:00:01").every((e) => !("agent.launcher" in e.metadata))).toBe(true);
+  });
+
+  it("counts a call copied into a second transcript once when the pass shares its set", () => {
+    const usage = { input_tokens: 5, output_tokens: 40 };
+    const line = JSON.stringify({ timestamp: "2026-10-29T14:00:00.000Z", message: { id: "msg_A", model: "m", usage } });
+    const seenMessageIds = new Set();
+    const original = parseClaudeSessionJsonl(line, { sessionKey: "orig", seenMessageIds });
+    const fork = parseClaudeSessionJsonl(line, { sessionKey: "fork", seenMessageIds });
+    expect(original.length).toBeGreaterThan(0);
+    expect(fork).toEqual([]);
   });
 
   it("keeps the eventId the first line of a call always had, as the call grows", () => {
