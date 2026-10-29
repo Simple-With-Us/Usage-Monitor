@@ -99,6 +99,28 @@ describe("POST /api/otlp/v1/traces", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(0);
   });
 
+  it("writes a retried turn once per platform and generation id", async () => {
+    const turn = (generationId: string | undefined) => ({
+      platform: "cursor-agent",
+      model: "gpt-5",
+      inputTokens: 11,
+      outputTokens: 7,
+      conversationId: "conv-retry",
+      ...(generationId ? { generationId } : {}),
+      occurredAt: "2026-10-11T12:00:00.000Z",
+    });
+    const body = { turns: [turn("gen-1"), turn("gen-1"), turn("gen-2"), turn(undefined)] };
+    const first = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+    expect(await first.json()).toMatchObject({ ok: true, accepted: 3 });
+    // The exporter did not see the response and sends the same request again.
+    const retry = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+    expect(retry.status).toBe(202);
+    // Only the turn with no generation id is indistinguishable from a new one.
+    expect(await retry.json()).toMatchObject({ ok: true, accepted: 1 });
+    const turns = await prisma.agentTurn.findMany({ orderBy: { generationId: "asc" } });
+    expect(turns.map((t) => t.generationId)).toEqual([null, null, "gen-1", "gen-2"]);
+  });
+
   it("rejects a payload that is neither resourceSpans nor turns", async () => {
     const res = await POST(
       jsonRequest({ resourceLogs: [] }, { authorization: "Bearer test-token-123" })

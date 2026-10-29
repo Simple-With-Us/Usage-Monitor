@@ -48,6 +48,7 @@ import {
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
 import { dropEventsCoveredByNative } from "@/lib/native-telemetry-coverage";
+import { dropEventsCoveredByBotFleet } from "@/lib/botfleet-coverage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -273,6 +274,17 @@ export async function POST(request: NextRequest) {
     events = nativeCoverage.events;
   }
 
+  // BotFleet-vs-child coverage: a child harness row the collector tagged as
+  // BotFleet-launched is dropped only when a stored `botfleet` turn names the
+  // same child session and spans the row's time.  Anything unproven is kept
+  // (duplicates over loss).  Counted as duplicates in the ACK, like above.
+  const botFleetCoverage = await dropEventsCoveredByBotFleet(events);
+  if (botFleetCoverage.skippedBotFleetCovered > 0) {
+    events = botFleetCoverage.events;
+  }
+  const skippedCoveredElsewhere =
+    nativeCoverage.skippedNativeCovered + botFleetCoverage.skippedBotFleetCovered;
+
   // Default-off LiteLLM cost derivation (INGEST_COST_DERIVATION_ENABLED):
   // stamps `_derivedCostUsd` into metadata for unpriced token events whose
   // keyRef resolves in the bundled pricing snapshot. Metadata only —
@@ -458,7 +470,7 @@ export async function POST(request: NextRequest) {
         persistResult.attempted -
           persistResult.persisted -
           persistResult.skippedPrunedDuplicates +
-          nativeCoverage.skippedNativeCovered
+          skippedCoveredElsewhere
       );
       return NextResponse.json(
         {
@@ -466,11 +478,11 @@ export async function POST(request: NextRequest) {
           schemaVersion: 2,
           // `received` counts every submitted event (valid + rejected), so the
           // shared ACK invariant holds: persisted + duplicates + pruned +
-          // rejected === received.  The native-covered events are counted as
-          // duplicates: they were not stored twice because the native feed
-          // already carries that usage.
+          // rejected === received.  The native-covered and BotFleet-covered
+          // events are counted as duplicates: they were not stored twice
+          // because another feed already carries that usage.
           received:
-            persistResult.attempted + v2Rejected + nativeCoverage.skippedNativeCovered,
+            persistResult.attempted + v2Rejected + skippedCoveredElsewhere,
           persisted: persistResult.persisted,
           duplicates,
           pruned: persistResult.skippedPrunedDuplicates,

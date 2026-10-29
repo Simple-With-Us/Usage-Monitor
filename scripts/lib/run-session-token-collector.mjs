@@ -218,9 +218,38 @@ export function codexSessionKeyFor(codexHome, filePath) {
   return `sessions/${fileName}`;
 }
 
+/** The Codex conversation id from a rollout's `session_meta` row, which is
+ *  the thread id an app-server client such as BotFleet sees. */
+export function codexSessionId(text) {
+  for (const line of text.split("\n")) {
+    if (!line.includes('"session_meta"')) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row?.type !== "session_meta") continue;
+      const id = row.payload?.id;
+      return typeof id === "string" && id.trim() ? id.trim() : undefined;
+    } catch {
+      // Keep looking for a valid session_meta row.
+    }
+  }
+  return undefined;
+}
+
+/** Add correlation metadata to already-built events.  The eventId is not
+ *  touched, and the monitor ignores a correlation key that only one side of a
+ *  replay carries, so tagging an event the monitor already stored is safe. */
+export function withCorrelationMetadata(events, metadata) {
+  const entries = Object.entries(metadata).filter(([, value]) => value != null && value !== "");
+  if (entries.length === 0) return events;
+  const extra = Object.fromEntries(entries);
+  return events.map((event) => ({ ...event, metadata: { ...(event.metadata ?? {}), ...extra } }));
+}
+
 /** BotFleet emits its child-turn usage separately under producer `botfleet`.
- * Exclude those Codex rollouts here because ingest idempotency is namespaced
- * by producer and cannot collapse the same turn across both producers. */
+ * Ingest idempotency is namespaced by producer and cannot collapse the same
+ * turn across both producers, so these rollouts are either excluded
+ * (USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1) or tagged for the monitor's
+ * exact BotFleet coverage check. */
 export function isBotFleetManagedCodexSession(text) {
   for (const line of text.split("\n")) {
     if (!line.includes('"session_meta"')) continue;
@@ -246,6 +275,40 @@ export function botFleetChildExclusionEnabled(env = process.env) {
   return env.USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN === "1";
 }
 
-export function isBotFleetSessionPath(path) {
-  return path.includes("/.botfleet/workspaces/") || path.includes(".botfleet-workspaces-");
+/** The metadata a collector stamps on a session it recognises as BotFleet's
+ *  child, when it sends the session instead of dropping it.  The monitor drops
+ *  such a row at ingest only when a stored `botfleet` turn names the same
+ *  child session (src/lib/botfleet-coverage.ts), so a turn BotFleet never
+ *  reported is kept rather than lost. */
+export const BOTFLEET_LAUNCHER_METADATA = Object.freeze({ "agent.launcher": "botfleet" });
+
+/** Claude Code names a project folder after its cwd with every character
+ *  outside [A-Za-z0-9] replaced by "-", so `~/.botfleet/workspaces/x` becomes
+ *  `-Users-jay--botfleet-workspaces-x`. */
+export function claudeProjectSlug(path) {
+  return path.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+/** Extra BotFleet workspace roots, for a BotFleet whose data dir is not
+ *  `~/.botfleet` (BotFleet-server sets OMB_DATA_DIR, so its workspaces live in
+ *  `<data>/workspaces`).  Comma-separated absolute paths. */
+export function botFleetWorkspaceRoots(env = process.env) {
+  return String(env.BOTFLEET_WORKSPACES_DIRS ?? "")
+    .split(",")
+    .map((root) => root.trim().replace(/\/+$/, ""))
+    .filter((root) => root.startsWith("/"));
+}
+
+export function isBotFleetSessionPath(path, env = process.env) {
+  if (
+    path.includes("/.botfleet/workspaces/") ||
+    path.includes(".botfleet-workspaces-") ||
+    // The Claude projects-folder form of `/.botfleet/workspaces/`.
+    path.includes("-botfleet-workspaces-")
+  ) {
+    return true;
+  }
+  return botFleetWorkspaceRoots(env).some(
+    (root) => path.startsWith(`${root}/`) || path.includes(`${claudeProjectSlug(root)}-`)
+  );
 }

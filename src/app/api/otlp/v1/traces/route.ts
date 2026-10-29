@@ -19,6 +19,7 @@ import {
   tryAcquireIngestAdmission,
 } from "@/lib/ingest-admission";
 import { fanoutAgentTurns } from "@/lib/usage-fanout";
+import { newAgentTurns } from "@/lib/agent-turn-dedupe";
 
 // OTLP-HTTP traces ingest: POST /api/otlp/v1/traces
 //
@@ -164,9 +165,11 @@ export async function POST(request: NextRequest) {
     }
 
     let persisted = 0;
-    if (mapped.turns.length > 0) {
+    // A retried export must not insert the same turns twice (agent-turn-dedupe.ts).
+    const freshTurns = mapped.turns.length > 0 ? await newAgentTurns(mapped.turns) : [];
+    if (freshTurns.length > 0) {
       const result = await prisma.agentTurn.createMany({
-        data: mapped.turns.map((t) => ({
+        data: freshTurns.map((t) => ({
           platform: t.platform,
           seat: t.seat,
           repo: t.repo,
@@ -188,7 +191,7 @@ export async function POST(request: NextRequest) {
         })),
       });
       persisted = result.count;
-      void fanoutAgentTurns(mapped.turns);
+      void fanoutAgentTurns(freshTurns);
     }
 
     // claude_code.llm_request spans -> AiRequest (UM-1590).  Upserts on the

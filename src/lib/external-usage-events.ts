@@ -33,6 +33,7 @@ import {
   shouldDeriveAnalyticsTokenEstimate,
 } from "@/lib/subscription-analytics";
 import { logSlowScanTimingIfNeeded } from "@/lib/slow-scan-timing";
+import { oneSidedCorrelationKeys, withoutMetadataKeys } from "@/lib/telemetry-correlation";
 import {
   MTD_SCAN_MEMO_TTL_MS,
   clearMtdScanMemo,
@@ -332,10 +333,13 @@ function withoutDerivedCostMetadata(value: unknown): unknown {
 // throw ExternalUsageIdempotencyCollisionError.
 function comparableEvent(
   event: ExternalUsageEventInput | ExistingExternalUsageEvent,
-  options: { ignoreCanonicalAi?: boolean } = {}
+  options: { ignoreCanonicalAi?: boolean; ignoreMetadataKeys?: readonly string[] } = {}
 ) {
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
-  const serverComparable = withoutDerivedCostMetadata(value.metadata ?? null);
+  const serverComparable = withoutMetadataKeys(
+    withoutDerivedCostMetadata(value.metadata ?? null),
+    options.ignoreMetadataKeys ?? []
+  );
   const metadata = options.ignoreCanonicalAi
     ? withoutCanonicalAiMetadata(serverComparable)
     : serverComparable;
@@ -384,8 +388,12 @@ function sameEvent(
   // carries the projection.  When both sides have it, it is compared as usual.
   const ignoreCanonicalAi =
     hasCanonicalAiMetadata(left.metadata) !== hasCanonicalAiMetadata(right.metadata);
-  const leftComp = comparableEvent(left, { ignoreCanonicalAi });
-  const rightComp = comparableEvent(right, { ignoreCanonicalAi });
+  // Correlation keys (session id, launcher) a producer learned after it first
+  // sent the event: one-sided means "now known", not "changed".  See
+  // telemetry-correlation.ts.
+  const ignoreMetadataKeys = oneSidedCorrelationKeys(left.metadata, right.metadata);
+  const leftComp = comparableEvent(left, { ignoreCanonicalAi, ignoreMetadataKeys });
+  const rightComp = comparableEvent(right, { ignoreCanonicalAi, ignoreMetadataKeys });
   if (stableJson(leftComp) === stableJson(rightComp)) {
     return true;
   }

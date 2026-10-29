@@ -44,6 +44,8 @@ import {
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  BOTFLEET_LAUNCHER_METADATA,
+  botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
   expandHome,
   fileMayContainEventsSince,
@@ -120,9 +122,15 @@ export async function collectClaudeEvents({
   const files = await walkFiles(projectsDir, { suffix: ".jsonl", onTraversalError: markIncomplete });
   const events = [];
   for (const file of files) {
-    // BotFleet owns its child-turn usage under producer `botfleet`, and ingest
-    // idempotency is producer-scoped, so those sessions must not be sent here.
-    if (isBotFleetSessionPath(file)) continue;
+    // BotFleet reports its child turns under producer `botfleet`, and ingest
+    // idempotency is producer-scoped.  Such a session is excluded when
+    // USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1, and otherwise sent tagged, so
+    // the monitor drops it only where a stored BotFleet turn names this very
+    // session (src/lib/botfleet-coverage.ts) and keeps it where none does.
+    // The path test never matched Claude's projects-folder names before
+    // (`/.botfleet/` is written `--botfleet-`), so this was a silent no-op.
+    const botFleetChild = isBotFleetSessionPath(file);
+    if (botFleetChild && botFleetChildExclusionEnabled()) continue;
     if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
     const text = await readIfFresh(file, { onReadError: markIncomplete });
     if (!text) continue;
@@ -133,6 +141,7 @@ export async function collectClaudeEvents({
         // The machine identity, so the receiver can tell this machine's
         // transcript rows from another machine's native OTLP rows.
         "host.name": hostname(),
+        ...(botFleetChild ? BOTFLEET_LAUNCHER_METADATA : {}),
       },
     });
     events.push(...filterEventsSince(parsed, since));

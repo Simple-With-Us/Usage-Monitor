@@ -637,6 +637,7 @@ export function buildOpencodeTokenEvents({
   assistantRows,
   projectBySession,
   sessionIdCutoffMs = OPENCODE_SESSION_ID_CUTOFF_MS,
+  botFleetSessionIds = new Set(),
 }) {
   const events = [];
   for (const row of assistantRows) {
@@ -647,6 +648,13 @@ export function buildOpencodeTokenEvents({
       const completedMs = Date.parse(event.occurredAt);
       if (sessionId && Number.isFinite(completedMs) && completedMs >= sessionIdCutoffMs) {
         event.metadata.sessionId = sessionId;
+      }
+      // `session.id` and `agent.launcher` are correlation keys: the monitor
+      // ignores one that only one side of a replay carries, so unlike
+      // `sessionId` above they need no cutoff (src/lib/telemetry-correlation.ts).
+      if (sessionId) {
+        event.metadata["session.id"] = sessionId;
+        if (botFleetSessionIds.has(sessionId)) event.metadata["agent.launcher"] = "botfleet";
       }
       if (project) {
         event.project = project;
