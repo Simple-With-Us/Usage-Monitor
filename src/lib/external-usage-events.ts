@@ -784,6 +784,73 @@ interface AnalyticsTokenRow {
   quantity: number;
 }
 
+// --- Chunked raw-event scans ------------------------------------------------
+// Prisma 7 runs on the better-sqlite3 driver adapter, so every query executes
+// synchronously on the Node main thread (see create-prisma-client.ts): a
+// query's wall time is event-loop blockage during which NO request — not even
+// the DB-free /api/health — can be served. A single GROUP BY over the
+// month-to-date raw window measured 135s cold in production (2026-10-29,
+// ~780k rows; the plan is an occurredAt range scan into a file-backed temp
+// B-tree), which is why the app could print Ready, report a healthy replica,
+// and still never answer a health probe once the scheduler's first tick
+// started its budget computes.
+//
+// The scans below therefore never issue one unbounded aggregation. They walk
+// the window with a keyset cursor on (occurredAt, id) in bounded row chunks
+// and take a setImmediate turn between chunks, so the event loop keeps
+// serving requests while a scan is in flight. SUM / COUNT are associative,
+// so merging per-chunk rows in JS returns exactly the single-shot aggregate
+// (verified against the old groupBy on a 780k-row fixture: identical groups,
+// sums equal to float-association noise). Two alternatives were measured and
+// rejected: Prisma's own cursor pagination re-walks the window per page
+// (quadratic total, multi-second pages), and time-sliced groupBys stay
+// unbounded because a slice's cost follows physical row placement, not a row
+// count — one hot day is still a multi-second block.
+const RAW_EVENT_SCAN_CHUNK_ROWS = 10_000;
+
+function yieldEventLoopTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+interface RawEventScanCursor {
+  occurredAt: Date;
+  id: string;
+}
+
+function rawEventCursorClause(cursor: RawEventScanCursor | null): Prisma.Sql {
+  if (!cursor) return Prisma.empty;
+  return Prisma.sql`AND ("occurredAt" > ${cursor.occurredAt} OR ("occurredAt" = ${cursor.occurredAt} AND "id" > ${cursor.id}))`;
+}
+
+function rawEventScanCursorFromRow(row: {
+  occurredAt: Date | string;
+  id: string;
+}): RawEventScanCursor {
+  // Prisma stores DateTime in SQLite as ISO text with an explicit offset
+  // ("2026-10-15T12:00:00.000+00:00") and the adapter hands it back as a
+  // Date or that same string — both parse unambiguously. Normalize
+  // defensively anyway (review, PR #1820): a space-separated value would
+  // parse as LOCAL time via new Date(), silently shifting the keyset
+  // boundary, so rewrite it to the UTC ISO form; a value with no offset
+  // is read as UTC, matching how the column is written. An unparseable
+  // value fails the scan loudly instead of binding a NaN cursor.
+  let occurredAt: Date;
+  if (row.occurredAt instanceof Date) {
+    occurredAt = row.occurredAt;
+  } else {
+    const raw = String(row.occurredAt).trim();
+    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+    occurredAt = new Date(hasOffset ? iso : `${iso}Z`);
+  }
+  if (Number.isNaN(occurredAt.getTime())) {
+    throw new Error(
+      `raw event scan: unparseable occurredAt cursor value ${JSON.stringify(row.occurredAt)}`
+    );
+  }
+  return { occurredAt, id: String(row.id) };
+}
+
 /**
  * Catalog-priced API-equivalent for subscription seats that post tokens
  * without a vendor costUsd (Codex JSONL). Claude is excluded: its OTLP
@@ -796,42 +863,74 @@ async function loadAnalyticsTokenRows(
 ): Promise<AnalyticsTokenRow[]> {
   if (typeof prisma.$queryRaw !== "function") return [];
   try {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        sourceApp: string;
-        provider: string;
-        service: string | null;
-        keyRef: string | null;
-        label: string | null;
-        quantity: unknown;
-      }>
-    >(Prisma.sql`
-      SELECT
-        "sourceApp",
-        "provider",
-        "service",
-        "keyRef",
-        "label",
-        COALESCE(SUM("quantity"), 0) AS "quantity"
-      FROM "ExternalUsageEvent"
-      WHERE "occurredAt" >= ${since}
-        AND "occurredAt" <= ${until}
-        AND "metricType" = 'usage'
-        AND "unit" = 'token'
-        AND "sourceApp" IN (${Prisma.join(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS)})
-      GROUP BY "sourceApp", "provider", "service", "keyRef", "label"
-    `);
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .filter((row) => typeof row?.sourceApp === "string" && typeof row.provider === "string")
-      .map((row) => ({
-        sourceApp: row.sourceApp,
-        provider: row.provider,
-        service: row.service,
-        keyRef: row.keyRef,
-        label: row.label,
-        quantity: Number(row.quantity ?? 0),
-      }));
+    const totals = new Map<string, AnalyticsTokenRow>();
+    let cursor: RawEventScanCursor | null = null;
+    for (;;) {
+      const rows = await prisma.$queryRaw<
+        Array<{
+          id: string;
+          occurredAt: Date | string;
+          sourceApp: string;
+          provider: string;
+          service: string | null;
+          keyRef: string | null;
+          label: string | null;
+          quantity: unknown;
+        }>
+      >(Prisma.sql`
+        SELECT
+          "id",
+          "occurredAt",
+          "sourceApp",
+          "provider",
+          "service",
+          "keyRef",
+          "label",
+          "quantity"
+        FROM "ExternalUsageEvent"
+        WHERE "occurredAt" >= ${since}
+          AND "occurredAt" <= ${until}
+          ${rawEventCursorClause(cursor)}
+          AND "metricType" = 'usage'
+          AND "unit" = 'token'
+          AND "sourceApp" IN (${Prisma.join(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS)})
+        ORDER BY "occurredAt" ASC, "id" ASC
+        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+      `);
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      for (const row of rows) {
+        if (
+          typeof row?.sourceApp !== "string" ||
+          typeof row.provider !== "string"
+        ) {
+          continue;
+        }
+        const key = JSON.stringify([
+          row.sourceApp,
+          row.provider,
+          row.service,
+          row.keyRef,
+          row.label,
+        ]);
+        const existing = totals.get(key);
+        if (existing) {
+          existing.quantity += Number(row.quantity ?? 0);
+        } else {
+          totals.set(key, {
+            sourceApp: row.sourceApp,
+            provider: row.provider,
+            service: row.service,
+            keyRef: row.keyRef,
+            label: row.label,
+            quantity: Number(row.quantity ?? 0),
+          });
+        }
+      }
+      if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+      cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+      await yieldEventLoopTurn();
+    }
+    return Array.from(totals.values());
   } catch {
     return [];
   }
@@ -1460,7 +1559,7 @@ export async function sumMonthToDateReceiptCashByProviderId(
 type ReceiptCashEventLikeWithCost = Parameters<typeof receiptCashProviderId>[0];
 
 // One-time diagnostic: log how many raw ExternalUsageEvent rows the
-// current-month groupBy below actually scans. rawSince == monthStart for
+// current-month scan below actually covers. rawSince == monthStart for
 // every current-month call (the daily-rollup branch never applies to the
 // current month - only to days older than the raw-retention cutoff), so
 // this is effectively "how big is the current month's raw event volume,"
@@ -1478,7 +1577,7 @@ let loggedExternalEventsRawSizeOnce = false;
 // provider refresh finishes. On the 512 MB production instance, retaining
 // both aggregate result sets at once is enough to kill the process.
 //
-// Serialize the complete aggregation bodies, not just their groupBy calls, so
+// Serialize the complete aggregation bodies, not just their scan calls, so
 // the next aggregate cannot start while the prior query result is still being
 // classified into application maps. The lease lives below the SWR caches:
 // stale callers still receive their cached response immediately, while only
@@ -1486,7 +1585,7 @@ let loggedExternalEventsRawSizeOnce = false;
 // caller and avoids taking a higher-level lock before a nested budget compute.
 //
 // Wave H / E1: both provider and project MTD views share one raw+rollup scan
-// (attribution-shaped groupBy) with a short process-local memo so a cold
+// (attribution-shaped scan) with a short process-local memo so a cold
 // dashboard that loads provider then project status does not pay ~11s twice.
 let externalUsageCostAggregationTail: Promise<void> = Promise.resolve();
 
@@ -1632,7 +1731,7 @@ export async function sumMonthToDateExternalCostAttribution(
 /**
  * Wave H / E1: one exclusive scan feeds both provider totals and project
  * attribution. A short memo lets sequential cold computeBudgetStatus +
- * computeProjectBudgetStatus share the same ~11s groupBy within TTL.
+ * computeProjectBudgetStatus share the same ~11s scan within TTL.
  */
 async function loadMonthToDateExternalCostMaterial(
   monthStart: Date,
@@ -1642,7 +1741,7 @@ async function loadMonthToDateExternalCostMaterial(
   byProvider: Map<string, ProviderPushedCost>;
   attribution: ExternalCostAttributionRow[];
 }> {
-  // Under vitest, skip the process memo so mocked groupBy sequences and
+  // Under vitest, skip the process memo so mocked scan sequences and
   // per-test SQLite fixtures never observe cross-call contamination. Production
   // still memos so provider+project cold paths share one ~11s scan.
   const memoEnabled = process.env.VITEST !== "true";
@@ -1686,6 +1785,111 @@ async function loadMonthToDateExternalCostMaterial(
   });
 }
 
+interface MonthToDateRawGroup {
+  provider: string;
+  sourceApp: string;
+  service: string | null;
+  label: string | null;
+  projectId: string | null;
+  metricType: string;
+  _sum: { costUsd: number | null };
+  _count: { _all: number; costUsd: number };
+}
+
+/**
+ * The raw half of the month-to-date external-cost aggregate: exactly the
+ * rows the old single groupBy folded (same window, same status-metric
+ * exclusion, same non-receipt-candidate complement), grouped by
+ * (provider, sourceApp, service, label, projectId, metricType) with
+ * SUM(costUsd) / COUNT(*) / COUNT(costUsd) — computed by the bounded
+ * chunked scan above so no single synchronous query can stall the event
+ * loop (see the RAW_EVENT_SCAN_CHUNK_ROWS comment).
+ */
+async function scanMonthToDateRawGroups(
+  rawSince: Date,
+  now: Date
+): Promise<MonthToDateRawGroup[]> {
+  const merged = new Map<string, MonthToDateRawGroup>();
+  let cursor: RawEventScanCursor | null = null;
+  for (;;) {
+    const rows = await prisma.$queryRaw<
+      Array<{
+        id: string;
+        occurredAt: Date | string;
+        provider: string;
+        sourceApp: string;
+        service: string | null;
+        label: string | null;
+        projectId: string | null;
+        metricType: string;
+        costUsd: number | null;
+      }>
+    >(Prisma.sql`
+      SELECT
+        "id",
+        "occurredAt",
+        "provider",
+        "sourceApp",
+        "service",
+        "label",
+        "projectId",
+        "metricType",
+        "costUsd"
+      FROM "ExternalUsageEvent"
+      WHERE "occurredAt" >= ${rawSince}
+        AND "occurredAt" <= ${now}
+        ${rawEventCursorClause(cursor)}
+        AND "metricType" NOT IN (${Prisma.join(Array.from(STATUS_METRIC_TYPES))})
+        AND (
+          "sourceApp" <> ${BILLING_RECEIPT_SOURCE_APP}
+          OR "service" IS NULL
+          OR "service" <> ${API_PREPAID_FUNDING_SERVICE}
+          OR "label" IS NULL
+          OR "label" <> ${RECEIPT_CASH_LABEL}
+          OR "billingMode" <> 'actual'
+          OR "metricType" <> 'cost'
+          OR "confidence" <> 'actual'
+        )
+      ORDER BY "occurredAt" ASC, "id" ASC
+      LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+    `);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const row of rows) {
+      const key = JSON.stringify([
+        row.provider,
+        row.sourceApp,
+        row.service,
+        row.label,
+        row.projectId,
+        row.metricType,
+      ]);
+      let group = merged.get(key);
+      if (!group) {
+        group = {
+          provider: row.provider,
+          sourceApp: row.sourceApp,
+          service: row.service,
+          label: row.label,
+          projectId: row.projectId,
+          metricType: row.metricType,
+          _sum: { costUsd: null },
+          _count: { _all: 0, costUsd: 0 },
+        };
+        merged.set(key, group);
+      }
+      group._count._all += 1;
+      if (row.costUsd != null) {
+        group._sum.costUsd = (group._sum.costUsd ?? 0) + row.costUsd;
+        group._count.costUsd += 1;
+      }
+    }
+    if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+    cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+    await yieldEventLoopTurn();
+  }
+  return Array.from(merged.values());
+}
+
 async function loadMonthToDateExternalCostMaterialUnserialized(
   monthStart: Date,
   rawCutoff: Date,
@@ -1723,16 +1927,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     try {
       const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
       const [rawGroups, rollups] = await Promise.all([
-        prisma.externalUsageEvent.groupBy({
-          by: ["provider", "sourceApp", "service", "label", "projectId", "metricType"],
-          where: {
-            occurredAt: { gte: rawSince, lte: now },
-            metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-            ...NON_RECEIPT_CANDIDATE_WHERE,
-          },
-          _sum: { costUsd: true },
-          _count: { _all: true, costUsd: true },
-        }),
+        scanMonthToDateRawGroups(rawSince, now),
         monthStart < rawCutoff
           ? prisma.externalUsageEventDailyRollup.findMany({
               where: {

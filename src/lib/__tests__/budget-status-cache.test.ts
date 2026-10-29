@@ -403,38 +403,49 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     const blockedMtdScan = new Promise<never[]>((resolve) => {
       releaseMtdScan = resolve;
     });
-    const originalGroupBy = prisma.externalUsageEvent.groupBy.bind(
-      prisma.externalUsageEvent
-    );
-    const groupBySpy = vi.spyOn(prisma.externalUsageEvent, "groupBy");
+    const originalQueryRaw = prisma.$queryRaw.bind(prisma);
+    const rawQuerySpy = vi.spyOn(prisma, "$queryRaw");
     let mtdScanBlocked = false;
-    // Wave H / E1: provider + attribution share one groupBy that always
-    // includes projectId. Block the first such heavy scan only.
-    groupBySpy.mockImplementation((args) => {
-      const by = Array.isArray(args.by) ? args.by : [];
-      if (
-        !mtdScanBlocked &&
-        by.includes("provider") &&
-        by.includes("projectId")
-      ) {
+    // Wave H / E1: provider + attribution share one MTD scan. It is a
+    // chunked $queryRaw walk (see RAW_EVENT_SCAN_CHUNK_ROWS in
+    // external-usage-events.ts); a scan "start" is a chunk query without
+    // the (occurredAt, id) cursor predicate. Block the first scan start
+    // only; every later chunk and every other raw query delegates.
+    const sqlTextOf = (query: unknown): string =>
+      typeof query === "object" && query !== null && "sql" in query
+        ? String((query as { sql: unknown }).sql)
+        : String(query);
+    const isMtdScanStart = (query: unknown): boolean => {
+      const text = sqlTextOf(query);
+      return (
+        text.includes('FROM "ExternalUsageEvent"') &&
+        // The MTD cost scan selects costUsd; the loader's analytics
+        // token-rows scan has the same FROM/ORDER shape but selects
+        // quantity instead and must not count as a heavy aggregation.
+        text.includes('"costUsd"') &&
+        text.includes('ORDER BY "occurredAt" ASC, "id" ASC') &&
+        !text.includes('"id" >')
+      );
+    };
+    rawQuerySpy.mockImplementation(((...args: unknown[]) => {
+      if (!mtdScanBlocked && isMtdScanStart(args[0])) {
         mtdScanBlocked = true;
         return blockedMtdScan as never;
       }
-      return originalGroupBy(args as never) as never;
-    });
+      return (originalQueryRaw as (...a: never[]) => unknown)(
+        ...(args as never[])
+      ) as never;
+    }) as never);
     const heavyAggregationCallCount = () =>
-      groupBySpy.mock.calls.filter(([args]) => {
-        const by = Array.isArray(args.by) ? args.by : [];
-        return by.includes("provider") && by.includes("projectId");
-      }).length;
+      rawQuerySpy.mock.calls.filter(([query]) => isMtdScanStart(query)).length;
 
     // Drop the Wave H MTD scan memo so the background refresh must re-scan
-    // (otherwise the 5s memo from the warm prime would skip groupBy entirely).
+    // (otherwise the 5s memo from the warm prime would skip the scan entirely).
     const { clearMtdScanMemo } = await import("../mtd-scan-memo");
     clearMtdScanMemo();
 
     // Make both entries stale. The provider call returns its cached object and
-    // starts a background refresh whose heavy groupBy is deliberately held.
+    // starts a background refresh whose heavy MTD scan is deliberately held.
     process.env.BUDGET_STATUS_CACHE_TTL_MS = "0";
     const staleProvider = await computeBudgetStatus(NOW);
     expect(staleProvider).toBe(firstProvider);
@@ -443,7 +454,7 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     // The stale project call must also return immediately. Its background
     // refresh reaches the shared MTD scan, but the exclusive lease keeps it
     // behind the still-held first scan (and the 5s memo means it will not
-    // open a second groupBy once the first completes).
+    // open a second scan once the first completes).
     const staleProject = await computeProjectBudgetStatus(NOW);
     expect(staleProject).toBe(firstProject);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -451,7 +462,7 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
 
     // Stop further zero-TTL refreshes, release the blocked scan. Under vitest
     // the process memo is disabled, so the queued project refresh pays a
-    // second groupBy after the lease releases (still serialized, never
+    // second scan after the lease releases (still serialized, never
     // concurrent). Production keeps the 5s memo so cold provider+project
     // only scan once.
     process.env.BUDGET_STATUS_CACHE_TTL_MS = "60000";

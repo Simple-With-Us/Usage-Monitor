@@ -556,6 +556,33 @@ describe("runtime health state", () => {
       expect(getR2WeeklyArchiveStatus()).toBeNull();
     });
 
+    it("re-reads the status file after it is rewritten (memo invalidation)", () => {
+      const path = writeArchiveStatus({
+        ok: true,
+        key: "weekly/first.db.gz",
+        completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        prunedCount: 1,
+      });
+      vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+      // Repeat read of the unchanged file (memo hit) agrees.
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ok: false,
+          reason: "verify_hash_mismatch",
+          checkedAt: new Date().toISOString(),
+        }),
+        "utf8"
+      );
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({
+        ok: false,
+        reason: "verify_hash_mismatch",
+      });
+    });
+
     it("reports a fresh successful archive as ok", () => {
       const path = writeArchiveStatus({
         ok: true,
