@@ -28,7 +28,7 @@ Every row the new parser emits that the old parser also emitted keeps the same e
 1. **Claude transcript parser** (`scripts/lib/session-token-collectors.mjs`):
    - one row set per `message.id`, kept from the call's FIRST line so its eventId is the one already stored, and shared across the files of one pass (oldest first) so a call copied into a forked session counts once;
    - Anthropic's exclusive cache semantics.  The input row keeps the quantity the old split gave it, so it replays byte-identical, and the part the old split took away is sent as a separate `input-exclusive` row;
-   - `requestId` sent as `providerRequestId` (not part of the key or the replay comparison), and the transcript's `sessionId` as `metadata["session.id"]`.
+   - `requestId` is deliberately NOT sent as `providerRequestId`: only OpenRouter rows are ever verified, so stamping Anthropic rows would wedge the provider's compliance badge in "pending" forever; the transcript's `sessionId` is sent as `metadata["session.id"]`.
 2. **Correlation metadata** (`src/lib/telemetry-correlation.ts`): `session.id`, `agent.launcher` and `agent.launcher.session` say where an event came from, not what it measured.  A replay that carries one the stored row lacks is no longer a 409; when both sides carry it, it is compared as before.
 3. **BotFleet children are tagged, not silently dropped or missed.**  The Claude, Codex and opencode collectors recognise a BotFleet-launched session and stamp `agent.launcher=botfleet` and `session.id`:
    - Claude: the transcript's own `cwd` (lossless), or a projects folder named exactly `…--botfleet-workspaces-<id>`; subagent (sidechain) lines are never tagged, because BotFleet bills only its own main-thread turns;

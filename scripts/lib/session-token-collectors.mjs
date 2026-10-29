@@ -425,7 +425,11 @@ export function parseClaudeSessionJsonl(
       seenMessageIds.add(messageId);
     }
     const sessionId = typeof obj.sessionId === "string" && obj.sessionId ? obj.sessionId : undefined;
-    const requestId = typeof obj.requestId === "string" && obj.requestId ? obj.requestId : undefined;
+    // The transcript's requestId is deliberately NOT sent as providerRequestId:
+    // compliance counts every providerRequestId-carrying event as verifiable and
+    // pending until the verification worker settles it, but only OpenRouter rows
+    // are ever verified — so stamping Anthropic rows would wedge the provider's
+    // badge in "pending" forever (src/lib/provider-compliance.ts).
     const rawModel = (typeof obj.message?.model === "string" && obj.message.model.trim()) || "claude-3-7-sonnet";
     const model = rawModel;
     const occurredAtIso = isoTimestamp(obj.timestamp, fallbackIso);
@@ -448,7 +452,6 @@ export function parseClaudeSessionJsonl(
       sessionKey: sessionKey ?? "claude",
       occurredAtIso,
       model,
-      ...(requestId ? { providerRequestId: requestId } : {}),
       ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
     };
     // The input row keeps the quantity the old inclusive split gave it, so a

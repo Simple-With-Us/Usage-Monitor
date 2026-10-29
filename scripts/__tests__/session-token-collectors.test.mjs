@@ -534,7 +534,10 @@ describe("parseClaudeSessionJsonl", () => {
     const events = parseClaudeSessionJsonl(text, { sessionKey: "s", extraMetadata: { collector: "transcript" } });
     // Two calls x three non-zero token types.
     expect(events).toHaveLength(6);
-    expect(new Set(events.map((e) => e.providerRequestId))).toEqual(new Set(["req_A", "req_B"]));
+    // The transcript's requestId is not a verifiable provider id (only OpenRouter
+    // rows are ever verified), so Claude events must not carry providerRequestId:
+    // compliance would otherwise count them as pending forever.
+    expect(events.every((e) => e.providerRequestId === undefined)).toBe(true);
     expect(events.every((e) => e.metadata["session.id"] === "sess-1")).toBe(true);
     expect(events.every((e) => e.metadata.collector === "transcript")).toBe(true);
   });
