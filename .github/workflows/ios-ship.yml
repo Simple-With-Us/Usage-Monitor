@@ -62,11 +62,15 @@ name: iOS TestFlight ship (Mac runner)
 # would look like "no prior ship" and re-archive.
 #
 # NOT EVERY TICK SHIPS -- the scheduled path is guarded twice.
-#   1. scripts/ios-scheduled-ship-gate.sh refuses to try unless ios/ actually
-#      changed between the last successful ship and HEAD. A cron carries
-#      no `paths:` filter of its own, so without this a backend-only commit
-#      would ship a TestFlight build. The owner does not want TestFlight
-#      spammed; this is the guard that prevents it.
+#   1. scripts/ios-scheduled-ship-gate.sh refuses to try unless one of the
+#      on.push.paths entries below actually changed between the last
+#      successful ship and HEAD. A cron carries no `paths:` filter of its
+#      own, so without this a backend-only commit would ship a TestFlight
+#      build. The owner does not want TestFlight spammed; this is the guard
+#      that prevents it. The gate step passes every push path as its own
+#      --path-prefix (one place, this file; the gate test fails if they
+#      drift), so a merge the push trigger missed still ships on the
+#      next tick.
 #   2. The fleet ship script then rate-limits successful uploads to one per app
 #      per DEFAULT_MIN_INTERVAL_SEC=3600 seconds (1 hour) and independently
 #      skips when git HEAD already shipped. Those runs print "ship-gate: skip"
@@ -131,13 +135,18 @@ jobs:
       # Runs FIRST so a tick with nothing to ship costs seconds.
       # Logic lives in a script, not inline YAML, so CI can unit-test it on
       # every PR instead of it only ever being exercised on the ship job.
-      # usage-local is included so LocalUsageMonitor ships when ios/ changes.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      # usage-local is included so LocalUsageMonitor ships when a push path changes.
+      - name: Scheduled ship gate (skip unless a push path changed)
         id: gate
         run: |
           bash "$GITHUB_WORKSPACE/scripts/ios-scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
+            --path-prefix '.github/workflows/ios-ship.yml' \
+            --path-prefix 'scripts/ios-*.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix 'scripts/ios-fleet-pin.sh' \
+            --path-prefix 'scripts/ios-fleet.sha256' \
             --repo-root "$GITHUB_WORKSPACE" \
             usage usage-local
 
