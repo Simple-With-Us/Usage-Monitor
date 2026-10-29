@@ -57,9 +57,11 @@ import {
   resolveOpencodeSessionIdCutoffMs,
 } from "./lib/opencode-session-telemetry.mjs";
 import {
+  botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
   collectorStatePath,
   expandHome,
+  isBotFleetSessionPath,
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
@@ -195,10 +197,24 @@ export async function collectOpencodeEvents({
       projectNamesBySession(telemetry.sessions, telemetry.projects),
       frozenProjectNames,
     );
+    // Sessions BotFleet launched (their directory is a BotFleet workspace).
+    // Their token rows are tagged, so the monitor drops them only where a
+    // stored BotFleet turn names the same session, or left out entirely when
+    // USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1.
+    const botFleetSessionIds = new Set(
+      (telemetry.sessions ?? [])
+        .filter((session) => typeof session?.directory === "string" && session.directory)
+        .filter((session) => isBotFleetSessionPath(`${session.directory.replace(/\/+$/, "")}/`))
+        .map((session) => session.id)
+        .filter((id) => typeof id === "string" && id)
+    );
     const tokenEvents = buildOpencodeTokenEvents({
-      assistantRows: telemetry.assistantRows,
+      assistantRows: botFleetChildExclusionEnabled()
+        ? telemetry.assistantRows.filter((row) => !botFleetSessionIds.has(row?.session_id))
+        : telemetry.assistantRows,
       projectBySession,
       sessionIdCutoffMs,
+      botFleetSessionIds,
     });
     const catalog = parseModelsDevCatalog(telemetry.catalogValue);
     // A catalog that cannot be used is not a silent event: every context row

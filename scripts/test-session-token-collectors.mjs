@@ -41,6 +41,7 @@ import {
   COLLECTOR_STATE_OVERLAP_MINUTES,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
+  codexSessionId,
   codexSessionKeyFor,
   isBotFleetManagedCodexSession,
   isBotFleetSessionPath,
@@ -279,6 +280,29 @@ assert(
     isBotFleetSessionPath("/tmp/.botfleet-workspaces-child/session.jsonl.zstd") &&
     !isBotFleetSessionPath("/Users/test/.dsh/sessions/local/session.jsonl.zstd"),
   "BotFleet child-path detection covers both managed workspace layouts",
+);
+assert(
+  // Claude Code's projects-folder name for cwd /Users/jay/.botfleet/workspaces/<id>.
+  isBotFleetSessionPath(
+    "/Users/jay/.claude/projects/-Users-jay--botfleet-workspaces-0b6c/4f1e.jsonl",
+    {}
+  ) &&
+    !isBotFleetSessionPath("/Users/jay/.claude/projects/-Users-jay-Code-Usage-Monitor/4f1e.jsonl", {}),
+  "BotFleet child-path detection matches Claude's projects-folder encoding",
+);
+assert(
+  !isBotFleetSessionPath("/Users/jay/.claude/projects/-Users-jay-Code-my-botfleet-workspaces-notes/s.jsonl", {}) &&
+    !isBotFleetSessionPath("/Users/jay/Code/botfleet-workspaces-tool/x.jsonl", {}),
+  "BotFleet child-path detection ignores ordinary folders that merely mention the name",
+);
+assert(
+  isBotFleetSessionPath("/srv/bf/data/workspaces/abc/", {
+    BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces/",
+  }) &&
+    !isBotFleetSessionPath("/srv/bf/data/workspaces-old/abc/", {
+      BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces",
+    }),
+  "BotFleet child-path detection honours BOTFLEET_WORKSPACES_DIRS on real paths",
 );
 
 const traversalRoot = await mkdtemp(join(tmpdir(), "collector-traversal-"));
@@ -544,6 +568,16 @@ const botFleetSessionMeta = JSON.stringify({
 assert(
   isBotFleetManagedCodexSession(botFleetSessionMeta),
   "BotFleet Codex child sessions are identified before standalone ingest",
+);
+assert(
+  codexSessionId(botFleetSessionMeta) === undefined &&
+    codexSessionId(
+      [
+        botFleetSessionMeta,
+        JSON.stringify({ type: "session_meta", payload: { id: " 019a-thread " } }),
+      ].join("\n"),
+    ) === "019a-thread",
+  "Codex session id skips a session_meta row that has no id",
 );
 assert(
   !botFleetChildExclusionEnabled({}),
@@ -820,9 +854,15 @@ const claudeFixture = [
 ].join("\n");
 
 const claudeEvents = parseClaudeSessionJsonl(claudeFixture, { sessionKey: "test/claude-session.jsonl" });
-assert(claudeEvents.length === 4, `claude event count ${claudeEvents.length}`);
+// Four token types; the input is split into the row the old parser stored
+// (1500 - 300) and the remainder it never counted (300).
+assert(claudeEvents.length === 5, `claude event count ${claudeEvents.length}`);
 assert(claudeEvents[0].producerKeyRef === "claude-opus-5", "claude model parsed");
-assert(claudeEvents.find((e) => e.label === "token:input")?.quantity === 1200, "claude uncached input quantity");
+// Anthropic's input_tokens already excludes cache reads and writes.
+assert(
+  claudeEvents.filter((e) => e.label === "token:input").reduce((sum, e) => sum + e.quantity, 0) === 1500,
+  "claude uncached input quantity",
+);
 assert(claudeEvents.find((e) => e.label === "token:cacheRead")?.quantity === 300, "claude cache read quantity");
 assert(claudeEvents.find((e) => e.label === "token:cacheCreation")?.quantity === 200, "claude cache write quantity");
 assert(claudeEvents.find((e) => e.label === "token:output")?.quantity === 450, "claude output quantity");
@@ -1177,10 +1217,22 @@ try {
       ]),
     "opencode token rows keep their exact event ids",
   );
+  // The pin covers everything except the correlation keys (`session.id`,
+  // `agent.launcher`), which Usage Monitor ignores when only one side of a
+  // replay carries them (src/lib/telemetry-correlation.ts), so adding them to a
+  // stored row cannot answer 409.  Every other byte is still pinned.
+  const withoutCorrelation = (event) => {
+    const { "session.id": _session, "agent.launcher": _launcher, ...metadata } = event.metadata;
+    return { ...event, metadata };
+  };
   assert(
-    createHash("sha256").update(JSON.stringify(ocTokenRows)).digest("hex") ===
+    createHash("sha256").update(JSON.stringify(ocTokenRows.map(withoutCorrelation))).digest("hex") ===
       "e3c1af265367a5ca714b717422e7d5207d258c27a85be58c9045a89149ece2cf",
     "opencode token rows keep their exact content",
+  );
+  assert(
+    ocTokenRows.every((e) => e.metadata["session.id"] === "ses_1" && !("agent.launcher" in e.metadata)),
+    "opencode token rows name their session as a correlation key",
   );
   assert(
     ocCollected.filter((e) => e.label.startsWith("context:")).length === 2 &&

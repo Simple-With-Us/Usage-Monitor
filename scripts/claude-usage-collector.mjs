@@ -32,6 +32,7 @@
 //   USAGE_MONITOR_INGEST_URL (required; the deployment's ingest endpoint)
 //   CLAUDE_HOME (default ~/.claude)
 
+import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,8 @@ import {
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  BOTFLEET_LAUNCHER_METADATA,
+  botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
   expandHome,
   fileMayContainEventsSince,
@@ -108,6 +111,32 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+/** The working directory a transcript records on its lines, or undefined. */
+export function claudeTranscriptCwd(text) {
+  const match = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+  if (!match) return undefined;
+  try {
+    const cwd = JSON.parse(`"${match[1]}"`);
+    return typeof cwd === "string" && cwd.startsWith("/") ? cwd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Files ordered by modification time, oldest first; unreadable ones last. */
+async function oldestFirst(files) {
+  const stamped = await Promise.all(
+    files.map(async (file) => {
+      try {
+        return { file, mtimeMs: (await stat(file)).mtimeMs };
+      } catch {
+        return { file, mtimeMs: Number.POSITIVE_INFINITY };
+      }
+    })
+  );
+  return stamped.sort((a, b) => a.mtimeMs - b.mtimeMs).map((entry) => entry.file);
+}
+
 export async function collectClaudeEvents({
   claudeHome = expandHome(process.env.CLAUDE_HOME || join(homedir(), ".claude")),
   since,
@@ -117,22 +146,38 @@ export async function collectClaudeEvents({
     if (scanStatus) scanStatus.complete = false;
   };
   const projectsDir = join(claudeHome, "projects");
-  const files = await walkFiles(projectsDir, { suffix: ".jsonl", onTraversalError: markIncomplete });
+  const files = await oldestFirst(
+    await walkFiles(projectsDir, { suffix: ".jsonl", onTraversalError: markIncomplete })
+  );
   const events = [];
+  // One call is counted once per pass even when a forked or resumed session
+  // copied it into a second transcript; oldest first keeps the original's id.
+  const seenMessageIds = new Set();
   for (const file of files) {
-    // BotFleet owns its child-turn usage under producer `botfleet`, and ingest
-    // idempotency is producer-scoped, so those sessions must not be sent here.
-    if (isBotFleetSessionPath(file)) continue;
     if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
     const text = await readIfFresh(file, { onReadError: markIncomplete });
     if (!text) continue;
+    // BotFleet reports its child turns under producer `botfleet`, and ingest
+    // idempotency is producer-scoped.  Such a session is excluded when
+    // USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1, and otherwise sent tagged
+    // (agent.launcher=botfleet) so the two can be told apart exactly.  The old
+    // path test never matched Claude's projects-folder names (`/.botfleet/`
+    // is written `--botfleet-`), so it was a silent no-op; the transcript's
+    // own cwd is the lossless test, and the folder name the fallback.
+    const cwd = claudeTranscriptCwd(text);
+    const botFleetChild =
+      (cwd ? isBotFleetSessionPath(`${cwd.replace(/\/+$/, "")}/`) : false) ||
+      isBotFleetSessionPath(file);
+    if (botFleetChild && botFleetChildExclusionEnabled()) continue;
     const parsed = parseClaudeSessionJsonl(text, {
       sessionKey: sessionKeyFor(claudeHome, file),
+      seenMessageIds,
       extraMetadata: {
         collector: TRANSCRIPT_COLLECTOR_MARKER,
         // The machine identity, so the receiver can tell this machine's
         // transcript rows from another machine's native OTLP rows.
         "host.name": hostname(),
+        ...(botFleetChild ? BOTFLEET_LAUNCHER_METADATA : {}),
       },
     });
     events.push(...filterEventsSince(parsed, since));

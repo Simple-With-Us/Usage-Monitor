@@ -30,6 +30,8 @@ import {
   readCodexObservedPlan,
 } from "./lib/codex-observed-plan.mjs";
 import {
+  BOTFLEET_LAUNCHER_METADATA,
+  codexSessionId,
   codexSessionKeyFor,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
@@ -41,6 +43,7 @@ import {
   resolveCollectorArgs,
   resolveCollectorToken,
   walkFiles,
+  withCorrelationMetadata,
 } from "./lib/run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
@@ -75,11 +78,17 @@ export async function collectCodexEvents({
       if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
       const text = await readIfFresh(file, { onReadError: markIncomplete });
       if (!text) continue;
-      if (botFleetChildExclusionEnabled() && isBotFleetManagedCodexSession(text)) continue;
+      const botFleetChild = isBotFleetManagedCodexSession(text);
+      if (botFleetChild && botFleetChildExclusionEnabled()) continue;
       const parsed = parseCodexJsonl(text, {
         sessionKey: codexSessionKeyFor(codexHome, file),
       });
-      events.push(...filterEventsSince(parsed, since));
+      events.push(
+        ...withCorrelationMetadata(filterEventsSince(parsed, since), {
+          "session.id": codexSessionId(text),
+          ...(botFleetChild ? BOTFLEET_LAUNCHER_METADATA : {}),
+        })
+      );
     }
   }
   return events;
