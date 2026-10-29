@@ -330,6 +330,13 @@ jobs:
       - name: Test the iOS fleet version-numbering rules
         run: node --test scripts/ios-fleet/version-plan.node-test.mjs
 
+      # The shared four-digit build counter (owner, Oct 28 2026):  ONE counter
+      # per app across iOS and macOS for a fixed marketing version.  The
+      # planner lives in scripts/ios-fleet/shared-build.mjs (pure, no I/O);
+      # this is its unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet shared build counter
+        run: node --test scripts/ios-fleet/shared-build.test.mjs
+
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
       # a payload-shape regression in the collector can be caught before the
