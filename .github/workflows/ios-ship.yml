@@ -32,6 +32,17 @@ name: iOS TestFlight ship (Mac runner)
 # are separate ASC records with separate failure modes).  Rate gate and
 # same-HEAD skip stay at the ship script defaults -- no standing override.
 #
+# PLAN-BUILD (owner, Oct 29 2026): CFBundleVersion is max(S, M + 1), a 12-digit
+# merge-stamp build computed ONCE per release per app by the "Plan release
+# builds" step below (--plan-build-only: registry + HEAD merge stamp + ASC
+# inventory + Sparkle feed floor, read-only) and handed to each ship step as
+# --build.  Each app (usage, usage-local) has its own counter, so each gets
+# its own planned value.  A ship given --build never plans; it only verifies
+# the value clears this app record's own platform inventory.  A skipped ship
+# uploads nothing, planned or not.  This repo ships no Mac app to TestFlight
+# (Mac releases go out over Sparkle), so there is no second platform job to
+# feed; a future Mac TestFlight ship must take the same planned value.
+#
 # WHY THERE IS A `schedule:` TRIGGER (2026-08-13)
 # ----------------------------------------------
 # `push:` alone is not a reliable trigger. A PR merged by github-actions[bot]
@@ -292,12 +303,39 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
           unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
+      # Plan-build: compute each app's release build ONCE here and hand it to
+      # the ship steps as --build, so the two ships of one release can never
+      # plan different builds.  Read-only (registry + HEAD merge stamp + ASC
+      # inventory + feed floor); a later ship-gate skip still uploads nothing.
+      # Runs after signing load because the ASC inventory read needs the same
+      # credential the ships use.  Never echoes secrets; build numbers are
+      # not secret.
+      - name: Plan release builds (once per app per release)
+        id: plan
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          SHIP_USAGE: ${{ steps.gate.outputs.ship_usage }}
+          SHIP_USAGE_LOCAL: ${{ steps.gate.outputs.ship_usage_local }}
+        run: |
+          set -euo pipefail
+          plan_one() {
+            local app="$1" out="$2" build
+            build="$(bash "$GITHUB_WORKSPACE/scripts/ios-fleet/ship-testflight.sh" "$app" --repo-root "$GITHUB_WORKSPACE" --plan-build-only)"
+            [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::plan-build for ${app} printed '${build}', not a 12-digit merge-stamp build"; exit 1; }
+            printf '%s=%s\n' "$out" "$build" >> "$GITHUB_OUTPUT"
+          }
+          if [ "${SHIP_USAGE:-0}" = "1" ]; then plan_one usage build_usage; fi
+          if [ "${SHIP_USAGE_LOCAL:-0}" = "1" ]; then plan_one usage-local build_usage_local; fi
+
       - name: Ship UsageMonitor to TestFlight
         id: ship_usage
-        if: steps.gate.outputs.ship_usage == '1'
+        if: ${{ steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh"
+        run: |
+          build="${{ steps.plan.outputs.build_usage }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage; refusing to re-plan"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" --build "$build"
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
@@ -330,10 +368,13 @@ jobs:
       # secrets step must have succeeded so we never ship without signing.
       - name: Ship LocalUsageMonitor to TestFlight
         id: ship_usage_local
-        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
+        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh"
+        run: |
+          build="${{ steps.plan.outputs.build_usage_local }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage-local; refusing to re-plan"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" --build "$build"
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.

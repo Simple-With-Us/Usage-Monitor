@@ -1,18 +1,28 @@
 // Pure build planner.  No network, uploads or release state changes.
-// One shared four-digit counter per app across iOS and macOS (owner, Oct 28 2026).
-// next = max(1000, every iOS candidate, every macOS candidate, every extraFloor + 1).
-// A build N or N.x.y requires next >= N + 1.  iOS UTC timestamp builds
-// (first component >= 100000000) are ignored because App Store Connect orders
-// iOS builds only within a version train and those trains are closed; they are
-// counted in ignoredIos.  macOS builds order across all trains, so every mac
-// build counts.
-export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complete}) {
+// One shared merge-timestamp build per app across iOS and macOS (owner, Oct 29 2026).
+// next = max(S, M + 1) as a plain integer, where S is the committer date of
+// the commit being built (HEAD) in America/Chicago as YYYYMMDDHHMM and M is
+// the highest first numeric component among every iOS build, every macOS
+// build and every extra floor.  A rebuild of the same commit still goes up,
+// because the just-shipped build is in the inventory by then.  Every build
+// counts, old iOS timestamp-style builds included; there is no 1000 floor
+// and no 9999 cap.  The result is always a 12-digit merge-stamp build: a
+// plan above 12 digits throws instead of emitting a value the shell gate
+// would reject.
+export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complete, mergeStamp}) {
   if (complete !== true || !Array.isArray(iosBuilds) || !Array.isArray(macBuilds)) {
     throw new Error('complete build inventory required');
   }
+  if (typeof mergeStamp !== 'string' || !/^[1-9][0-9]{11}$/.test(mergeStamp)) {
+    throw new Error('malformed merge stamp');
+  }
   if (!Array.isArray(extraFloors)) throw new Error('malformed build inventory');
   for (const floor of extraFloors) {
-    if (typeof floor !== 'number' || !Number.isSafeInteger(floor) || floor < 0) {
+    if (typeof floor === 'number') {
+      if (!Number.isSafeInteger(floor) || floor < 0) throw new Error('malformed build inventory');
+    } else if (typeof floor === 'string') {
+      if (!/^[0-9]+$/.test(floor)) throw new Error('malformed build inventory');
+    } else {
       throw new Error('malformed build inventory');
     }
   }
@@ -21,32 +31,23 @@ export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complet
   for (const value of [...iosBuilds, ...macBuilds]) {
     if (typeof value !== 'string' || !re.test(value)) throw new Error('malformed build inventory');
   }
-  const TIMESTAMP = 100000000n;
-  const LIMIT = 9999n;
-  let ignoredIos = 0;
-  let next = 1000n;
-  for (const value of iosBuilds) {
-    const first = BigInt(value.split('.')[0]);
-    if (first >= TIMESTAMP) {
-      ignoredIos += 1;
-      continue;
-    }
-    if (first >= LIMIT) throw new Error('four-digit build range exhausted');
-    const candidate = first + 1n;
-    if (candidate > next) next = candidate;
-  }
-  for (const value of macBuilds) {
-    const first = BigInt(value.split('.')[0]);
-    if (first >= LIMIT) {
-      throw new Error(`four-digit build unavailable on macOS: existing ${value} requires >= ${first + 1n}`);
-    }
-    const candidate = first + 1n;
-    if (candidate > next) next = candidate;
+  let m = null;
+  const consider = (value) => {
+    if (m === null || value > m) m = value;
+  };
+  for (const value of [...iosBuilds, ...macBuilds]) {
+    consider(BigInt(value.split('.')[0]));
   }
   for (const floor of extraFloors) {
-    const candidate = BigInt(floor) + 1n;
+    consider(BigInt(floor));
+  }
+  const stamp = BigInt(mergeStamp);
+  let next = stamp;
+  if (m !== null) {
+    const candidate = m + 1n;
     if (candidate > next) next = candidate;
   }
-  if (next > LIMIT) throw new Error('four-digit build range exhausted');
-  return {build: String(next), ignoredIos};
+  const planned = String(next);
+  if (planned.length > 12) throw new Error('planned build exceeds 12 digits');
+  return {build: planned};
 }
