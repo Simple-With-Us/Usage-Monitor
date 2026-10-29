@@ -227,7 +227,8 @@ export function codexSessionId(text) {
       const row = JSON.parse(line);
       if (row?.type !== "session_meta") continue;
       const id = row.payload?.id;
-      return typeof id === "string" && id.trim() ? id.trim() : undefined;
+      if (typeof id === "string" && id.trim()) return id.trim();
+      // A session_meta row without an id: keep looking for one that has it.
     } catch {
       // Keep looking for a valid session_meta row.
     }

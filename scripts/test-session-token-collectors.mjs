@@ -41,6 +41,7 @@ import {
   COLLECTOR_STATE_OVERLAP_MINUTES,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
+  codexSessionId,
   codexSessionKeyFor,
   isBotFleetManagedCodexSession,
   isBotFleetSessionPath,
@@ -567,6 +568,16 @@ const botFleetSessionMeta = JSON.stringify({
 assert(
   isBotFleetManagedCodexSession(botFleetSessionMeta),
   "BotFleet Codex child sessions are identified before standalone ingest",
+);
+assert(
+  codexSessionId(botFleetSessionMeta) === undefined &&
+    codexSessionId(
+      [
+        botFleetSessionMeta,
+        JSON.stringify({ type: "session_meta", payload: { id: " 019a-thread " } }),
+      ].join("\n"),
+    ) === "019a-thread",
+  "Codex session id skips a session_meta row that has no id",
 );
 assert(
   !botFleetChildExclusionEnabled({}),

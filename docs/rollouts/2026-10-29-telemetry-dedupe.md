@@ -44,7 +44,7 @@ Every row the new parser emits that the old parser also emitted keeps the same e
 The server must be deployed BEFORE the collectors on any host are updated.  The updated collectors add `session.id` to rows the monitor already stored, and only the new replay rule accepts that.  An updated collector talking to an old server would get a whole-batch 409 and stall until the server is updated (no data is lost; its checkpoint holds).
 
 1. Merge and deploy; verify the live revision.
-2. Update the installed collectors on the server (`/mnt/fleet-extra/apps/usage-monitor-collectors`) and on the Mac, then confirm one clean pass each.
+2. Update the installed collectors on the server and on the Mac (their install paths are in the private operations inventory), then confirm one clean pass each.
 3. BotFleet's join-key change can land in either order.
 
 ## What this does not do
