@@ -15,7 +15,7 @@
 #   3. pairedBundleId is passed through to plan-release-build, macBundleId is an
 #      accepted alias, and pairedBundleId wins when both are present
 #   4. (round two) whitespace-padded <sparkle:version> values count, a non-https
-#      feed is rejected before curl runs, a feed max outside the 1..18-digit
+#      feed is rejected before curl runs, a feed max outside the 1..12-digit
 #      range fails closed, and a macOS entry with no paired keys reverse-resolves
 #      its peer
 #   5. (merge stamp) the merge stamp of HEAD travels to the client as
@@ -46,6 +46,7 @@ cat > "${tmp}/apps.json" <<'APPS'
     "feedws": {"bundleId": "test.feed.ws", "pairedBuildFeed": "https://example.invalid/appcast-ws.xml"},
     "feedhttp": {"bundleId": "test.feed.http", "pairedBuildFeed": "http://example.invalid/appcast-ok.xml"},
     "feedbig": {"bundleId": "test.feed.big", "pairedBuildFeed": "https://example.invalid/appcast-big.xml"},
+    "feed13": {"bundleId": "test.feed.13", "pairedBuildFeed": "https://example.invalid/appcast-13.xml"},
     "feed9999": {"bundleId": "test.feed.9999", "pairedBuildFeed": "https://example.invalid/appcast-9999.xml"},
     "feedzero": {"bundleId": "test.feed.zero", "pairedBuildFeed": "https://example.invalid/appcast-zero.xml"},
     "feedstamp": {"bundleId": "test.feed.stamp", "pairedBuildFeed": "https://example.invalid/appcast-stamp.xml"},
@@ -85,6 +86,14 @@ cat > "${tmp}/appcast-big.xml" <<'XML'
 <rss><channel>
 <item><title>1.0 (1400)</title><sparkle:version>1400</sparkle:version></item>
 <item><title>1.0 (big)</title><sparkle:version>1234567890123456789</sparkle:version></item>
+</channel></rss>
+XML
+# An appcast whose max is 13 digits: just over the 12-digit plan cap.
+cat > "${tmp}/appcast-13.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<rss><channel>
+<item><title>1.0 (1400)</title><sparkle:version>1400</sparkle:version></item>
+<item><title>1.0 (13)</title><sparkle:version>2026103009001</sparkle:version></item>
 </channel></rss>
 XML
 # An appcast whose max is 9999: a plain small floor now, not a range error.
@@ -341,7 +350,8 @@ grep -qF 'http://example.invalid/appcast-ok.xml' "${tmp}/err" || fail "non-https
 [[ ! -s "$CURL_ARGS_LOG" ]] || fail "non-https feed still ran curl"
 [[ ! -s "$ASC_ARGS_LOG" ]] || fail "non-https feed still called App Store Connect"
 
-# 12. A feed max above 18 digits fails closed with the URL; nothing reaches the client.
+# 12. A feed max above 12 digits fails closed with the URL and the value;
+# nothing reaches the client.
 reset_logs
 export APP_KEY=feedbig BUNDLE_ID=test.feed.big CURL_MODE=ok CURL_BODY_FILE="${tmp}/appcast-big.xml"
 set +e
@@ -350,7 +360,20 @@ set -e
 [[ $rc -eq 1 ]] || fail "out-of-range feed max did not fail closed (rc=${rc})"
 [[ -z "$out" ]] || fail "out-of-range feed max printed on stdout: ${out}"
 grep -qF 'https://example.invalid/appcast-big.xml' "${tmp}/err" || fail "out-of-range feed max did not log the URL"
+grep -qF '1234567890123456789' "${tmp}/err" || fail "out-of-range feed max did not log the value"
 [[ ! -s "$ASC_ARGS_LOG" ]] || fail "out-of-range feed max still called App Store Connect"
+
+# 12a. A 13-digit feed max fails closed the same way: just over the cap.
+reset_logs
+export APP_KEY=feed13 BUNDLE_ID=test.feed.13 CURL_MODE=ok CURL_BODY_FILE="${tmp}/appcast-13.xml"
+set +e
+out="$(asc_next_shared_build 2>"${tmp}/err")"; rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "13-digit feed max did not fail closed (rc=${rc})"
+[[ -z "$out" ]] || fail "13-digit feed max printed on stdout: ${out}"
+grep -qF 'https://example.invalid/appcast-13.xml' "${tmp}/err" || fail "13-digit feed max did not log the URL"
+grep -qF '2026103009001' "${tmp}/err" || fail "13-digit feed max did not log the value"
+[[ ! -s "$ASC_ARGS_LOG" ]] || fail "13-digit feed max still called App Store Connect"
 
 # 12b. A feed max below 1 fails closed the same way.
 reset_logs

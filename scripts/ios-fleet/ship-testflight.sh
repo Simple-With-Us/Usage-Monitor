@@ -144,6 +144,7 @@ STATE_DIR="${IOS_FLEET_STATE_DIR:-${HOME}/.cache/ios-fleet}"
 APP_KEY=""
 REPO_ROOT=""
 FORCE_BUILD=""
+FORCE_BUILD_SET=0
 FORCE_VERSION=""
 EXPORT_ONLY=0
 UPLOAD_ONLY_IPA=""
@@ -657,9 +658,10 @@ PY
       return 1
     fi
     # The feed max joins the plan as a floor: https-only (checked above),
-    # numeric, at least 1, at most 18 digits.
-    if [[ "${#max}" -gt 18 || "$max" =~ ^0+$ ]]; then
-      logerr "pairedBuildFeed ${feed}: feed max ${max} is not a 1..18-digit integer >= 1, cannot join the release build"
+    # numeric, at least 1, at most 12 digits (the planned build is a 12-digit
+    # merge-stamp build, so a longer feed max can never join it).
+    if [[ "${#max}" -gt 12 || "$max" =~ ^0+$ ]]; then
+      logerr "pairedBuildFeed ${feed}: feed max ${max} is not a 1..12-digit integer >= 1, cannot join the release build"
       return 1
     fi
     floor="$max"
@@ -992,7 +994,7 @@ record_successful_ship() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo-root) REPO_ROOT="$2"; shift 2 ;;
-    --build) FORCE_BUILD="$2"; shift 2 ;;
+    --build) FORCE_BUILD="$2"; FORCE_BUILD_SET=1; shift 2 ;;
     --version) FORCE_VERSION="$2"; shift 2 ;;
     --export-only) EXPORT_ONLY=1; shift ;;
     --upload-only) UPLOAD_ONLY_IPA="$2"; shift 2 ;;
@@ -1118,7 +1120,7 @@ DEFAULT_MARKETING="$(json_get "$APP_KEY" marketingVersionDefault)"
 # floor.  apps.json keys: fixedMarketingVersion ("1.1.2"), optional
 # pairedBundleId (the paired app whose iOS and macOS builds join the plan;
 # macBundleId is kept as an alias), optional pairedBuildFeed (an https Sparkle
-# appcast URL whose max <sparkle:version>, numeric, >= 1, <= 18 digits, joins
+# appcast URL whose max <sparkle:version>, numeric, >= 1, <= 12 digits, joins
 # the plan).  A macOS entry with no paired keys reverse-resolves its peer (the
 # entry naming its bundle id).  Absent fixedMarketingVersion keeps the
 # next-patch behaviour.  Fixed mode works on both platforms: the planned build
@@ -1315,6 +1317,12 @@ sys.exit(0 if a>b else 1)' "$FIXED_MARKETING" "$_rel"; then
   fi
 
   # ---- the build number ---------------------------------------------------
+  # An explicitly empty --build is a missing release plan (the CI plan step
+  # failed or was skipped), never "no override": fail closed instead of
+  # silently re-planning a second build for the same release.
+  if [[ "$FORCE_BUILD_SET" -eq 1 && -z "$FORCE_BUILD" ]]; then
+    die "--build was passed an empty value; the release plan is missing, refusing to re-plan. Nothing shipped."
+  fi
   if [[ -n "$FORCE_BUILD" ]]; then
     if [[ "$FIXED_MODE" -eq 1 ]]; then
       asc_verify_fixed_build "$FORCE_BUILD" || die "rejected --build ${FORCE_BUILD}; nothing shipped"

@@ -329,10 +329,13 @@ jobs:
 
       - name: Ship UsageMonitor to TestFlight
         id: ship_usage
-        if: steps.gate.outputs.ship_usage == '1'
+        if: ${{ steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" --build "${{ steps.plan.outputs.build_usage }}"
+        run: |
+          build="${{ steps.plan.outputs.build_usage }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage; refusing to re-plan"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" --build "$build"
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.
@@ -365,10 +368,13 @@ jobs:
       # secrets step must have succeeded so we never ship without signing.
       - name: Ship LocalUsageMonitor to TestFlight
         id: ship_usage_local
-        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
+        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"
-        run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" --build "${{ steps.plan.outputs.build_usage_local }}"
+        run: |
+          build="${{ steps.plan.outputs.build_usage_local }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage-local; refusing to re-plan"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" --build "$build"
 
       # Sync the standing testers and attach/submit the new build to the public
       # external group.  A failure here is a warning, never a red ship.

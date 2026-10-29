@@ -164,14 +164,22 @@ for (const cmd of ["plan-release-build", "next-shared-build"]) {
     }
   });
 
-  test(`${cmd} accepts an 18-digit floor and refuses a 19-digit one`, () => {
-    const ok = runClient(cmd, ["test.ios", "202610300900123456", "--merge-stamp", STAMP], [
+  test(`${cmd} accepts a 12-digit floor, refuses a plan above 12 digits and refuses a 19-digit floor`, () => {
+    const ok = runClient(cmd, ["test.ios", "202610300900", "--merge-stamp", STAMP], [
       appRule("test.ios", "APP1"),
       buildsRule("APP1", "IOS", []),
       buildsRule("APP1", "MAC_OS", [])
     ]);
     assert.equal(ok.status, 0);
-    assert.equal(ok.stdout.trim(), "202610300900123457");
+    assert.equal(ok.stdout.trim(), "202610300901");
+    const over = runClient(cmd, ["test.ios", "2026103009001", "--merge-stamp", STAMP], [
+      appRule("test.ios", "APP1"),
+      buildsRule("APP1", "IOS", []),
+      buildsRule("APP1", "MAC_OS", [])
+    ]);
+    assert.equal(over.status, 3);
+    assert.ok(over.stderr.includes("planned build exceeds 12 digits"));
+    assert.equal(over.stdout, "");
     const bad = runClient(cmd, ["test.ios", "2026103009001234567", "--merge-stamp", STAMP], [
       appRule("test.ios", "APP1"),
       buildsRule("APP1", "IOS", []),

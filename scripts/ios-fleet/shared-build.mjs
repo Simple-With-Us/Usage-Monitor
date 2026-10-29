@@ -6,7 +6,9 @@
 // build and every extra floor.  A rebuild of the same commit still goes up,
 // because the just-shipped build is in the inventory by then.  Every build
 // counts, old iOS timestamp-style builds included; there is no 1000 floor
-// and no 9999 cap.
+// and no 9999 cap.  The result is always a 12-digit merge-stamp build: a
+// plan above 12 digits throws instead of emitting a value the shell gate
+// would reject.
 export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complete, mergeStamp}) {
   if (complete !== true || !Array.isArray(iosBuilds) || !Array.isArray(macBuilds)) {
     throw new Error('complete build inventory required');
@@ -45,5 +47,7 @@ export function nextSharedBuild({iosBuilds, macBuilds, extraFloors = [], complet
     const candidate = m + 1n;
     if (candidate > next) next = candidate;
   }
-  return {build: String(next)};
+  const planned = String(next);
+  if (planned.length > 12) throw new Error('planned build exceeds 12 digits');
+  return {build: planned};
 }

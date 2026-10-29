@@ -57,11 +57,17 @@ test('paired inventories and the feed floor join one max', () => {
     {build: '202610300901'}
   );
 });
-test('string floors above the safe-integer range count', () => {
+test('string floors count as floors', () => {
   assert.deepEqual(
-    next({...input, extraFloors: ['20261030090012345678']}),
-    {build: '20261030090012345679'}
+    next({...input, extraFloors: ['202610300900']}),
+    {build: '202610300901'}
   );
+});
+test('a plan above 12 digits throws instead of emitting it', () => {
+  assert.throws(() => next({...input, extraFloors: ['20261030090012345678']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, iosBuilds: ['2026103009001']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, iosBuilds: ['999999999999']}), /planned build exceeds 12 digits/);
+  assert.throws(() => next({...input, macBuilds: ['1000000000000']}), /planned build exceeds 12 digits/);
 });
 test('malformed inventory throws before computing', () => {
   for (const bad of [null, 'NaN', '1.2.3.4', 42, '', ' 1000', 'v1']) {
