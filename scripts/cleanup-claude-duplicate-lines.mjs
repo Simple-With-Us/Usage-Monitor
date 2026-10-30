@@ -41,21 +41,21 @@ async function main() {
         const entry = index.shards[ordinal];
         const plan = await readReviewedCleanupShard(input, index, entry);
         const receiptPath = input + ".receipt-" + String(ordinal + 1).padStart(6, "0") + ".json";
-        let receipt;
+        let receipt, check;
         try { receipt = await readProtectedCleanupJson(receiptPath); }
         catch (error) { if (error.code !== "ENOENT") throw error; }
         if (receipt && (receipt.indexDigest !== indexDigest || receipt.shardSha256 !== entry.sha256 || receipt.reviewedDigest !== entry.reviewedDigest || receipt.deleted !== entry.count || !/^[a-f0-9]{64}$/.test(receipt.backupDigest ?? "") || (apply && receipt.backupDigest !== backupDigest))) throw new Error("Cleanup receipt does not match the reviewed shard");
         if (apply && !receipt) {
           const result = await applyStoredClaudeDuplicatePlan(prisma, plan, { reviewedDigest: entry.reviewedDigest, backupDigest, reviewedBackupDigest: value("--full-backup-sha256") });
           if (result.deleted !== entry.count) throw new Error("Shard deletion count differs from reviewed count");
-          const check = await verifyAppliedStoredClaudePlan(prisma, plan);
+          check = await verifyAppliedStoredClaudePlan(prisma, plan);
           if (!check.verified) throw new Error("Committed shard did not pass exact verification");
           receipt = { indexDigest, shardSha256: entry.sha256, reviewedDigest: entry.reviewedDigest, backupDigest, deleted: result.deleted };
           await writePrivateCleanupJson(receiptPath, receipt);
           totals.deletedThisRun += result.deleted;
         } else if (receipt) totals.resumedFromReceipts += receipt.deleted;
         else totals.missingReceipts++;
-        const check = await verifyAppliedStoredClaudePlan(prisma, plan);
+        check ??= await verifyAppliedStoredClaudePlan(prisma, plan);
         totals.candidatesRemaining += check.candidatesRemaining;
         totals.matchingTombstones += check.matchingTombstones;
         totals.keeperChecksFailed += check.keeperChecksFailed;
