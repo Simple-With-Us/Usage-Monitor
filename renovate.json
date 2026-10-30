@@ -5,6 +5,12 @@
   "minimumReleaseAge": "5 days",
   "packageRules": [
     {
+      "description": "Keep Docker Node updates within the supported package engine and runtime major.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["node"],
+      "allowedVersions": ">=24 <25"
+    },
+    {
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "groupName": "non-major dependencies",
       "automerge": true,
