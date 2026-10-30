@@ -64,6 +64,7 @@ function stubRawScanQueries(opts: {
   tokenRows?: Array<Record<string, unknown>>;
 }) {
   const mtdQueue = [...(opts.mtdRowSets ?? [])];
+  let summaryRows: Array<Record<string, unknown>> | null = null;
   prismaMock.$queryRaw.mockImplementation((arg: unknown) => {
     const text =
       typeof (arg as { sql?: unknown })?.sql === "string"
@@ -71,6 +72,49 @@ function stubRawScanQueries(opts: {
         : "";
     if (text.includes('"keyRef"')) {
       return Promise.resolve(opts.tokenRows ?? []);
+    }
+    if (text.includes('"limit", "limitWindow"')) {
+      if (summaryRows === null) {
+        const values = (arg as { values?: unknown[] })?.values ?? [];
+        const dates = values.filter((value): value is Date => value instanceof Date);
+        const [from, through] = dates;
+        return prismaMock.externalUsageEvent.groupBy({
+          by: ["sourceApp", "environment", "provider", "service", "label", "projectId", "metricType", "unit", "limit", "limitWindow"],
+          where: { occurredAt: { gte: from, lte: through }, metricType: { notIn: ["quota_sync", "credit_balance"] } },
+          _sum: { costUsd: true, requests: true, quantity: true },
+          _count: { _all: true, costUsd: true },
+          _max: { occurredAt: true },
+        }).then((groups: Array<Record<string, any>>) => {
+          summaryRows = [];
+          for (const group of groups) {
+            const count = group._count?._all ?? 0;
+            const priced = group._count?.costUsd ?? 0;
+            for (let i = 0; i < count; i += 1) {
+              summaryRows.push({
+                id: `summary-fixture-${summaryRows.length}`,
+                occurredAt: group._max?.occurredAt ?? from,
+                sourceApp: group.sourceApp, environment: group.environment ?? null,
+                provider: group.provider, service: group.service ?? null,
+                label: group.label ?? null, projectId: group.projectId ?? null,
+                metricType: group.metricType, unit: group.unit ?? null,
+                limit: group.limit ?? null, limitWindow: group.limitWindow ?? null,
+                costUsd: i < priced ? (i === 0 ? group._sum?.costUsd : 0) : null,
+                requests: i === 0 ? group._sum?.requests ?? null : null,
+                quantity: i === 0 ? group._sum?.quantity ?? null : null,
+              });
+            }
+          }
+          summaryRows.sort((a, b) => String(a.occurredAt).localeCompare(String(b.occurredAt)) || String(a.id).localeCompare(String(b.id)));
+          return [];
+        }).then(() => {
+          const page = summaryRows!.slice(0, 2_000);
+          summaryRows = summaryRows!.slice(page.length);
+          return page;
+        });
+      }
+      const page = summaryRows.slice(0, 2_000);
+      summaryRows = summaryRows.slice(page.length);
+      return Promise.resolve(page);
     }
     if (text.includes('"costUsd"')) {
       if (text.includes('"id" >')) return Promise.resolve([]);
@@ -84,12 +128,13 @@ describe("summarizeExternalUsageEvents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    stubRawScanQueries({});
   });
 
-  it("aggregates the raw month via one SQL groupBy and preserves rollup totals", async () => {
+  it("folds the paged raw month and preserves rollup totals", async () => {
     // E1: the 1,002 raw events below used to arrive as two cursor-paginated
-    // findMany pages; they now arrive as three pre-aggregated groupBy rows
-    // (split by the limit dimension) with identical folded output.
+    // findMany pages; the fixture adapter expands its grouped test fixtures
+    // into rows that the production scanner folds directly.
     const rawGroup = {
       sourceApp: "socratic-trade",
       environment: "prod",
@@ -149,27 +194,11 @@ describe("summarizeExternalUsageEvents", () => {
       now
     );
 
-    expect(prismaMock.externalUsageEvent.groupBy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        by: [
-          "sourceApp",
-          "environment",
-          "provider",
-          "service",
-          "label",
-          "projectId",
-          "metricType",
-          "unit",
-          "limit",
-          "limitWindow",
-        ],
-        where: expect.objectContaining({
-          // Future-dated telemetry fix: the raw scan is bounded to `now` so
-          // phantom future rows can never inflate totals or latestAt.
-          occurredAt: { gte: new Date("2026-07-01T00:00:00.000Z"), lte: now },
-        }),
-      })
-    );
+    const summarySql = prismaMock.$queryRaw.mock.calls
+      .map(([query]) => (query as { sql?: string }).sql ?? "")
+      .find((sql) => sql.includes('"limit", "limitWindow"'));
+    expect(summarySql).toContain('"occurredAt" <=');
+    expect(summarySql).toContain('ORDER BY "occurredAt" ASC, "id" ASC');
     // The only raw findMany left is the receipt-candidate superset query -
     // the cursor-paginated full-month scan is gone.
     expect(prismaMock.externalUsageEvent.findMany).toHaveBeenCalledTimes(1);
@@ -908,7 +937,19 @@ describe("summarizeExternalUsageEvents derived cost estimates", () => {
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
-    prismaMock.$queryRaw.mockResolvedValue([{ totalUsd: 12.5, eventCount: 7 }]);
+    prismaMock.$queryRaw.mockImplementation((query: unknown) => {
+      const sql = typeof (query as { sql?: unknown })?.sql === "string"
+        ? (query as { sql: string }).sql
+        : "";
+      if (sql.includes('"limit", "limitWindow"')) return Promise.resolve([]);
+      if (sql.includes("json_extract")) {
+        return Promise.resolve(Array.from({ length: 7 }, (_, index) => ({
+          hasDerivedCost: 1,
+          derivedCostUsd: index === 0 ? 12.5 : 0,
+        })));
+      }
+      return Promise.resolve([]);
+    });
   });
 
   afterEach(() => {

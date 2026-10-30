@@ -73,4 +73,20 @@ describe("countExternalUsageEventTombstones", () => {
     );
     expect(existsSync(databasePath)).toBe(false);
   });
+
+  it("reads committed WAL rows while another connection holds a writer transaction", async () => {
+    const { databasePath, db } = createFixtureDatabase();
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      INSERT INTO "ExternalUsageEventTombstone" VALUES ('committed', 1, 1);
+      BEGIN IMMEDIATE;
+      INSERT INTO "ExternalUsageEventTombstone" VALUES ('pending', 1, 1);
+    `);
+    try {
+      await expect(countExternalUsageEventTombstones(`file:${databasePath}`)).resolves.toBe(1);
+    } finally {
+      db.exec("ROLLBACK");
+      db.close();
+    }
+  });
 });

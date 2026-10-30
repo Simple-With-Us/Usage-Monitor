@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe("retention integration", () => {
   it("summarizes every filtered raw event beyond the former 5,000-row cap", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
     const rows = Array.from({ length: 5_050 }, (_, index) => ({
       idempotencyKey: `summary-page-${index}`,
@@ -93,7 +93,7 @@ describe("retention integration", () => {
   });
 
   it("returns only the newest requested raw snapshot points in chronological order", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
     const provider = await prisma.provider.create({
       data: {
@@ -230,7 +230,7 @@ describe("retention integration", () => {
   });
 
   it("serves rolled-up historical data without double counting recent raw rows", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
 
     const provider = await prisma.provider.create({
