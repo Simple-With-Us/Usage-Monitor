@@ -85,36 +85,68 @@ function stubRawScanQueries(opts: {
           _count: { _all: true, costUsd: true },
           _max: { occurredAt: true },
         }).then((groups: Array<Record<string, any>>) => {
-          summaryRows = [];
-          for (const group of groups) {
-            const count = group._count?._all ?? 0;
-            const priced = group._count?.costUsd ?? 0;
-            for (let i = 0; i < count; i += 1) {
-              summaryRows.push({
-                id: `summary-fixture-${summaryRows.length}`,
-                occurredAt: group._max?.occurredAt ?? from,
-                sourceApp: group.sourceApp, environment: group.environment ?? null,
-                provider: group.provider, service: group.service ?? null,
-                label: group.label ?? null, projectId: group.projectId ?? null,
-                metricType: group.metricType, unit: group.unit ?? null,
-                limit: group.limit ?? null, limitWindow: group.limitWindow ?? null,
-                costUsd: i < priced ? (i === 0 ? group._sum?.costUsd : 0) : null,
-                requests: i === 0 ? group._sum?.requests ?? null : null,
-                quantity: i === 0 ? group._sum?.quantity ?? null : null,
-              });
-            }
-          }
-          summaryRows.sort((a, b) => String(a.occurredAt).localeCompare(String(b.occurredAt)) || String(a.id).localeCompare(String(b.id)));
-          return [];
-        }).then(() => {
-          const page = summaryRows!.slice(0, 2_000);
-          summaryRows = summaryRows!.slice(page.length);
-          return page;
+          const pageCount = groups.reduce((sum, group) => sum + Number(group._count?._all ?? 0), 0);
+          const lastAt = groups.reduce<Date | null>((latest, group) => {
+            const current = group._max?.occurredAt as Date | null;
+            return current && (!latest || current > latest) ? current : latest;
+          }, null) ?? through ?? from;
+          summaryRows = groups.map((group, index) => ({
+            sourceApp: group.sourceApp,
+            environment: group.environment ?? null,
+            provider: group.provider,
+            service: group.service ?? null,
+            label: group.label ?? null,
+            projectId: group.projectId ?? null,
+            metricType: group.metricType,
+            unit: group.unit ?? null,
+            limit: group.limit ?? null,
+            limitWindow: group.limitWindow ?? null,
+            eventCount: group._count?._all ?? 0,
+            pricedEventCount: group._count?.costUsd ?? 0,
+            totalCostUsd: group._sum?.costUsd ?? null,
+            totalRequests: group._sum?.requests ?? null,
+            totalQuantity: group._sum?.quantity ?? null,
+            latestAt: group._max?.occurredAt ?? lastAt,
+            groupLastId: `fixture-${String(index).padStart(6, "0")}`,
+            pageCount,
+            pageLastOccurredAt: lastAt,
+            pageLastId: "fixture-last",
+          }));
+          return summaryRows;
         });
       }
-      const page = summaryRows.slice(0, 2_000);
-      summaryRows = summaryRows.slice(page.length);
+      const page = summaryRows;
+      summaryRows = [];
       return Promise.resolve(page);
+    }
+    if (text.includes('AS "totalCostUsd"')) {
+      const rawRows = mtdQueue.shift() ?? [];
+      const groups = new Map<string, Record<string, any>>();
+      for (const row of rawRows) {
+        const dims = [row.provider, row.sourceApp, row.service ?? null, row.label ?? null, row.projectId ?? null, row.metricType];
+        const key = JSON.stringify(dims);
+        let group = groups.get(key);
+        if (!group) {
+          group = {
+            provider: row.provider, sourceApp: row.sourceApp, service: row.service ?? null,
+            label: row.label ?? null, projectId: row.projectId ?? null, metricType: row.metricType,
+            totalCostUsd: null, eventCount: 0, pricedEventCount: 0,
+          };
+          groups.set(key, group);
+        }
+        group.eventCount += 1;
+        if (row.costUsd != null) {
+          group.pricedEventCount += 1;
+          group.totalCostUsd = (group.totalCostUsd ?? 0) + Number(row.costUsd);
+        }
+      }
+      const pageLast = rawRows[rawRows.length - 1];
+      return Promise.resolve(Array.from(groups.values(), (group) => ({
+        ...group,
+        pageCount: rawRows.length,
+        pageLastOccurredAt: pageLast?.occurredAt,
+        pageLastId: pageLast?.id,
+      })));
     }
     if (text.includes('"costUsd"')) {
       if (text.includes('"id" >')) return Promise.resolve([]);
@@ -943,10 +975,13 @@ describe("summarizeExternalUsageEvents derived cost estimates", () => {
         : "";
       if (sql.includes('"limit", "limitWindow"')) return Promise.resolve([]);
       if (sql.includes("json_extract")) {
-        return Promise.resolve(Array.from({ length: 7 }, (_, index) => ({
-          hasDerivedCost: 1,
-          derivedCostUsd: index === 0 ? 12.5 : 0,
-        })));
+        return Promise.resolve([{
+          totalUsd: 12.5,
+          eventCount: 7,
+          pageCount: 7,
+          pageLastOccurredAt: new Date("2026-07-01T00:00:00.000Z"),
+          pageLastId: "derived-last",
+        }]);
       }
       return Promise.resolve([]);
     });

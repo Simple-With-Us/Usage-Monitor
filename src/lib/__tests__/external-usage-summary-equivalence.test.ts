@@ -285,14 +285,49 @@ function installFixtureMocks() {
       const values = (query as { values?: unknown[] })?.values ?? [];
       const dates = values.filter((value): value is Date => value instanceof Date);
       const [from, through] = dates;
-      summaryRows = RAW_EVENTS
+      const events = RAW_EVENTS
         .filter((event) => (!from || event.occurredAt >= from) && (!through || event.occurredAt <= through))
         .filter((event) => !["quota_sync", "credit_balance"].includes(event.metricType) && !isReceiptCandidateShape(event))
-        .map((event) => ({ ...event }))
         .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id));
+      const dimensions = ["sourceApp", "environment", "provider", "service", "label", "projectId", "metricType", "unit", "limit", "limitWindow"] as const;
+      const buckets = new Map<string, { dims: Record<string, unknown>; count: number; priced: number; cost: number | null; requests: number | null; quantity: number | null; latest: Date; lastId: string }>();
+      for (const event of events) {
+        const dims = Object.fromEntries(dimensions.map((field) => [field, event[field] ?? null]));
+        const key = JSON.stringify(dims);
+        let bucket = buckets.get(key);
+        if (!bucket) {
+          bucket = { dims, count: 0, priced: 0, cost: null, requests: null, quantity: null, latest: event.occurredAt, lastId: event.id };
+          buckets.set(key, bucket);
+        }
+        bucket.count += 1;
+        if (event.costUsd != null) { bucket.priced += 1; bucket.cost = (bucket.cost ?? 0) + event.costUsd; }
+        if (event.requests != null) bucket.requests = (bucket.requests ?? 0) + event.requests;
+        if (event.quantity != null) bucket.quantity = (bucket.quantity ?? 0) + event.quantity;
+        if (event.occurredAt > bucket.latest || (event.occurredAt.getTime() === bucket.latest.getTime() && event.id > bucket.lastId)) {
+          bucket.latest = event.occurredAt;
+          bucket.lastId = event.id;
+        }
+      }
+      const pageLast = events[events.length - 1];
+      summaryRows = Array.from(buckets.values()).map((bucket) => ({
+        ...bucket.dims,
+        eventCount: bucket.count,
+        pricedEventCount: bucket.priced,
+        totalCostUsd: bucket.cost,
+        totalRequests: bucket.requests,
+        totalQuantity: bucket.quantity,
+        latestAt: bucket.latest,
+        groupLastId: bucket.lastId,
+        pageCount: events.length,
+        pageLastOccurredAt: pageLast?.occurredAt ?? from,
+        pageLastId: pageLast?.id ?? "",
+      })).sort((a, b) => {
+        const at = new Date(a.latestAt as Date).getTime() - new Date(b.latestAt as Date).getTime();
+        return at || String(a.groupLastId).localeCompare(String(b.groupLastId));
+      });
     }
-    const page = summaryRows.slice(0, 2_000);
-    summaryRows = summaryRows.slice(page.length);
+    const page = summaryRows;
+    summaryRows = [];
     return Promise.resolve(page);
   });
 
