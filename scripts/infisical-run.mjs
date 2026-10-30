@@ -146,7 +146,16 @@ const child = spawn("infisical", execArgs, {
   env: runEnv,
 });
 
-child.on("exit", (code, signal) => {
+const forwardSigint = () => child.kill("SIGINT");
+const forwardSigterm = () => child.kill("SIGTERM");
+
+process.on("SIGINT", forwardSigint);
+process.on("SIGTERM", forwardSigterm);
+
+child.once("exit", (code, signal) => {
+  process.off("SIGINT", forwardSigint);
+  process.off("SIGTERM", forwardSigterm);
+
   if (signal) {
     process.kill(process.pid, signal);
   } else {
