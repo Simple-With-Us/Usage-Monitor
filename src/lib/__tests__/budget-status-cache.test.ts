@@ -523,6 +523,119 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     }
   });
 
+  it("serializes legacy Prisma materialization and releases its lease after a fetch error", async () => {
+    const NOW = new Date("2027-04-10T12:00:00.000Z");
+    const provider = await createProviderWithCost(
+      "legacy-lease-cleanup-provider",
+      23,
+      new Date("2027-04-10T10:00:00.000Z")
+    );
+
+    let releaseFirstReceipt!: () => void;
+    const firstReceiptBlocked = new Promise<void>((resolve) => {
+      releaseFirstReceipt = resolve;
+    });
+    let signalFirstReceipt!: () => void;
+    const firstReceiptEntered = new Promise<void>((resolve) => {
+      signalFirstReceipt = resolve;
+    });
+    let signalRollupRejected!: () => void;
+    const rollupRejected = new Promise<void>((resolve) => {
+      signalRollupRejected = resolve;
+    });
+    let signalMtdCompleted!: () => void;
+    const mtdCompleted = new Promise<void>((resolve) => {
+      signalMtdCompleted = resolve;
+    });
+    const expectedSummaryError = new Error("controlled rollup fetch failure");
+
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      const rows = await querySqliteUsageAggregate(
+        ...(args as Parameters<typeof querySqliteUsageAggregate>)
+      );
+      if (args[0] === "mtd") signalMtdCompleted();
+      return rows;
+    });
+
+    const originalReceiptFindMany = prisma.externalUsageEvent.findMany.bind(
+      prisma.externalUsageEvent
+    );
+    let receiptCalls = 0;
+    let activeReceiptCalls = 0;
+    let maximumActiveReceiptCalls = 0;
+    vi.spyOn(prisma.externalUsageEvent, "findMany").mockImplementation((...args) => {
+      const run = async () => {
+        if (args[0]?.where?.sourceApp !== "billing-receipt-import") {
+          return originalReceiptFindMany(...args);
+        }
+        receiptCalls += 1;
+        activeReceiptCalls += 1;
+        maximumActiveReceiptCalls = Math.max(maximumActiveReceiptCalls, activeReceiptCalls);
+        try {
+          if (receiptCalls === 1) {
+            signalFirstReceipt();
+            await firstReceiptBlocked;
+          }
+          return await originalReceiptFindMany(...args);
+        } finally {
+          activeReceiptCalls -= 1;
+        }
+      };
+      return run() as ReturnType<typeof prisma.externalUsageEvent.findMany>;
+    });
+
+    const originalRollupFindMany =
+      prisma.externalUsageEventDailyRollup.findMany.bind(
+        prisma.externalUsageEventDailyRollup
+      );
+    let rollupCalls = 0;
+    vi.spyOn(prisma.externalUsageEventDailyRollup, "findMany").mockImplementation(
+      (...args) => {
+        const run = async () => {
+          rollupCalls += 1;
+          if (rollupCalls === 1) {
+            signalRollupRejected();
+            throw expectedSummaryError;
+          }
+          return await originalRollupFindMany(...args);
+        };
+        return run() as ReturnType<typeof prisma.externalUsageEventDailyRollup.findMany>;
+      }
+    );
+
+    const since = new Date("2027-03-01T00:00:00.000Z");
+    const rawCutoff = new Date("2027-04-01T00:00:00.000Z");
+    const summaryPromise = summarizeExternalUsageEvents(since, rawCutoff, NOW);
+    const summaryOutcomePromise = summaryPromise.then(
+      () => null,
+      (error: unknown) => error
+    );
+    let budgetPromise: Promise<Awaited<ReturnType<typeof computeBudgetStatus>>> | undefined;
+    try {
+      await Promise.all([firstReceiptEntered, rollupRejected]);
+      budgetPromise = computeBudgetStatus(NOW);
+      await mtdCompleted;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // The MTD native worker starts independently, but its receipt fetch waits
+      // for the held sibling Prisma query even after the rollup query rejects.
+      expect(receiptCalls).toBe(1);
+      expect(rollupCalls).toBe(1);
+      releaseFirstReceipt();
+
+      const summaryError = await summaryOutcomePromise;
+      const budget = await budgetPromise;
+      expect(summaryError).toBe(expectedSummaryError);
+      expect(receiptCalls).toBeGreaterThan(1);
+      expect(maximumActiveReceiptCalls).toBe(1);
+      expect(budget.providers.find((item) => item.id === provider.id)?.spentUsd).toBe(23);
+    } finally {
+      releaseFirstReceipt();
+      await summaryPromise.catch(() => undefined);
+      if (budgetPromise) await budgetPromise.catch(() => undefined);
+    }
+  });
+
   it("dedupes concurrent cold callers onto a single underlying compute and the same cached instance", async () => {
     const NOW = new Date("2026-11-10T12:00:00.000Z");
     const provider = await createProviderWithCost(
