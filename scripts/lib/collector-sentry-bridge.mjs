@@ -199,7 +199,9 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
         const result = otlpAckSchema(logs).safeParse(raw);
         if (!result.success) throw new Error("OTLP acknowledgement is invalid");
         const partial = result.data.partialSuccess ?? result.data.partial_success;
-        poisoned = (partial?.rejectedSpans ?? partial?.rejected_spans ?? partial?.rejectedLogRecords ?? partial?.rejected_log_records ?? 0) > 0;
+        const rejected = partial?.rejectedSpans ?? partial?.rejected_spans ?? partial?.rejectedLogRecords ?? partial?.rejected_log_records ?? 0;
+        if (rejected > group.length) throw new Error("OTLP acknowledgement rejection count exceeds submitted records");
+        poisoned = rejected > 0;
       }
     }
     if (poisoned) {

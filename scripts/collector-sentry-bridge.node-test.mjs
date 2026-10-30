@@ -129,7 +129,7 @@ test("partial rejection isolates a durable quarantine and malformed responses re
 
 test("malformed OTLP ACK fields remain pending without quarantining or acknowledging", () => fixture(async (config) => {
   const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
-  for (const body of [null, [], { partialSuccess: { rejectedSpans: -1 } }, { partialSuccess: { rejectedSpans: true } }, { partialSuccess: { rejectedSpans: "not-a-count" } }, { partialSuccess: { rejectedSpans: "9007199254740992" } }, { partialSuccess: { rejectedLogRecords: 1 } }]) {
+  for (const body of [null, [], { partialSuccess: { rejectedSpans: -1 } }, { partialSuccess: { rejectedSpans: 2 } }, { partialSuccess: { rejectedSpans: true } }, { partialSuccess: { rejectedSpans: "not-a-count" } }, { partialSuccess: { rejectedSpans: "9007199254740992" } }, { partialSuccess: { rejectedLogRecords: 1 } }]) {
     const result = await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(body)) });
     assert.equal(result.delivered, 0);
     assert.equal(result.quarantined, 0);
