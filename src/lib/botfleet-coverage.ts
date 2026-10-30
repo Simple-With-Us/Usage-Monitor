@@ -1,8 +1,9 @@
 import type { ParsedUsageTelemetryEvent } from "@/lib/usage-telemetry";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { deriveUsageTelemetryV2IdempotencyKey } from "@jaywedgeworth22/congress-trading-shared";
 import { prisma } from "@/lib/prisma";
 import { AI_METADATA_KEYS } from "@/lib/ai-usage-metadata";
+import type { IngestCredential } from "@/lib/ingest-auth";
 
 export interface BotFleetCoverageResult {
   events: ParsedUsageTelemetryEvent[];
@@ -27,6 +28,57 @@ function singleCallEventId(session: string, call: string): string {
   return `bf-call-v1:${createHash("sha256").update(JSON.stringify([session, call])).digest("hex")}`;
 }
 
+interface ReceiptIdentity {
+  idempotencyKey?: string | null;
+  sourceApp: string;
+  provider: string;
+  metricType: string;
+  unit?: string | null;
+  quantity?: number | null;
+  requests?: number | null;
+  metadata?: unknown;
+}
+
+function receiptSignature(event: ReceiptIdentity, token: string): string {
+  const meta = record(event.metadata);
+  const fields = [
+    "_usageTelemetrySchemaVersion", "_producerEventId", "_producerInstanceId",
+    "childHarness", "childSessionId", "usageReported", "billedCallProofVersion",
+    "billedCallId", "billedCallModel", "billedCallOutput", "billedCallCacheRead", "billedCallCacheWrite",
+    AI_METADATA_KEYS.modelServed, AI_METADATA_KEYS.harness, AI_METADATA_KEYS.source,
+    AI_METADATA_KEYS.tokensInput, AI_METADATA_KEYS.tokensOutput, AI_METADATA_KEYS.tokensCacheRead,
+    AI_METADATA_KEYS.tokensCacheWrite5m, AI_METADATA_KEYS.tokensCacheWrite1h,
+  ];
+  return createHmac("sha256", token).update("usage-monitor:botfleet-receipt:v1\0").update(JSON.stringify([
+    event.idempotencyKey, event.sourceApp, event.provider, event.metricType,
+    event.unit, event.quantity, event.requests, ...fields.map((key) => meta[key]),
+  ])).digest("hex");
+}
+
+function hasReceiptSignature(event: ReceiptIdentity, tokens: string[]): boolean {
+  const signature = record(event.metadata)._botFleetReceiptSignature;
+  if (typeof signature !== "string" || !/^[a-f0-9]{64}$/.test(signature)) return false;
+  return tokens.some((token) => timingSafeEqual(Buffer.from(signature), Buffer.from(receiptSignature(event, token))));
+}
+
+/** Only the HTTP receiver may grant receipt authority to a scoped BotFleet issuer. */
+export function stampBotFleetReceiptCredential(
+  events: ParsedUsageTelemetryEvent[], credential: IngestCredential | null
+): ParsedUsageTelemetryEvent[] {
+  if (credential?.credentialId !== "botfleet" || credential.allowedSourceApps?.size !== 1 ||
+    !credential.allowedSourceApps.has("botfleet")) return events;
+  return events.map((event) => {
+    const meta = record(event.metadata);
+    if (event.sourceApp !== "botfleet" || meta._usageTelemetrySchemaVersion !== 2 ||
+      meta.billedCallProofVersion !== 1 || typeof meta._producerEventId !== "string" ||
+      !/^bf-call-v1:[a-f0-9]{64}$/.test(meta._producerEventId)) return event;
+    return { ...event, metadata: {
+      ...meta, _botFleetReceiptCredential: "botfleet-v1",
+      _botFleetReceiptSignature: receiptSignature(event, credential.token),
+    } };
+  });
+}
+
 /** Only a persisted, reconciled single-call receipt can cover child token slices. */
 export async function dropEventsCoveredByBotFleet(
   events: ParsedUsageTelemetryEvent[],
@@ -34,6 +86,12 @@ export async function dropEventsCoveredByBotFleet(
 ): Promise<BotFleetCoverageResult> {
   const unchanged = () => ({ events, skippedBotFleetCovered: 0 });
   if (env.BOTFLEET_CHILD_COVERAGE_DROP !== "1" || events.length > 100) return unchanged();
+  const issuerTokens = (env.USAGE_INGEST_PRODUCER_TOKENS ?? "").split(",").flatMap((entry) => {
+    const colon = entry.indexOf(":");
+    const token = entry.slice(colon + 1).trim();
+    return colon > 0 && entry.slice(0, colon).trim() === "botfleet" && token ? [token] : [];
+  });
+  if (!issuerTokens.length) return unchanged();
   const candidates = await Promise.all(events.map(async (event, index) => {
     const meta = record(event.metadata);
     const session = identity(meta["session.id"]);
@@ -72,6 +130,7 @@ export async function dropEventsCoveredByBotFleet(
       const row = byKey.get(candidate.key);
       if (!row || row.sourceApp !== "botfleet" || row.provider !== "anthropic" || row.metricType !== "usage" || row.unit !== "token" || row.requests !== 1) continue;
       const meta = record(row.metadata);
+      if (!hasReceiptSignature(row, issuerTokens)) continue;
       const output = meta[AI_METADATA_KEYS.tokensOutput];
       const input = meta[AI_METADATA_KEYS.tokensInput];
       const read = meta[AI_METADATA_KEYS.tokensCacheRead];
@@ -80,7 +139,8 @@ export async function dropEventsCoveredByBotFleet(
       if (![input, output, read, write5m, write1h].every(count)) continue;
       const total = (input as number) + (output as number) + (read as number) + (write5m as number) + (write1h as number);
       if (!Number.isSafeInteger(total)) continue;
-      if (meta._usageTelemetrySchemaVersion !== 2 || meta._producerEventId !== candidate.eventId ||
+      if (meta._botFleetReceiptCredential !== "botfleet-v1" ||
+        meta._usageTelemetrySchemaVersion !== 2 || meta._producerEventId !== candidate.eventId ||
         meta._producerInstanceId !== candidate.host || meta.childHarness !== "claudeAgent" ||
         meta.childSessionId !== candidate.session || meta.usageReported !== true ||
         meta.billedCallProofVersion !== 1 || meta.billedCallId !== candidate.call ||

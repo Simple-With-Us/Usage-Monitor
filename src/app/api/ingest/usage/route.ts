@@ -48,7 +48,7 @@ import {
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
 import { dropEventsCoveredByNative } from "@/lib/native-telemetry-coverage";
-import { dropEventsCoveredByBotFleet } from "@/lib/botfleet-coverage";
+import { dropEventsCoveredByBotFleet, stampBotFleetReceiptCredential } from "@/lib/botfleet-coverage";
 import { sqliteWriteContentionCode } from "@/lib/sqlite-write-contention";
 
 export const runtime = "nodejs";
@@ -264,6 +264,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Server-owned authority never comes from producer metadata or an unscoped token.
+  events = stampBotFleetReceiptCredential(events, credential);
+
   // Native-vs-local coverage (UM-1636): when a producer's native feed is
   // healthy it already carries the same calls a local transcript collector
   // would send, so the transcript-sourced events are dropped instead of
@@ -276,8 +279,8 @@ export async function POST(request: NextRequest) {
   }
 
   // BotFleet-vs-child coverage: a child harness row the collector tagged as
-  // BotFleet-launched is dropped only when a stored `botfleet` turn names the
-  // same child session and spans the row's time.  Anything unproven is kept
+  // BotFleet-launched is dropped only against an authenticated, exactly
+  // reconciled single-call receipt; anything unproven is kept
   // (duplicates over loss).  Counted as duplicates in the ACK, like above.
   const botFleetCoverage = await dropEventsCoveredByBotFleet(events);
   if (botFleetCoverage.skippedBotFleetCovered > 0) {

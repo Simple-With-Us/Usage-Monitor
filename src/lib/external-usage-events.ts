@@ -349,7 +349,9 @@ function comparableEvent(
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
   const serverComparable = withoutMetadataKeys(
     withoutDerivedCostMetadata(value.metadata ?? null),
-    options.ignoreMetadataKeys ?? []
+    // Authentication is receiver-owned and may differ across a credential
+    // rollout; replay never upgrades or removes the stored receipt authority.
+    ["_botFleetReceiptCredential", "_botFleetReceiptSignature", ...(options.ignoreMetadataKeys ?? [])]
   );
   const metadata = options.ignoreCanonicalAi
     ? withoutCanonicalAiMetadata(serverComparable)
