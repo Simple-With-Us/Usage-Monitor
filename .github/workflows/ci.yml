@@ -380,6 +380,8 @@ jobs:
       #    without jq, so a runner image change degrades rather than breaks).
       - name: Test session token collectors
         run: npm run test:session-token-collectors
+      - name: Test durable collector Sentry bridge
+        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs
       - name: Test detached collector runtime updates
         run: npm run test:collector-runtime
 
