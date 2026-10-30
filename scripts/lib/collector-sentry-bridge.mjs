@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, chmod, readFile } from "node:fs/promises";
+import { mkdir, chmod, readFile, stat } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -34,7 +34,7 @@ export function collectorSentryConfig(env = process.env, producerId) {
     try { hub = new URL(env.COLLECTOR_TELEMETRY_HUB_ENDPOINT); } catch { throw new Error("Collector hub endpoint is invalid"); }
     const octets = hub.hostname.split(".").map(Number);
     const tailnet = octets.length === 4 && octets.every((n) => Number.isInteger(n) && n >= 0 && n <= 255) && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
-    const local = hub.hostname === "127.0.0.1" || hub.hostname === "[::1]" || hub.hostname === "localhost";
+    const local = hub.hostname === "127.0.0.1" || hub.hostname === "[::1]";
     if ((hub.protocol !== "https:" && !(hub.protocol === "http:" && (local || tailnet))) || hub.username || hub.password || hub.search || hub.hash) throw new Error("Collector hub endpoint must use HTTPS or private loopback/Tailscale HTTP");
     let token = env.COLLECTOR_TELEMETRY_HUB_TOKEN;
     if (env.COLLECTOR_TELEMETRY_HUB_TOKENS_JSON) {
@@ -105,9 +105,10 @@ async function processBirth(pid) {
   }
 }
 
-async function openOutbox(root) {
-  await mkdir(root, { recursive: true, mode: 0o700 });
+async function openOutbox(root, { create = true } = {}) {
   const path = join(root, "outbox.sqlite");
+  if (create) await mkdir(root, { recursive: true, mode: 0o700 });
+  else if (!(await stat(path)).isFile()) throw new Error("Existing collector outbox is required for maintenance");
   const db = new DatabaseSync(path);
   try {
     await chmod(path, 0o600);
@@ -147,12 +148,14 @@ export async function enqueueCollectorSentry(events, identity, config) {
 }
 
 /** At-least-once delivery; receipts survive collector checkpoints and restarts. */
-export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = 1000, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000 } = {}) {
+export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = 1000, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32 } = {}) {
+  if (!Number.isSafeInteger(requestLimit) || requestLimit < 1 || requestLimit > 1000) throw new Error("Outbox request limit must be between 1 and 1000");
   const db = await openOutbox(root);
   const owner = randomUUID();
   const deadline = Date.now() + budgetMs;
   let delivered = 0;
   let quarantined = 0;
+  let requests = 0;
 
   const quarantine = (id) => {
     db.prepare("UPDATE events SET state='quarantined', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND owner=?").run(id, owner);
@@ -173,7 +176,8 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
 
   const deliverGroup = async (group) => {
     if (!group.length) return;
-    if (Date.now() >= deadline) throw new Error("Outbox delivery budget exhausted");
+    if (Date.now() >= deadline || requests >= requestLimit) throw new Error("Outbox delivery budget exhausted");
+    requests += 1;
     const logs = group[0].kind === "log";
     const response = await fetchImpl(`${config.endpoint}/v1/${logs ? "logs" : "traces"}`, {
       method: "POST",
@@ -264,7 +268,7 @@ export async function pruneCollectorSentryReceipts(root, { successfulThrough, re
   const checkpoint = new Date(successfulThrough).getTime();
   if (!Number.isFinite(checkpoint) || checkpoint > now || !Number.isInteger(retentionDays) || retentionDays < 180 || !Number.isInteger(limit) || limit < 1 || limit > 10000) throw new Error("Receipt pruning requires a verified checkpoint and at least 180 days of retention");
   const cutoff = new Date(checkpoint - (retentionDays + 1) * 86400000).toISOString();
-  const db = await openOutbox(root);
+  const db = await openOutbox(root, { create: false });
   try {
     db.exec("BEGIN IMMEDIATE");
     const result = db.prepare("DELETE FROM events WHERE id IN (SELECT id FROM events WHERE state='sent' AND sent_at < ? AND json_extract(payload, '$.ts') < ? ORDER BY rowid LIMIT ?)").run(now - retentionDays * 86400000, cutoff, limit);
@@ -277,7 +281,7 @@ export async function pruneCollectorSentryReceipts(root, { successfulThrough, re
 
 export async function retryCollectorSentryQuarantine(root, eventId) {
   if (!/^[a-f0-9]{64}$/.test(eventId || "")) throw new Error("Provide one exact quarantined event ID");
-  const db = await openOutbox(root);
+  const db = await openOutbox(root, { create: false });
   try { return { requeued: db.prepare("UPDATE events SET state='pending' WHERE id=? AND state='quarantined'").run(eventId).changes }; }
   finally { db.close(); }
 }

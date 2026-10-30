@@ -27,7 +27,40 @@ test("configuration is explicit, project scoped and refuses non-Sentry destinati
   assert.equal(collectorSentryConfig(env, "openai-codex"), null);
   const ipv6 = collectorSentryConfig({ ...env, COLLECTOR_TELEMETRY_HUB_ENDPOINT: "http://[::1]:4318" }, "claude-code");
   assert.equal(new URL(ipv6.endpoint).hostname, "[::1]");
+  assert.throws(() => collectorSentryConfig({ ...env, COLLECTOR_TELEMETRY_HUB_ENDPOINT: "http://localhost:4318" }, "claude-code"));
+  assert.equal(collectorSentryConfig({ ...env, COLLECTOR_TELEMETRY_HUB_ENDPOINT: "https://localhost:4318" }, "claude-code").destination, "hub");
 });
+
+test("maintenance rejects missing outboxes without creating files", () => fixture(async (config) => {
+  const missing = join(config.stateRoot, "mistyped-outbox");
+  await assert.rejects(pruneCollectorSentryReceipts(missing, { successfulThrough: new Date(Date.now() - 1000).toISOString() }), { code: "ENOENT" });
+  await assert.rejects(retryCollectorSentryQuarantine(missing, "a".repeat(64)), { code: "ENOENT" });
+  await assert.rejects(stat(missing), { code: "ENOENT" });
+}));
+
+test("poison isolation bounds requests while healthy rows remain pending and eventually deliver", () => fixture(async (config) => {
+  const events = Array.from({ length: 16 }, (_, i) => tokens({ collectorCallId: `call-${i}`, extraId: `call-${i}`, model: i === 15 ? "good-model" : "bad-model" })).flat();
+  const root = await enqueueCollectorSentry(events, identity, config);
+  let delivered = 0;
+  let quarantined = 0;
+  let pending = true;
+  for (let invocation = 0; invocation < 20 && pending; invocation += 1) {
+    let requests = 0;
+    const result = await drainCollectorSentry(root, config, { requestLimit: 8, fetchImpl: async (_url, options) => {
+      requests += 1;
+      const payload = JSON.parse(options.body);
+      const spans = payload.resourceSpans.flatMap((resource) => resource.scopeSpans.flatMap((scope) => scope.spans));
+      const poisoned = spans.some((span) => span.attributes.some((a) => a.key === "gen_ai.request.model" && a.value.stringValue === "bad-model"));
+      return poisoned ? new Response("", { status: 422 }) : accepted();
+    } });
+    assert.ok(requests <= 8);
+    delivered += result.delivered;
+    quarantined += result.quarantined;
+    pending = result.pending && quarantined < 15;
+  }
+  assert.equal(delivered, 1);
+  assert.equal(quarantined, 15);
+}));
 
 test("only authoritative source calls become spans; serialization and IDs remain unchanged", () => {
   const plain = tokens();
