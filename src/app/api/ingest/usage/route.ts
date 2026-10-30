@@ -49,6 +49,7 @@ import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
 import { dropEventsCoveredByNative } from "@/lib/native-telemetry-coverage";
 import { dropEventsCoveredByBotFleet } from "@/lib/botfleet-coverage";
+import { sqliteWriteContentionCode } from "@/lib/sqlite-write-contention";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -512,6 +513,13 @@ export async function POST(request: NextRequest) {
       { status: 202 }
     );
   } catch (error) {
+    const contentionCode = sqliteWriteContentionCode(error);
+    if (contentionCode) {
+      console.warn("[ingest/usage] SQLite writer busy:", contentionCode);
+      return respondError(503, "receiver_busy", "Usage ingest is busy. Retry later.", {
+        retryAfterSeconds: INGEST_ADMISSION_RETRY_AFTER_SECONDS,
+      });
+    }
     // X6: any non-collision persistence/unexpected failure must surface as the
     // typed contract error, not an untyped HTML 500.
     console.error(

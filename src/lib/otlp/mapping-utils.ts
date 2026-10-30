@@ -64,6 +64,8 @@ const METADATA_ALLOWLIST = new Set([
   // resource attrs. Same rule as above — attribution dimensions only, never
   // prompt/response/tool-argument content (those ride AgentTurn, not events).
   "agent.platform",
+  "agent.launcher",
+  "agent.launcher.session",
   "seat",
   "lane",
   "repo",

@@ -255,6 +255,12 @@ export async function persistExternalUsageEvents(
   // resurrect a row immediately after retention pruned it.
   return prisma.$transaction(
     async (tx) => {
+      // Prisma's SQLite adapter starts a deferred BEGIN. Reserve the writer
+      // before reading tombstones/replays: an external writer (including the
+      // replicator) can otherwise invalidate that read snapshot, and the later
+      // INSERT fails immediately with SQLITE_BUSY_SNAPSHOT/P1008 regardless of
+      // busy_timeout. WHERE 0 changes no rows and cannot scan the event table.
+      await reserveExternalUsageWriter(tx);
       const result = await persistExternalUsageEventsInTransaction(tx, events);
       await syncStatusToUsageSnapshot(result.newEvents, tx);
       return result;
@@ -263,6 +269,10 @@ export async function persistExternalUsageEvents(
       timeout: 30_000,
     }
   );
+}
+
+export async function reserveExternalUsageWriter(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`UPDATE "ExternalUsageEvent" SET "id" = "id" WHERE 0`;
 }
 
 type ExistingExternalUsageEvent = Awaited<
