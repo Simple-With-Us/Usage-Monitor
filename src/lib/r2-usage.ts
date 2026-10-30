@@ -303,6 +303,7 @@ export function __resetR2UsageStateForTests(): void {
   loggedResumeOverride = false;
   liveS3ListCache = null;
   r2ProductStatusCache = new Map();
+  setR2CheckpointHandoffPending(false);
   if (cachedFallbackFlagDir) {
     try {
       fs.rmSync(cachedFallbackFlagDir, { recursive: true, force: true });
@@ -348,6 +349,7 @@ export function isLitestreamR2Endpoint(
 function r2SupervisorCanResume(): boolean {
   return (
     process.env.APP_STARTUP_WRAPPER === "start-with-litestream-v2" &&
+    process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE === "true" &&
     isLitestreamR2Endpoint() &&
     Boolean(
       process.env.LITESTREAM_S3_BUCKET?.trim() &&
@@ -366,6 +368,31 @@ async function setWalAutocheckpointPages(pages: 0 | 1_000): Promise<void> {
     throw new Error("SQLite WAL checkpoint ownership hook is unavailable");
   }
   await (setWalAutocheckpoint as (pages: 0 | 1_000) => Promise<void>)(pages);
+}
+
+async function handOffR2CheckpointToApp(): Promise<void> {
+  try {
+    await setWalAutocheckpointPages(1_000);
+    setR2CheckpointHandoffPending(false);
+  } catch (error) {
+    setR2CheckpointHandoffPending(true);
+    throw error;
+  }
+}
+
+async function retryPendingR2CheckpointHandoff(): Promise<void> {
+  if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+  await serializeR2Transition(async () => {
+    if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+    try {
+      await handOffR2CheckpointToApp();
+    } catch (error) {
+      console.error("[r2-usage] Retry of R2 checkpoint handoff failed:", error);
+      throw new Error("R2 kill remains active; SQLite checkpoint handoff retry failed", {
+        cause: error,
+      });
+    }
+  });
 }
 
 export function resolveR2UsageCredentials(
@@ -536,6 +563,17 @@ let loggedResumeOverride = false;
 // so a slow resume cannot commit after a newer kill has already engaged.
 const r2TransitionLeaseKey = Symbol.for("usage-monitor.r2-transition-lease");
 const r2TransitionRegistry = globalThis as typeof globalThis & Record<symbol, unknown>;
+const r2CheckpointHandoffPendingKey = Symbol.for(
+  "usage-monitor.r2-checkpoint-handoff-pending"
+);
+
+function isR2CheckpointHandoffPending(): boolean {
+  return r2TransitionRegistry[r2CheckpointHandoffPendingKey] === true;
+}
+
+function setR2CheckpointHandoffPending(pending: boolean): void {
+  r2TransitionRegistry[r2CheckpointHandoffPendingKey] = pending;
+}
 
 function serializeR2Transition<T>(operation: () => Promise<T>): Promise<T> {
   const tail = (r2TransitionRegistry[r2TransitionLeaseKey] as Promise<void> | undefined) ??
@@ -625,6 +663,7 @@ async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
       // The supervisor must keep Litestream stopped until SQLite has given
       // checkpoint ownership back to the replicator.
       await setWalAutocheckpointPages(0);
+      setR2CheckpointHandoffPending(false);
     }
   }
   // Persist the decision. Mutating process.env alone made this a no-op across
@@ -636,7 +675,7 @@ async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
     writeR2AutoResumeMarkerAtomically(reason);
   } catch (err) {
     if (canResumeSupervisor) {
-      await setWalAutocheckpointPages(1_000).catch((rollbackError) => {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
         console.error("[r2-usage] Failed restoring SQLite checkpoint policy after resume-marker failure:", rollbackError);
       });
     }
@@ -655,7 +694,7 @@ async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
       console.error("[r2-usage] Failed cleaning uncommitted auto-resume marker:", cleanupError);
     }
     if (canResumeSupervisor) {
-      await setWalAutocheckpointPages(1_000).catch((rollbackError) => {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
         console.error("[r2-usage] Failed restoring SQLite checkpoint policy after kill-flag failure:", rollbackError);
       });
     }
@@ -693,9 +732,13 @@ async function enforceR2AutoDisableSerialized(reason: string): Promise<void> {
   } catch (err) {
     console.error("[r2-usage] Failed clearing auto-resume marker:", err);
   }
-  if (r2Target && process.env.LITESTREAM_ACTIVE === "true") {
+  if (
+    r2Target &&
+    r2SupervisorCanResume() &&
+    (process.env.LITESTREAM_ACTIVE === "true" || isR2CheckpointHandoffPending())
+  ) {
     try {
-      await setWalAutocheckpointPages(1_000);
+      await handOffR2CheckpointToApp();
     } catch (err) {
       checkpointHandoffError = err;
     }
@@ -2560,6 +2603,8 @@ export async function runR2UsageCheck(
   fetchImpl: typeof fetch = fetch,
   now: Date = new Date()
 ): Promise<R2UsageAssessment> {
+  // Retry prior checkpoint transfers before cached inventory or other paths.
+  await retryPendingR2CheckpointHandoff();
   const credentials = resolveR2UsageCredentials();
   let assessment: R2UsageAssessment;
   const failClosed = r2FreeTierFailClosedRequired();

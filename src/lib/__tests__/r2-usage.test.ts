@@ -49,6 +49,8 @@ describe("R2 usage monitoring & auto-disable", () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     delete (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"];
+    delete process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE;
+    delete process.env.APP_STARTUP_WRAPPER;
     delete process.env.LITESTREAM_EMERGENCY_DISABLE;
     delete process.env.R2_WRITES_DISABLED;
     delete process.env.PUSHOVER_USER_KEY;
@@ -1127,8 +1129,9 @@ describe("R2 usage monitoring & auto-disable", () => {
   // every maintenance-cycle resume died with the process and the next restart
   // re-injected the variable. The resume has to outlive the process.
   describe("durable auto-resume over an env-pinned kill switch", () => {
-    function configureManagedR2Supervisor(active: boolean): void {
+    function configureManagedR2Supervisor(active: boolean, watcherActive = active): void {
       process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
+      process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = watcherActive ? "true" : "false";
       process.env.LITESTREAM_S3_BUCKET = "test-r2-bucket";
       process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
       process.env.LITESTREAM_S3_ACCESS_KEY_ID = "test-access-key";
@@ -1173,8 +1176,8 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(hasR2AutoResumeMarker()).toBe(true);
     });
 
-    it("reclaims checkpoints when booted with R2 replication disabled", async () => {
-      configureManagedR2Supervisor(false);
+    it("defers resume until restart when R2 booted without its watcher", async () => {
+      configureManagedR2Supervisor(false, false);
       process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
       process.env.R2_WRITES_DISABLED = "true";
       fs.writeFileSync(
@@ -1190,13 +1193,16 @@ describe("R2 usage monitoring & auto-disable", () => {
 
       await clearR2AutoDisable("boot recovery");
 
-      expect(checkpointChanges).toEqual([0]);
-      expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+      expect(checkpointChanges).toEqual([]);
+      expect(hasR2AutoResumeMarker()).toBe(true);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
       expect(isR2AutoDisabled()).toBe(false);
     });
 
     it("does not claim R2 replication resumed without the managed supervisor config", async () => {
       process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
+      process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
+      process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "false";
       process.env.LITESTREAM_ACTIVE = "false";
       process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
       process.env.R2_WRITES_DISABLED = "true";
@@ -1236,6 +1242,35 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(process.env.LITESTREAM_ACTIVE).toBe("false");
       expect(isR2AutoDisabled()).toBe(true);
       expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+
+    it("retries a failed kill checkpoint handoff at the next maintenance check", async () => {
+      configureManagedR2Supervisor(true);
+      let failFirstHandoff = true;
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+          if (pages === 1_000 && failFirstHandoff) {
+            failFirstHandoff = false;
+            throw new Error("transient pragma failure");
+          }
+        };
+
+      await expect(enforceR2AutoDisable("transient checkpoint failure")).rejects.toThrow(
+        "R2 kill persisted but SQLite checkpoint handoff failed"
+      );
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const deniedListRequest: typeof fetch = async () =>
+        new Response("AccessDenied", { status: 403 });
+      await runR2UsageCheck(deniedListRequest);
+      expect(checkpointChanges).toEqual([1_000, 1_000]);
+
+      await runR2UsageCheck(deniedListRequest);
+      expect(checkpointChanges).toEqual([1_000, 1_000]);
+      expect(isR2AutoDisabled()).toBe(true);
     });
 
     it("rolls checkpoint ownership back when atomic resume-marker preparation fails", async () => {
