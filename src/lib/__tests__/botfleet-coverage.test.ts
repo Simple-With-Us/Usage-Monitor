@@ -85,6 +85,12 @@ describe("exact single-call billing receipts", () => {
     expect((await dropEventsCoveredByBotFleet(priced, { BOTFLEET_CHILD_COVERAGE_DROP: "1" })).events).toBe(priced);
     expect(findMany).not.toHaveBeenCalled();
   });
+
+  it.each(["input", "constructor", "toString", "__proto__", "unknown"])("keeps unproven token component %s without a query", async (tokenType) => {
+    const events = [child({ tokenType })];
+    expect((await dropEventsCoveredByBotFleet(events, { BOTFLEET_CHILD_COVERAGE_DROP: "1" })).events).toBe(events);
+    expect(findMany).not.toHaveBeenCalled();
+  });
 });
 
 describe("BotFleet coverage preserves calls without exact billing proof", () => {

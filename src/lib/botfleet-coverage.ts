@@ -10,6 +10,9 @@ export interface BotFleetCoverageResult {
 }
 
 type RecordValue = Record<string, unknown>;
+const COVERED_COMPONENTS = new Map([
+  ["output", "billedCallOutput"], ["cacheRead", "billedCallCacheRead"], ["cacheCreation", "billedCallCacheWrite"],
+]);
 function record(value: unknown): RecordValue {
   return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {};
 }
@@ -37,7 +40,7 @@ export async function dropEventsCoveredByBotFleet(
     const call = identity(meta["call.id"]);
     const model = identity(meta.model);
     const host = identity(meta._producerInstanceId);
-    const component = ({ output: "billedCallOutput", cacheRead: "billedCallCacheRead", cacheCreation: "billedCallCacheWrite" } as Record<string, string>)[String(meta.tokenType)];
+    const component = typeof meta.tokenType === "string" ? COVERED_COMPONENTS.get(meta.tokenType) : undefined;
     // Inputs, costs, request counts, cumulative metrics and all incomplete
     // identities stay additive. There is no time-window fallback.
     if (event.sourceApp !== "claude-code" || event.provider !== "anthropic" ||
