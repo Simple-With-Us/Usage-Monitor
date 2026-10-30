@@ -141,20 +141,36 @@ if (process.env.INFISICAL_BASE_URL) {
 }
 execArgs.push("--", ...command);
 
-const child = spawn("infisical", execArgs, {
-  stdio: "inherit",
-  env: runEnv,
-});
-
 const forwardSigint = () => child.kill("SIGINT");
 const forwardSigterm = () => child.kill("SIGTERM");
+let childSettled = false;
+let child;
+
+const removeSignalForwarders = () => {
+  process.off("SIGINT", forwardSigint);
+  process.off("SIGTERM", forwardSigterm);
+};
 
 process.on("SIGINT", forwardSigint);
 process.on("SIGTERM", forwardSigterm);
 
+child = spawn("infisical", execArgs, {
+  stdio: "inherit",
+  env: runEnv,
+});
+
+child.once("error", (error) => {
+  if (childSettled) return;
+  childSettled = true;
+  removeSignalForwarders();
+  console.error(`[infisical] Failed to start Infisical CLI (${error.code ?? "unknown"}).`);
+  process.exit(127);
+});
+
 child.once("exit", (code, signal) => {
-  process.off("SIGINT", forwardSigint);
-  process.off("SIGTERM", forwardSigterm);
+  if (childSettled) return;
+  childSettled = true;
+  removeSignalForwarders();
 
   if (signal) {
     process.kill(process.pid, signal);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -11,21 +11,28 @@ import { fileURLToPath } from "node:url";
 const scriptPath =
   process.env.INFISICAL_RUN_SCRIPT || fileURLToPath(new URL("./infisical-run.mjs", import.meta.url));
 const timeoutMs = 3000;
+const startupTimeoutMs = 10000;
 
 async function makeFakeInfisical(mode) {
   const root = await mkdtemp(path.join(os.tmpdir(), "infisical-run-test-"));
   const binPath = path.join(root, "bin");
   const markerPath = path.join(root, "child-pid");
   const signalPath = path.join(root, "child-signal");
+  const versionPath = path.join(root, "version-probe");
   await mkdir(binPath);
+  await symlink(process.execPath, path.join(binPath, "node"));
 
   const executablePath = path.join(binPath, "infisical");
   await writeFile(
     executablePath,
     `#!/usr/bin/env node
-const { writeFileSync } = require("node:fs");
+const { unlinkSync, writeFileSync } = require("node:fs");
 
-if (process.argv[2] === "--version") process.exit(0);
+if (process.argv[2] === "--version") {
+  writeFileSync(process.env.FAKE_INFISICAL_VERSION_FILE, "probed");
+  if (process.env.FAKE_INFISICAL_MODE === "self-delete") unlinkSync(process.argv[1]);
+  process.exit(0);
+}
 writeFileSync(process.env.FAKE_INFISICAL_PID_FILE, String(process.pid));
 if (process.env.FAKE_INFISICAL_MODE === "exit") process.exit(37);
 for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -44,19 +51,21 @@ setInterval(() => {}, 1000);
     root,
     markerPath,
     signalPath,
+    versionPath,
     env: {
-      PATH: [binPath, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
+      PATH: binPath,
       INFISICAL_PROJECT_ID: "fake-project",
       INFISICAL_TOKEN: "test-only-token",
       FAKE_INFISICAL_MODE: mode,
       FAKE_INFISICAL_PID_FILE: markerPath,
       FAKE_INFISICAL_SIGNAL_FILE: signalPath,
+      FAKE_INFISICAL_VERSION_FILE: versionPath,
     },
   };
 }
 
 async function waitForMarker(markerPath) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + startupTimeoutMs;
   while (Date.now() < deadline) {
     try {
       const pid = Number(await readFile(markerPath, "utf8"));
@@ -92,6 +101,15 @@ function killIfRunning(pid) {
   }
 }
 
+function killProcessGroup(wrapper) {
+  if (!wrapper?.pid) return;
+  try {
+    process.kill(-wrapper.pid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
 function waitForExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
@@ -110,21 +128,28 @@ async function runWithFakeInfisical(mode, verify) {
   const fake = await makeFakeInfisical(mode);
   let wrapper;
   let childPid;
+  const stderr = [];
   try {
     wrapper = spawn(process.execPath, [scriptPath, "--", "node", "-e", "0"], {
       env: fake.env,
-      stdio: "ignore",
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
     });
-    childPid = await waitForMarker(fake.markerPath);
-    await verify({ wrapper, fake, childPid });
+    wrapper.stderr.setEncoding("utf8");
+    wrapper.stderr.on("data", (chunk) => stderr.push(chunk));
+    if (mode !== "self-delete") childPid = await waitForMarker(fake.markerPath);
+    await verify({ wrapper, fake, childPid, stderr });
   } finally {
-    killIfRunning(childPid);
-    await waitForChildExit(childPid);
-    if (wrapper && wrapper.exitCode === null && wrapper.signalCode === null) {
-      wrapper.kill("SIGKILL");
-      await once(wrapper, "exit").catch(() => {});
+    try {
+      killIfRunning(childPid);
+      killProcessGroup(wrapper);
+      if (childPid) await waitForChildExit(childPid);
+      if (wrapper && wrapper.exitCode === null && wrapper.signalCode === null) {
+        await waitForExit(wrapper);
+      }
+    } finally {
+      await rm(fake.root, { recursive: true, force: true });
     }
-    await rm(fake.root, { recursive: true, force: true });
   }
 }
 
@@ -146,5 +171,16 @@ test("propagates the Infisical exit code", async () => {
     const result = await waitForExit(wrapper);
     assert.equal(result.code, 37);
     assert.equal(result.signal, null);
+  });
+});
+
+test("reports asynchronous CLI spawn errors and exits 127", async () => {
+  await runWithFakeInfisical("self-delete", async ({ wrapper, fake, stderr }) => {
+    const result = await waitForExit(wrapper);
+    assert.equal(result.code, 127);
+    assert.equal(result.signal, null);
+    assert.equal(stderr.join(""), "[infisical] Failed to start Infisical CLI (ENOENT).\n");
+    assert.equal(await readFile(fake.versionPath, "utf8"), "probed");
+    await assert.rejects(readFile(fake.markerPath), { code: "ENOENT" });
   });
 });
