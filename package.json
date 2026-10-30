@@ -55,6 +55,7 @@
     "test:backup-staged-errors": "node scripts/test-backup-staged-errors.mjs",
     "test:r2-archive": "node scripts/test-r2-weekly-archive.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
+    "test:node-runtime": "node scripts/check-node-runtime-parity.mjs",
     "test:oracle-deploy": "node scripts/test-oracle-deploy-config.mjs",
     "test:apple-projects": "bash scripts/verify-apple-projects.sh",
     "test:antigravity-collector": "node scripts/test-antigravity-collector.mjs",
@@ -66,7 +67,7 @@
     "test:e2e-visual-snapshot-files": "node scripts/test-e2e-visual-snapshot-files.mjs",
     "test:audit-ci": "node scripts/test-audit-ci.mjs",
     "test:sentry-ci-report": "python3 scripts/test-sentry-ci-report.py",
-    "verify": "npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:backup-concurrent-startup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run test:quota-wrapper && npm run test:audit-ci && npm run build"
+    "verify": "npm run test:node-runtime && npm run test:sentry-ci-report && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:backup-concurrent-startup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run test:quota-wrapper && npm run test:audit-ci && npm run build"
   },
   "dependencies": {
     "@datadog/browser-logs": "^7.15.0",

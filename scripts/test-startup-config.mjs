@@ -119,7 +119,7 @@ try {
     );
   }
   const backupIndex = startupSource.indexOf(
-    'node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs"'
+    'node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs" --if-schema-changed'
   );
   const migrationIndex = startupSource.indexOf('node "${REPO_ROOT}/scripts/migrate-safe.mjs"');
   const linkAuditIndex = startupSource.indexOf(
