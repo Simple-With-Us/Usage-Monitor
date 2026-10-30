@@ -12,7 +12,7 @@ let package = Package(
         // Sparkle 2: self-update for the Mac app (Mac target only; AppKit-only,
         // must never link into anything iOS).  scripts/mac-release-build.sh
         // embeds the framework and asserts it; see docs/AUTO-UPDATE.md.
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.1"),
     ],
     targets: [
         .target(name: "QuotaCore", linkerSettings: [.linkedLibrary("sqlite3")]),
