@@ -273,10 +273,9 @@ let r2ProductStatusCache = new Map<
 
 function getFlagDir(): string {
   // Unit tests must never observe or mutate a host's live guard files merely
-  // because the test runner happens to have a /data mount. Vitest sets
-  // NODE_ENV=test before loading application modules, so keep every test
-  // process in the same private fallback used on hosts without that mount.
-  if (process.env.NODE_ENV !== "test" && fs.existsSync("/data")) return "/data";
+  // because the test runner happens to have a /data mount. Use Vitest's own
+  // marker because production-behavior tests intentionally replace NODE_ENV.
+  if (process.env.VITEST !== "true" && fs.existsSync("/data")) return "/data";
   // Fallback for environments without the persistent /data volume: use a
   // private per-process directory (mkdtemp creates it 0o700 with an
   // unpredictable suffix) instead of predictable paths directly inside the

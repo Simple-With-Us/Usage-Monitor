@@ -2,7 +2,7 @@
 
 ## Summary
 
-Usage Monitor tests now keep R2 emergency-state files in a private per-process directory whenever `NODE_ENV=test`.
+Usage Monitor tests now keep R2 emergency-state files in a private per-process directory whenever Vitest's dedicated runtime marker is present.
 
 A test run on a host with `/data` can no longer read, delete, or overwrite live R2 guard state.
 

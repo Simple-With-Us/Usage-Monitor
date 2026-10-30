@@ -1221,6 +1221,15 @@ describe("R2 usage monitoring & auto-disable", () => {
     }
   );
 
+  it("keeps test flag files isolated when a test enables production behavior", () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+
+    expect(flagPath).not.toBe(path.join("/data", R2_DISABLED_FLAG_FILENAME));
+    expect(path.dirname(path.dirname(flagPath))).toBe(path.resolve(os.tmpdir()));
+  });
+
   it(
     "writes flag files with owner-only permissions and the expected content",
     () => {
