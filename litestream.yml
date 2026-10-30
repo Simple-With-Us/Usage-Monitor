@@ -26,8 +26,10 @@
 
 snapshot:
   interval: 24h
-  # B2 is not free-tier–capped like R2; 24h retention is enough for DR.
-  retention: 24h
+  # Jay 2026-10-29 fleet policy: short-term backups are kept 3 days (72h), and the
+  # privacy policy (src/app/privacy/page.tsx) says so.  B2 is paid capacity, and
+  # compaction is L1-only, so the 3x window does not reopen the Aug 2026 R2 growth mode.
+  retention: 72h
 
 # Product compaction is L0 + bounded L1 + 24h snapshots.  L2 and L3 are OFF.
 #

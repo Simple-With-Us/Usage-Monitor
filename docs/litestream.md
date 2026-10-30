@@ -67,7 +67,7 @@ Local pre-migration snapshots on `/data` still exist.
   to run even when replication is never enabled — the binary just sits unused.
 - `litestream.yml` — the replica config: `/data/prod.db`, single S3-type replica
   populated entirely from `LITESTREAM_S3_*` env vars. **Disaster recovery only**
-  for this app: `snapshot.interval: 24h`, `snapshot.retention: 24h`,
+  for this app: `snapshot.interval: 24h`, `snapshot.retention: 72h` (3 days, Jay 2026-10-29),
   `sync-interval: 1h`, `part-size: 10MB`, `concurrency: 2` (see `litestream.yml`).
   Product compaction is **L1-only**: a single top-level `levels:` entry
   (`interval: 30s`) so `Config.Levels` `MaxLevel() == 1` and L2/L3 monitors
@@ -243,7 +243,7 @@ live overlay currently holds them off.
 
 There is also **no compaction-backoff yaml key**.  Removing L2/L3 is the
 backoff: remaining L1 retries every 30s against a small L0 window.  Snapshot
-stays `24h` / `24h`.  Replica `sync-interval: 1h`, `part-size: 10MB`, and
+stays `24h` interval / `72h` retention.  Replica `sync-interval: 1h`, `part-size: 10MB`, and
 `concurrency: 2` are unchanged.  Backup health-check wiring is unchanged
 (probes still list 0–3 + 9; leftover L2/L3 objects do not mean those
 monitors are running).  Do **not** add `verify-compaction: true`.
@@ -259,6 +259,8 @@ tip-prune at 50% absolute storage (keep newest tip per level).  Manual
 tip-prune (ops): delete non-tip `.ltx` under
 `api-usage-monitor/prod.db/{0000..0009}/`.  Multi-day retention is what filled
 15+ GiB in August 2026 — do not raise retention without measuring.
+2026-10-29: Jay set retention to 72h (fleet 3-day short-term policy) on paid B2
+with L1-only compaction; watch B2 `api-usage-monitor/prod.db/` size after rollout.
 
 
 ## Rollback host only (Render)

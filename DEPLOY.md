@@ -278,7 +278,7 @@ up to five verified offline SQLite snapshots for automatic code rollback.
 
 [Litestream](https://litestream.io/) continuously replicates `/data/prod.db`
 to **Backblaze B2** (bucket `jays-usage-monitor-eu`) with disaster-recovery
-restore points (24 h snapshot retention, 24 h snapshot interval, 1 h
+restore points (72 h snapshot retention, 24 h snapshot interval, 1 h
 sync-interval — not continuous second-scale PITR; see `litestream.yml`).
 **Cloudflare R2 remains historic** until the owner deletes it after B2 is
 proven. The external singleton at
