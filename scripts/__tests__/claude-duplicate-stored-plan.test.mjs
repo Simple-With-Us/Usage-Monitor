@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { openProtectedCleanupFile, readProtectedCleanupJson, readProtectedCleanupJsonHandle, verifyProtectedSqliteBackup } from "../lib/protected-cleanup-file.mjs";
 import { writeStoredCleanupShards, readReviewedCleanupIndex, readReviewedCleanupShard, writePrivateCleanupJson, validateReviewedCleanupShards } from "../lib/stored-cleanup-artifacts.mjs";
+import { cleanupFailureDiagnostic } from "../lib/cleanup-diagnostics.mjs";
 
 const proof = { idempotencyKey: "duplicate", keeperIdempotencyKey: "keeper", label: "token:output", model: "claude-test", quantity: 20,
   occurredAt: "2026-10-29T12:00:01.000Z", keeperOccurredAt: "2026-10-29T12:00:00.000Z", sourceProofHash: "source-sha", messageProofHash: "message-sha" };
@@ -142,11 +143,38 @@ test("CLI failures disclose only the fixed phase and error name", async () => {
     await writeFile(path, "sensitive-plan-payload", { mode: 0o600 });
     const maintenance = spawnSync(process.execPath, [fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url)), "--proof-manifest", path], { encoding: "utf8" });
     assert.equal(maintenance.status, 1);
-    assert.deepEqual(JSON.parse(maintenance.stderr), { phase: "cleanup-maintenance", errorName: "Error" });
+    assert.deepEqual(JSON.parse(maintenance.stderr), { phase: "cleanup-maintenance", errorName: "Error", operation: "read-proof" });
     const source = spawnSync(process.execPath, [fileURLToPath(new URL("../plan-claude-duplicate-cleanup.mjs", import.meta.url)), "--claude-home", directory, "--manifest", path, "--since", "sensitive-invalid-date"], { encoding: "utf8" });
     assert.equal(source.status, 1);
     assert.deepEqual(JSON.parse(source.stderr), { phase: "cleanup-source-plan", errorName: "Error" });
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("CLI reports only bounded database codes and operation while withholding private error data", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-coded-failure-"));
+  try {
+    const preload = join(directory, "inject.mjs");
+    await writeFile(preload, `process.getuid = () => { const error = new Error("private SQL parameter and transcript path"); error.name = "PrismaClientKnownRequestError"; error.code = "P2028"; error.meta = { private: "private SQL parameter and transcript path", driverAdapterError: { cause: { originalCode: "SQLITE_BUSY_SNAPSHOT", message: "private SQL parameter and transcript path" } } }; throw error; };`);
+    const cli = fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, ["--import", preload, cli, "--proof-manifest", join(directory, "private-plan.json")], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.deepEqual(JSON.parse(result.stderr), { phase: "cleanup-maintenance", errorName: "PrismaClientKnownRequestError", operation: "read-proof", prismaCode: "P2028", sqliteCode: "SQLITE_BUSY_SNAPSHOT" });
+    assert.equal((result.stderr + result.stdout).includes("private SQL"), false);
+    assert.equal((result.stderr + result.stdout).includes(directory), false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("transaction failure identifies the exact safe operation and shard without altering writes", async () => {
+  const db = client([row("duplicate"), row("keeper")]);
+  const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
+  db.externalUsageEventTombstone.createMany = async () => { throw Object.assign(new Error("private row payload"), { name: "PrismaClientKnownRequestError", code: "P2002", meta: { private: "private row payload" } }); };
+  const context = { operation: "apply-shard", shardOrdinal: 1628 };
+  await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, { ...verified(plan), onOperation: (name) => { context.operation = name; } }), (error) => {
+    assert.deepEqual(cleanupFailureDiagnostic(error, context), { phase: "cleanup-maintenance", errorName: "PrismaClientKnownRequestError", operation: "write-tombstones", shardOrdinal: 1628, prismaCode: "P2002" });
+    return true;
+  });
+  assert.deepEqual(db.calls, ["writer-lock"]);
+});
+test("unrecognized code names and diagnostic context never pass through", () => {
+  assert.deepEqual(cleanupFailureDiagnostic({ name: "PrivateProject", code: "P2028 private payload", cause: { code: "SQLITE_BUSY_PRIVATE_PAYLOAD" }, meta: { driverAdapterError: { cause: { originalCode: "SQLITE_PRIVATE_PAYLOAD" } } } }, { operation: "private-path", shardOrdinal: "private-row" }), { phase: "cleanup-maintenance", errorName: "Error", operation: "arguments" });
 });
 test("historical tombstones are counted as uncertain history without changing rollups", async () => {
   const db = client([row("keeper")]);
