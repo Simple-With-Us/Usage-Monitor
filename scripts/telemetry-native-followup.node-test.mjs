@@ -83,6 +83,41 @@ test("native publication requires an explicit window and reports retained comple
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("native projection budget retains the source and emits no partial coverage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-budget-"));
+  try {
+    const path = join(root, "thread.ndjson");
+    const body = [started, completed].map(JSON.stringify).join("\n") + "\n";
+    await writeFile(path, body);
+    const result = await collectBotFleetSessionTelemetry({ eventsDir: root, producerInstanceId: "test-host", ...nativeWindow, maxRecords: 1 });
+    assert.equal(result.stats.complete, false);
+    assert.equal(result.stats.projectionBudgetExceeded, true);
+    assert.deepEqual(result.events, []);
+    assert.equal(await readFile(path, "utf8"), body);
+    const retry = await collectBotFleetSessionTelemetry({ eventsDir: root, producerInstanceId: "test-host", ...nativeWindow });
+    assert.equal(retry.stats.complete, true);
+    assert.equal(retry.events.length, 1);
+    const config = { stateRoot: join(root, "delivery"), destination: "hub", endpoint: "https://hub.example.test", token: "test-only-native-source-bearer-00000000000000" };
+    const identity = { producerId: "botfleet", producerInstanceId: "test-host" };
+    await enqueueCollectorSentryTelemetry(retry.events, identity, config);
+    const outbox = await enqueueCollectorSentryTelemetry(result.events, identity, config);
+    const delivered = await drainCollectorSentry(outbox, config, { fetchImpl: async () => Response.json({ ok: true, received: 1, written: 1, ignored: 0 }) });
+    assert.equal(delivered.delivered, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("rotated duplicate completion counts match first-win publication", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-duplicate-"));
+  try {
+    await writeFile(join(root, "thread.ndjson"), [started, completed].map(JSON.stringify).join("\n") + "\n");
+    await writeFile(join(root, "thread.ndjson.1"), JSON.stringify({ ...completed, createdAt: "2026-11-01T12:00:00Z" }) + "\n");
+    const { events, stats } = await collectBotFleetSessionTelemetry({ eventsDir: root, producerInstanceId: "test-host", ...nativeWindow });
+    assert.equal(events.length, 1);
+    assert.equal(stats.retainedCompletions, 1);
+    assert.equal(stats.afterWindowCompletions, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("native BotFleet uses only durable telemetry delivery and keeps aggregate names through restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-outbox-"));
   try {

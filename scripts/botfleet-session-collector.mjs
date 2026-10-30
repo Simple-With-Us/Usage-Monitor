@@ -8,11 +8,12 @@ import { botFleetRuntimeTelemetry, projectBotFleetRuntimeEvent } from "./lib/bot
 import { collectorSentryConfig, drainCollectorSentry, enqueueCollectorSentryTelemetry } from "./lib/collector-sentry-bridge.mjs";
 
 /** Read retained native events without persisting or logging their content. */
-export async function collectBotFleetSessionTelemetry({ eventsDir, producerInstanceId, since, until }) {
+export async function collectBotFleetSessionTelemetry({ eventsDir, producerInstanceId, since, until, maxRecords = 100000 }) {
   if (!(since instanceof Date) || !(until instanceof Date)) throw new Error("Native telemetry requires an explicit operational window of 1 to 168 hours");
   const windowMs = until?.getTime() - since?.getTime();
   if (!Number.isFinite(windowMs) || windowMs < 3600000 || windowMs > 168 * 3600000) throw new Error("Native telemetry requires an explicit operational window of 1 to 168 hours");
-  const stats = { sourceAvailable: true, sourceFiles: 0, malformedLines: 0, historyGaps: 0, readRaces: 0, retainedCompletions: 0, outsideLookbackCompletions: 0, afterWindowCompletions: 0 };
+  if (!Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 100000) throw new Error("Invalid native projection budget");
+  const stats = { complete: true, projectionBudgetExceeded: false, sourceAvailable: true, sourceFiles: 0, malformedLines: 0, historyGaps: 0, readRaces: 0, retainedCompletions: 0, outsideLookbackCompletions: 0, afterWindowCompletions: 0 };
   let files;
   try { files = await readdir(eventsDir, { withFileTypes: true }); }
   catch (error) {
@@ -21,7 +22,9 @@ export async function collectBotFleetSessionTelemetry({ eventsDir, producerInsta
   }
   const records = [];
   const historyGapIds = new Set();
-  for (const file of files.filter((entry) => entry.isFile() && /\.ndjson(?:\.1)?$/.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name))) {
+  const sourceFiles = files.filter((entry) => entry.isFile() && /\.ndjson(?:\.1)?$/.test(entry.name));
+  if (sourceFiles.length > 10000) return { events: [], stats: { ...stats, complete: false, projectionBudgetExceeded: true } };
+  for (const file of sourceFiles.sort((a, b) => a.name.localeCompare(b.name))) {
     const input = createReadStream(join(eventsDir, file.name), { encoding: "utf8" });
     const lines = createInterface({ input, crlfDelay: Infinity });
     try {
@@ -29,9 +32,15 @@ export async function collectBotFleetSessionTelemetry({ eventsDir, producerInsta
         if (!line.trim()) continue;
         let raw;
         try { raw = JSON.parse(line); } catch { stats.malformedLines += 1; continue; }
-        if (raw?.type === "runtime.error" && raw.raw?.source === "botfleet.event-log" && typeof raw.eventId === "string") historyGapIds.add(raw.eventId);
+        if (raw?.type === "runtime.error" && raw.raw?.source === "botfleet.event-log" && typeof raw.eventId === "string" && raw.eventId.length <= 256) {
+          if (historyGapIds.size >= maxRecords && !historyGapIds.has(raw.eventId)) return { events: [], stats: { ...stats, complete: false, projectionBudgetExceeded: true } };
+          historyGapIds.add(raw.eventId);
+        }
         const selected = projectBotFleetRuntimeEvent(raw);
-        if (selected) records.push(selected);
+        if (selected) {
+          if (records.length >= maxRecords) return { events: [], stats: { ...stats, complete: false, projectionBudgetExceeded: true } };
+          records.push(selected);
+        }
       }
       stats.sourceFiles += 1;
     } catch (error) {
@@ -44,7 +53,10 @@ export async function collectBotFleetSessionTelemetry({ eventsDir, producerInsta
   }
   records.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
   stats.historyGaps = historyGapIds.size;
-  const completions = new Map(records.filter((record) => record.type === "turn.completed").map((record) => [record.eventId, record.ts]));
+  const completions = new Map();
+  for (const record of records) {
+    if (record.type === "turn.completed" && !completions.has(record.eventId)) completions.set(record.eventId, record.ts);
+  }
   stats.retainedCompletions = completions.size;
   stats.outsideLookbackCompletions = [...completions.values()].filter((ts) => Date.parse(ts) < since.getTime()).length;
   stats.afterWindowCompletions = [...completions.values()].filter((ts) => Date.parse(ts) > until.getTime()).length;
@@ -71,9 +83,10 @@ export async function main(argv = process.argv.slice(2)) {
   const since = new Date(until.getTime() - hours * 3600000);
   const { events, stats } = await collectBotFleetSessionTelemetry({ eventsDir: process.env.BOTFLEET_EVENTS_DIR || join(homedir(), ".botfleet", "events"), producerInstanceId, since, until });
   const summary = { collector: "botfleet-native-sentry", dryRun, lookbackHours: hours, ...stats, turns: events.length, spans: events.filter((event) => event.kind === "span").length, observations: events.filter((event) => event.kind === "log").length };
+  if (!stats.complete) process.exitCode = 1;
   if (config) {
     const root = await enqueueCollectorSentryTelemetry(events, { producerId, producerInstanceId }, config);
-    Object.assign(summary, { spooled: true }, await drainCollectorSentry(root, config, { prioritizeUnnarrowed: true }));
+    Object.assign(summary, { spooled: stats.complete }, await drainCollectorSentry(root, config, { prioritizeUnnarrowed: true }));
   }
   console.log(JSON.stringify(summary));
 }
