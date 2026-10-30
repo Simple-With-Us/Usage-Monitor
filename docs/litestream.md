@@ -5,8 +5,23 @@ writes to `/data/prod.db` as LTX files. **Production** (Hetzner + Coolify +
 GitHub Actions, since the 2026-08-07 cutover) replicates to **Backblaze B2**
 (bucket `jays-usage-monitor-eu`, S3 endpoint
 `https://s3.eu-central-003.backblazeb2.com`, object prefix
-`api-usage-monitor/prod.db` in `litestream.yml`).  The retired Oracle
+`api-usage-monitor/prod-recovery-v1.db` in `litestream.yml`).  The retired Oracle
 container path lives under `deploy/retired/oracle/`; do not redeploy it.
+
+The previous `api-usage-monitor/prod.db` chain failed an independent restore
+integrity check on 2026-10-29 while the live database passed its quick check.  It
+is retained for incident inspection and is not the active restore source.  The
+replacement prefix starts from a full snapshot of the checked live database;
+the old local Litestream metadata was preserved separately before initializing
+the new chain.  The explicit `meta-path` keeps this generation separate across
+deployments.  Never reuse the old metadata against an empty replica prefix.
+
+Coolify must use **Consistent name (no rolling updates)** for this application,
+with a 60-second stop grace period.  Two overlapping containers would otherwise
+run two Litestream processes against the same SQLite file and local metadata.  The
+Infisical wrapper forwards shutdown signals so Litestream can stop its child and
+close before Docker's kill deadline.  A recent-object heartbeat proves freshness;
+only an independent restore and SQLite integrity check prove recoverability.
 
 **Cloudflare R2 is weekly archive only** (bucket `usage-monitor-prod-v3`
 prefix `weekly/`).  Frequent replica is Backblaze B2.  Historic Litestream LTX
@@ -264,7 +279,7 @@ tip-prune (ops): delete non-tip `.ltx` under
 `api-usage-monitor/prod.db/{0000..0009}/`.  Multi-day retention is what filled
 15+ GiB in August 2026 — do not raise retention without measuring.
 2026-10-29: Jay set retention to 72h (fleet 3-day short-term policy) on paid B2
-with L1-only compaction; watch B2 `api-usage-monitor/prod.db/` size after rollout.
+with L1-only compaction; watch the active B2 prefix in `litestream.yml` after rollout.
 
 
 ## Rollback host only (Render)
