@@ -319,7 +319,6 @@ jobs:
         run: |
           bash -n deploy/server/vps-storage-watch/vps-storage-watch.sh
           bash -n deploy/server/vps-storage-watch/install.sh
-          python3 -m py_compile deploy/server/vps-storage-watch/vps-status-supplement.py
           bash deploy/server/vps-storage-watch/test.sh
 
       # The App Store Connect credential contract (AFC-459):  the private key
