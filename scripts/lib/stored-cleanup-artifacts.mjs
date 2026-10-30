@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { createHash } from "node:crypto";
 import { storedPlanDigest, createStoredPlanDigest, fingerprint } from "./claude-duplicate-stored-plan.mjs";
-import { readProtectedCleanupJson } from "./protected-cleanup-file.mjs";
+import { readProtectedCleanupJson, cleanupOwnerUid } from "./protected-cleanup-file.mjs";
 
 const MAX_BYTES = 256 * 1024 * 1024;
 const digest = (value) => /^[a-f0-9]{64}$/.test(value ?? "");
@@ -18,10 +18,11 @@ export async function writePrivateCleanupJson(path, value) {
 }
 
 export async function writeCleanupProgress(path, value) {
+  const ownerUid = cleanupOwnerUid();
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const info = await handle.stat();
-    if (!info.isFile() || (info.mode & 0o777) !== 0o600 || info.uid !== process.getuid()) throw new Error("Unsafe cleanup progress file");
+    if (!info.isFile() || (info.mode & 0o777) !== 0o600 || info.uid !== ownerUid) throw new Error("Unsafe cleanup progress file");
     await handle.truncate(0);
     await handle.writeFile(JSON.stringify(value));
   } finally { await handle.close(); }

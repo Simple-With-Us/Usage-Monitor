@@ -119,9 +119,21 @@ test("backup validation rejects symlinks and the live inode using held descripto
     await symlink(backup, link);
     await assert.rejects(verifyProtectedSqliteBackup(link, undefined, expected));
     await assert.rejects(verifyProtectedSqliteBackup(backup, backup, expected), /separate from the live/);
+    await assert.rejects(verifyProtectedSqliteBackup(backup, link, expected), /separate from the live/);
+    const live = join(directory, "live.db"), liveLink = join(directory, "live-link.db");
+    await writeFile(live, Buffer.from("SQLite format 3\u0000"));
+    await symlink(live, liveLink);
+    assert.equal(await verifyProtectedSqliteBackup(backup, liveLink, expected), expected);
     assert.equal(await verifyProtectedSqliteBackup(backup, undefined, expected), expected);
     await assert.rejects(verifyProtectedSqliteBackup(backup, undefined, "f".repeat(64)), /checksum differs/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("unsupported ownership platforms fail explicitly instead of skipping UID validation", async () => {
+  const original = process.getuid;
+  try {
+    process.getuid = undefined;
+    await assert.rejects(readProtectedCleanupJson("unused.json"), (error) => error.name === "UnsupportedPlatformError");
+  } finally { process.getuid = original; }
 });
 test("CLI failures disclose only the fixed phase and error name", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cleanup-safe-failure-"));
