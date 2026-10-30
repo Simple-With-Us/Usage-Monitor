@@ -57,6 +57,25 @@ afterEach(() => {
 });
 
 describe("retention integration", () => {
+  it("filters raw receipt inspection by exact source before pagination", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    await prisma.externalUsageEvent.createMany({ data: ["botfleet", "codex", "botfleet"].map((sourceApp, index) => ({
+      idempotencyKey: `source-filter-${index}`, sourceApp, provider: "openai",
+      billingMode: "estimated", metricType: "usage", quantity: 1, unit: "token",
+      occurredAt: new Date(NOW.getTime() - index * 1000),
+    })) });
+    const first = await (await getUsageEvents(new NextRequest("https://example.test/api/usage-events?raw=1&sourceApp=botfleet&limit=1"))).json();
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0].sourceApp).toBe("botfleet");
+    expect(first.hasMore).toBe(true);
+    const second = await (await getUsageEvents(new NextRequest(`https://example.test/api/usage-events?raw=1&sourceApp=botfleet&limit=1&cursor=${first.nextCursor}`))).json();
+    expect(second.events).toHaveLength(1);
+    expect(second.events[0].sourceApp).toBe("botfleet");
+    expect(second.events[0].id).not.toBe(first.events[0].id);
+    expect(second.hasMore).toBe(false);
+  });
+
   it("summarizes every filtered raw event beyond the former 5,000-row cap", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);

@@ -5,9 +5,9 @@
 // journal.  It never talks to the network itself and it never answers with
 // anything derived from a producer value.
 //
-// The listener is bound to 127.0.0.1 only.  It is never bound to 0.0.0.0:
-// this receiver accepts unauthenticated local telemetry, so it must not be
-// reachable from the network.
+// The default listener accepts local telemetry on loopback only.
+// A configured non-loopback listener requires scoped bearer sources and
+// stamps their configured identity before journaling any producer claims.
 //
 // The body cap is 12 MiB, the same as Sentry's container cap, so a malformed
 // or hostile producer cannot exhaust memory.  `/v1/metrics` is refused with
@@ -22,6 +22,7 @@
 // the producer content.
 
 import { createServer } from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 import { normalizeOtlpLogs, normalizeOtlpTraces, NULL_LOGGER } from "./internal-event.mjs";
@@ -31,6 +32,25 @@ export const MAX_BODY_BYTES = 12 * 1024 * 1024;
 
 const RECEIVER_HOST = "127.0.0.1";
 const RECEIVER_PORT = 4318;
+
+export function parseReceiverSources(raw) {
+  if (!raw) return [];
+  const schema = z.array(z.strictObject({
+    id: z.string().regex(/^[a-z0-9._-]{1,80}$/),
+    platform: z.string().regex(/^[a-z0-9._-]{1,80}$/),
+    token: z.string().regex(/^\S{32,512}$/),
+  })).min(1).max(64);
+  let parsed;
+  try { parsed = schema.safeParse(JSON.parse(raw)); } catch { throw new Error("Hub source configuration is invalid"); }
+  if (!parsed.success || new Set(parsed.data.map((source) => source.token)).size !== parsed.data.length) throw new Error("Hub source configuration is invalid");
+  return parsed.data;
+}
+
+function authenticatedSource(request, sources) {
+  const bearer = /^Bearer (\S{32,512})$/.exec(request.headers.authorization ?? "")?.[1] ?? "";
+  const digest = createHash("sha256").update(bearer).digest();
+  return sources.find((source) => timingSafeEqual(digest, source.digest));
+}
 
 //  An OTLP timestamp is a 64 bit number.  The JSON mapping of the OTLP
 //  specification sends it as a string, but producers send both, so both are
@@ -285,15 +305,22 @@ function readBoundedBody(request, maxBytes) {
  * @param {import("./journal.mjs").Journal} options.journal
  * @param {object} [options.logger]
  */
-export function createReceiver({ journal, logger = NULL_LOGGER, host = RECEIVER_HOST, port = RECEIVER_PORT } = {}) {
+export function createReceiver({ journal, logger = NULL_LOGGER, host = RECEIVER_HOST, port = RECEIVER_PORT, sources = [] } = {}) {
   if (!journal) throw new Error("The receiver needs a journal");
+  const configuredSources = sources.map((source) => ({ id: source.id, platform: source.platform, digest: createHash("sha256").update(source.token).digest() }));
+  if (host !== "127.0.0.1" && host !== "::1" && configuredSources.length === 0) throw new Error("A non-loopback hub receiver requires authenticated sources");
 
   const server = createServer((request, response) => {
+    const source = configuredSources.length ? authenticatedSource(request, configuredSources) : null;
+    if (configuredSources.length && !source) {
+      sendJson(response, 401, { error: "Authentication required" });
+      return;
+    }
     //  A rejection inside the handler must never take the hub down: an
     //  unhandled rejection ends the process on Node 15 and later.  The
     //  handler answers a 500 and logs the error NAME only, because the
     //  message of an error can quote the payload.
-    void handleRequest(request, response, { journal, logger }).catch((error) => {
+    void handleRequest(request, response, { journal, logger, source }).catch((error) => {
       logger.error("the otlp request failed", { errorName: error?.name ?? "Error" });
       sendJson(response, 500, { error: "The hub could not handle the request" });
     });
@@ -324,7 +351,7 @@ export function createReceiver({ journal, logger = NULL_LOGGER, host = RECEIVER_
   };
 }
 
-async function handleRequest(request, response, { journal, logger }) {
+async function handleRequest(request, response, { journal, logger, source }) {
   //  A malformed request target, such as "//", is not a valid URL.  It is
   //  answered with 400 instead of throwing out of the handler.
   let path;
@@ -403,9 +430,19 @@ async function handleRequest(request, response, { journal, logger }) {
   }
 
   const projected = isTraces ? projectTraces(checked.data) : projectLogs(checked.data);
+  const identity = source ? { sourceId: source.id, platform: source.platform } : {};
   const normalized = isTraces
-    ? normalizeOtlpTraces(projected.payload)
-    : normalizeOtlpLogs(projected.payload);
+    ? normalizeOtlpTraces(projected.payload, identity)
+    : normalizeOtlpLogs(projected.payload, identity);
+  if (source) {
+    for (const event of normalized.events) {
+      event.platform = source.platform;
+      event.authenticatedSource = source.id;
+      event.serviceName = `telemetry-hub.${source.id}`;
+      // Caller-supplied attribute aliases cannot undo the authenticated identity.
+      for (const key of ["agent.platform", "gen_ai.system", "gen_ai.agent.name", "agent.seat", "seat"]) delete event.attrs?.[key];
+    }
+  }
   const ignored = normalized.ignored + projected.dropped;
   if (projected.dropped > 0) {
     logger.warn("the otlp payload had rows that do not match the expected shape", {

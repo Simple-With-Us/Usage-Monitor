@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for opencode session usage.
 //
 // Reads opencode's SQLite store
@@ -235,6 +236,13 @@ export async function collectOpencodeEvents({
       projectBySession,
       onWarning,
     });
+    for (const event of extraEvents) {
+      const sessionId = event.metadata?.sessionId;
+      if (typeof sessionId !== "string" || !sessionId) continue;
+      // Correlation-only additions preserve existing replay identities.
+      event.metadata["session.id"] = sessionId;
+      if (botFleetSessionIds.has(sessionId)) event.metadata["agent.launcher"] = "botfleet";
+    }
     // The session fact is dated at the session's creation instant, so the
     // window filter would drop it for every session that was created before
     // the window even though the session is still discovered through its
@@ -350,6 +358,7 @@ async function main() {
     }
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);

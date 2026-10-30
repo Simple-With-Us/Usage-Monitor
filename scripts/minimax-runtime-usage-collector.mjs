@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for the MiniMax Code desktop runtime's exact token ledger.
 //
 // Reads ${MINIMAX_RUNTIME_DB:-~/.minimax/v2/sqlite/runtime-state.sqlite},
@@ -204,6 +205,7 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: MINIMAX_RUNTIME_PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     const scanComplete = events.truncated !== true;
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete })) {

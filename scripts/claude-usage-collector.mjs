@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for Anthropic Claude Code session JSONL.
 //
 // Reads ${CLAUDE_HOME:-~/.claude}/projects/*/*.jsonl.
@@ -209,6 +210,7 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);

@@ -1,0 +1,23 @@
+services:
+  telemetry-hub:
+    build:
+      context: ../..
+      dockerfile: deploy/telemetry-hub/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.5
+    mem_limit: 512m
+    tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
+    environment:
+      INFISICAL_TOKEN: ${INFISICAL_TOKEN:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_API_URL: ${INFISICAL_API_URL:-https://app.infisical.com/api}
+      TELEMETRY_HUB_BIND_HOST: ${TELEMETRY_HUB_BIND_HOST:-127.0.0.1}
+    volumes:
+      - journal:/data
+volumes:
+  journal:

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for OpenAI Codex CLI session JSONL.
 //
 // Reads ${CODEX_HOME:-~/.codex}/sessions and archived_sessions (same layout
@@ -120,6 +121,7 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);

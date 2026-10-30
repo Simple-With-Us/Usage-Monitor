@@ -64,6 +64,14 @@ describe("ExternalUsageEvent replay that adds correlation metadata", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(1);
   });
 
+  it("accepts a newly learned call identity but rejects changing a known call", async () => {
+    await persistExternalUsageEvents([{ ...base, metadata: meta() }]);
+    expect((await persistExternalUsageEvents([{ ...base, metadata: meta({ "call.id": "call-1" }) }])).persisted).toBe(0);
+    await prisma.externalUsageEvent.deleteMany();
+    await persistExternalUsageEvents([{ ...base, metadata: meta({ "call.id": "call-1" }) }]);
+    await expect(persistExternalUsageEvents([{ ...base, metadata: meta({ "call.id": "call-2" }) }])).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
+  });
+
   it("still collides when both sides carry a different session id", async () => {
     await persistExternalUsageEvents([{ ...base, metadata: meta({ "session.id": "sess-1" }) }]);
     await expect(

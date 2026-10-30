@@ -42,6 +42,7 @@
  * deliberate edit here, not a config toggle.
  */
 export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
+  "agent.platform",
   "gen_ai.system",
   "gen_ai.operation.name",
   "gen_ai.request.model",
@@ -64,6 +65,11 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
   "service.name",
   "service.version",
 ]);
+
+const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "xai", "meta", "groq", "together_ai", "openrouter"]);
+export function knownAiVendor(value) {
+  return typeof value === "string" && AI_VENDORS.has(value.toLowerCase()) ? value.toLowerCase() : undefined;
+}
 
 const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
 
@@ -478,7 +484,8 @@ export function internalEventAttributes(event, options) {
   const tokens = isPlainObject(event.tokens) ? event.tokens : {};
   const context = isPlainObject(event.context) ? event.context : {};
   const typed = [
-    ["gen_ai.system", event.platform],
+    ["agent.platform", event.platform],
+    ["gen_ai.system", knownAiVendor(event.vendor)],
     ["gen_ai.operation.name", event.operation],
     ["gen_ai.request.model", event.model],
     ["gen_ai.response.model", event.model],

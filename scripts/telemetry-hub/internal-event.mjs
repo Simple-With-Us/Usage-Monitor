@@ -29,6 +29,7 @@ export const INTERNAL_EVENT_FIELDS = Object.freeze([
   "eventId",
   "ts",
   "platform",
+  "vendor",
   "model",
   "operation",
   "tokens",
@@ -250,11 +251,11 @@ export function computeEventId(kind, sourceParts) {
  * `gen_ai.output.messages`.  They are CONTENT and they are the reason the
  * UM path receives everything.
  */
-export function normalizeSpan(span, resourceAttributes = {}) {
+export function normalizeSpan(span, resourceAttributes = {}, authenticatedIdentity = {}) {
   if (!isPlainObject(span)) return null;
   const flat = { ...resourceAttributes, ...flattenOtlpAttributes(span.attributes) };
 
-  const platform = normalizePlatform(
+  const platform = authenticatedIdentity.platform ?? normalizePlatform(
     flat["agent.platform"] ?? flat["gen_ai.system"] ?? flat["gen_ai.agent.name"],
   );
   const model = readString(flat["gen_ai.request.model"] ?? flat["model"], 160);
@@ -275,7 +276,9 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     typeof span.traceId === "string" && span.traceId.length > 0 &&
     typeof span.spanId === "string" && span.spanId.length > 0;
   if (!hasNativeIdentity) return null;
-  const eventId = computeEventId("span", [span.traceId, span.spanId, span.startTimeUnixNano ?? "", platform]);
+  const eventId = computeEventId("span", authenticatedIdentity.sourceId
+    ? [authenticatedIdentity.sourceId, span.traceId, span.spanId]
+    : [span.traceId, span.spanId, span.startTimeUnixNano ?? "", platform]);
 
   const tokens = {
     input: readInt(flat["gen_ai.usage.input_tokens"]),
@@ -301,6 +304,7 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     eventId,
     ts: nanosToIso(span.endTimeUnixNano) ?? nanosToIso(span.startTimeUnixNano) ?? new Date().toISOString(),
     platform,
+    vendor: readString(flat["gen_ai.system"], 80),
     model,
     operation,
     tokens,
@@ -336,10 +340,10 @@ export function normalizeSpan(span, resourceAttributes = {}) {
  * is never captured.  The event therefore carries counts and names only,
  * and its `attrs` map is the allowlisted attribute set.
  */
-export function normalizeLogRecord(record, resourceAttributes = {}) {
+export function normalizeLogRecord(record, resourceAttributes = {}, authenticatedIdentity = {}) {
   if (!isPlainObject(record)) return null;
   const flat = { ...resourceAttributes, ...flattenOtlpAttributes(record.attributes) };
-  const platform = normalizePlatform(
+  const platform = authenticatedIdentity.platform ?? normalizePlatform(
     flat["agent.platform"] ?? flat["gen_ai.system"] ?? flat["gen_ai.agent.name"],
   );
   const severity = readInt(record.severityNumber);
@@ -354,18 +358,21 @@ export function normalizeLogRecord(record, resourceAttributes = {}) {
   const eventId = computeEventId("log", [
     record.timeUnixNano ?? "",
     record.observedTimeUnixNano ?? "",
-    platform,
+    authenticatedIdentity.sourceId ?? platform,
     record.spanId ?? "",
     record.traceId ?? "",
     severity ?? "",
     typeof record.severityText === "string" ? record.severityText : "",
     stableDigest(record.body ?? null),
-    stableDigest(record.attributes ?? []),
+    stableDigest(authenticatedIdentity.sourceId
+      ? (record.attributes ?? []).filter((attribute) => !["agent.platform", "gen_ai.system", "gen_ai.agent.name", "agent.seat", "seat"].includes(attribute?.key))
+      : record.attributes ?? []),
   ]);
   return {
     eventId,
     ts: nanosToIso(record.timeUnixNano) ?? nanosToIso(record.observedTimeUnixNano) ?? new Date().toISOString(),
     platform,
+    vendor: readString(flat["gen_ai.system"], 80),
     model: readString(flat["gen_ai.request.model"] ?? flat["model"], 160),
     operation: readString(flat["gen_ai.operation.name"], 120) ?? "log",
     tokens: {
@@ -404,7 +411,7 @@ export function normalizeLogRecord(record, resourceAttributes = {}) {
  * Resource attributes are merged into every span, so a producer that sets
  * `service.name` once at the resource level is not repeated per span.
  */
-export function normalizeOtlpTraces(payload) {
+export function normalizeOtlpTraces(payload, authenticatedIdentity = {}) {
   const events = [];
   let ignored = 0;
   const resourceSpans = isPlainObject(payload) ? payload.resourceSpans : undefined;
@@ -425,7 +432,7 @@ export function normalizeOtlpTraces(payload) {
       }
       const spans = Array.isArray(scope.spans) ? scope.spans : [];
       for (const span of spans) {
-        const event = normalizeSpan(span, resourceAttributes);
+        const event = normalizeSpan(span, resourceAttributes, authenticatedIdentity);
         if (event) events.push(event);
         else ignored += 1;
       }
@@ -435,7 +442,7 @@ export function normalizeOtlpTraces(payload) {
 }
 
 /** Normalize a whole `{ resourceLogs: [...] }` payload. */
-export function normalizeOtlpLogs(payload) {
+export function normalizeOtlpLogs(payload, authenticatedIdentity = {}) {
   const events = [];
   let ignored = 0;
   const resourceLogs = isPlainObject(payload) ? payload.resourceLogs : undefined;
@@ -456,7 +463,7 @@ export function normalizeOtlpLogs(payload) {
       }
       const records = Array.isArray(scope.logRecords) ? scope.logRecords : [];
       for (const record of records) {
-        const event = normalizeLogRecord(record, resourceAttributes);
+        const event = normalizeLogRecord(record, resourceAttributes, authenticatedIdentity);
         if (event) events.push(event);
         else ignored += 1;
       }

@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { COLLECTOR_CALL_ID, collectorSentryConfig, enqueueCollectorSentry, drainCollectorSentry } from "./collector-sentry-bridge.mjs";
 
 export const GROK_COST_USD_TICKS = 1e10;
 export const MAX_EVENTS_PER_BATCH = 100;
@@ -113,12 +114,13 @@ export function tokenEventsFromBreakdown({
   extraId,
   extraMetadata,
   providerRequestId,
+  collectorCallId,
 }) {
   const events = [];
   for (const tokenType of TOKEN_TYPES) {
     const quantity = breakdown[tokenType];
     if (!quantity) continue;
-    events.push({
+    const event = {
       eventId: shaEventId([
         producerId,
         sessionKey,
@@ -145,7 +147,9 @@ export function tokenEventsFromBreakdown({
         ...(model ? { model } : {}),
         ...(extraMetadata ?? {}),
       },
-    });
+    };
+    if (collectorCallId) Object.defineProperty(event, COLLECTOR_CALL_ID, { value: JSON.stringify([sessionKey, collectorCallId]) });
+    events.push(event);
   }
   return events;
 }
@@ -442,6 +446,7 @@ export function parseClaudeSessionJsonl(
     const { "agent.launcher": launcher, ...baseMetadata } = extraMetadata ?? {};
     const metadata = {
       ...baseMetadata,
+      ...(messageId ? { "call.id": messageId } : {}),
       ...(launcher && !sidechain ? { "agent.launcher": launcher } : {}),
       ...(sessionId ? { [SESSION_ID_METADATA_KEY]: sessionId } : {}),
     };
@@ -452,6 +457,7 @@ export function parseClaudeSessionJsonl(
       sessionKey: sessionKey ?? "claude",
       occurredAtIso,
       model,
+      ...(messageId ? { collectorCallId: messageId } : {}),
       ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
     };
     // The input row keeps the quantity the old inclusive split gave it, so a
@@ -859,6 +865,7 @@ export function parseOpencodeMessageRows(rows) {
       model: model || undefined,
       breakdown,
       extraId: messageId,
+      collectorCallId: messageId,
       extraMetadata: {
         harness: "opencode",
         billingMode: info.billingMode,
@@ -989,9 +996,20 @@ export async function postUsageBatches({
     log(`--dry-run; would send ${events.length} event(s) as ${chunkEvents(events).length} batch(es)`);
     return { received: 0, persisted: 0, rejected: 0, dryRun: true, events };
   }
-  if (!ingestToken) {
-    throw new Error("Missing ingest token");
+  let sentryRoot;
+  let sentryConfig;
+  let spoolError;
+  try {
+    sentryConfig = collectorSentryConfig(process.env, producerId);
+    if (sentryConfig) sentryRoot = await enqueueCollectorSentry(events, { producerId, producerInstanceId: bodyFor([]).producerInstanceId }, sentryConfig);
+  } catch {
+    spoolError = true;
+    log("WARNING: collector Sentry outbox unavailable; Usage Monitor delivery continues");
   }
+  const sentryDelivery = sentryRoot
+    ? drainCollectorSentry(sentryRoot, sentryConfig).catch(() => ({ pending: true }))
+    : Promise.resolve({ pending: false });
+  if (!ingestToken) { await sentryDelivery; throw new Error("Missing ingest token"); }
   let received = 0;
   let persisted = 0;
   let rejected = 0;
@@ -999,13 +1017,14 @@ export async function postUsageBatches({
   const batches = chunkEvents(events);
   for (let i = 0; i < batches.length; i += 1) {
     const batch = batches[i];
-    const parsed = await postBatchIsolatingConflicts({
+    let parsed;
+    try { parsed = await postBatchIsolatingConflicts({
       ingestUrl,
       ingestToken,
       bodyFor,
       events: batch,
       log,
-    });
+    }); } catch (error) { await sentryDelivery; throw error; }
     received += parsed.received;
     persisted += parsed.persisted;
     rejected += parsed.rejected;
@@ -1019,6 +1038,14 @@ export async function postUsageBatches({
   if (conflicted > 0) {
     log(`WARNING: ${conflicted} event(s) skipped as idempotency conflicts (already stored with different content)`);
   }
+  if (sentryRoot) {
+    const result = await sentryDelivery;
+    if (result.pending) log("WARNING: collector Sentry delivery pending in durable outbox");
+    if (result.quarantined) log(`WARNING: ${result.quarantined} collector Sentry event(s) quarantined in durable outbox`);
+  }
+  // UM has already acknowledged these rows; retaining the source checkpoint
+  // only retries their idempotent replay until the Sentry spool is durable.
+  if (spoolError) throw new Error("Usage Monitor delivered; collector Sentry outbox failed, checkpoint must not advance");
   return { received, persisted, rejected, conflicted };
 }
 
