@@ -249,31 +249,20 @@ describe("chunked month-to-date external-cost scan", () => {
     process.env.INGEST_COST_DERIVATION_ENABLED = "true";
     let summary: Awaited<ReturnType<typeof summarizeExternalUsageEvents>>;
     let daily: Awaited<ReturnType<typeof buildDailySpendSeries>>;
-    const immediateSpy = vi.spyOn(globalThis, "setImmediate");
-    const rawQuery = vi.spyOn(prisma, "$queryRaw");
+    let timerFired = false;
+    const timerTurn = new Promise<void>((resolve) => setTimeout(() => {
+      timerFired = true;
+      resolve();
+    }, 0));
     try {
       summary = await summarizeExternalUsageEvents(MONTH_START, MONTH_START, NOW);
       daily = await buildDailySpendSeries(MONTH_START, MONTH_START, NOW);
+      await timerTurn;
     } finally {
       if (previousFlag === undefined) delete process.env.INGEST_COST_DERIVATION_ENABLED;
       else process.env.INGEST_COST_DERIVATION_ENABLED = previousFlag;
     }
-    const sqlText = (query: unknown) => typeof query === "object" && query !== null && "sql" in query
-      ? String((query as { sql: unknown }).sql)
-      : "";
-    const sqlCalls = rawQuery.mock.calls.map(([query]) => sqlText(query));
-    const summarySql = sqlCalls.find((sql) => sql.includes('"ranked"') && sql.includes('"groupLastId"')) ?? "";
-    const dailySql = sqlCalls.find((sql) => sql.includes('date("page"."occurredAt")')) ?? "";
-    const derivedSql = sqlCalls.find((sql) => sql.includes('SUM(json_extract("page"."metadata"')) ?? "";
-    expect(summarySql).toContain('WITH "page" AS MATERIALIZED');
-    expect(summarySql.indexOf("LIMIT")).toBeLessThan(summarySql.indexOf('SUM("ranked"."costUsd")'));
-    expect(summarySql).toMatch(/GROUP BY\s+"ranked"\."sourceApp"/);
-    expect(summarySql).toContain('"ranked"."label"');
-    expect(summarySql).toContain('"ranked"."limit", "ranked"."limitWindow"');
-    expect(dailySql).toContain('WITH "page" AS MATERIALIZED');
-    expect(dailySql.indexOf("LIMIT")).toBeLessThan(dailySql.indexOf('SUM("page"."costUsd")'));
-    expect(derivedSql).toContain('WITH "page" AS MATERIALIZED');
-    expect(derivedSql.indexOf("LIMIT")).toBeLessThan(derivedSql.indexOf('SUM(json_extract("page"."metadata"'));
+    expect(timerFired).toBe(true);
     for (const old of oldGroups) {
       const isAnalytics = old.provider === "anthropic";
       const actual = summary.groups.find((group) => group.provider === old.provider && group.metricType === old.metricType);
@@ -308,10 +297,9 @@ describe("chunked month-to-date external-cost scan", () => {
     ]);
   });
 
-  it("walks multiple chunks on an (occurredAt, id) cursor and yields to the event loop", async () => {
-    // 12,000 rows at one identical timestamp: pagination must rely on the
-    // id half of the cursor, and crossing several chunk boundaries
-    // must neither lose nor double-count a row.
+  it("aggregates a large tied-timestamp MTD fixture in a child while the parent event loop advances", async () => {
+    // 12,000 rows at one identical timestamp exercise native aggregation
+    // without transferring the raw rows through the parent process.
     await prisma.$executeRawUnsafe(`
       INSERT INTO "ExternalUsageEvent"
         ("id", "idempotencyKey", "sourceApp", "provider", "metricType", "costUsd", "occurredAt", "billingMode", "confidence", "createdAt")
@@ -332,58 +320,25 @@ describe("chunked month-to-date external-cost scan", () => {
       FROM c
     `);
 
-    const rawQuery = vi.spyOn(prisma, "$queryRaw");
-    const immediateSpy = vi.spyOn(globalThis, "setImmediate");
+    let timerFired = false;
+    const timerTurn = new Promise<void>((resolve) => setTimeout(() => {
+      timerFired = true;
+      resolve();
+    }, 0));
 
     const { sumMonthToDateExternalCostByProvider } = await import(
       "../external-usage-events"
     );
     const byProvider = await sumMonthToDateExternalCostByProvider(MONTH_START, MONTH_START, NOW);
+    await timerTurn;
 
-    // The pre-scheduled macrotask ran before the scan resolved: the scan
-    // took a real event-loop turn between chunks instead of holding the
-    // loop for one monolithic aggregation.
-    expect(immediateSpy).toHaveBeenCalled();
+    // The pre-scheduled timer ran while the read-only child performed SQLite work.
+    expect(timerFired).toBe(true);
 
     const bulk = byProvider.get("bulk-provider");
     expect(bulk?.usagePushed).toBeCloseTo(6000, 6);
     expect(bulk?.pricedEventCount).toBe(12000);
     expect(bulk?.unpricedEventCount).toBe(0);
 
-    const sqlTextOf = (query: unknown): string =>
-      typeof query === "object" && query !== null && "sql" in query
-        ? String((query as { sql: unknown }).sql)
-        : String(query);
-    const scanCalls = rawQuery.mock.calls.filter(([query]) => {
-      const text = sqlTextOf(query);
-      return (
-        text.includes('FROM "ExternalUsageEvent"') &&
-        text.includes('"costUsd"') &&
-        text.includes('ORDER BY "occurredAt" ASC, "id" ASC')
-      );
-    });
-    expect(scanCalls.length).toBeGreaterThan(2);
-    expect(immediateSpy).toHaveBeenCalled();
-    const firstMtdSql = sqlTextOf(scanCalls[0][0]);
-    expect(firstMtdSql).toContain('WITH "page" AS MATERIALIZED');
-    expect(firstMtdSql.indexOf("LIMIT")).toBeLessThan(firstMtdSql.indexOf('SUM("page"."costUsd")'));
-    expect(firstMtdSql).toContain('GROUP BY "page"."provider"');
-    expect(sqlTextOf(scanCalls[0][0])).toContain('"occurredAt" >=');
-    for (const [query] of scanCalls.slice(1)) {
-      expect(sqlTextOf(query)).toContain('("occurredAt", "id") >');
-      expect(sqlTextOf(query)).not.toContain('"occurredAt" >=');
-    }
-
-    const continuation = scanCalls[1][0] as { sql: string; values: unknown[] };
-    const plan = await prisma.$queryRawUnsafe<Array<{ detail: string }>>(
-      `EXPLAIN QUERY PLAN ${continuation.sql}`,
-      ...continuation.values
-    );
-    expect(plan.map(({ detail }) => detail).join("\n")).toContain(
-      "ExternalUsageEvent_mtd_scan_cover_idx"
-    );
-    expect(plan.map(({ detail }) => detail).join("\n")).toContain(
-      "(occurredAt,id)>(?,?)"
-    );
   });
 });

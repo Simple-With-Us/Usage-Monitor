@@ -42,6 +42,7 @@ import {
   setMtdScanMemo,
   setUsageEventsSummaryMemo,
 } from "@/lib/mtd-scan-memo";
+import { querySqliteUsageAggregate } from "@/lib/sqlite-usage-aggregates";
 
 export {
   isClaudeCodeAnalyticsTelemetry,
@@ -759,12 +760,11 @@ export interface ExternalUsageEventSummary {
 }
 
 /**
- * Sum server-stamped derived cost estimates over the RAW window. One bounded
- * aggregate query (json_extract over metadata), called only when the
- * derivation flag is enabled so default-off deployments pay zero query cost.
- * Derived stamps exist only on metricType="usage"/unit="token" rows, so
- * receipt-cash and status-metric shapes are excluded by construction — no
- * receipt-candidate where-clause replication needed here.
+ * Sum server-stamped derived cost estimates over the RAW window in a read-only
+ * child process.  Called only when the derivation flag is enabled, so
+ * default-off deployments pay zero query cost.  Derived stamps exist only on
+ * metricType="usage"/unit="token" rows, so receipt-cash and status-metric
+ * shapes are excluded by construction.
  */
 const TOKEN_TYPE_LABEL_PREFIX = "token:";
 
@@ -784,28 +784,12 @@ interface AnalyticsTokenRow {
   quantity: number;
 }
 
-// --- Chunked raw-event scans ------------------------------------------------
-// Prisma 7 runs on the better-sqlite3 driver adapter, so every query executes
-// synchronously on the Node main thread (see create-prisma-client.ts): a
-// query's wall time is event-loop blockage during which NO request — not even
-// the DB-free /api/health — can be served. A single GROUP BY over the
-// month-to-date raw window measured 135s cold in production (2026-10-29,
-// ~780k rows; the plan is an occurredAt range scan into a file-backed temp
-// B-tree), which is why the app could print Ready, report a healthy replica,
-// and still never answer a health probe once the scheduler's first tick
-// started its budget computes.
-//
-// The scans below therefore never issue one unbounded aggregation. They walk
-// the window with a keyset cursor on (occurredAt, id) in bounded row chunks
-// and take a setImmediate turn between chunks, so the event loop keeps
-// serving requests while a scan is in flight. SUM / COUNT are associative,
-// so merging per-chunk rows in JS returns exactly the single-shot aggregate
-// (verified against the old groupBy on a 780k-row fixture: identical groups,
-// sums equal to float-association noise). Two alternatives were measured and
-// rejected: Prisma's own cursor pagination re-walks the window per page
-// (quadratic total, multi-second pages), and time-sliced groupBys stay
-// unbounded because a slice's cost follows physical row placement, not a row
-// count — one hot day is still a multi-second block.
+// --- Raw event scans and isolated aggregates --------------------------------
+// Prisma 7 uses the synchronous better-sqlite3 adapter on the Node main
+// thread.  The raw token-detail scan below stays in bounded keyset pages; the
+// larger summary, daily, derived-metadata, and MTD aggregates run in a
+// short-lived read-only child so SQLite work does not block HTTP or scheduler
+// health checks.
 const RAW_EVENT_SCAN_CHUNK_ROWS = 2_000;
 
 function yieldEventLoopTurn(): Promise<void> {
@@ -1013,55 +997,14 @@ function deriveAnalyticsTokenUsdBySource(
 async function sumDerivedCostEstimates(
   rawSince: Date
 ): Promise<{ totalUsd: number; eventCount: number }> {
-  let totalUsd = 0;
-  let eventCount = 0;
-  let cursor: RawEventScanCursor | null = null;
-  for (;;) {
-    // Keep the old since-only semantics.  Fetch bounded rows before applying
-    // JSON extraction so a sparse metadata key cannot make one SQLite SUM
-    // walk the entire retained table without yielding to the event loop.
-    const rows = await prisma.$queryRaw<
-      Array<{
-        totalUsd: unknown;
-        eventCount: unknown;
-        pageCount: unknown;
-        pageLastOccurredAt: Date | string;
-        pageLastId: string;
-      }>
-    >(Prisma.sql`
-      WITH "page" AS MATERIALIZED (
-        SELECT "id", "occurredAt", "metadata"
-        FROM "ExternalUsageEvent"
-        WHERE ${rawEventScanStartClause(rawSince, cursor)}
-        ORDER BY "occurredAt" ASC, "id" ASC
-        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
-      ),
-      "pageInfo" AS (
-        SELECT
-          COUNT(*) AS "pageCount",
-          (SELECT "occurredAt" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastOccurredAt",
-          (SELECT "id" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastId"
-        FROM "page"
-      )
-      SELECT
-        COALESCE(SUM(json_extract("page"."metadata", '$._derivedCostUsd')), 0) AS "totalUsd",
-        COUNT(json_extract("page"."metadata", '$._derivedCostUsd')) AS "eventCount",
-        "pageInfo"."pageCount",
-        "pageInfo"."pageLastOccurredAt",
-        "pageInfo"."pageLastId"
-      FROM "page" CROSS JOIN "pageInfo"
-    `);
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    totalUsd += Number(rows[0].totalUsd ?? 0);
-    eventCount += Number(rows[0].eventCount ?? 0);
-    if (Number(rows[0].pageCount ?? 0) < RAW_EVENT_SCAN_CHUNK_ROWS) break;
-    cursor = rawEventScanCursorFromRow({
-      occurredAt: rows[0].pageLastOccurredAt,
-      id: rows[0].pageLastId,
-    });
-    await yieldEventLoopTurn();
-  }
-  return { totalUsd, eventCount };
+  const rows = await querySqliteUsageAggregate<Array<{
+    totalUsd: number | null;
+    eventCount: number;
+  }>>("derived", rawSince, undefined);
+  return {
+    totalUsd: Number(rows[0]?.totalUsd ?? 0),
+    eventCount: Number(rows[0]?.eventCount ?? 0),
+  };
 }
 
 // The dashboard portfolio panel polls this every 60s.  This short process-local
@@ -1214,63 +1157,21 @@ async function scanRawDailySpendByDay(
   until: Date
 ): Promise<Map<string, number>> {
   const byDay = new Map<string, number>();
-  let cursor: RawEventScanCursor | null = null;
-  for (;;) {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        day: string;
-        totalUsd: unknown;
-        pageCount: unknown;
-        pageLastOccurredAt: Date | string;
-        pageLastId: string;
-      }>
-    >(Prisma.sql`
-      WITH "page" AS MATERIALIZED (
-        SELECT "id", "occurredAt", "costUsd"
-        FROM "ExternalUsageEvent"
-        WHERE ${rawEventScanStartClause(rawSince, cursor)}
-          AND "occurredAt" <= ${until}
-          AND "metricType" NOT IN ('quota_sync', 'credit_balance')
-        ORDER BY "occurredAt" ASC, "id" ASC
-        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
-      ),
-      "pageInfo" AS (
-        SELECT
-          COUNT(*) AS "pageCount",
-          (SELECT "occurredAt" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastOccurredAt",
-          (SELECT "id" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastId"
-        FROM "page"
-      )
-      SELECT
-        date("page"."occurredAt") AS "day",
-        COALESCE(SUM("page"."costUsd"), 0) AS "totalUsd",
-        "pageInfo"."pageCount",
-        "pageInfo"."pageLastOccurredAt",
-        "pageInfo"."pageLastId"
-      FROM "page" CROSS JOIN "pageInfo"
-      GROUP BY date("page"."occurredAt")
-      ORDER BY "day" ASC
-    `);
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    for (const row of rows) {
-      byDay.set(row.day, (byDay.get(row.day) ?? 0) + Number(row.totalUsd ?? 0));
-    }
-    const pageCount = Number(rows[0].pageCount ?? 0);
-    if (pageCount < RAW_EVENT_SCAN_CHUNK_ROWS) break;
-    cursor = rawEventScanCursorFromRow({
-      occurredAt: rows[0].pageLastOccurredAt,
-      id: rows[0].pageLastId,
-    });
-    await yieldEventLoopTurn();
+  const rows = await querySqliteUsageAggregate<Array<{
+    day: string;
+    totalUsd: number | null;
+  }>>("daily", rawSince, until);
+  for (const row of rows) {
+    byDay.set(row.day, Number(row.totalUsd ?? 0));
   }
   return byDay;
 }
 
 /**
- * The raw side uses bounded keyset pages and folds each event into the same
- * summary dimensions as the prior SQL groupBy.  Processing rows in
- * occurredAt/id order preserves latest-non-null limit semantics across page
- * boundaries without one unbounded SQLite aggregate.
+ * The raw side uses native SQLite groups on the read-only child and folds the
+ * compact result into the same summary dimensions as the prior SQL groupBy.
+ * A packed timestamp/id cursor preserves latest-non-null limit provenance
+ * when timestamps tie.
  *
  * Receipt-cash rows keep their exact per-row identity validation: the raw
  * scan excludes the fixed-shape receipt candidate superset and candidates
@@ -1282,134 +1183,67 @@ async function scanRawUsageSummaryEvents(
   upperBound: Date,
   groups: Map<string, SummaryAccumulator>
 ): Promise<number> {
+  const rows = await querySqliteUsageAggregate<Array<{
+    packedLatest: string;
+    sourceApp: string;
+    environment: string | null;
+    provider: string;
+    service: string | null;
+    label: string | null;
+    projectId: string | null;
+    metricType: string;
+    unit: string | null;
+    limit: number | null;
+    limitWindow: string | null;
+    eventCount: number;
+    pricedEventCount: number;
+    totalCostUsd: number | null;
+    totalRequests: number | null;
+    totalQuantity: number | null;
+  }>>("summary", rawSince, upperBound);
+
   let eventCount = 0;
-  let cursor: RawEventScanCursor | null = null;
-  for (;;) {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        latestAt: Date | string;
-        groupLastId: string;
-        sourceApp: string;
-        environment: string | null;
-        provider: string;
-        service: string | null;
-        label: string | null;
-        projectId: string | null;
-        metricType: string;
-        unit: string | null;
-        limit: number | null;
-        limitWindow: string | null;
-        eventCount: unknown;
-        pricedEventCount: unknown;
-        totalCostUsd: unknown;
-        totalRequests: unknown;
-        totalQuantity: unknown;
-        pageCount: unknown;
-        pageLastOccurredAt: Date | string;
-        pageLastId: string;
-      }>
-    >(Prisma.sql`
-      WITH "page" AS MATERIALIZED (
-        SELECT
-          "id", "occurredAt", "sourceApp", "environment", "provider", "service",
-          "label", "projectId", "metricType", "unit", "limit", "limitWindow",
-          "costUsd", "requests", "quantity"
-        FROM "ExternalUsageEvent"
-        WHERE ${rawEventScanStartClause(rawSince, cursor)}
-          AND "occurredAt" <= ${upperBound}
-          AND "metricType" NOT IN (${Prisma.join(Array.from(STATUS_METRIC_TYPES))})
-          AND (
-            "sourceApp" <> ${BILLING_RECEIPT_SOURCE_APP}
-            OR "service" IS NULL
-            OR "service" <> ${API_PREPAID_FUNDING_SERVICE}
-            OR "label" IS NULL
-            OR "label" <> ${RECEIPT_CASH_LABEL}
-            OR "billingMode" <> 'actual'
-            OR "metricType" <> 'cost'
-            OR "confidence" <> 'actual'
-          )
-        ORDER BY "occurredAt" ASC, "id" ASC
-        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
-      ),
-      "ranked" AS MATERIALIZED (
-        SELECT
-          "page".*,
-          ROW_NUMBER() OVER (
-            PARTITION BY "sourceApp", "environment", "provider", "service", "label", "projectId",
-                         "metricType", "unit", "limit", "limitWindow"
-            ORDER BY "occurredAt" DESC, "id" DESC
-          ) AS "latestRowNumber"
-        FROM "page"
-      ),
-      "pageInfo" AS (
-        SELECT
-          COUNT(*) AS "pageCount",
-          (SELECT "occurredAt" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastOccurredAt",
-          (SELECT "id" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastId"
-        FROM "page"
-      )
-      SELECT
-        "ranked"."sourceApp", "ranked"."environment", "ranked"."provider", "ranked"."service",
-        "ranked"."label", "ranked"."projectId", "ranked"."metricType", "ranked"."unit",
-        "ranked"."limit", "ranked"."limitWindow",
-        COUNT(*) AS "eventCount",
-        COUNT("ranked"."costUsd") AS "pricedEventCount",
-        SUM("ranked"."costUsd") AS "totalCostUsd",
-        SUM("ranked"."requests") AS "totalRequests",
-        SUM("ranked"."quantity") AS "totalQuantity",
-        MAX("ranked"."occurredAt") AS "latestAt",
-        MAX(CASE WHEN "ranked"."latestRowNumber" = 1 THEN "ranked"."id" END) AS "groupLastId",
-        "pageInfo"."pageCount", "pageInfo"."pageLastOccurredAt", "pageInfo"."pageLastId"
-      FROM "ranked" CROSS JOIN "pageInfo"
-      GROUP BY
-        "ranked"."sourceApp", "ranked"."environment", "ranked"."provider", "ranked"."service",
-        "ranked"."label", "ranked"."projectId", "ranked"."metricType", "ranked"."unit",
-        "ranked"."limit", "ranked"."limitWindow"
-      ORDER BY "latestAt" ASC, "groupLastId" ASC
-    `);
-    if (!Array.isArray(rows) || rows.length === 0) break;
-
-    for (const row of rows) {
-      const latestAt = rawEventScanCursorFromRow({ occurredAt: row.latestAt, id: row.groupLastId }).occurredAt.toISOString();
-      const isAnalytics = isSubscriptionAnalyticsTelemetry(row);
-      const rowEventCount = Number(row.eventCount ?? 0);
-      const pricedEventCount = Number(row.pricedEventCount ?? 0);
-      eventCount += rowEventCount;
-      addSummaryContribution(groups, {
-        sourceApp: row.sourceApp,
-        environment: row.environment,
-        provider: row.provider,
-        service: row.service,
-        projectId: row.projectId,
-        metricType: row.metricType,
-        unit: row.unit,
-        eventCount: rowEventCount,
-        pricedEventCount: isAnalytics ? 0 : pricedEventCount,
-        unpricedEventCount: isAnalytics ? 0 : rowEventCount - pricedEventCount,
-        unclassifiedCostEventCount: 0,
-        totalCostUsd: isAnalytics ? 0 : Number(row.totalCostUsd ?? 0),
-        receiptCashPaidUsd: 0,
-        estimatedApiEquivalentUsd: isAnalytics ? Number(row.totalCostUsd ?? 0) : 0,
-        totalRequests: Number(row.totalRequests ?? 0),
-        totalQuantity: Number(row.totalQuantity ?? 0),
-        limit: row.limit,
-        limitWindow: row.limitWindow,
-        latestAt,
-      });
+  for (const row of rows) {
+    const separatorIndex = row.packedLatest.indexOf("\u0001");
+    if (separatorIndex < 1) {
+      throw new Error("SQLite summary aggregate returned an invalid latest cursor");
     }
-
-    if (Number(rows[0].pageCount ?? 0) < RAW_EVENT_SCAN_CHUNK_ROWS) break;
-    cursor = rawEventScanCursorFromRow({
-      occurredAt: rows[0].pageLastOccurredAt,
-      id: rows[0].pageLastId,
+    const latestAt = rawEventScanCursorFromRow({
+      occurredAt: row.packedLatest.slice(0, separatorIndex),
+      id: row.packedLatest.slice(separatorIndex + 1),
+    }).occurredAt.toISOString();
+    const isAnalytics = isSubscriptionAnalyticsTelemetry(row);
+    const rowEventCount = Number(row.eventCount ?? 0);
+    const pricedEventCount = Number(row.pricedEventCount ?? 0);
+    eventCount += rowEventCount;
+    addSummaryContribution(groups, {
+      sourceApp: row.sourceApp,
+      environment: row.environment,
+      provider: row.provider,
+      service: row.service,
+      projectId: row.projectId,
+      metricType: row.metricType,
+      unit: row.unit,
+      eventCount: rowEventCount,
+      pricedEventCount: isAnalytics ? 0 : pricedEventCount,
+      unpricedEventCount: isAnalytics ? 0 : rowEventCount - pricedEventCount,
+      unclassifiedCostEventCount: 0,
+      totalCostUsd: isAnalytics ? 0 : Number(row.totalCostUsd ?? 0),
+      receiptCashPaidUsd: 0,
+      estimatedApiEquivalentUsd: isAnalytics ? Number(row.totalCostUsd ?? 0) : 0,
+      totalRequests: Number(row.totalRequests ?? 0),
+      totalQuantity: Number(row.totalQuantity ?? 0),
+      limit: row.limit,
+      limitWindow: row.limitWindow,
+      latestAt,
     });
-    await yieldEventLoopTurn();
   }
   return eventCount;
 }
 
 /**
- * Summarizes historical rollups plus bounded raw event pages.
+ * Summarizes historical rollups plus native SQLite aggregates executed by a
+ * bounded, read-only child process.
  */
 async function summarizeExternalUsageEventsUnserialized(
   since: Date,
@@ -1924,105 +1758,34 @@ interface MonthToDateRawGroup {
  * rows the old single groupBy folded (same window, same status-metric
  * exclusion, same non-receipt-candidate complement), grouped by
  * (provider, sourceApp, service, label, projectId, metricType) with
- * SUM(costUsd) / COUNT(*) / COUNT(costUsd) — computed by the bounded
- * chunked scan above so no single synchronous query can stall the event
- * loop (see the RAW_EVENT_SCAN_CHUNK_ROWS comment).
+ * SUM(costUsd) / COUNT(*) / COUNT(costUsd) — computed in a bounded-heap,
+ * read-only child so the aggregate cannot stall the event loop.
  */
 async function scanMonthToDateRawGroups(
   rawSince: Date,
   now: Date
 ): Promise<MonthToDateRawGroup[]> {
-  const merged = new Map<string, MonthToDateRawGroup>();
-  let cursor: RawEventScanCursor | null = null;
-  for (;;) {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        provider: string;
-        sourceApp: string;
-        service: string | null;
-        label: string | null;
-        projectId: string | null;
-        metricType: string;
-        totalCostUsd: unknown;
-        eventCount: unknown;
-        pricedEventCount: unknown;
-        pageCount: unknown;
-        pageLastOccurredAt: Date | string;
-        pageLastId: string;
-      }>
-    >(Prisma.sql`
-      WITH "page" AS MATERIALIZED (
-        SELECT "id", "occurredAt", "provider", "sourceApp", "service", "label", "projectId", "metricType", "costUsd"
-        FROM "ExternalUsageEvent"
-        WHERE ${rawEventScanStartClause(rawSince, cursor)}
-          AND "occurredAt" <= ${now}
-          AND "metricType" NOT IN (${Prisma.join(Array.from(STATUS_METRIC_TYPES))})
-          AND (
-            "sourceApp" <> ${BILLING_RECEIPT_SOURCE_APP}
-            OR "service" IS NULL
-            OR "service" <> ${API_PREPAID_FUNDING_SERVICE}
-            OR "label" IS NULL
-            OR "label" <> ${RECEIPT_CASH_LABEL}
-            OR "billingMode" <> 'actual'
-            OR "metricType" <> 'cost'
-            OR "confidence" <> 'actual'
-          )
-        ORDER BY "occurredAt" ASC, "id" ASC
-        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
-      ),
-      "pageInfo" AS (
-        SELECT
-          COUNT(*) AS "pageCount",
-          (SELECT "occurredAt" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastOccurredAt",
-          (SELECT "id" FROM "page" ORDER BY "occurredAt" DESC, "id" DESC LIMIT 1) AS "pageLastId"
-        FROM "page"
-      )
-      SELECT
-        "page"."provider", "page"."sourceApp", "page"."service", "page"."label", "page"."projectId", "page"."metricType",
-        SUM("page"."costUsd") AS "totalCostUsd",
-        COUNT(*) AS "eventCount",
-        COUNT("page"."costUsd") AS "pricedEventCount",
-        "pageInfo"."pageCount", "pageInfo"."pageLastOccurredAt", "pageInfo"."pageLastId"
-      FROM "page" CROSS JOIN "pageInfo"
-      GROUP BY "page"."provider", "page"."sourceApp", "page"."service", "page"."label", "page"."projectId", "page"."metricType"
-    `);
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    for (const row of rows) {
-      const key = JSON.stringify([
-        row.provider,
-        row.sourceApp,
-        row.service,
-        row.label,
-        row.projectId,
-        row.metricType,
-      ]);
-      let group = merged.get(key);
-      if (!group) {
-        group = {
-          provider: row.provider,
-          sourceApp: row.sourceApp,
-          service: row.service,
-          label: row.label,
-          projectId: row.projectId,
-          metricType: row.metricType,
-          _sum: { costUsd: null },
-          _count: { _all: 0, costUsd: 0 },
-        };
-        merged.set(key, group);
-      }
-      group._count._all += Number(row.eventCount ?? 0);
-      const pricedCount = Number(row.pricedEventCount ?? 0);
-      group._count.costUsd += pricedCount;
-      if (pricedCount > 0) group._sum.costUsd = (group._sum.costUsd ?? 0) + Number(row.totalCostUsd ?? 0);
-    }
-    if (Number(rows[0].pageCount ?? 0) < RAW_EVENT_SCAN_CHUNK_ROWS) break;
-    cursor = rawEventScanCursorFromRow({
-      occurredAt: rows[0].pageLastOccurredAt,
-      id: rows[0].pageLastId,
-    });
-    await yieldEventLoopTurn();
-  }
-  return Array.from(merged.values());
+  const rows = await querySqliteUsageAggregate<Array<{
+    provider: string;
+    sourceApp: string;
+    service: string | null;
+    label: string | null;
+    projectId: string | null;
+    metricType: string;
+    totalCostUsd: number | null;
+    eventCount: number;
+    pricedEventCount: number;
+  }>>("mtd", rawSince, now);
+  return rows.map((row) => ({
+    provider: row.provider,
+    sourceApp: row.sourceApp,
+    service: row.service,
+    label: row.label,
+    projectId: row.projectId,
+    metricType: row.metricType,
+    _sum: { costUsd: row.pricedEventCount > 0 ? Number(row.totalCostUsd ?? 0) : null },
+    _count: { _all: Number(row.eventCount), costUsd: Number(row.pricedEventCount) },
+  }));
 }
 
 async function loadMonthToDateExternalCostMaterialUnserialized(

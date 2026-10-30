@@ -5,8 +5,12 @@ const prismaMock = vi.hoisted(() => ({
   externalUsageEventDailyRollup: { findMany: vi.fn() },
   $queryRaw: vi.fn(),
 }));
+const aggregateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/sqlite-usage-aggregates", () => ({
+  querySqliteUsageAggregate: aggregateMock,
+}));
 
 import {
   sumMonthToDateExternalCostAttribution,
@@ -64,7 +68,58 @@ function stubRawScanQueries(opts: {
   tokenRows?: Array<Record<string, unknown>>;
 }) {
   const mtdQueue = [...(opts.mtdRowSets ?? [])];
-  let summaryRows: Array<Record<string, unknown>> | null = null;
+  aggregateMock.mockImplementation((mode: string, since: Date, until?: Date) => {
+    if (mode === "summary") {
+      return prismaMock.externalUsageEvent.groupBy({
+        by: ["sourceApp", "environment", "provider", "service", "label", "projectId", "metricType", "unit", "limit", "limitWindow"],
+        where: { occurredAt: { gte: since, lte: until }, metricType: { notIn: ["quota_sync", "credit_balance"] } },
+        _sum: { costUsd: true, requests: true, quantity: true },
+        _count: { _all: true, costUsd: true },
+        _max: { occurredAt: true },
+      }).then((groups: Array<Record<string, any>>) => groups.map((group, index) => ({
+        sourceApp: group.sourceApp,
+        environment: group.environment ?? null,
+        provider: group.provider,
+        service: group.service ?? null,
+        label: group.label ?? null,
+        projectId: group.projectId ?? null,
+        metricType: group.metricType,
+        unit: group.unit ?? null,
+        limit: group.limit ?? null,
+        limitWindow: group.limitWindow ?? null,
+        eventCount: group._count?._all ?? 0,
+        pricedEventCount: group._count?.costUsd ?? 0,
+        totalCostUsd: group._sum?.costUsd ?? null,
+        totalRequests: group._sum?.requests ?? null,
+        totalQuantity: group._sum?.quantity ?? null,
+        packedLatest: `${(group._max?.occurredAt as Date | null)?.toISOString() ?? since.toISOString()}\u0001fixture-${String(index).padStart(6, "0")}`,
+      })));
+    }
+    if (mode === "mtd") {
+      const rows = mtdQueue.shift() ?? [];
+      const groups = new Map<string, Record<string, any>>();
+      for (const row of rows) {
+        const dims = [row.provider, row.sourceApp, row.service ?? null, row.label ?? null, row.projectId ?? null, row.metricType];
+        const key = JSON.stringify(dims);
+        const group = groups.get(key) ?? {
+          provider: row.provider, sourceApp: row.sourceApp, service: row.service ?? null,
+          label: row.label ?? null, projectId: row.projectId ?? null, metricType: row.metricType,
+          totalCostUsd: null, eventCount: 0, pricedEventCount: 0,
+        };
+        group.eventCount += 1;
+        if (row.costUsd != null) {
+          group.pricedEventCount += 1;
+          group.totalCostUsd = (group.totalCostUsd ?? 0) + Number(row.costUsd);
+        }
+        groups.set(key, group);
+      }
+      return Promise.resolve(Array.from(groups.values()));
+    }
+    if (mode === "derived") {
+      return prismaMock.$queryRaw({ sql: "SELECT json_extract(metadata, '$._derivedCostUsd')" });
+    }
+    return Promise.resolve([]);
+  });
   prismaMock.$queryRaw.mockImplementation((arg: unknown) => {
     const text =
       typeof (arg as { sql?: unknown })?.sql === "string"
@@ -72,85 +127,6 @@ function stubRawScanQueries(opts: {
         : "";
     if (text.includes('"keyRef"')) {
       return Promise.resolve(opts.tokenRows ?? []);
-    }
-    if (text.includes('"limit", "limitWindow"')) {
-      if (summaryRows === null) {
-        const values = (arg as { values?: unknown[] })?.values ?? [];
-        const dates = values.filter((value): value is Date => value instanceof Date);
-        const [from, through] = dates;
-        return prismaMock.externalUsageEvent.groupBy({
-          by: ["sourceApp", "environment", "provider", "service", "label", "projectId", "metricType", "unit", "limit", "limitWindow"],
-          where: { occurredAt: { gte: from, lte: through }, metricType: { notIn: ["quota_sync", "credit_balance"] } },
-          _sum: { costUsd: true, requests: true, quantity: true },
-          _count: { _all: true, costUsd: true },
-          _max: { occurredAt: true },
-        }).then((groups: Array<Record<string, any>>) => {
-          const pageCount = groups.reduce((sum, group) => sum + Number(group._count?._all ?? 0), 0);
-          const lastAt = groups.reduce<Date | null>((latest, group) => {
-            const current = group._max?.occurredAt as Date | null;
-            return current && (!latest || current > latest) ? current : latest;
-          }, null) ?? through ?? from;
-          summaryRows = groups.map((group, index) => ({
-            sourceApp: group.sourceApp,
-            environment: group.environment ?? null,
-            provider: group.provider,
-            service: group.service ?? null,
-            label: group.label ?? null,
-            projectId: group.projectId ?? null,
-            metricType: group.metricType,
-            unit: group.unit ?? null,
-            limit: group.limit ?? null,
-            limitWindow: group.limitWindow ?? null,
-            eventCount: group._count?._all ?? 0,
-            pricedEventCount: group._count?.costUsd ?? 0,
-            totalCostUsd: group._sum?.costUsd ?? null,
-            totalRequests: group._sum?.requests ?? null,
-            totalQuantity: group._sum?.quantity ?? null,
-            latestAt: group._max?.occurredAt ?? lastAt,
-            groupLastId: `fixture-${String(index).padStart(6, "0")}`,
-            pageCount,
-            pageLastOccurredAt: lastAt,
-            pageLastId: "fixture-last",
-          }));
-          return summaryRows;
-        });
-      }
-      const page = summaryRows;
-      summaryRows = [];
-      return Promise.resolve(page);
-    }
-    if (text.includes('AS "totalCostUsd"')) {
-      const rawRows = mtdQueue.shift() ?? [];
-      const groups = new Map<string, Record<string, any>>();
-      for (const row of rawRows) {
-        const dims = [row.provider, row.sourceApp, row.service ?? null, row.label ?? null, row.projectId ?? null, row.metricType];
-        const key = JSON.stringify(dims);
-        let group = groups.get(key);
-        if (!group) {
-          group = {
-            provider: row.provider, sourceApp: row.sourceApp, service: row.service ?? null,
-            label: row.label ?? null, projectId: row.projectId ?? null, metricType: row.metricType,
-            totalCostUsd: null, eventCount: 0, pricedEventCount: 0,
-          };
-          groups.set(key, group);
-        }
-        group.eventCount += 1;
-        if (row.costUsd != null) {
-          group.pricedEventCount += 1;
-          group.totalCostUsd = (group.totalCostUsd ?? 0) + Number(row.costUsd);
-        }
-      }
-      const pageLast = rawRows[rawRows.length - 1];
-      return Promise.resolve(Array.from(groups.values(), (group) => ({
-        ...group,
-        pageCount: rawRows.length,
-        pageLastOccurredAt: pageLast?.occurredAt,
-        pageLastId: pageLast?.id,
-      })));
-    }
-    if (text.includes('"costUsd"')) {
-      if (text.includes('"id" >')) return Promise.resolve([]);
-      return Promise.resolve(mtdQueue.shift() ?? []);
     }
     return Promise.resolve([]);
   });
@@ -226,11 +202,11 @@ describe("summarizeExternalUsageEvents", () => {
       now
     );
 
-    const summarySql = prismaMock.$queryRaw.mock.calls
-      .map(([query]) => (query as { sql?: string }).sql ?? "")
-      .find((sql) => sql.includes('"limit", "limitWindow"'));
-    expect(summarySql).toContain('"occurredAt" <=');
-    expect(summarySql).toContain('ORDER BY "occurredAt" ASC, "id" ASC');
+    expect(aggregateMock).toHaveBeenCalledWith(
+      "summary",
+      new Date("2026-07-01T00:00:00.000Z"),
+      new Date("2026-07-15T00:00:00.000Z")
+    );
     // The only raw findMany left is the receipt-candidate superset query -
     // the cursor-paginated full-month scan is gone.
     expect(prismaMock.externalUsageEvent.findMany).toHaveBeenCalledTimes(1);
@@ -741,19 +717,11 @@ describe("summarizeExternalUsageEvents", () => {
         }),
       })
     );
-    // Wave H / E1: the shared MTD scan always selects projectId, and the
-    // receipt complement (rows the candidate query does NOT own) is part of
-    // the raw SQL — service/label null branches included.
-    const scanSql = prismaMock.$queryRaw.mock.calls
-      .map(([arg]) => (arg as { sql?: string })?.sql ?? "")
-      .find(
-        (text) =>
-          text.includes('FROM "ExternalUsageEvent"') && text.includes('"costUsd"')
-      );
-    expect(scanSql).toBeDefined();
-    expect(scanSql).toContain('"service" IS NULL');
-    expect(scanSql).toContain('"label" IS NULL');
-    expect(scanSql).toContain('ORDER BY "occurredAt" ASC, "id" ASC');
+    expect(aggregateMock).toHaveBeenCalledWith(
+      "mtd",
+      new Date("2026-07-01T00:00:00.000Z"),
+      expect.any(Date)
+    );
     expect(byProvider.get("anthropic")).toEqual({
       usagePushed: 60,
       subscriptionPushed: 175,
@@ -817,27 +785,11 @@ describe("summarizeExternalUsageEvents", () => {
       new Date("2026-07-01T00:00:00.000Z")
     );
 
-    // The scan selects exactly the reduced grouping dimensions (provider,
-    // sourceApp, service, label, projectId, metricType) plus costUsd and
-    // the keyset cursor columns — nothing wider reaches the fold.
-    const scanSql = prismaMock.$queryRaw.mock.calls
-      .map(([arg]) => (arg as { sql?: string })?.sql ?? "")
-      .find(
-        (text) =>
-          text.includes('FROM "ExternalUsageEvent"') && text.includes('"costUsd"')
-      );
-    expect(scanSql).toBeDefined();
-    for (const column of [
-      '"provider"',
-      '"sourceApp"',
-      '"service"',
-      '"label"',
-      '"projectId"',
-      '"metricType"',
-      '"costUsd"',
-    ]) {
-      expect(scanSql).toContain(column);
-    }
+    expect(aggregateMock).toHaveBeenCalledWith(
+      "mtd",
+      new Date("2026-07-01T00:00:00.000Z"),
+      expect.any(Date)
+    );
     expect(attribution).toEqual([
       {
         provider: "openai",
