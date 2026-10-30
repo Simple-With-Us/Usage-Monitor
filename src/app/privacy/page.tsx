@@ -177,9 +177,9 @@ export default function PrivacyPolicyPage() {
             or provider rows according to your ops practice.
           </li>
           <li>
-            <strong>Web dashboard we operate:</strong> short-term server
-            backups are kept for 3 days.  Weekly backups are kept for 3
-            weeks, then deleted.  A few rollback copies made during app
+            <strong>Web dashboard we operate:</strong> server backups are
+            kept for at most 2 weeks: short-term backups for 3 days, and
+            weekly backups for 2 weeks, then deleted.  A few rollback copies made during app
             updates are also kept on the server until newer updates replace
             them.
           </li>
