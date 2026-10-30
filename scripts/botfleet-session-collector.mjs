@@ -54,8 +54,11 @@ export async function collectBotFleetSessionTelemetry({ eventsDir, producerInsta
   records.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
   stats.historyGaps = historyGapIds.size;
   const completions = new Map();
+  const seen = new Set();
   for (const record of records) {
-    if (record.type === "turn.completed" && !completions.has(record.eventId)) completions.set(record.eventId, record.ts);
+    if (seen.has(record.eventId)) continue;
+    seen.add(record.eventId);
+    if (record.type === "turn.completed") completions.set(record.eventId, record.ts);
   }
   stats.retainedCompletions = completions.size;
   stats.outsideLookbackCompletions = [...completions.values()].filter((ts) => Date.parse(ts) < since.getTime()).length;

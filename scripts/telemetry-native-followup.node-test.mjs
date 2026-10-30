@@ -115,6 +115,11 @@ test("rotated duplicate completion counts match first-win publication", async ()
     assert.equal(events.length, 1);
     assert.equal(stats.retainedCompletions, 1);
     assert.equal(stats.afterWindowCompletions, 0);
+    await writeFile(join(root, "thread.ndjson"), [started, { ...completed, eventId: started.eventId }].map(JSON.stringify).join("\n") + "\n");
+    await writeFile(join(root, "thread.ndjson.1"), "");
+    const conflict = await collectBotFleetSessionTelemetry({ eventsDir: root, producerInstanceId: "test-host", ...nativeWindow });
+    assert.equal(conflict.events.length, 0);
+    assert.equal(conflict.stats.retainedCompletions, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
