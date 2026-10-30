@@ -249,17 +249,31 @@ describe("chunked month-to-date external-cost scan", () => {
     process.env.INGEST_COST_DERIVATION_ENABLED = "true";
     let summary: Awaited<ReturnType<typeof summarizeExternalUsageEvents>>;
     let daily: Awaited<ReturnType<typeof buildDailySpendSeries>>;
-    let timerTurns = 0;
-    const timer = setInterval(() => { timerTurns += 1; }, 0);
+    const immediateSpy = vi.spyOn(globalThis, "setImmediate");
+    const rawQuery = vi.spyOn(prisma, "$queryRaw");
     try {
       summary = await summarizeExternalUsageEvents(MONTH_START, MONTH_START, NOW);
       daily = await buildDailySpendSeries(MONTH_START, MONTH_START, NOW);
     } finally {
-      clearInterval(timer);
       if (previousFlag === undefined) delete process.env.INGEST_COST_DERIVATION_ENABLED;
       else process.env.INGEST_COST_DERIVATION_ENABLED = previousFlag;
     }
-    expect(timerTurns).toBeGreaterThan(0);
+    const sqlText = (query: unknown) => typeof query === "object" && query !== null && "sql" in query
+      ? String((query as { sql: unknown }).sql)
+      : "";
+    const sqlCalls = rawQuery.mock.calls.map(([query]) => sqlText(query));
+    const summarySql = sqlCalls.find((sql) => sql.includes('"ranked"') && sql.includes('"groupLastId"')) ?? "";
+    const dailySql = sqlCalls.find((sql) => sql.includes('date("page"."occurredAt")')) ?? "";
+    const derivedSql = sqlCalls.find((sql) => sql.includes('SUM(json_extract("page"."metadata"')) ?? "";
+    expect(summarySql).toContain('WITH "page" AS MATERIALIZED');
+    expect(summarySql.indexOf("LIMIT")).toBeLessThan(summarySql.indexOf('SUM("ranked"."costUsd")'));
+    expect(summarySql).toMatch(/GROUP BY\s+"ranked"\."sourceApp"/);
+    expect(summarySql).toContain('"ranked"."label"');
+    expect(summarySql).toContain('"ranked"."limit", "ranked"."limitWindow"');
+    expect(dailySql).toContain('WITH "page" AS MATERIALIZED');
+    expect(dailySql.indexOf("LIMIT")).toBeLessThan(dailySql.indexOf('SUM("page"."costUsd")'));
+    expect(derivedSql).toContain('WITH "page" AS MATERIALIZED');
+    expect(derivedSql.indexOf("LIMIT")).toBeLessThan(derivedSql.indexOf('SUM(json_extract("page"."metadata"'));
     for (const old of oldGroups) {
       const isAnalytics = old.provider === "anthropic";
       const actual = summary.groups.find((group) => group.provider === old.provider && group.metricType === old.metricType);
@@ -319,10 +333,7 @@ describe("chunked month-to-date external-cost scan", () => {
     `);
 
     const rawQuery = vi.spyOn(prisma, "$queryRaw");
-    let immediateFired = false;
-    setImmediate(() => {
-      immediateFired = true;
-    });
+    const immediateSpy = vi.spyOn(globalThis, "setImmediate");
 
     const { sumMonthToDateExternalCostByProvider } = await import(
       "../external-usage-events"
@@ -332,7 +343,7 @@ describe("chunked month-to-date external-cost scan", () => {
     // The pre-scheduled macrotask ran before the scan resolved: the scan
     // took a real event-loop turn between chunks instead of holding the
     // loop for one monolithic aggregation.
-    expect(immediateFired).toBe(true);
+    expect(immediateSpy).toHaveBeenCalled();
 
     const bulk = byProvider.get("bulk-provider");
     expect(bulk?.usagePushed).toBeCloseTo(6000, 6);
@@ -352,6 +363,11 @@ describe("chunked month-to-date external-cost scan", () => {
       );
     });
     expect(scanCalls.length).toBeGreaterThan(2);
+    expect(immediateSpy).toHaveBeenCalled();
+    const firstMtdSql = sqlTextOf(scanCalls[0][0]);
+    expect(firstMtdSql).toContain('WITH "page" AS MATERIALIZED');
+    expect(firstMtdSql.indexOf("LIMIT")).toBeLessThan(firstMtdSql.indexOf('SUM("page"."costUsd")'));
+    expect(firstMtdSql).toContain('GROUP BY "page"."provider"');
     expect(sqlTextOf(scanCalls[0][0])).toContain('"occurredAt" >=');
     for (const [query] of scanCalls.slice(1)) {
       expect(sqlTextOf(query)).toContain('("occurredAt", "id") >');
