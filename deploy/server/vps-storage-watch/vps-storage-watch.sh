@@ -60,15 +60,20 @@ check_db() { # name dbfile t24h t1h
   echo "$size"
 }
 
-for name in ST_APP_DB CT_DB UM_DB; do
-  if [ -z "${!name:-}" ]; then
-    echo "vps-storage-watch: $name is not set in $ENV_FILE" >&2
-    exit 2
+db_size() { # name path_var t24h t1h -> size, or null when the path is not configured
+  local path="${!2:-}"
+  if [ -z "$path" ]; then
+    # A missing path skips only this database:  the device samples and the snapshot still run, and the size is
+    # null rather than a fictitious zero.
+    echo "vps-storage-watch: $2 is not set in $ENV_FILE" >&2
+    echo null
+    return
   fi
-done
-ST_SIZE=$(check_db st_app_db "$ST_APP_DB" 1073741824 209715200)
-CT_SIZE=$(check_db ct_db "$CT_DB" 536870912 104857600)
-UM_SIZE=$(check_db um_db "$UM_DB" 536870912 104857600)
+  check_db "$1" "$path" "$3" "$4"
+}
+ST_SIZE=$(db_size st_app_db ST_APP_DB 1073741824 209715200)
+CT_SIZE=$(db_size ct_db CT_DB 536870912 104857600)
+UM_SIZE=$(db_size um_db UM_DB 536870912 104857600)
 
 # device free bytes
 ROOT_FREE=$(df -B1 --output=avail / | tail -1 | tr -d ' ')

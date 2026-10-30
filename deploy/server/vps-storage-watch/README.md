@@ -22,7 +22,7 @@ Each alert posts to `#Alerts-Log` › `vps-storage` as the Operator and tags bot
 | `vps-storage-watch.cron` | `/etc/cron.d/vps-storage-watch` |
 | `vps-storage-watch.env.example` | the template for `/etc/vps-storage-watch.env` |
 
-The database paths are host inventory, so they are not in this public repo.  They live in `/etc/vps-storage-watch.env` (root, mode 0600), and the watch stops without posting anything if one is missing.  The Operator's Zulip login is `/root/.zuliprc-operator`, which the watch reads at run time and this repo never holds.
+The database paths are host inventory, so they are not in this public repo.  They live in `/etc/vps-storage-watch.env` (root, mode 0600), and `install.sh` refuses to run until all three are set.  If one goes missing later, the watch skips only that database (its snapshot size is `null`, never a made-up zero) and keeps the rest running.  The Operator's Zulip login is `/root/.zuliprc-operator`, which the watch reads at run time and this repo never holds.
 
 ## Install
 

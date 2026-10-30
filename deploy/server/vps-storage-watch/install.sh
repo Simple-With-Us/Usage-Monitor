@@ -11,6 +11,12 @@ if [ ! -s "$env_file" ]; then
   echo "install: $env_file is missing;  copy vps-storage-watch.env.example there (mode 0600) and fill it in" >&2
   exit 2
 fi
+for name in ST_APP_DB CT_DB UM_DB; do
+  if ! grep -q "^$name=." "$env_file"; then
+    echo "install: $env_file has no $name;  every database path must be set" >&2
+    exit 2
+  fi
+done
 
 place() { # source target mode
   if [ -e "$2" ] && ! cmp -s "$1" "$2"; then

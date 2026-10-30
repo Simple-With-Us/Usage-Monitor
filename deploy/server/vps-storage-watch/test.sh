@@ -48,10 +48,18 @@ grep -q '"host": "' "$work/snapshot.json" || fail "no snapshot"
 run "$work/env"
 [ "$(posts)" -eq 1 ] || fail "the cooldown did not hold"
 
-# A missing database path stops before any post.
-rm -f "$work"/post.*
+# A missing database path skips only that database:  nothing is posted for it, its size is null, and the snapshot
+# is still written with the others.
+rm -f "$work"/post.* "$work/snapshot.json"
 grep -v '^UM_DB=' "$work/env" > "$work/env.partial"
-if run "$work/env.partial" 2>/dev/null; then fail "ran without UM_DB"; fi
+run "$work/env.partial" 2>/dev/null || fail "a missing UM_DB stopped the run"
 [ "$(posts)" -eq 0 ] || fail "posted without UM_DB"
+grep -q '"um_db": null' "$work/snapshot.json" || fail "um_db is not null in the snapshot"
+grep -q '"ct_db": 209715200' "$work/snapshot.json" || fail "ct_db is missing from the snapshot"
+
+# install.sh refuses an env file that lacks a database path.
+sed "s#^env_file=.*#env_file=$work/env.partial#" "$here/install.sh" > "$work/install.sh"
+refusal=$(bash "$work/install.sh" 2>&1 >/dev/null) && fail "install.sh accepted an env file without UM_DB"
+grep -q "has no UM_DB" <<<"$refusal" || fail "install.sh did not name the missing UM_DB: $refusal"
 
 echo "vps-storage-watch: all checks passed"
