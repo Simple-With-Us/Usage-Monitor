@@ -93,6 +93,30 @@ describe("parseMuseSubscriptionStatus", () => {
     expect(readings[0].planType).toBe("Pro plan");
   });
 
+  it("parses both windows for the paid-plan wording without the word free", () => {
+    const paidCurrent = [
+      "The user is on the Power subscription.",
+      "Usage: 10% of weekly limit.",
+      "Weekly limit resets Nov 4 at 7:17 PM CST",
+      "Additional tokens: 19% used (2.4B tokens left)",
+    ].join("\n");
+    const readings = parseMuseSubscriptionStatus(paidCurrent, { now });
+    expect(readings).toHaveLength(2);
+    const byBucket = Object.fromEntries(readings.map((r) => [r.bucketId, r]));
+    expect(byBucket[WEEKLY_BUCKET].remainingPercent).toBe(90);
+    expect(byBucket[WEEKLY_BUCKET].usedPercent).toBe(10);
+    expect(byBucket[WEEKLY_BUCKET].resetAt).toBe("2026-11-05T01:17:00.000Z");
+    expect(byBucket[WEEKLY_BUCKET].planType).toBe(
+      "The user is on the Power subscription",
+    );
+    expect(byBucket[WEEKLY_BUCKET].label).toBe("Weekly limit");
+    expect(byBucket[ADDITIONAL_BUCKET].remainingPercent).toBe(81);
+    expect(byBucket[ADDITIONAL_BUCKET].usedPercent).toBe(19);
+    expect(byBucket[ADDITIONAL_BUCKET].metadataExtras).toEqual({
+      tokensLeftLabel: "2.4B tokens left",
+    });
+  });
+
   it("detects the plan line after a leading blank line and parses both windows", () => {
     const blankFirst = [
       "",
