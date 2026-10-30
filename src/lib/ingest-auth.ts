@@ -67,6 +67,23 @@ function resolveProducerCredential(
   return null;
 }
 
+/** A rotation window has explicit endpoints and can last at most one hour. */
+function matchesPreviousUsageToken(actual: string, now = Date.now()): boolean {
+  const previous = process.env.USAGE_INGEST_PREVIOUS_TOKEN?.trim();
+  const from = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_FROM?.trim();
+  const until = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_UNTIL?.trim();
+  if (!previous || !from || !until) return false;
+  const receiptToken = process.env.BILLING_RECEIPT_INGEST_TOKEN?.trim();
+  if (receiptToken && safeEqual(previous, receiptToken)) return false;
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+  if (!iso.test(from) || !iso.test(until)) return false;
+  const start = Date.parse(from);
+  const end = Date.parse(until);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  if (end <= start || end - start > 3_600_000 || now < start || now >= end) return false;
+  return safeEqual(actual, previous);
+}
+
 export function resolveUsageIngestCredential(request: NextRequest): IngestCredential | null {
   const actual = tokenFromRequest(request, "x-usage-ingest-token");
   if (!actual) return null;
@@ -88,6 +105,10 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
       token: actual,
       allowedSourceApps: null,
     };
+  }
+
+  if (expected && !requireScoped && matchesPreviousUsageToken(actual)) {
+    return { credentialId: "unscoped", token: actual, allowedSourceApps: null };
   }
 
   return null;
