@@ -186,7 +186,7 @@ export function parseMuseSubscriptionStatus(text, { now = new Date() } = {}) {
 
     // Data-line patterns FIRST.  A data line appearing before the plan line
     // must be parsed as data, never swallowed as planType.
-    let m = /^Usage:\s*(\d+(?:\.\d+)?)%\s*of\s*free\s*weekly\s*limit/i.exec(line);
+    let m = /^Usage:\s*(\d+(?:\.\d+)?)%\s*of\s*(?:free\s+)?weekly\s*limit/i.exec(line);
     if (m) {
       weeklyUsed = Number(m[1]);
       continue;
