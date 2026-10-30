@@ -107,6 +107,14 @@ test("Claude content-block fragmentation produces one call with complete split i
   assert.equal(output[0].attributes.find((a) => a.key === "gen_ai.usage.input_tokens").value.intValue, "20");
 });
 
+test("distinct output fragments accumulate reasoning once per deduped event", () => {
+  const first = tokens({ collectorCallId: "fragmented-call", extraId: "fragment-one", extraMetadata: { reasoningTokens: 2 } });
+  const second = tokens({ collectorCallId: "fragmented-call", extraId: "fragment-two", extraMetadata: { reasoningTokens: 3 } });
+  const [span] = collectorSentryEvents([...first, ...second, ...first, ...second], identity);
+  assert.equal(span.attributes.find((attr) => attr.key === "gen_ai.usage.output_tokens").value.intValue, "40");
+  assert.equal(span.attributes.find((attr) => attr.key === "gen_ai.usage.reasoning_count").value.stringValue, "5");
+});
+
 test("outbox retries after restart and sent receipts suppress collector replay", () => fixture(async (config) => {
   const events = tokens({ collectorCallId: "call" });
   const root = await enqueueCollectorSentry(events, identity, config);

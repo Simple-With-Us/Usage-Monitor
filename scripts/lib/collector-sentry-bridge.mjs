@@ -76,7 +76,7 @@ export function collectorSentryEvents(events, { producerId, producerInstanceId =
     };
     row.tokens[type] = (row.tokens[type] ?? 0) + event.quantity;
     const reasoning = event.metadata?.reasoningTokens;
-    if (type === "output" && Number.isFinite(reasoning) && reasoning >= 0 && reasoning <= Number.MAX_SAFE_INTEGER) row.tokens.reasoning = reasoning;
+    if (type === "output" && Number.isFinite(reasoning) && reasoning >= 0 && reasoning <= Number.MAX_SAFE_INTEGER) row.tokens.reasoning = (row.tokens.reasoning ?? 0) + reasoning;
     const duration = event.metadata?.durationMs;
     if (Number.isFinite(duration) && duration >= 0) {
       row.durationMs = duration;
