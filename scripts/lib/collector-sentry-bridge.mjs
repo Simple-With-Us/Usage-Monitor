@@ -136,12 +136,25 @@ export async function flushCollectorSentry({ producerId, producerInstanceId, dry
 
 /** SQLite owns concurrent enqueue/claim transitions and durable receipts. */
 export async function enqueueCollectorSentry(events, identity, config) {
+  return persistCollectorSentry(collectorSentryEvents(events, identity), identity, config);
+}
+
+/** Native aggregate telemetry uses the same privacy projection and independent outbox. */
+export async function enqueueCollectorSentryTelemetry(events, identity, config) {
+  const projected = events.map((event) => {
+    if (!/^[a-f0-9]{64}$/.test(event?.eventId || "")) throw new Error("Native telemetry requires a stable hashed event identity");
+    return scrubInternalEvent(projectHubTelemetry(event));
+  }).filter(Boolean);
+  return persistCollectorSentry(projected, identity, config);
+}
+
+async function persistCollectorSentry(events, identity, config) {
   const root = join(config.stateRoot, hash(JSON.stringify([identity.producerId, identity.producerInstanceId || hostname(), config.destination || "sentry", config.endpoint])));
   const db = await openOutbox(root);
   try {
     db.exec("BEGIN IMMEDIATE");
     const insert = db.prepare("INSERT OR IGNORE INTO events (id, payload) VALUES (?, ?)");
-    for (const event of collectorSentryEvents(events, identity)) insert.run(event.eventId, JSON.stringify(event));
+    for (const event of events) insert.run(event.eventId, JSON.stringify(event));
     db.exec("COMMIT");
   } catch (error) { if (db.isTransaction) db.exec("ROLLBACK"); throw error; }
   finally { db.close(); }
@@ -149,7 +162,7 @@ export async function enqueueCollectorSentry(events, identity, config) {
 }
 
 /** At-least-once delivery; receipts survive collector checkpoints and restarts. */
-export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = 1000, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32 } = {}) {
+export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = 1000, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32, prioritizeUnnarrowed = false } = {}) {
   if (!Number.isSafeInteger(requestLimit) || requestLimit < 1 || requestLimit > 1000) throw new Error("Outbox request limit must be between 1 and 1000");
   const db = await openOutbox(root);
   const owner = randomUUID();
@@ -157,6 +170,7 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
   let delivered = 0;
   let quarantined = 0;
   let requests = 0;
+  let claimPass = 0;
 
   const quarantine = (id) => {
     db.prepare("UPDATE events SET state='quarantined', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND owner=?").run(id, owner);
@@ -170,7 +184,12 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       if (typeof value === "number") return Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
       return typeof value === "string" && value.split(",").every((part) => telemetryIdentifier(part));
     });
-    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" ? "span" : "log", name: event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
+    const nativeTurn = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "botfleet.turn");
+    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" ? "span" : "log", name: nativeTurn ? "botfleet.turn" : event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
+    if (nativeTurn) {
+      if (safe.kind === "span") safe.status = { code: event.status?.code === 2 ? 2 : 1 };
+      else safe.severityNumber = event.severityNumber === 17 ? 17 : 9;
+    }
     if (Number.isFinite(event.durationMs) && event.durationMs >= 0) safe.durationMs = event.durationMs;
     return safe;
   };
@@ -249,7 +268,8 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       try {
         const recover = db.prepare("UPDATE events SET state='pending', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND state='sending' AND owner IS ? AND pid IS ? AND birth IS ?");
         for (const held of stale) recover.run(held.id, held.owner, held.pid, held.birth);
-        const candidates = db.prepare("SELECT id, retry_batch_size FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(100, limit - count));
+        const order = prioritizeUnnarrowed && claimPass++ % 2 === 0 ? "retry_batch_size DESC, rowid DESC" : "rowid";
+        const candidates = db.prepare(`SELECT id, retry_batch_size FROM events WHERE state='pending' ORDER BY ${order} LIMIT ?`).all(Math.min(100, limit - count));
         const batchSize = candidates.reduce((size, row) => Math.min(size, Number.isSafeInteger(row.retry_batch_size) && row.retry_batch_size > 0 ? row.retry_batch_size : 1), 100);
         const picked = candidates.slice(0, batchSize).map((row) => row.id);
         rows = picked.length ? db.prepare(`SELECT id, payload FROM events WHERE id IN (${picked.map(() => "?").join(",")}) ORDER BY rowid`).all(...picked) : [];
