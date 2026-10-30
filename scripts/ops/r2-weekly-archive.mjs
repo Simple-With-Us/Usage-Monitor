@@ -64,12 +64,11 @@ const DEFAULTS = {
   bucket: "usage-monitor-prod-v3",
   prefix: "weekly/",
   region: "auto",
-  // 2 generations (~100 MB compressed) against a 10 GiB free tier. The owner's
-  // ask was "delete the old one once the new one is verified"; keeping one extra
-  // generation still bounds storage but leaves an escape hatch if a structurally
-  // valid snapshot turns out to be logically wrong. Set to 1 for strict
-  // one-copy-only behaviour.
-  keepGenerations: 2,
+  // Jay 2026-10-29 fleet policy: keep the newest 3 weekly generations (3 weeks,
+  // ~150 MB compressed against a 10 GiB free tier), matching the privacy-policy
+  // copy in src/app/privacy/page.tsx. Prune still runs only after the fresh
+  // upload is verified. R2_ARCHIVE_KEEP_GENERATIONS / --keep override this.
+  keepGenerations: 3,
   statusPath: "/data/.r2-archive-status.json",
   // Pages per sqlite3_backup_step(); matches the pre-migration backup default.
   backupRatePages: 100,

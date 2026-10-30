@@ -19,7 +19,7 @@ export default function PrivacyPolicyPage() {
           Privacy Policy
         </h1>
         <p className="text-sm text-gray-600 dark:text-gray-400">
-          Effective August 10, 2026 · Applies to{" "}
+          Effective October 29, 2026 · Applies to{" "}
           <strong>Usage Monitor Client</strong>,{" "}
           <strong>Usage Monitor Local</strong>, and the optional{" "}
           <strong>Usage Monitor</strong> web dashboard at usage.jays.services.
@@ -175,6 +175,13 @@ export default function PrivacyPolicyPage() {
           <li>
             <strong>Self-hosted server:</strong> delete the instance database
             or provider rows according to your ops practice.
+          </li>
+          <li>
+            <strong>Web dashboard we operate:</strong> short-term server
+            backups are kept for 3 days.  Weekly backups are kept for 3
+            weeks, then deleted.  A few rollback copies made during app
+            updates are also kept on the server until newer updates replace
+            them.
           </li>
         </ul>
       </section>

@@ -270,7 +270,7 @@ await test("resolveArchiveConfig normalizes prefix and detects the kill switch",
   assert.equal(config.prefix, "archives/");
   assert.equal(config.killSwitchEngaged, true);
   assert.equal(config.ignoreKillSwitch, false);
-  assert.equal(config.keepGenerations, 2);
+  assert.equal(config.keepGenerations, 3);
 });
 
 // ------------------------------------------------------------ end to end ----
