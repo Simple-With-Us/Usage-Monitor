@@ -180,6 +180,20 @@ afterEach(() => {
 });
 
 describe("POST /api/ingest/usage admission", () => {
+  it("persists transcript cache reads without inferring native aggregate coverage", async () => {
+    const response = await POST(nextRequest({
+      sourceApp: "claude-code", provider: "anthropic", service: "claude-code",
+      metricType: "usage", unit: "token", quantity: 1000,
+      occurredAt: "2026-10-30T12:00:00Z",
+      metadata: { collector: "transcript", "host.name": "host-a", tokenType: "cacheRead" },
+    }, USAGE_TOKEN));
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist.mock.calls[0][0][0]).toMatchObject({
+      sourceApp: "claude-code", quantity: 1000, metadata: { tokenType: "cacheRead" },
+    });
+    expect(await response.json()).toMatchObject({ received: 1, accepted: 1 });
+  });
+
   it("accepts v2 through the shared schema and returns explicit persistence counts", async () => {
     externalUsageMocks.persist.mockResolvedValueOnce({
       attempted: 1,

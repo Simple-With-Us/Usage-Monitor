@@ -267,12 +267,8 @@ export async function POST(request: NextRequest) {
   // Server-owned authority never comes from producer metadata or an unscoped token.
   events = stampBotFleetReceiptCredential(events, credential);
 
-  // Native-vs-local coverage (UM-1636): when a producer's native feed is
-  // healthy it already carries the same calls a local transcript collector
-  // would send, so the transcript-sourced events are dropped instead of
-  // double-counted.  When the native feed is dead the transcript events are
-  // kept and the gap is filled.  The dropped events are counted as duplicates
-  // in the ACK, because the usage they describe IS already in the ledger.
+  // Aggregate native metrics cannot prove which transcript calls or token
+  // components they contain; unproven overlap stays additive.
   const nativeCoverage = await dropEventsCoveredByNative(events);
   if (nativeCoverage.skippedNativeCovered > 0) {
     events = nativeCoverage.events;

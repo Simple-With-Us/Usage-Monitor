@@ -1,187 +1,44 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const findMany = vi.fn();
-vi.mock("@/lib/prisma", () => ({
-  prisma: { externalUsageEvent: { findMany: (...args: unknown[]) => findMany(...args) } },
-}));
-
-import {
-  NATIVE_COVERAGE_WINDOW_MS,
-  dropEventsCoveredByNative,
-  isTranscriptSourcedEvent,
-  readHostName,
-  readTranscriptMarker,
-} from "../native-telemetry-coverage";
 import type { ParsedUsageTelemetryEvent } from "../usage-telemetry";
 
-const at = (iso: string) => new Date(iso);
+const { findMany } = vi.hoisted(() => ({ findMany: vi.fn() }));
+vi.mock("@/lib/prisma", () => ({
+  prisma: { externalUsageEvent: { findMany } },
+}));
+import { dropEventsCoveredByNative } from "../native-telemetry-coverage";
 
-/**
- * Emulate the raw lookup: it returns only the native rows whose machine is
- * one of the machines the query asked about, which is what the SQL does.
- */
-function mockNativeRows(
-  rows: Array<{ occurredAt: Date; metadata: Record<string, string> }>
-) {
-  findMany.mockResolvedValue(rows);
-}
+const transcript = (host: string): ParsedUsageTelemetryEvent => ({
+  sourceApp: "claude-code", provider: "anthropic", service: "claude-code",
+  billingMode: "estimated", metricType: "usage", confidence: "estimated",
+  occurredAt: new Date("2026-10-30T12:00:00Z"), quantity: 1000, unit: "token",
+  idempotencyKey: host, metadata: { collector: "transcript", "host.name": host, tokenType: "cacheRead" },
+});
+beforeEach(() => { findMany.mockReset(); });
 
-
-function event(
-  occurredAt: string,
-  metadata: Record<string, string | number | boolean | null>,
-  sourceApp = "claude-code",
-): ParsedUsageTelemetryEvent {
-  return {
-    sourceApp,
-    provider: "anthropic",
-    service: "claude-code",
-    billingMode: "estimated",
-    metricType: "usage",
-    confidence: "estimated",
-    occurredAt: at(occurredAt),
-    metadata,
-    idempotencyKey: `k-${occurredAt}-${JSON.stringify(metadata)}`,
-  };
-}
-
-describe("native telemetry coverage", () => {
-  beforeEach(() => {
-    findMany.mockReset();
+describe("unproven native aggregate coverage", () => {
+  it("retains cache reads beside native input telemetry on the same host", async () => {
+    findMany.mockResolvedValue([{ occurredAt: new Date("2026-10-30T12:00:01Z"), metadata: { "host.name": "host-a", tokenType: "input" } }]);
+    const events = [transcript("host-a")];
+    expect(await dropEventsCoveredByNative(events)).toEqual({
+      events, skippedNativeCovered: 0, nativeRowsConsidered: 0,
+    });
+    expect(findMany).not.toHaveBeenCalled();
   });
 
-  it("recognizes a transcript-sourced event by its marker", () => {
-    expect(isTranscriptSourcedEvent(event("2026-10-25T10:00:00.000Z", { collector: "transcript" }))).toBe(true);
-    expect(isTranscriptSourcedEvent(event("2026-10-25T10:00:00.000Z", {}))).toBe(false);
-    // Another producer's events are never treated as transcript rows.
-    expect(
-      isTranscriptSourcedEvent(
-        event("2026-10-25T10:00:00.000Z", { collector: "transcript" }, "opencode")
-      )
-    ).toBe(false);
+  it("retains every transcript in a mixed-host batch beside one native feed", async () => {
+    findMany.mockResolvedValue([{ occurredAt: new Date("2026-10-30T12:00:01Z"), metadata: { "host.name": "host-a" } }]);
+    const events = [transcript("host-a"), transcript("host-b")];
+    expect((await dropEventsCoveredByNative(events)).events).toBe(events);
+    expect(findMany).not.toHaveBeenCalled();
   });
 
-  it("reads the marker and host out of an unknown metadata shape", () => {
-    expect(readTranscriptMarker({ collector: "transcript" })).toBe("transcript");
-    expect(readTranscriptMarker(null)).toBeUndefined();
-    expect(readTranscriptMarker(["transcript"])).toBeUndefined();
-    expect(readHostName({ "host.name": "workstation-1" })).toBe("workstation-1");
-    expect(readHostName({ "host.name": "  " })).toBeUndefined();
-  });
-
-  it("keeps transcript events when the native feed has no rows", async () => {
-    mockNativeRows([]);
-    const events = [event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" })];
+  it("retains native, transcript and cash records even when lookup would fail", async () => {
+    findMany.mockImplementation(() => { throw new Error("database unavailable"); });
+    const events = [transcript("host-a"), { ...transcript("host-a"), metadata: {} },
+      { ...transcript("host-a"), sourceApp: "other-producer", costUsd: 1 }];
     const result = await dropEventsCoveredByNative(events);
-    expect(result.events).toHaveLength(1);
+    expect(result.events).toBe(events);
     expect(result.skippedNativeCovered).toBe(0);
-  });
-
-  it("drops a transcript event the native feed already covers", async () => {
-    mockNativeRows([
-      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-      event("2026-10-25T11:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(1);
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0].occurredAt.toISOString()).toBe("2026-10-25T11:00:00.000Z");
-  });
-
-  it("does not let one machine's native feed silence another machine's transcripts", async () => {
-    // The Mac's native feed must not drop the server's transcript rows, and
-    // the server has no native feed at all.
-    mockNativeRows([
-      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "server-1" }),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(0);
-    expect(result.events).toHaveLength(1);
-  });
-
-  it("never lets a native row without a machine identity cover anything", async () => {
-    // A native row that cannot be attributed to a machine must not silence
-    // another machine's transcript events.
-    mockNativeRows([
-      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: {} },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "server-1" }),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(0);
-    expect(result.events).toHaveLength(2);
-  });
-
-  it("compares machine identities case-insensitively", async () => {
-    // The OTLP resource attribute is written by an operator and the transcript
-    // feed writes os.hostname(), so a case difference must not decide
-    // whether the native feed covers the event.
-    mockNativeRows([
-      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "Workstation-1" } },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(1);
-    expect(result.events).toHaveLength(0);
-  });
-
-  it("never treats this feed's own earlier rows as native telemetry", async () => {
-    // A transcript row stored by an earlier pass would otherwise cover the
-    // next transcript event in the same window and drop it from the ledger.
-    mockNativeRows([
-      {
-        occurredAt: at("2026-10-25T10:00:30.000Z"),
-        metadata: { "host.name": "workstation-1", collector: "transcript" },
-      },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(0);
-    expect(result.events).toHaveLength(1);
-  });
-
-  it("never drops another producer's events", async () => {
-    mockNativeRows([
-      { occurredAt: at("2026-10-25T10:00:30.000Z"), metadata: { "host.name": "workstation-1" } },
-    ]);
-    const events = [
-      event("2026-10-25T10:00:00.000Z", { "host.name": "workstation-1" }, "opencode"),
-    ];
-    const result = await dropEventsCoveredByNative(events);
-    expect(result.skippedNativeCovered).toBe(0);
-    expect(result.events).toHaveLength(1);
-  });
-
-  it("looks only inside the batch's own time window", async () => {
-    mockNativeRows([]);
-    await dropEventsCoveredByNative([
-      event("2026-10-25T10:00:00.000Z", { collector: "transcript", "host.name": "workstation-1" }),
-    ]);
-    // The lookup is bounded on both ends: it asks for the native token rows
-    // of that source app inside the batch's own window, and nothing else.
-    const where = (findMany.mock.calls[0][0] as {
-      where: { sourceApp: { in: string[] }; metricType: string; unit: string; occurredAt: { gte: Date; lte: Date } };
-    }).where;
-    expect(where.sourceApp.in).toContain("claude-code");
-    expect(where.metricType).toBe("usage");
-    expect(where.unit).toBe("token");
-    expect(where.occurredAt.gte.getTime()).toBe(
-      at("2026-10-25T10:00:00.000Z").getTime() - NATIVE_COVERAGE_WINDOW_MS
-    );
-    expect(where.occurredAt.lte.getTime()).toBe(
-      at("2026-10-25T10:00:00.000Z").getTime() + NATIVE_COVERAGE_WINDOW_MS
-    );
+    expect(findMany).not.toHaveBeenCalled();
   });
 });
