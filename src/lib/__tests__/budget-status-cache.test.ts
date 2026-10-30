@@ -4,6 +4,13 @@ import os from "os";
 import path from "path";
 import { setupPrismaSqliteTestDb } from "./setup-test-db";
 
+const aggregateMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/sqlite-usage-aggregates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sqlite-usage-aggregates")>();
+  return { ...actual, querySqliteUsageAggregate: aggregateMock };
+});
+
 // Covers the stale-while-revalidate cache wrapped around computeBudgetStatus
 // and computeProjectBudgetStatus (see the "Stale-while-revalidate cache for
 // computeBudgetStatus and computeProjectBudgetStatus" block in
@@ -41,6 +48,7 @@ let __resetProjectBudgetStatusCacheForTests: typeof import("../budget-status")._
 let budgetStatusCacheTtlMs: typeof import("../budget-status").budgetStatusCacheTtlMs;
 let bustBudgetStatusCache: typeof import("../budget-status").bustBudgetStatusCache;
 let markBudgetStatusSoftStale: typeof import("../budget-status").markBudgetStatusSoftStale;
+let querySqliteUsageAggregate: typeof import("@/lib/sqlite-usage-aggregates").querySqliteUsageAggregate;
 
 let testDir: string;
 
@@ -63,6 +71,9 @@ beforeAll(async () => {
   const dbPath = path.join(testDir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
   setupPrismaSqliteTestDb(dbPath);
+
+  ({ querySqliteUsageAggregate } = await vi.importActual("@/lib/sqlite-usage-aggregates"));
+  aggregateMock.mockImplementation(querySqliteUsageAggregate);
 
   ({ prisma } = await import("@/lib/prisma"));
   ({
@@ -96,6 +107,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  aggregateMock.mockImplementation(querySqliteUsageAggregate);
   __setBudgetStatusCacheOverrideForTests(null);
   __resetBudgetStatusCacheForTests();
   __setProjectBudgetStatusCacheOverrideForTests(null);
@@ -403,41 +415,23 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     const blockedMtdScan = new Promise<never[]>((resolve) => {
       releaseMtdScan = resolve;
     });
-    const originalQueryRaw = prisma.$queryRaw.bind(prisma);
-    const rawQuerySpy = vi.spyOn(prisma, "$queryRaw");
     let mtdScanBlocked = false;
-    // Wave H / E1: provider + attribution share one MTD scan. It is a
-    // chunked $queryRaw walk (see RAW_EVENT_SCAN_CHUNK_ROWS in
-    // external-usage-events.ts); a scan "start" is a chunk query without
-    // the (occurredAt, id) cursor predicate. Block the first scan start
-    // only; every later chunk and every other raw query delegates.
-    const sqlTextOf = (query: unknown): string =>
-      typeof query === "object" && query !== null && "sql" in query
-        ? String((query as { sql: unknown }).sql)
-        : String(query);
-    const isMtdScanStart = (query: unknown): boolean => {
-      const text = sqlTextOf(query);
-      return (
-        text.includes('FROM "ExternalUsageEvent"') &&
-        // The MTD cost scan selects costUsd; the loader's analytics
-        // token-rows scan has the same FROM/ORDER shape but selects
-        // quantity instead and must not count as a heavy aggregation.
-        text.includes('"costUsd"') &&
-        text.includes('ORDER BY "occurredAt" ASC, "id" ASC') &&
-        !text.includes('"id" >')
-      );
-    };
-    rawQuerySpy.mockImplementation(((...args: unknown[]) => {
-      if (!mtdScanBlocked && isMtdScanStart(args[0])) {
-        mtdScanBlocked = true;
-        return blockedMtdScan as never;
+    let mtdScanCallCount = 0;
+    // Hold the first MTD aggregation at the async worker boundary.  This
+    // keeps the lease interleaving deterministic without depending on Prisma
+    // query internals, which are bypassed by the read-only SQLite worker.
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "mtd") {
+        mtdScanCallCount += 1;
+        if (!mtdScanBlocked) {
+          mtdScanBlocked = true;
+          await blockedMtdScan;
+          return [];
+        }
       }
-      return (originalQueryRaw as (...a: never[]) => unknown)(
-        ...(args as never[])
-      ) as never;
-    }) as never);
-    const heavyAggregationCallCount = () =>
-      rawQuerySpy.mock.calls.filter(([query]) => isMtdScanStart(query)).length;
+      return querySqliteUsageAggregate(...(args as Parameters<typeof querySqliteUsageAggregate>));
+    });
+    const heavyAggregationCallCount = () => mtdScanCallCount;
 
     // Drop the Wave H MTD scan memo so the background refresh must re-scan
     // (otherwise the 5s memo from the warm prime would skip the scan entirely).

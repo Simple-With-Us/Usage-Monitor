@@ -56,6 +56,51 @@ function event(id: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe("read-only SQLite usage aggregate child", () => {
+  it("matches the legacy row-number winner for canonical millisecond timestamps and ID ties", async () => {
+    await prisma.externalUsageEvent.createMany({
+      data: [
+        event("same-time-a", { label: "same-time", occurredAt: new Date("2026-10-04T12:00:00.000Z") }),
+        event("same-time-z", { label: "same-time", occurredAt: new Date("2026-10-04T12:00:00.000Z") }),
+        event("later-time-z", { label: "millisecond", occurredAt: new Date("2026-10-04T12:00:00.001Z") }),
+        event("earlier-time-zz", { label: "millisecond", occurredAt: new Date("2026-10-04T12:00:00.000Z") }),
+      ],
+    });
+
+    const summary = await querySqliteUsageAggregate<Array<Record<string, unknown>>>("summary", SINCE, UNTIL, databaseUrl);
+    const legacy = await prisma.$queryRawUnsafe<Array<{
+      label: string;
+      id: string;
+      occurredAt: string | Date;
+    }>>(`
+      WITH ranked AS (
+        SELECT "label", "id", "occurredAt",
+          ROW_NUMBER() OVER (
+            PARTITION BY "sourceApp", "environment", "provider", "service", "label", "projectId",
+              "metricType", "unit", "limit", "limitWindow"
+            ORDER BY "occurredAt" DESC, "id" DESC
+          ) AS rank
+        FROM "ExternalUsageEvent"
+        WHERE "occurredAt" >= '${SINCE.toISOString().replace("Z", "+00:00")}'
+          AND "occurredAt" <= '${UNTIL.toISOString().replace("Z", "+00:00")}'
+          AND "metricType" NOT IN ('quota_sync', 'credit_balance')
+          AND ("sourceApp" <> 'billing-receipt-import' OR "service" IS NULL OR "service" <> 'api-prepaid-funding'
+            OR "label" IS NULL OR "label" <> 'receipt_cash_paid' OR "billingMode" <> 'actual'
+            OR "metricType" <> 'cost' OR "confidence" <> 'actual')
+      )
+      SELECT "label", "id", "occurredAt" FROM ranked WHERE rank = 1
+    `);
+
+    for (const winner of legacy) {
+      const packed = summary.find((row) => row.label === winner.label)?.packedLatest;
+      const canonicalTimestamp = winner.occurredAt instanceof Date
+        ? winner.occurredAt.toISOString().replace("Z", "+00:00")
+        : winner.occurredAt;
+      expect(packed).toBe(`${canonicalTimestamp}\u0001${winner.id}`);
+    }
+    expect(legacy.find((row) => row.label === "same-time")?.id).toBe("same-time-z");
+    expect(legacy.find((row) => row.label === "millisecond")?.id).toBe("later-time-z");
+  });
+
   it("matches legacy aggregate semantics for nulls, UTC days, receipt candidates, malformed estimates and tied limits", async () => {
     const providerId = "123e4567-e89b-42d3-a456-426614174000";
     const digest = "ab".repeat(32);

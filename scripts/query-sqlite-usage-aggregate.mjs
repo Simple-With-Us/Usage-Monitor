@@ -32,6 +32,8 @@ const receiptExclusion = `(
   OR "confidence" <> 'actual'
 )`;
 
+// Preserve the prior raw TEXT timestamp/id ordering and millisecond precision;
+// SQLite datetime() would reinterpret timestamps and discard fractional seconds.
 const queries = {
   summary: `
     WITH "aggregate" AS (
