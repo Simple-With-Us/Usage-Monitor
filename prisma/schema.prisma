@@ -342,6 +342,7 @@ model ExternalUsageEvent {
   // un-ANALYZEd SQLite file. This index turns that into a direct indexed
   // range search.
   @@index([occurredAt])
+  @@index([metricType, occurredAt])
 }
 
 model ExternalUsageEventDailyRollup {
