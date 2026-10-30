@@ -1049,11 +1049,10 @@ export async function summarizeExternalUsageEvents(
     }
   }
 
-  // Share the exclusive-aggregation lease with the MTD cost scans: the
-  // groupBy result set for a summary window can be as large as theirs, and
-  // on the 512 MB instance two concurrent in-flight aggregations are enough
-  // to kill the process.
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  // Serialize summaries with other summaries while allowing MTD budget scans
+  // to use the second bounded SQLite reader.  The process-global reader pool
+  // still caps native aggregate children across all aggregation families.
+  return withExclusiveExternalUsageSummaryAggregation(async () => {
     if (memoEnabled) {
       const again = getUsageEventsSummaryMemo<ExternalUsageEventSummary>();
       if (again && again.key === key && again.expiresAt > Date.now()) {
@@ -1258,137 +1257,141 @@ async function summarizeExternalUsageEventsUnserialized(
   const upperBound = until !== undefined && until < now ? until : now;
   const rawSince = since > rawCutoff ? since : rawCutoff;
 
-  const receiptCandidates = await rawReceiptCashCandidates(rawSince, upperBound);
   // For rollups: the day-lt bound is the lesser of rawCutoff and the day after
   // `upperBound`, so a calendar-range query doesn't include rollup days beyond
   // the requested `to` date.
   const rollupDayLt = upperBound < rawCutoff
     ? new Date(Date.UTC(upperBound.getUTCFullYear(), upperBound.getUTCMonth(), upperBound.getUTCDate() + 1))
     : rawCutoff;
-  const [scannedRawEventCount, rollups, derivedCostEstimates] = await Promise.all([
+  // Run bounded native aggregates before entering the shared legacy-result
+  // lease.  In particular, never hold the heap lease while waiting for a child
+  // reader, or an MTD request queued behind this summary could not progress.
+  const [scannedRawEventCount, derivedCostEstimates] = await Promise.all([
     scanRawUsageSummaryEvents(rawSince, upperBound, groups),
-    since < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            day: {
-              gte: new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())),
-              lt: rollupDayLt,
-            },
-            metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-          },
-          select: {
-            sourceApp: true,
-            environment: true,
-            provider: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            projectId: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            eventCount: true,
-            pricedEventCount: true,
-            unpricedEventCount: true,
-            unclassifiedCostEventCount: true,
-            totalCostUsd: true,
-            totalRequests: true,
-            totalQuantity: true,
-            maxLimit: true,
-            limitWindow: true,
-            latestOccurredAt: true,
-          },
-        })
-      : Promise.resolve([]),
     // Flag-gated: default-off deployments skip the json_extract scan entirely.
     ingestCostDerivationEnabled()
       ? sumDerivedCostEstimates(rawSince)
       : Promise.resolve({ totalUsd: 0, eventCount: 0 }),
   ]);
 
-  const rawEventCount = scannedRawEventCount + receiptCandidates.length;
+  const loadLegacyMaterial = async () => {
+    const [receiptCandidates, rollups] = await awaitAllSettledTuple([
+      () => rawReceiptCashCandidates(rawSince, upperBound),
+      () => since < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.findMany({
+            where: {
+              day: {
+                gte: new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())),
+                lt: rollupDayLt,
+              },
+              metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
+            },
+            select: {
+              sourceApp: true,
+              environment: true,
+              provider: true,
+              service: true,
+              label: true,
+              keyRef: true,
+              billingMode: true,
+              projectId: true,
+              metricType: true,
+              unit: true,
+              confidence: true,
+              eventCount: true,
+              pricedEventCount: true,
+              unpricedEventCount: true,
+              unclassifiedCostEventCount: true,
+              totalCostUsd: true,
+              totalRequests: true,
+              totalQuantity: true,
+              maxLimit: true,
+              limitWindow: true,
+              latestOccurredAt: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
-  // Receipt candidates are rare (only exact receipt-shaped rows); folding
-  // them per-row preserves the old fold's validated-receipt semantics.
-  for (const candidate of receiptCandidates) {
-    const isAnalytics = isSubscriptionAnalyticsTelemetry(candidate);
-    const isReceiptCash = isReceiptCashEvent(candidate);
-    addSummaryContribution(groups, {
-      sourceApp: candidate.sourceApp,
-      environment: candidate.environment ?? null,
-      provider: candidate.provider,
-      service: candidate.service,
-      projectId: candidate.projectId,
-      metricType: candidate.metricType,
-      unit: candidate.unit,
-      eventCount: 1,
-      pricedEventCount:
-        isAnalytics || isReceiptCash || candidate.costUsd == null
-          ? 0
-          : 1,
-      unpricedEventCount:
-        isAnalytics || isReceiptCash || candidate.costUsd != null
-          ? 0
-          : 1,
-      unclassifiedCostEventCount: 0,
-      totalCostUsd:
-        isAnalytics || isReceiptCash ? 0 : candidate.costUsd ?? 0,
-      receiptCashPaidUsd: isReceiptCash ? candidate.costUsd ?? 0 : 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? candidate.costUsd ?? 0
-        : 0,
-      totalRequests: candidate.requests ?? 0,
-      totalQuantity: candidate.quantity ?? 0,
-      limit: candidate.limit,
-      limitWindow: candidate.limitWindow,
-      latestAt: candidate.occurredAt.toISOString(),
-    });
-  }
+    // Preserve the legacy fold order: native raw groups were folded above,
+    // then validated receipt candidates, then historical rollups.
+    for (const candidate of receiptCandidates) {
+      const isAnalytics = isSubscriptionAnalyticsTelemetry(candidate);
+      const isReceiptCash = isReceiptCashEvent(candidate);
+      addSummaryContribution(groups, {
+        sourceApp: candidate.sourceApp,
+        environment: candidate.environment ?? null,
+        provider: candidate.provider,
+        service: candidate.service,
+        projectId: candidate.projectId,
+        metricType: candidate.metricType,
+        unit: candidate.unit,
+        eventCount: 1,
+        pricedEventCount:
+          isAnalytics || isReceiptCash || candidate.costUsd == null ? 0 : 1,
+        unpricedEventCount:
+          isAnalytics || isReceiptCash || candidate.costUsd != null ? 0 : 1,
+        unclassifiedCostEventCount: 0,
+        totalCostUsd:
+          isAnalytics || isReceiptCash ? 0 : candidate.costUsd ?? 0,
+        receiptCashPaidUsd: isReceiptCash ? candidate.costUsd ?? 0 : 0,
+        estimatedApiEquivalentUsd: isAnalytics ? candidate.costUsd ?? 0 : 0,
+        totalRequests: candidate.requests ?? 0,
+        totalQuantity: candidate.quantity ?? 0,
+        limit: candidate.limit,
+        limitWindow: candidate.limitWindow,
+        latestAt: candidate.occurredAt.toISOString(),
+      });
+    }
 
-  for (const rollup of rollups) {
-    const isAnalytics = isSubscriptionAnalyticsTelemetry(rollup);
-    const isReceiptCash = isReceiptCashEvent(rollup);
-    const hasCoverageCounts =
-      rollup.pricedEventCount != null ||
-      rollup.unpricedEventCount != null ||
-      rollup.unclassifiedCostEventCount != null;
-    const costCounts = isAnalytics || isReceiptCash
-      ? {
-          pricedEventCount: 0,
-          unpricedEventCount: 0,
-          unclassifiedCostEventCount: 0,
-        }
-      : {
-          pricedEventCount: rollup.pricedEventCount ?? 0,
-          unpricedEventCount: rollup.unpricedEventCount ?? 0,
-          unclassifiedCostEventCount: hasCoverageCounts
-            ? rollup.unclassifiedCostEventCount ?? 0
-            : rollup.eventCount,
-        };
-    addSummaryContribution(groups, {
-      sourceApp: rollup.sourceApp,
-      environment: rollup.environment,
-      provider: rollup.provider,
-      service: rollup.service,
-      projectId: rollup.projectId,
-      metricType: rollup.metricType,
-      unit: rollup.unit,
-      eventCount: rollup.eventCount,
-      ...costCounts,
-      totalCostUsd:
-        isAnalytics || isReceiptCash ? 0 : rollup.totalCostUsd,
-      receiptCashPaidUsd: isReceiptCash ? rollup.totalCostUsd : 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? rollup.totalCostUsd
-        : 0,
-      totalRequests: rollup.totalRequests,
-      totalQuantity: rollup.totalQuantity,
-      limit: rollup.maxLimit,
-      limitWindow: rollup.limitWindow,
-      latestAt: rollup.latestOccurredAt.toISOString(),
-    });
-  }
+    for (const rollup of rollups) {
+      const isAnalytics = isSubscriptionAnalyticsTelemetry(rollup);
+      const isReceiptCash = isReceiptCashEvent(rollup);
+      const hasCoverageCounts =
+        rollup.pricedEventCount != null ||
+        rollup.unpricedEventCount != null ||
+        rollup.unclassifiedCostEventCount != null;
+      const costCounts = isAnalytics || isReceiptCash
+        ? {
+            pricedEventCount: 0,
+            unpricedEventCount: 0,
+            unclassifiedCostEventCount: 0,
+          }
+        : {
+            pricedEventCount: rollup.pricedEventCount ?? 0,
+            unpricedEventCount: rollup.unpricedEventCount ?? 0,
+            unclassifiedCostEventCount: hasCoverageCounts
+              ? rollup.unclassifiedCostEventCount ?? 0
+              : rollup.eventCount,
+          };
+      addSummaryContribution(groups, {
+        sourceApp: rollup.sourceApp,
+        environment: rollup.environment,
+        provider: rollup.provider,
+        service: rollup.service,
+        projectId: rollup.projectId,
+        metricType: rollup.metricType,
+        unit: rollup.unit,
+        eventCount: rollup.eventCount,
+        ...costCounts,
+        totalCostUsd: isAnalytics || isReceiptCash ? 0 : rollup.totalCostUsd,
+        receiptCashPaidUsd: isReceiptCash ? rollup.totalCostUsd : 0,
+        estimatedApiEquivalentUsd: isAnalytics ? rollup.totalCostUsd : 0,
+        totalRequests: rollup.totalRequests,
+        totalQuantity: rollup.totalQuantity,
+        limit: rollup.maxLimit,
+        limitWindow: rollup.limitWindow,
+        latestAt: rollup.latestOccurredAt.toISOString(),
+      });
+    }
+
+    return {
+      rawEventCount: scannedRawEventCount + receiptCandidates.length,
+      rollupEventCount: rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
+    };
+  };
+  const { rawEventCount, rollupEventCount } =
+    await withExclusiveExternalUsageLegacyMaterialization(loadLegacyMaterial);
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, upperBound);
   const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
@@ -1427,8 +1430,7 @@ async function summarizeExternalUsageEventsUnserialized(
     );
 
   return {
-    eventCount:
-      rawEventCount + rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
+    eventCount: rawEventCount + rollupEventCount,
     groups: summaries,
     derivedCostEstimateUsd: derivedCostEstimates.totalUsd,
     derivedCostEstimateEventCount: derivedCostEstimates.eventCount,
@@ -1488,90 +1490,106 @@ export async function sumMonthToDateReceiptCashByProviderId(
     unit: "usd",
     confidence: "actual",
   } as const;
-  const [rawGroups, rollups] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: [
-        "sourceApp",
-        "service",
-        "label",
-        "keyRef",
-        "billingMode",
-        "metricType",
-        "unit",
-        "confidence",
-      ],
-      where: { ...exactReceiptWhere, occurredAt: { gte: rawSince, lte: now } },
-      _sum: { costUsd: true },
-      _count: { _all: true },
-    }),
-    monthStart < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            ...exactReceiptWhere,
-            day: { gte: monthStart, lt: rawCutoff },
-            latestOccurredAt: { lte: now },
-          },
-          select: {
-            sourceApp: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            totalCostUsd: true,
-            eventCount: true,
-          },
-        })
-      : Promise.resolve([]),
-  ]);
+  return withExclusiveExternalUsageLegacyMaterialization(async () => {
+    const [rawGroups, rollups] = await awaitAllSettledTuple([
+      () => prisma.externalUsageEvent.groupBy({
+        by: [
+          "sourceApp",
+          "service",
+          "label",
+          "keyRef",
+          "billingMode",
+          "metricType",
+          "unit",
+          "confidence",
+        ],
+        where: { ...exactReceiptWhere, occurredAt: { gte: rawSince, lte: now } },
+        _sum: { costUsd: true },
+        _count: { _all: true },
+      }),
+      () => monthStart < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.findMany({
+            where: {
+              ...exactReceiptWhere,
+              day: { gte: monthStart, lt: rawCutoff },
+              latestOccurredAt: { lte: now },
+            },
+            select: {
+              sourceApp: true,
+              service: true,
+              label: true,
+              keyRef: true,
+              billingMode: true,
+              metricType: true,
+              unit: true,
+              confidence: true,
+              totalCostUsd: true,
+              eventCount: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
-  const totals = new Map<string, ProviderReceiptCash>();
-  const add = (row: ReceiptCashEventLikeWithCost, costUsd: number, eventCount: number) => {
-    const providerId = receiptCashProviderId(row);
-    if (!providerId) return;
-    const current = totals.get(providerId) ?? { paidUsd: 0, eventCount: 0 };
-    current.paidUsd += costUsd;
-    current.eventCount += eventCount;
-    totals.set(providerId, current);
-  };
-  for (const row of rawGroups) {
-    add(row, row._sum.costUsd ?? 0, row._count._all);
-  }
-  for (const rollup of rollups) {
-    add(rollup, rollup.totalCostUsd, rollup.eventCount);
-  }
-  return totals;
+    const totals = new Map<string, ProviderReceiptCash>();
+    const add = (row: ReceiptCashEventLikeWithCost, costUsd: number, eventCount: number) => {
+      const providerId = receiptCashProviderId(row);
+      if (!providerId) return;
+      const current = totals.get(providerId) ?? { paidUsd: 0, eventCount: 0 };
+      current.paidUsd += costUsd;
+      current.eventCount += eventCount;
+      totals.set(providerId, current);
+    };
+    for (const row of rawGroups) {
+      add(row, row._sum.costUsd ?? 0, row._count._all);
+    }
+    for (const rollup of rollups) {
+      add(rollup, rollup.totalCostUsd, rollup.eventCount);
+    }
+    return totals;
+  });
 }
 
 type ReceiptCashEventLikeWithCost = Parameters<typeof receiptCashProviderId>[0];
 
-// Provider totals and project attribution both scan and materialize the
-// current month's raw ExternalUsageEvent rows. A stale provider-cache hit can
-// start its refresh in the background and return immediately; a stale project
-// cache refresh may then reach its separate attribution aggregate before that
-// provider refresh finishes. On the 512 MB production instance, retaining
-// both aggregate result sets at once is enough to kill the process.
-//
-// Serialize the complete aggregation bodies, not just their scan calls, so
-// the next aggregate cannot start while the prior query result is still being
-// classified into application maps. The lease lives below the SWR caches:
-// stale callers still receive their cached response immediately, while only
-// background/cold recomputation queues. Keeping it here also covers every
-// caller and avoids taking a higher-level lock before a nested budget compute.
-//
-// Wave H / E1: both provider and project MTD views share one raw+rollup scan
-// (attribution-shaped scan) with a short process-local memo so a cold
-// dashboard that loads provider then project status does not pay ~11s twice.
-let externalUsageCostAggregationTail: Promise<void> = Promise.resolve();
+// MTD provider totals and project attribution share one raw+rollup scan and
+// memo.  Keep each expensive family serialized while allowing one summary and
+// one MTD compute to run concurrently.  The reader pool caps native children;
+// the legacy lease separately serializes parent-process Prisma arrays through
+// their fold.
+const EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL = Symbol.for(
+  "usage-monitor.external-usage-aggregation-leases.v1"
+);
 
-async function withExclusiveExternalUsageCostAggregation<T>(
+type ExternalUsageAggregationFamily = "summary" | "mtd" | "legacy";
+type ExternalUsageAggregationLeaseRegistry = Record<
+  ExternalUsageAggregationFamily,
+  Promise<void>
+>;
+
+function externalUsageAggregationLeaseRegistry(): ExternalUsageAggregationLeaseRegistry {
+  const registry = globalThis as unknown as Record<symbol, unknown>;
+  const current = registry[
+    EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL
+  ] as ExternalUsageAggregationLeaseRegistry | undefined;
+  if (current) return current;
+
+  const leases: ExternalUsageAggregationLeaseRegistry = {
+    summary: Promise.resolve(),
+    mtd: Promise.resolve(),
+    legacy: Promise.resolve(),
+  };
+  registry[EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL] = leases;
+  return leases;
+}
+
+async function withExclusiveExternalUsageAggregation<T>(
+  family: ExternalUsageAggregationFamily,
   work: () => Promise<T>
 ): Promise<T> {
-  const previous = externalUsageCostAggregationTail;
+  const leases = externalUsageAggregationLeaseRegistry();
+  const previous = leases[family];
   let release!: () => void;
-  externalUsageCostAggregationTail = new Promise<void>((resolve) => {
+  leases[family] = new Promise<void>((resolve) => {
     release = resolve;
   });
 
@@ -1581,6 +1599,57 @@ async function withExclusiveExternalUsageCostAggregation<T>(
   } finally {
     release();
   }
+}
+
+function withExclusiveExternalUsageSummaryAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("summary", work);
+}
+
+function withExclusiveExternalUsageMtdAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("mtd", work);
+}
+
+function withExclusiveExternalUsageLegacyMaterialization<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("legacy", work);
+}
+
+async function awaitAllSettledTuple<T extends readonly unknown[]>(
+  operations: { [Index in keyof T]: () => PromiseLike<T[Index]> }
+): Promise<T> {
+  // Wait for all sibling fetches so an early rejection cannot release the
+  // legacy lease while another Prisma result is still materializing.  Preserve
+  // the first original rejection after every operation has settled.
+  let firstError: unknown;
+  let hasError = false;
+  const results = await Promise.all(
+    operations.map((operation) => {
+      const reject = (error: unknown) => {
+        if (!hasError) {
+          hasError = true;
+          firstError = error;
+        }
+        return { status: "rejected" as const };
+      };
+      try {
+        return Promise.resolve(operation()).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          reject
+        );
+      } catch (error) {
+        return Promise.resolve(reject(error));
+      }
+    })
+  );
+  if (hasError) throw firstError;
+  return results.map((result) =>
+    result.status === "fulfilled" ? result.value : undefined
+  ) as unknown as T;
 }
 
 function mtdScanKey(monthStart: Date, rawCutoff: Date): string {
@@ -1714,7 +1783,7 @@ async function loadMonthToDateExternalCostMaterial(
     }
   }
 
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  return withExclusiveExternalUsageMtdAggregation(async () => {
     if (memoEnabled) {
       const again = getMtdScanMemo<
         Map<string, ProviderPushedCost>,
@@ -1799,43 +1868,11 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   const rawSince = monthStart > rawCutoff ? monthStart : rawCutoff;
 
   const mtdScanStartedAt = performance.now();
-  const { receiptCandidates, rawGroups, rollups } = await (async () => {
+  const rawGroups = await (async () => {
     try {
-      const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
-      const [rawGroups, rollups] = await Promise.all([
-        scanMonthToDateRawGroups(rawSince, now),
-        monthStart < rawCutoff
-          ? prisma.externalUsageEventDailyRollup.findMany({
-              where: {
-                day: { gte: monthStart, lt: rawCutoff },
-                metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-                latestOccurredAt: { lte: now },
-              },
-              select: {
-                provider: true,
-                sourceApp: true,
-                service: true,
-                label: true,
-                keyRef: true,
-                billingMode: true,
-                projectId: true,
-                metricType: true,
-                unit: true,
-                confidence: true,
-                eventCount: true,
-                pricedEventCount: true,
-                unpricedEventCount: true,
-                unclassifiedCostEventCount: true,
-                totalCostUsd: true,
-              },
-            })
-          : Promise.resolve([]),
-      ]);
-      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt, {
-        rawGroups: rawGroups.length,
-        rollupRows: rollups.length,
-      });
-      return { receiptCandidates, rawGroups, rollups };
+      // Wait for the bounded native aggregate before taking the shared legacy
+      // result lease, so it cannot block a summary while holding that lease.
+      return await scanMonthToDateRawGroups(rawSince, now);
     } catch (error) {
       logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt);
       throw error;
@@ -1940,67 +1977,111 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       counts
     );
   }
-  for (const candidate of receiptCandidates) {
-    if (isReceiptCashEvent(candidate)) continue;
-    const counts = {
-      pricedEventCount: candidate.costUsd == null ? 0 : 1,
-      unpricedEventCount: candidate.costUsd == null ? 1 : 0,
-      unclassifiedCostEventCount: 0,
-    };
-    const cost = candidate.costUsd ?? 0;
-    addProvider(
-      candidate.provider,
-      candidate.sourceApp,
-      candidate.service,
-      candidate.label,
-      candidate.metricType,
-      cost,
-      counts
-    );
-    addAttribution(
-      candidate.provider,
-      candidate.sourceApp,
-      candidate.service,
-      candidate.label,
-      candidate.projectId,
-      candidate.metricType,
-      cost,
-      counts
-    );
-  }
-  for (const rollup of rollups) {
-    if (isReceiptCashEvent(rollup)) continue;
-    const hasCoverageCounts =
-      rollup.pricedEventCount != null ||
-      rollup.unpricedEventCount != null ||
-      rollup.unclassifiedCostEventCount != null;
-    const counts = {
-      pricedEventCount: rollup.pricedEventCount ?? 0,
-      unpricedEventCount: rollup.unpricedEventCount ?? 0,
-      unclassifiedCostEventCount: hasCoverageCounts
-        ? rollup.unclassifiedCostEventCount ?? 0
-        : rollup.eventCount,
-    };
-    addProvider(
-      rollup.provider,
-      rollup.sourceApp,
-      rollup.service,
-      rollup.label,
-      rollup.metricType,
-      rollup.totalCostUsd,
-      counts
-    );
-    addAttribution(
-      rollup.provider,
-      rollup.sourceApp,
-      rollup.service,
-      rollup.label,
-      rollup.projectId,
-      rollup.metricType,
-      rollup.totalCostUsd,
-      counts
-    );
-  }
+  await withExclusiveExternalUsageLegacyMaterialization(async () => {
+    try {
+      const [receiptCandidates, rollups] = await awaitAllSettledTuple([
+        () => rawReceiptCashCandidates(rawSince, now),
+        () => monthStart < rawCutoff
+          ? prisma.externalUsageEventDailyRollup.findMany({
+              where: {
+                day: { gte: monthStart, lt: rawCutoff },
+                metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
+                latestOccurredAt: { lte: now },
+              },
+              select: {
+                provider: true,
+                sourceApp: true,
+                service: true,
+                label: true,
+                keyRef: true,
+                billingMode: true,
+                projectId: true,
+                metricType: true,
+                unit: true,
+                confidence: true,
+                eventCount: true,
+                pricedEventCount: true,
+                unpricedEventCount: true,
+                unclassifiedCostEventCount: true,
+                totalCostUsd: true,
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      // Preserve the old fold order: native raw groups, receipt candidates,
+      // then historical rollups.  Do not retain either Prisma result array
+      // beyond this shared heap-limited section.
+      for (const candidate of receiptCandidates) {
+        if (isReceiptCashEvent(candidate)) continue;
+        const counts = {
+          pricedEventCount: candidate.costUsd == null ? 0 : 1,
+          unpricedEventCount: candidate.costUsd == null ? 1 : 0,
+          unclassifiedCostEventCount: 0,
+        };
+        const cost = candidate.costUsd ?? 0;
+        addProvider(
+          candidate.provider,
+          candidate.sourceApp,
+          candidate.service,
+          candidate.label,
+          candidate.metricType,
+          cost,
+          counts
+        );
+        addAttribution(
+          candidate.provider,
+          candidate.sourceApp,
+          candidate.service,
+          candidate.label,
+          candidate.projectId,
+          candidate.metricType,
+          cost,
+          counts
+        );
+      }
+      for (const rollup of rollups) {
+        if (isReceiptCashEvent(rollup)) continue;
+        const hasCoverageCounts =
+          rollup.pricedEventCount != null ||
+          rollup.unpricedEventCount != null ||
+          rollup.unclassifiedCostEventCount != null;
+        const counts = {
+          pricedEventCount: rollup.pricedEventCount ?? 0,
+          unpricedEventCount: rollup.unpricedEventCount ?? 0,
+          unclassifiedCostEventCount: hasCoverageCounts
+            ? rollup.unclassifiedCostEventCount ?? 0
+            : rollup.eventCount,
+        };
+        addProvider(
+          rollup.provider,
+          rollup.sourceApp,
+          rollup.service,
+          rollup.label,
+          rollup.metricType,
+          rollup.totalCostUsd,
+          counts
+        );
+        addAttribution(
+          rollup.provider,
+          rollup.sourceApp,
+          rollup.service,
+          rollup.label,
+          rollup.projectId,
+          rollup.metricType,
+          rollup.totalCostUsd,
+          counts
+        );
+      }
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt, {
+        rawGroups: rawGroups.length,
+        rollupRows: rollups.length,
+      });
+    } catch (error) {
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt);
+      throw error;
+    }
+  });
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, now);
   const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
