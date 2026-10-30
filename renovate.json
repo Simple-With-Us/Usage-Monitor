@@ -5,6 +5,11 @@
   "minimumReleaseAge": "5 days",
   "packageRules": [
     {
+      "description": "Keep Node updates within the supported package engine and runtime major.",
+      "matchPackageNames": ["node"],
+      "allowedVersions": ">=24 <25"
+    },
+    {
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "groupName": "non-major dependencies",
       "automerge": true,
