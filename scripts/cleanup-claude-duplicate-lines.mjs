@@ -36,6 +36,7 @@ async function main() {
   }
   operation("create-client");
   const prisma = createPrismaClient();
+  let primaryFailed = false;
   try {
     if (args.includes("--litestream-wal-owner-verified")) { operation("configure-wal"); await prisma.$queryRaw`PRAGMA wal_autocheckpoint = 0`; }
     if (inventory) {
@@ -109,9 +110,12 @@ async function main() {
       console.log(JSON.stringify({ mode: "dry-run", matchedCandidates: plan.approved.length, skipped: plan.skipped, historicalTombstoneQuantities: plan.historicalTombstoneQuantities,
         reviewedPlanDigest: plan.digest, reviewedIndexDigest: result.sha256, indexBytes: result.bytes, shards: result.index.shards.length, largestShardBytes: Math.max(0, ...result.index.shards.map((entry) => entry.bytes)) }));
     }
-  } finally {
+  } catch (error) { primaryFailed = true; throw error; }
+  finally {
     try { await prisma.$disconnect(); }
-    catch (error) { operation("disconnect"); delete diagnosticContext.shardOrdinal; throw error; }
+    catch (error) {
+      if (!primaryFailed) { operation("disconnect"); delete diagnosticContext.shardOrdinal; throw error; }
+    }
   }
 }
 

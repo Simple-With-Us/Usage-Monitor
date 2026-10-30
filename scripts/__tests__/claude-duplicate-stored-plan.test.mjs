@@ -176,6 +176,21 @@ test("transaction failure identifies the exact safe operation and shard without 
 test("unrecognized code names and diagnostic context never pass through", () => {
   assert.deepEqual(cleanupFailureDiagnostic({ name: "PrivateProject", code: "P2028 private payload", cause: { code: "SQLITE_BUSY_PRIVATE_PAYLOAD" }, meta: { driverAdapterError: { cause: { originalCode: "SQLITE_PRIVATE_PAYLOAD" } } } }, { operation: "private-path", shardOrdinal: "private-row" }), { phase: "cleanup-maintenance", errorName: "Error", operation: "arguments" });
 });
+test("CLI preserves primary database diagnostics when disconnect also fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-dual-failure-"));
+  try {
+    const cli = fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url));
+    for (const primaryFails of [true, false]) {
+      const preload = join(directory, "inject-" + primaryFails + ".mjs");
+      const replacement = `export function createPrismaClient() { const primary = Object.assign(new Error("private primary SQL"), { name: "PrismaClientKnownRequestError", code: "P2028" }); const secondary = Object.assign(new Error("private disconnect SQL"), { name: "PrismaClientKnownRequestError", code: "P2002" }); return { externalUsageEvent: { aggregate: async () => { if (${primaryFails}) throw primary; return {}; } }, externalUsageEventDailyRollup: { aggregate: async () => ({}) }, $disconnect: async () => { throw secondary; } }; }`;
+      await writeFile(preload, `import { registerHooks } from "node:module"; registerHooks({ load(url, context, nextLoad) { if (url.endsWith("/scripts/lib/create-prisma-client.mjs")) return { format: "module", shortCircuit: true, source: ${JSON.stringify(replacement)} }; return nextLoad(url, context); } });`);
+      const result = spawnSync(process.execPath, ["--import", preload, cli, "--inventory"], { encoding: "utf8" });
+      assert.equal(result.status, 1);
+      assert.deepEqual(JSON.parse(result.stderr), { phase: "cleanup-maintenance", errorName: "PrismaClientKnownRequestError", operation: primaryFails ? "inventory" : "disconnect", prismaCode: primaryFails ? "P2028" : "P2002" });
+      assert.equal((result.stderr + result.stdout).includes("private"), false);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 test("historical tombstones are counted as uncertain history without changing rollups", async () => {
   const db = client([row("keeper")]);
   db.externalUsageEventTombstone.findMany = async () => [{ idempotencyKey: "duplicate", occurredAt: proof.occurredAt }];
