@@ -40,6 +40,7 @@ import {
   filterEventsSince,
   postUsageBatches,
   tokenEventsFromBreakdown,
+  SESSION_ID_METADATA_KEY,
 } from "./lib/session-token-collectors.mjs";
 import {
   canAdvanceCollectorCheckpoint,
@@ -47,6 +48,8 @@ import {
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
+  BOTFLEET_LAUNCHER_METADATA,
+  isBotFleetSessionPath,
 } from "./lib/run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
@@ -119,6 +122,8 @@ export function runtimeRowToEvents(row) {
     extraId: `mmrt-${row.id}`,
     extraMetadata: {
       collector: "runtime-db",
+      ...(typeof row.session_id === "string" && row.session_id ? { [SESSION_ID_METADATA_KEY]: row.session_id } : {}),
+      ...(typeof row.native_workspace_dir === "string" && row.native_workspace_dir.startsWith("/") && isBotFleetSessionPath(`${row.native_workspace_dir.replace(/\/+$/, "")}/`) ? BOTFLEET_LAUNCHER_METADATA : {}),
       ...(row.agent_name ? { agent: String(row.agent_name) } : {}),
       ...(row.framework_type ? { framework: String(row.framework_type) } : {}),
       ...(Number(row.reasoning_tokens) > 0
@@ -126,6 +131,28 @@ export function runtimeRowToEvents(row) {
         : {}),
     },
   });
+}
+
+/** Exact native session links only; absent or ambiguous workspace rows add no launcher. */
+function nativeSessionWorkspaces(db, rows) {
+  const workspaces = new Map();
+  try {
+    const columns = new Set(db.prepare("PRAGMA table_info(local_runtime_sessions)").all().map((column) => column.name));
+    if (!columns.has("session_id") || !columns.has("workspace_dir")) return workspaces;
+    const ids = [...new Set(rows.map((row) => row.session_id).filter((id) => typeof id === "string" && id))];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const group = ids.slice(offset, offset + 400);
+      const matches = db.prepare(`SELECT session_id, workspace_dir FROM local_runtime_sessions WHERE session_id IN (${group.map(() => "?").join(",")})`).all(...group);
+      for (const session of matches) {
+        if (workspaces.has(session.session_id)) workspaces.set(session.session_id, null);
+        else workspaces.set(session.session_id, typeof session.workspace_dir === "string" && session.workspace_dir.startsWith("/") ? session.workspace_dir : null);
+      }
+    }
+    return workspaces;
+  } catch {
+    // Optional schema changes must not discard authoritative token rows.
+    return new Map();
+  }
 }
 
 /**
@@ -158,8 +185,9 @@ export async function collectMinimaxRuntimeEvents({
     // When the pass hits the row cap there may be newer unprocessed rows, so
     // the caller must not advance the checkpoint watermark past them.
     const truncated = rows.length >= limit;
+    const workspaces = nativeSessionWorkspaces(db, rows);
     const events = [];
-    for (const row of rows) events.push(...runtimeRowToEvents(row));
+    for (const row of rows) events.push(...runtimeRowToEvents({ ...row, native_workspace_dir: workspaces.get(row.session_id) }));
     const filtered = filterEventsSince(events, since);
     filtered.truncated = truncated;
     return filtered;

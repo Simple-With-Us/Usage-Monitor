@@ -1,6 +1,6 @@
 import { knownAiVendor } from "./allowlist.mjs";
 
-const OPERATIONS = new Set(["chat", "generate_content", "execute_tool", "tool", "llm_request", "api_request", "log", "usage_observation"]);
+const OPERATIONS = new Set(["chat", "generate_content", "execute_tool", "tool", "llm_request", "api_request", "log", "usage_observation", "botfleet.turn"]);
 
 export function telemetryIdentifier(value, max = 160) {
   return typeof value === "string" && value.length <= max && /^[a-z0-9][a-z0-9._:/@+-]*$/i.test(value) && !/^(?:sk[-_]|bearer|password|secret[-_])/i.test(value) ? value : undefined;

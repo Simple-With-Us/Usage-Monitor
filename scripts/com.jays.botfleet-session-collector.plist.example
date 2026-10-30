@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Scheduled metadata-only native BotFleet turn telemetry. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.botfleet-session-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/COLLECTORS/scripts/botfleet-session-collector.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COLLECTOR_SENTRY_ENABLED</key>
+    <string>0</string>
+    <key>BOTFLEET_SENTRY_LOOKBACK_HOURS</key>
+    <string>24</string>
+    <key>COLLECTOR_TELEMETRY_HUB_ENDPOINT</key>
+    <string>https://TELEMETRY-HUB-HOST</string>
+    <key>COLLECTOR_TELEMETRY_HUB_TOKENS_JSON</key>
+    <string>{"botfleet":"REPLACE_WITH_SCOPED_SOURCE_BEARER"}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/botfleet-session-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/botfleet-session-collector.log</string>
+</dict>
+</plist>
