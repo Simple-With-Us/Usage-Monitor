@@ -181,6 +181,11 @@ describe("applySqliteNativeMemoryPragmas", () => {
   it("disables app-side WAL autocheckpoints only when Litestream owns checkpoints", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.stubEnv("LITESTREAM_ACTIVE", "true");
+    vi.stubEnv("APP_STARTUP_WRAPPER", "start-with-litestream-v2");
+    vi.stubEnv("LITESTREAM_S3_BUCKET", "test-r2-bucket");
+    vi.stubEnv("LITESTREAM_S3_ENDPOINT", "account.r2.cloudflarestorage.com");
+    vi.stubEnv("LITESTREAM_S3_ACCESS_KEY_ID", "test-access-key");
+    vi.stubEnv("LITESTREAM_S3_SECRET_ACCESS_KEY", "test-secret-key");
     const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
       "@/lib/prisma"
     );
@@ -191,21 +196,45 @@ describe("applySqliteNativeMemoryPragmas", () => {
     expect(errorSpy).not.toHaveBeenCalled();
 
     // The R2 kill switch hands checkpoints back to SQLite at runtime.
-    const { enforceR2AutoDisable } = await import("@/lib/r2-usage");
+    const { enforceR2AutoDisable, clearR2AutoDisable, __resetR2UsageStateForTests } = await import(
+      "@/lib/r2-usage"
+    );
     // enforceR2AutoDisable writes these directly; stub first so
     // vi.unstubAllEnvs restores them for later tests.
     vi.stubEnv("LITESTREAM_EMERGENCY_DISABLE", "");
     vi.stubEnv("R2_WRITES_DISABLED", "");
-    enforceR2AutoDisable("test: wal hook");
-    await vi.waitFor(async () => {
-      expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
-    });
+    await enforceR2AutoDisable("test: wal hook");
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+    expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+
+    await clearR2AutoDisable("test: resume hook");
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+    __resetR2UsageStateForTests();
 
     // Without Litestream nothing else checkpoints, so SQLite's default returns.
     vi.unstubAllEnvs();
     const { resetSqliteNativeMemoryPragmasForTests } = await import("@/lib/prisma");
     resetSqliteNativeMemoryPragmasForTests();
     await applySqliteNativeMemoryPragmas();
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+  });
+
+  it("registers the persistent checkpoint hook when Litestream is inactive at boot", async () => {
+    vi.stubEnv("LITESTREAM_ACTIVE", "false");
+    const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
+      "@/lib/prisma"
+    );
+    await applySqliteNativeMemoryPragmas();
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+
+    const setCheckpoint = (globalThis as Record<string, unknown>)[
+      "__apiUsageMonitorSetWalAutocheckpoint"
+    ];
+    expect(typeof setCheckpoint).toBe("function");
+    await (setCheckpoint as (pages: 0 | 1_000) => Promise<void>)(0);
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    await (setCheckpoint as (pages: 0 | 1_000) => Promise<void>)(1_000);
     expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
   });
 
