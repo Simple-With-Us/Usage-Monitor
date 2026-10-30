@@ -116,6 +116,7 @@ async function openOutbox(root, { create = true } = {}) {
     db.exec("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', owner TEXT, pid INTEGER, birth TEXT, sent_at INTEGER)");
     if (!db.prepare("PRAGMA table_info(events)").all().some((column) => column.name === "birth")) db.exec("ALTER TABLE events ADD COLUMN birth TEXT");
     if (!db.prepare("PRAGMA table_info(events)").all().some((column) => column.name === "sent_at")) db.exec("ALTER TABLE events ADD COLUMN sent_at INTEGER");
+    if (!db.prepare("PRAGMA table_info(events)").all().some((column) => column.name === "retry_batch_size")) db.exec("ALTER TABLE events ADD COLUMN retry_batch_size INTEGER NOT NULL DEFAULT 100");
     db.exec("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   } catch (error) { db.close(); throw error; }
   return db;
@@ -203,6 +204,13 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
     if (poisoned) {
       if (group.length === 1) { quarantine(group[0].eventId); return; }
       const middle = Math.ceil(group.length / 2);
+      // Persist narrowing before recursion so an interrupted split still makes progress.
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const narrow = db.prepare("UPDATE events SET retry_batch_size=MIN(retry_batch_size,?) WHERE id=? AND owner=?");
+        for (const event of group) narrow.run(middle, event.eventId, owner);
+        db.exec("COMMIT");
+      } catch (error) { if (db.isTransaction) db.exec("ROLLBACK"); throw error; }
       await deliverGroup(group.slice(0, middle));
       await deliverGroup(group.slice(middle));
       return;
@@ -238,7 +246,9 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       try {
         const recover = db.prepare("UPDATE events SET state='pending', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND state='sending' AND owner IS ? AND pid IS ? AND birth IS ?");
         for (const held of stale) recover.run(held.id, held.owner, held.pid, held.birth);
-        rows = db.prepare("SELECT id, payload FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(100, limit - count));
+        const first = db.prepare("SELECT retry_batch_size FROM events WHERE state='pending' ORDER BY rowid LIMIT 1").get();
+        const batchSize = Number.isSafeInteger(first?.retry_batch_size) && first.retry_batch_size > 0 ? Math.min(100, first.retry_batch_size) : 1;
+        rows = db.prepare("SELECT id, payload FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(batchSize, limit - count));
         const claim = db.prepare("UPDATE events SET state='sending', owner=?, pid=?, birth=? WHERE id=?");
         for (const row of rows) claim.run(owner, process.pid, invocationBirth, row.id);
         db.exec("COMMIT");

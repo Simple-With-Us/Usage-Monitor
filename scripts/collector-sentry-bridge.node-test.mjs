@@ -44,19 +44,19 @@ test("poison isolation bounds requests while healthy rows remain pending and eve
   let delivered = 0;
   let quarantined = 0;
   let pending = true;
-  for (let invocation = 0; invocation < 20 && pending; invocation += 1) {
+  for (let invocation = 0; invocation < 40 && pending; invocation += 1) {
     let requests = 0;
-    const result = await drainCollectorSentry(root, config, { requestLimit: 8, fetchImpl: async (_url, options) => {
+    const result = await drainCollectorSentry(root, config, { requestLimit: 1, fetchImpl: async (_url, options) => {
       requests += 1;
       const payload = JSON.parse(options.body);
       const spans = payload.resourceSpans.flatMap((resource) => resource.scopeSpans.flatMap((scope) => scope.spans));
       const poisoned = spans.some((span) => span.attributes.some((a) => a.key === "gen_ai.request.model" && a.value.stringValue === "bad-model"));
       return poisoned ? new Response("", { status: 422 }) : accepted();
     } });
-    assert.ok(requests <= 8);
+    assert.ok(requests <= 1);
     delivered += result.delivered;
     quarantined += result.quarantined;
-    pending = result.pending && quarantined < 15;
+    pending = result.pending && (quarantined < 15 || delivered < 1);
   }
   assert.equal(delivered, 1);
   assert.equal(quarantined, 15);
