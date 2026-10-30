@@ -110,6 +110,9 @@ describe("usage-retention wrapper", () => {
   it("keeps exclusive full-database compaction disabled unless explicitly enabled", () => {
     expect(isAutomaticVacuumEnabled({})).toBe(false);
     expect(
+      isAutomaticVacuumEnabled({ DATA_RETENTION_ENABLE_VACUUM: "true", LITESTREAM_ACTIVE: "true" })
+    ).toBe(false);
+    expect(
       isAutomaticVacuumEnabled({ DATA_RETENTION_ENABLE_VACUUM: "true" })
     ).toBe(true);
     expect(

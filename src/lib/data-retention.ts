@@ -316,9 +316,13 @@ function enabledFlag(value: string | undefined): boolean {
 export function isAutomaticVacuumEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env
 ): boolean {
+  // While Litestream replicates, it owns WAL checkpoints (prisma.ts sets
+  // wal_autocheckpoint=0).  The TRUNCATE checkpoint + full-file VACUUM would
+  // force a whole-database Litestream snapshot upload, so skip it.
   return (
     enabledFlag(env.DATA_RETENTION_ENABLE_VACUUM) &&
-    !enabledFlag(env.DATA_RETENTION_DISABLE_VACUUM)
+    !enabledFlag(env.DATA_RETENTION_DISABLE_VACUUM) &&
+    env.LITESTREAM_ACTIVE !== "true"
   );
 }
 

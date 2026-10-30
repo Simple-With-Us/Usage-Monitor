@@ -594,6 +594,21 @@ export function enforceR2AutoDisable(reason: string): void {
   // Also clear the "active" claim so readiness/runtime-health immediately
   // report backup as stopped (start-with-litestream only sets this at boot).
   process.env.LITESTREAM_ACTIVE = "false";
+  // Litestream owned WAL checkpoints (src/lib/prisma.ts sets
+  // wal_autocheckpoint=0 while it replicates).  Hand them back to SQLite so the
+  // WAL stays bounded if replication stops.  The hook name matches
+  // RESTORE_WAL_AUTOCHECKPOINT_HOOK in prisma.ts; it exists only after that
+  // pragma was applied, so tests and non-Litestream runs skip this.
+  const restoreWalAutocheckpoint = (globalThis as Record<string, unknown>)[
+    "__apiUsageMonitorRestoreWalAutocheckpoint"
+  ];
+  if (typeof restoreWalAutocheckpoint === "function") {
+    void Promise.resolve()
+      .then(() => (restoreWalAutocheckpoint as () => Promise<void>)())
+      .catch((err) => {
+        console.error("[r2-usage] Failed restoring SQLite wal_autocheckpoint:", err);
+      });
+  }
   try {
     const filePath = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
     fs.writeFileSync(

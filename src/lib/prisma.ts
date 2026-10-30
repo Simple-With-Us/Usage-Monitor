@@ -206,6 +206,24 @@ function sqliteWalAutocheckpointPages(): number {
   return process.env.LITESTREAM_ACTIVE === "true" ? 0 : SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES;
 }
 
+/**
+ * Global hook (no import needed by callers, so r2-usage.ts stays free of a
+ * Prisma dependency): set only after this process disabled app-side
+ * autocheckpoints.  The R2 kill switch calls it when it flips
+ * LITESTREAM_ACTIVE to false at runtime, so the WAL cannot grow without a
+ * checkpointer if replication stops.
+ */
+export const RESTORE_WAL_AUTOCHECKPOINT_HOOK = "__apiUsageMonitorRestoreWalAutocheckpoint";
+
+function registerWalAutocheckpointRestoreHook(): void {
+  (globalThis as Record<string, unknown>)[RESTORE_WAL_AUTOCHECKPOINT_HOOK] = async () => {
+    await prisma.$queryRawUnsafe(
+      `PRAGMA wal_autocheckpoint = ${SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES}`
+    );
+    delete (globalThis as Record<string, unknown>)[RESTORE_WAL_AUTOCHECKPOINT_HOOK];
+  };
+}
+
 function sqliteJournalModeFromPragma(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase() : String(value);
 }
@@ -310,6 +328,7 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
         await prisma.$queryRawUnsafe(
           `PRAGMA wal_autocheckpoint = ${target.walAutocheckpointPages}`
         );
+        if (target.walAutocheckpointPages === 0) registerWalAutocheckpointRestoreHook();
         // Read the values back on the same connection and confirm they took.
         // A mismatch is logged loudly (never swallowed): it would mean a future
         // engine change rejected a PRAGMA, or connection_limit was raised above

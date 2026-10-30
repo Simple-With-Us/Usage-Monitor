@@ -190,6 +190,17 @@ describe("applySqliteNativeMemoryPragmas", () => {
     expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
 
+    // The R2 kill switch hands checkpoints back to SQLite at runtime.
+    const { enforceR2AutoDisable } = await import("@/lib/r2-usage");
+    // enforceR2AutoDisable writes these directly; stub first so
+    // vi.unstubAllEnvs restores them for later tests.
+    vi.stubEnv("LITESTREAM_EMERGENCY_DISABLE", "");
+    vi.stubEnv("R2_WRITES_DISABLED", "");
+    enforceR2AutoDisable("test: wal hook");
+    await vi.waitFor(async () => {
+      expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+    });
+
     // Without Litestream nothing else checkpoints, so SQLite's default returns.
     vi.unstubAllEnvs();
     const { resetSqliteNativeMemoryPragmasForTests } = await import("@/lib/prisma");
