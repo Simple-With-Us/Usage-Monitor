@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { backfillUnattributedProjectIds } from "@/lib/project-resolver";
+import { countExternalUsageEventTombstones } from "@/lib/sqlite-tombstone-count";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_SNAPSHOT_RETENTION_DAYS = 45;
@@ -1064,7 +1065,7 @@ export async function runDataRetentionMaintenance(now = new Date()): Promise<Dat
   // Wave K / E14: surface growth via count so operators can size disks without
   // silently expiring idempotency proof.
   const tombstonesPruned = 0;
-  const tombstoneCount = await prisma.externalUsageEventTombstone.count();
+  const tombstoneCount = await countExternalUsageEventTombstones();
 
   // OtlpMetricState is intentionally not age-pruned either. OTLP cumulative
   // sums have no end-of-series signal; an exporter can resume an old series,

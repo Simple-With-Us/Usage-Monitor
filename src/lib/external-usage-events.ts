@@ -806,7 +806,7 @@ interface AnalyticsTokenRow {
 // (quadratic total, multi-second pages), and time-sliced groupBys stay
 // unbounded because a slice's cost follows physical row placement, not a row
 // count — one hot day is still a multi-second block.
-const RAW_EVENT_SCAN_CHUNK_ROWS = 10_000;
+const RAW_EVENT_SCAN_CHUNK_ROWS = 2_000;
 
 function yieldEventLoopTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -817,9 +817,12 @@ interface RawEventScanCursor {
   id: string;
 }
 
-function rawEventCursorClause(cursor: RawEventScanCursor | null): Prisma.Sql {
-  if (!cursor) return Prisma.empty;
-  return Prisma.sql`AND ("occurredAt" > ${cursor.occurredAt} OR ("occurredAt" = ${cursor.occurredAt} AND "id" > ${cursor.id}))`;
+function rawEventScanStartClause(since: Date, cursor: RawEventScanCursor | null): Prisma.Sql {
+  if (!cursor) return Prisma.sql`"occurredAt" >= ${since}`;
+  // The cursor already bounds the window after its first page.  Repeating
+  // the earlier date bound makes SQLite rescan that prefix on every page
+  // instead of seeking directly into the (occurredAt, id) covering index.
+  return Prisma.sql`("occurredAt", "id") > (${cursor.occurredAt}, ${cursor.id})`;
 }
 
 function rawEventScanCursorFromRow(row: {
@@ -888,9 +891,8 @@ async function loadAnalyticsTokenRows(
           "label",
           "quantity"
         FROM "ExternalUsageEvent"
-        WHERE "occurredAt" >= ${since}
+        WHERE ${rawEventScanStartClause(since, cursor)}
           AND "occurredAt" <= ${until}
-          ${rawEventCursorClause(cursor)}
           AND "metricType" = 'usage'
           AND "unit" = 'token'
           AND "sourceApp" IN (${Prisma.join(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS)})
@@ -1836,9 +1838,8 @@ async function scanMonthToDateRawGroups(
         "metricType",
         "costUsd"
       FROM "ExternalUsageEvent"
-      WHERE "occurredAt" >= ${rawSince}
+      WHERE ${rawEventScanStartClause(rawSince, cursor)}
         AND "occurredAt" <= ${now}
-        ${rawEventCursorClause(cursor)}
         AND "metricType" NOT IN (${Prisma.join(Array.from(STATUS_METRIC_TYPES))})
         AND (
           "sourceApp" <> ${BILLING_RECEIPT_SOURCE_APP}

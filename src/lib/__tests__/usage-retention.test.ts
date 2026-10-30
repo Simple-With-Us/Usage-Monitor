@@ -35,7 +35,12 @@ const prismaMock = vi.hoisted(() => {
   return client;
 });
 
+const tombstoneCountMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/sqlite-tombstone-count", () => ({
+  countExternalUsageEventTombstones: tombstoneCountMock,
+}));
 
 import {
   getExternalEventRawCutoff,
@@ -66,7 +71,7 @@ describe("usage-retention wrapper", () => {
     prismaMock.__transactionDepth = 0;
     // Wave I / E6 rehash runs first in retention; empty by default.
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
-    prismaMock.externalUsageEventTombstone.count.mockResolvedValue(0);
+    tombstoneCountMock.mockResolvedValue(0);
     prismaMock.agentTurn.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.agentTurn.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.aiRequest.deleteMany.mockResolvedValue({ count: 0 });

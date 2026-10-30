@@ -199,7 +199,7 @@ describe("chunked month-to-date external-cost scan", () => {
 
   it("walks multiple chunks on an (occurredAt, id) cursor and yields to the event loop", async () => {
     // 12,000 rows at one identical timestamp: pagination must rely on the
-    // id half of the cursor, and crossing the 10,000-row chunk boundary
+    // id half of the cursor, and crossing several chunk boundaries
     // must neither lose nor double-count a row.
     await prisma.$executeRawUnsafe(`
       INSERT INTO "ExternalUsageEvent"
@@ -254,8 +254,23 @@ describe("chunked month-to-date external-cost scan", () => {
         text.includes('ORDER BY "occurredAt" ASC, "id" ASC')
       );
     });
-    expect(scanCalls.length).toBe(2);
-    expect(sqlTextOf(scanCalls[0][0])).not.toContain('"id" >');
-    expect(sqlTextOf(scanCalls[1][0])).toContain('"id" >');
+    expect(scanCalls.length).toBeGreaterThan(2);
+    expect(sqlTextOf(scanCalls[0][0])).toContain('"occurredAt" >=');
+    for (const [query] of scanCalls.slice(1)) {
+      expect(sqlTextOf(query)).toContain('("occurredAt", "id") >');
+      expect(sqlTextOf(query)).not.toContain('"occurredAt" >=');
+    }
+
+    const continuation = scanCalls[1][0] as { sql: string; values: unknown[] };
+    const plan = await prisma.$queryRawUnsafe<Array<{ detail: string }>>(
+      `EXPLAIN QUERY PLAN ${continuation.sql}`,
+      ...continuation.values
+    );
+    expect(plan.map(({ detail }) => detail).join("\n")).toContain(
+      "ExternalUsageEvent_mtd_scan_cover_idx"
+    );
+    expect(plan.map(({ detail }) => detail).join("\n")).toContain(
+      "(occurredAt,id)>(?,?)"
+    );
   });
 });
