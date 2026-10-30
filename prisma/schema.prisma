@@ -343,6 +343,7 @@ model ExternalUsageEvent {
   // range search.
   @@index([occurredAt])
   @@index([metricType, occurredAt])
+  @@index([occurredAt, id, provider, sourceApp, service, label, projectId, metricType, costUsd, billingMode, confidence], map: "ExternalUsageEvent_mtd_scan_cover_idx")
 }
 
 model ExternalUsageEventDailyRollup {
