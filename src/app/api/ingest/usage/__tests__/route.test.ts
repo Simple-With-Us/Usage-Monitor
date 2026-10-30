@@ -516,6 +516,15 @@ describe("POST /api/ingest/usage admission", () => {
     }
   );
 
+  it("does not classify an unknown busy suffix as lock contention", async () => {
+    externalUsageMocks.persist.mockRejectedValueOnce({
+      code: "P1008", meta: { driverAdapterError: { cause: { originalCode: "SQLITE_BUSY_UNKNOWN" } } },
+    });
+    const response = await POST(v2Request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+  });
+
   it("accepts an exact signed receipt only for its dedicated token and provider ID", async () => {
     const response = await POST(receiptRequest());
     expect(response.status).toBe(202);
