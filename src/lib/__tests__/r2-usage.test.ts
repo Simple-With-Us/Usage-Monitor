@@ -43,11 +43,6 @@ import {
   __resetR2UsageStateForTests,
 } from "../r2-usage";
 
-// Flag files live under /data when the persistent volume exists (production
-// containers); these tests exercise the private mkdtemp fallback used
-// everywhere else.
-const hasDataVolume = fs.existsSync("/data");
-
 describe("R2 usage monitoring & auto-disable", () => {
   const originalEnv = process.env;
 
@@ -1124,9 +1119,7 @@ describe("R2 usage monitoring & auto-disable", () => {
   // every maintenance-cycle resume died with the process and the next restart
   // re-injected the variable. The resume has to outlive the process.
   describe("durable auto-resume over an env-pinned kill switch", () => {
-    // These write real flag files; on a host that has /data (production
-    // containers) __resetR2UsageStateForTests only clears the mkdtemp
-    // fallback, so clean both up explicitly.
+    // These write isolated flag files; clean them up explicitly between cases.
     afterEach(() => {
       for (const name of [R2_DISABLED_FLAG_FILENAME, R2_AUTO_RESUMED_FLAG_FILENAME]) {
         try {
@@ -1190,7 +1183,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
-    it.skipIf(hasDataVolume)(
+    it(
       "writes the resume marker owner-only, with the reason and how to undo it",
       () => {
         clearR2AutoDisable("storage 4.4% < 85% resume threshold");
@@ -1210,7 +1203,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     );
   });
 
-  it.skipIf(hasDataVolume)(
+  it(
     "places fallback flag files in a private per-process mkdtemp directory, not a predictable shared temp path",
     () => {
       const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
@@ -1228,7 +1221,16 @@ describe("R2 usage monitoring & auto-disable", () => {
     }
   );
 
-  it.skipIf(hasDataVolume)(
+  it("keeps test flag files isolated when a test enables production behavior", () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+
+    expect(flagPath).not.toBe(path.join("/data", R2_DISABLED_FLAG_FILENAME));
+    expect(path.dirname(path.dirname(flagPath))).toBe(path.resolve(os.tmpdir()));
+  });
+
+  it(
     "writes flag files with owner-only permissions and the expected content",
     () => {
       enforceR2AutoDisable("perm check reason");

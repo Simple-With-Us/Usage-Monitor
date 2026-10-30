@@ -311,6 +311,16 @@ jobs:
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
 
+      # The server's storage watch (deploy/server/vps-storage-watch):  a
+      # database past its growth threshold posts one alert tagging both
+      # Housekeepers and Jay, the cooldown holds, and a missing database path
+      # posts nothing.  Fully offline:  curl is replaced by a recorder.
+      - name: Test the server storage watch
+        run: |
+          bash -n deploy/server/vps-storage-watch/vps-storage-watch.sh
+          bash -n deploy/server/vps-storage-watch/install.sh
+          bash deploy/server/vps-storage-watch/test.sh
+
       # The App Store Connect credential contract (AFC-459):  the private key
       # comes from the environment or from Infisical, and a path on disk is
       # not a credential source at all.  Fully offline:  the keys are
