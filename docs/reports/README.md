@@ -186,3 +186,4 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-10-29-telemetry-dedupe](../rollouts/2026-10-29-telemetry-dedupe.md)
 - [2026-10-29-telemetry-parity-audit](../rollouts/2026-10-29-telemetry-parity-audit.md)
 - [2026-10-30-backup-storage-inventory](../rollouts/2026-10-30-backup-storage-inventory.md)
+- [Repository Report Library — October 30, 2026](../rollouts/2026-10-30-repository-report-library.md)
