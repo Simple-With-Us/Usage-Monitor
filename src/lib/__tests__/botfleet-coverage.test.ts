@@ -3,9 +3,15 @@ import { createHash } from "node:crypto";
 import { deriveUsageTelemetryV2IdempotencyKey } from "@jaywedgeworth22/congress-trading-shared";
 import senderFixture from "./fixtures/botfleet-singlecall-v2.json";
 
-const { findMany } = vi.hoisted(() => ({
+const { findMany, deriveKey } = vi.hoisted(() => ({
   findMany: vi.fn(),
+  deriveKey: vi.fn(),
 }));
+vi.mock("@jaywedgeworth22/congress-trading-shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@jaywedgeworth22/congress-trading-shared")>();
+  deriveKey.mockImplementation(actual.deriveUsageTelemetryV2IdempotencyKey);
+  return { ...actual, deriveUsageTelemetryV2IdempotencyKey: deriveKey };
+});
 vi.mock("@/lib/prisma", () => ({
   prisma: { externalUsageEvent: { findMany } },
 }));
@@ -90,6 +96,21 @@ describe("exact single-call billing receipts", () => {
     const events = [child({ tokenType })];
     expect((await dropEventsCoveredByBotFleet(events, { BOTFLEET_CHILD_COVERAGE_DROP: "1" })).events).toBe(events);
     expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves the candidate if exact-key derivation fails", async () => {
+    deriveKey.mockRejectedValueOnce(new Error("hash unavailable"));
+    const events = [child()];
+    expect((await dropEventsCoveredByBotFleet(events, { BOTFLEET_CHILD_COVERAGE_DROP: "1" })).events).toBe(events);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("retains additional claims on the same billed component within a batch", async () => {
+    findMany.mockResolvedValue([await receipt()]);
+    const events = [child(), { ...child(), idempotencyKey: "second-child-claim" }];
+    const result = await dropEventsCoveredByBotFleet(events, { BOTFLEET_CHILD_COVERAGE_DROP: "1" });
+    expect(result.events).toEqual([events[1]]);
+    expect(result.skippedBotFleetCovered).toBe(1);
   });
 });
 

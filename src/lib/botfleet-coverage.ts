@@ -49,8 +49,10 @@ export async function dropEventsCoveredByBotFleet(
       !count(event.quantity) || event.quantity === 0 || meta["agent.launcher"] !== "botfleet" ||
       !session || !call || !model || !host || event.keyRef !== model || !component) return null;
     const eventId = singleCallEventId(session, call);
-    const key = await deriveUsageTelemetryV2IdempotencyKey({ producerId: "botfleet", eventId });
-    return { index, session, call, model, host, component, eventId, key, quantity: event.quantity };
+    try {
+      const key = await deriveUsageTelemetryV2IdempotencyKey({ producerId: "botfleet", eventId });
+      return { index, session, call, model, host, component, eventId, key, quantity: event.quantity };
+    } catch { return null; }
   }));
   const eligible = candidates.filter((item) => item !== null);
   if (eligible.length === 0) return unchanged();
@@ -63,7 +65,10 @@ export async function dropEventsCoveredByBotFleet(
     });
     const byKey = new Map(receipts.map((row) => [row.idempotencyKey, row]));
     const covered = new Set<number>();
+    const claimed = new Set<string>();
     for (const candidate of eligible) {
+      const claim = `${candidate.key}:${candidate.component}`;
+      if (claimed.has(claim)) continue;
       const row = byKey.get(candidate.key);
       if (!row || row.sourceApp !== "botfleet" || row.provider !== "anthropic" || row.metricType !== "usage" || row.unit !== "token" || row.requests !== 1) continue;
       const meta = record(row.metadata);
@@ -86,6 +91,7 @@ export async function dropEventsCoveredByBotFleet(
         row.quantity !== total ||
         meta[candidate.component] !== candidate.quantity) continue;
       covered.add(candidate.index);
+      claimed.add(claim);
     }
     return covered.size > 0
       ? { events: events.filter((_, index) => !covered.has(index)), skippedBotFleetCovered: covered.size }
