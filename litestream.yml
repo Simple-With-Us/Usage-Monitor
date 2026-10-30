@@ -52,6 +52,17 @@ snapshot:
 levels:
   - interval: 30s
 
+# Checkpoints are owned by Litestream: the app sets PRAGMA wal_autocheckpoint=0
+# when LITESTREAM_ACTIVE=true (src/lib/prisma.ts), so Litestream's defaults
+# (PASSIVE at 1000 pages / 1m, emergency TRUNCATE at ~500 MB) are the only
+# checkpointer.  Do NOT set truncate-page-n: 0 here; on 0.5.13 that disables
+# the emergency TRUNCATE backstop (fixed upstream in 0.5.16, #1348).
+#
+# Shutdown sync retries for up to this long before Litestream exits.  The
+# 30s default cut uploads off mid-flight on restarts.  Coolify's stop grace
+# period is 60s (docs/litestream.md), so 45s leaves room to stop the child.
+shutdown-sync-timeout: 45s
+
 dbs:
   - path: /data/prod.db
     # Keep this replica generation separate from the previous local LTX chain.

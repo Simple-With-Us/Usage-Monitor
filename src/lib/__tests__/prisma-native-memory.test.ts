@@ -56,6 +56,7 @@ describe("resolveSqliteMemoryPragmaValues", () => {
       tempStore: "file",
       journalMode: "wal",
       busyTimeoutMs: 5_000,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -71,6 +72,7 @@ describe("resolveSqliteMemoryPragmaValues", () => {
       tempStore: "memory",
       journalMode: "wal",
       busyTimeoutMs: 7_500,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -114,6 +116,7 @@ describe("applySqliteNativeMemoryPragmas", () => {
       tempStore: "memory",
       journalMode: "wal",
       busyTimeoutMs: 4_321,
+      walAutocheckpointPages: 1_000,
     });
     expect(errorSpy).not.toHaveBeenCalled();
   });
@@ -131,6 +134,7 @@ describe("applySqliteNativeMemoryPragmas", () => {
       tempStore: "file",
       journalMode: "wal",
       busyTimeoutMs: 5_000,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -168,10 +172,30 @@ describe("applySqliteNativeMemoryPragmas", () => {
     const setCalls = querySpy.mock.calls
       .map((call) => String(call[0]))
       .filter((sql) =>
-        /PRAGMA (cache_size|mmap_size|temp_store|journal_mode|busy_timeout)\s*=/.test(sql)
+        /PRAGMA (cache_size|mmap_size|temp_store|journal_mode|busy_timeout|wal_autocheckpoint)\s*=/.test(sql)
       );
-    expect(setCalls).toHaveLength(5);
+    expect(setCalls).toHaveLength(6);
     expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("disables app-side WAL autocheckpoints only when Litestream owns checkpoints", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubEnv("LITESTREAM_ACTIVE", "true");
+    const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
+      "@/lib/prisma"
+    );
+
+    await applySqliteNativeMemoryPragmas();
+
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    // Without Litestream nothing else checkpoints, so SQLite's default returns.
+    vi.unstubAllEnvs();
+    const { resetSqliteNativeMemoryPragmasForTests } = await import("@/lib/prisma");
+    resetSqliteNativeMemoryPragmasForTests();
+    await applySqliteNativeMemoryPragmas();
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
   });
 
   it("is idempotent - a second call does not re-issue the PRAGMAs", async () => {

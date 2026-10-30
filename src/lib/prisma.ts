@@ -172,6 +172,7 @@ export interface SqliteMemoryPragmaValues {
   tempStore: SqliteTempStore;
   journalMode: string;
   busyTimeoutMs: number;
+  walAutocheckpointPages: number;
 }
 
 export type SqliteTempStore = "default" | "file" | "memory";
@@ -186,6 +187,24 @@ export type SqliteTempStore = "default" | "file" | "memory";
 // and read back through the same verified-pragma path as the memory bounds
 // so a rejected PRAGMA is logged loudly rather than silently no-op'ing.
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
+// When Litestream replicates this database it must own WAL checkpoints.
+// Litestream's verify() takes a fresh FULL-database snapshot whenever another
+// connection restarts, truncates, or overwrites the WAL behind it ("wal header
+// salt reset", "wal overwritten by another process", "full or restart
+// checkpoint detected").  SQLite's default wal_autocheckpoint=1000 lets this
+// app checkpoint on commit, which on 2026-10-28..30 produced ~2.38 GB
+// whole-DB L0 uploads to B2 several times an hour.  Litestream's docs say to
+// run the application with `PRAGMA wal_autocheckpoint = 0`
+// (https://litestream.io/tips/#disable-autocheckpoints-for-high-write-load-servers);
+// Litestream still checkpoints on its own (PASSIVE at 1000 pages / 1m, and an
+// emergency TRUNCATE at ~500 MB).  Without Litestream (LITESTREAM_ACTIVE unset)
+// nothing else would checkpoint, so keep SQLite's default there.
+const SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES = 1_000;
+
+function sqliteWalAutocheckpointPages(): number {
+  return process.env.LITESTREAM_ACTIVE === "true" ? 0 : SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES;
+}
 
 function sqliteJournalModeFromPragma(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase() : String(value);
@@ -231,6 +250,7 @@ export function resolveSqliteMemoryPragmaValues(): SqliteMemoryPragmaValues {
       0,
       60_000
     ),
+    walAutocheckpointPages: sqliteWalAutocheckpointPages(),
   };
 }
 
@@ -256,6 +276,9 @@ export async function readSqliteMemoryPragmas(): Promise<SqliteMemoryPragmaValue
   const busyTimeoutRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
     "PRAGMA busy_timeout"
   );
+  const walAutocheckpointRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    "PRAGMA wal_autocheckpoint"
+  );
   return {
     cacheSizeKib: Number(cacheRows[0]?.cache_size),
     mmapSizeBytes: Number(mmapRows[0]?.mmap_size),
@@ -263,6 +286,7 @@ export async function readSqliteMemoryPragmas(): Promise<SqliteMemoryPragmaValue
     journalMode: sqliteJournalModeFromPragma(journalModeRows[0]?.journal_mode),
     // SQLite names the busy_timeout pragma's result column "timeout".
     busyTimeoutMs: Number(busyTimeoutRows[0]?.timeout),
+    walAutocheckpointPages: Number(walAutocheckpointRows[0]?.wal_autocheckpoint),
   };
 }
 
@@ -283,6 +307,9 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
         await prisma.$queryRawUnsafe(`PRAGMA temp_store = ${target.tempStore.toUpperCase()}`);
         await prisma.$queryRawUnsafe(`PRAGMA journal_mode = ${target.journalMode.toUpperCase()}`);
         await prisma.$queryRawUnsafe(`PRAGMA busy_timeout = ${target.busyTimeoutMs}`);
+        await prisma.$queryRawUnsafe(
+          `PRAGMA wal_autocheckpoint = ${target.walAutocheckpointPages}`
+        );
         // Read the values back on the same connection and confirm they took.
         // A mismatch is logged loudly (never swallowed): it would mean a future
         // engine change rejected a PRAGMA, or connection_limit was raised above
@@ -294,7 +321,8 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
           applied.mmapSizeBytes !== target.mmapSizeBytes ||
           applied.tempStore !== target.tempStore ||
           applied.journalMode !== target.journalMode ||
-          applied.busyTimeoutMs !== target.busyTimeoutMs
+          applied.busyTimeoutMs !== target.busyTimeoutMs ||
+          applied.walAutocheckpointPages !== target.walAutocheckpointPages
         ) {
           console.error(
             `[prisma] SQLite native memory bounds did not take effect ` +
@@ -302,7 +330,9 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
               `temp_store=${target.tempStore}; journal_mode=${target.journalMode}; ` +
               `busy_timeout=${target.busyTimeoutMs}; read back cache_size=${applied.cacheSizeKib}, ` +
               `mmap_size=${applied.mmapSizeBytes}, temp_store=${applied.tempStore}, ` +
-              `journal_mode=${applied.journalMode}, busy_timeout=${applied.busyTimeoutMs})`
+              `journal_mode=${applied.journalMode}, busy_timeout=${applied.busyTimeoutMs}, ` +
+              `wal_autocheckpoint=${applied.walAutocheckpointPages}; wanted ` +
+              `wal_autocheckpoint=${target.walAutocheckpointPages})`
           );
         }
       } catch (error) {
