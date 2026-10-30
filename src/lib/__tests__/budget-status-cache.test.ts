@@ -49,6 +49,7 @@ let budgetStatusCacheTtlMs: typeof import("../budget-status").budgetStatusCacheT
 let bustBudgetStatusCache: typeof import("../budget-status").bustBudgetStatusCache;
 let markBudgetStatusSoftStale: typeof import("../budget-status").markBudgetStatusSoftStale;
 let querySqliteUsageAggregate: typeof import("@/lib/sqlite-usage-aggregates").querySqliteUsageAggregate;
+let summarizeExternalUsageEvents: typeof import("../external-usage-events").summarizeExternalUsageEvents;
 
 let testDir: string;
 
@@ -74,6 +75,7 @@ beforeAll(async () => {
 
   ({ querySqliteUsageAggregate } = await vi.importActual("@/lib/sqlite-usage-aggregates"));
   aggregateMock.mockImplementation(querySqliteUsageAggregate);
+  ({ summarizeExternalUsageEvents } = await import("../external-usage-events"));
 
   ({ prisma } = await import("@/lib/prisma"));
   ({
@@ -465,6 +467,60 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     await waitUntil(async () =>
       (await computeProjectBudgetStatus(NOW)) !== firstProject
     );
+  });
+
+  it("lets an MTD budget compute finish while a summary aggregate is still in flight", async () => {
+    const NOW = new Date("2027-04-10T12:00:00.000Z");
+    const provider = await createProviderWithCost(
+      "parallel-summary-mtd-provider",
+      17,
+      new Date("2027-04-10T10:00:00.000Z")
+    );
+
+    let releaseSummary!: () => void;
+    const heldSummary = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    let signalSummaryEntered!: () => void;
+    const summaryEntered = new Promise<void>((resolve) => {
+      signalSummaryEntered = resolve;
+    });
+    let mtdStarted = false;
+
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "summary") {
+        signalSummaryEntered();
+        await heldSummary;
+        return [];
+      }
+      if (args[0] === "mtd") mtdStarted = true;
+      return querySqliteUsageAggregate(
+        ...(args as Parameters<typeof querySqliteUsageAggregate>)
+      );
+    });
+
+    const since = new Date("2027-04-01T00:00:00.000Z");
+    const summaryPromise = summarizeExternalUsageEvents(since, since, NOW);
+    let budgetPromise: Promise<Awaited<ReturnType<typeof computeBudgetStatus>>> | undefined;
+    try {
+      await summaryEntered;
+      budgetPromise = computeBudgetStatus(NOW);
+      const budgetCompletedBeforeSummaryRelease = await Promise.race([
+        budgetPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
+      ]);
+
+      expect(budgetCompletedBeforeSummaryRelease).toBe(true);
+      expect(mtdStarted).toBe(true);
+      releaseSummary();
+      const [summary, budget] = await Promise.all([summaryPromise, budgetPromise]);
+      expect(summary).toBeDefined();
+      expect(budget.providers.find((item) => item.id === provider.id)?.spentUsd).toBe(17);
+    } finally {
+      releaseSummary();
+      await summaryPromise.catch(() => undefined);
+      if (budgetPromise) await budgetPromise.catch(() => undefined);
+    }
   });
 
   it("dedupes concurrent cold callers onto a single underlying compute and the same cached instance", async () => {

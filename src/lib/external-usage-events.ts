@@ -1049,11 +1049,10 @@ export async function summarizeExternalUsageEvents(
     }
   }
 
-  // Share the exclusive-aggregation lease with the MTD cost scans: the
-  // groupBy result set for a summary window can be as large as theirs, and
-  // on the 512 MB instance two concurrent in-flight aggregations are enough
-  // to kill the process.
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  // Serialize summaries with other summaries while allowing MTD budget scans
+  // to use the second bounded SQLite reader.  The process-global reader pool
+  // still caps native aggregate children across all aggregation families.
+  return withExclusiveExternalUsageSummaryAggregation(async () => {
     if (memoEnabled) {
       const again = getUsageEventsSummaryMemo<ExternalUsageEventSummary>();
       if (again && again.key === key && again.expiresAt > Date.now()) {
@@ -1547,31 +1546,43 @@ export async function sumMonthToDateReceiptCashByProviderId(
 
 type ReceiptCashEventLikeWithCost = Parameters<typeof receiptCashProviderId>[0];
 
-// Provider totals and project attribution both scan and materialize the
-// current month's raw ExternalUsageEvent rows. A stale provider-cache hit can
-// start its refresh in the background and return immediately; a stale project
-// cache refresh may then reach its separate attribution aggregate before that
-// provider refresh finishes. On the 512 MB production instance, retaining
-// both aggregate result sets at once is enough to kill the process.
-//
-// Serialize the complete aggregation bodies, not just their scan calls, so
-// the next aggregate cannot start while the prior query result is still being
-// classified into application maps. The lease lives below the SWR caches:
-// stale callers still receive their cached response immediately, while only
-// background/cold recomputation queues. Keeping it here also covers every
-// caller and avoids taking a higher-level lock before a nested budget compute.
-//
-// Wave H / E1: both provider and project MTD views share one raw+rollup scan
-// (attribution-shaped scan) with a short process-local memo so a cold
-// dashboard that loads provider then project status does not pay ~11s twice.
-let externalUsageCostAggregationTail: Promise<void> = Promise.resolve();
+// MTD provider totals and project attribution share one raw+rollup scan and
+// memo.  Keep each expensive family serialized while allowing one summary and
+// one MTD compute to run concurrently; the separate process-global reader pool
+// remains the hard cap across Next module copies and all modes.
+const EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL = Symbol.for(
+  "usage-monitor.external-usage-aggregation-leases.v1"
+);
 
-async function withExclusiveExternalUsageCostAggregation<T>(
+type ExternalUsageAggregationFamily = "summary" | "mtd";
+type ExternalUsageAggregationLeaseRegistry = Record<
+  ExternalUsageAggregationFamily,
+  Promise<void>
+>;
+
+function externalUsageAggregationLeaseRegistry(): ExternalUsageAggregationLeaseRegistry {
+  const registry = globalThis as unknown as Record<symbol, unknown>;
+  const current = registry[
+    EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL
+  ] as ExternalUsageAggregationLeaseRegistry | undefined;
+  if (current) return current;
+
+  const leases: ExternalUsageAggregationLeaseRegistry = {
+    summary: Promise.resolve(),
+    mtd: Promise.resolve(),
+  };
+  registry[EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL] = leases;
+  return leases;
+}
+
+async function withExclusiveExternalUsageAggregation<T>(
+  family: ExternalUsageAggregationFamily,
   work: () => Promise<T>
 ): Promise<T> {
-  const previous = externalUsageCostAggregationTail;
+  const leases = externalUsageAggregationLeaseRegistry();
+  const previous = leases[family];
   let release!: () => void;
-  externalUsageCostAggregationTail = new Promise<void>((resolve) => {
+  leases[family] = new Promise<void>((resolve) => {
     release = resolve;
   });
 
@@ -1581,6 +1592,18 @@ async function withExclusiveExternalUsageCostAggregation<T>(
   } finally {
     release();
   }
+}
+
+function withExclusiveExternalUsageSummaryAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("summary", work);
+}
+
+function withExclusiveExternalUsageMtdAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("mtd", work);
 }
 
 function mtdScanKey(monthStart: Date, rawCutoff: Date): string {
@@ -1714,7 +1737,7 @@ async function loadMonthToDateExternalCostMaterial(
     }
   }
 
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  return withExclusiveExternalUsageMtdAggregation(async () => {
     if (memoEnabled) {
       const again = getMtdScanMemo<
         Map<string, ProviderPushedCost>,
