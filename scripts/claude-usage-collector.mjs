@@ -16,14 +16,12 @@ import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // carry the same usage per request, so they are the exact source that is
 // still available.
 //
-// DOUBLE COUNTING: the native OTLP path and this collector describe the same
-// calls, and their idempotency keys do not collide (one is the shared v2
-// eventId hash, the other an OTLP attribute hash).  The receiver therefore
-// applies a native-preference rule: a transcript event is dropped when the
-// native feed delivered a token row close enough in time to have covered it
-// (src/lib/native-telemetry-coverage.ts).  Every event this collector sends
-// carries metadata.collector="transcript" so that rule can tell the two
-// feeds apart, and so the ledger can show which feed produced a row.
+// OVERLAP: native OTLP aggregates and transcript calls may describe shared
+// usage, and their idempotency keys do not collide (one is the shared v2
+// eventId hash, the other an OTLP attribute hash).  Aggregate native metrics
+// cannot prove coverage of each transcript call or token component, so both
+// feeds remain additive.  Every event carries metadata.collector="transcript"
+// to preserve provenance; exact event idempotency still handles replay.
 //
 // Usage:
 //   node scripts/claude-usage-collector.mjs [--dry-run] [--debug] [--days N] [--since ISO]
