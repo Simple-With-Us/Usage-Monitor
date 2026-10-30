@@ -5,7 +5,7 @@ The October 29 recovery addressed separate startup, SQLite responsiveness, and r
 - PR1821 skips the full pre-migration snapshot only after a successful no-drift schema comparison; real migrations still require a verified snapshot.
 - PR1828 pins the Docker runtime to Node 24 and adds the quota and month-to-date scan indexes.
 - PR1830 forwards shutdown signals through the Infisical wrapper, separates replacement Litestream metadata from the retired chain, and provides an explicit repair for legacy integer timestamps in the two alert delivery tables.
-- PR1832 moves the cold maintenance tombstone count into a bounded read-only child process and replaces long raw usage aggregates with bounded keyset scans that yield between pages.
+- PR1832 moves the cold maintenance tombstone count into a bounded read-only child process and improves month-to-date keyset seeks.  The dashboard follow-up replaces its long raw usage aggregates with bounded keyset scans that yield between pages.
 
 The old replica failed restored-database integrity checks despite a fresh heartbeat and a successful restore plan.  The replacement chain passed two independent restores with SQLite quick integrity checks: first the full baseline, then the caught-up baseline plus deltas.  Both restored databases contained 35 tables and 32 providers.  The second restored database was 5,239,009,280 bytes.  This verifies those restore points; later replica freshness must still be checked separately.
 
