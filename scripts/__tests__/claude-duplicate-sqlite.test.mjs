@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPrismaClient } from "../lib/create-prisma-client.mjs";
 import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan } from "../lib/claude-duplicate-stored-plan.mjs";
+import { writeStoredCleanupShards } from "../lib/stored-cleanup-artifacts.mjs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 test("real SQLite deletes exact duplicates with tombstones and rolls back on tombstone collision", async () => {
   const directory = await mkdtemp(join(tmpdir(), "claude-cleanup-test-"));
@@ -22,7 +26,24 @@ test("real SQLite deletes exact duplicates with tombstones and rolls back on tom
     await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "duplicate", occurredAt: new Date(proof.occurredAt) } });
     const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
     assert.equal(plan.approved.length, 1);
-    await applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: "a".repeat(64), reviewedBackupDigest: "a".repeat(64) });
+    const indexPath = join(directory, "index.json"), backupPath = join(directory, "backup.db");
+    const index = await writeStoredCleanupShards(indexPath, plan, ["f".repeat(64)]);
+    await db.$executeRaw`VACUUM INTO ${backupPath}`;
+    await chmod(backupPath, 0o600);
+    const backupSha = createHash("sha256").update(await readFile(backupPath)).digest("hex");
+    const cli = fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url));
+    const environment = { ...process.env, VITEST: "true", DATABASE_URL: "file:" + join(directory, "test.db") };
+    const applyArgs = [cli, "--apply", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256, "--full-backup-verified", "--full-backup-path", backupPath, "--full-backup-sha256", backupSha];
+    const applied = spawnSync(process.execPath, applyArgs, { env: environment, encoding: "utf8" });
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(JSON.parse(applied.stdout).deletedThisRun, 1);
+    const resumed = spawnSync(process.execPath, applyArgs, { env: environment, encoding: "utf8" });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(JSON.parse(resumed.stdout).deletedThisRun, 0);
+    assert.equal(JSON.parse(resumed.stdout).resumedFromReceipts, 1);
+    const verified = spawnSync(process.execPath, [cli, "--verify", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256], { env: environment, encoding: "utf8" });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(JSON.parse(verified.stdout).verified, true);
     assert.equal(await db.externalUsageEvent.count(), 1);
     assert.equal(await db.externalUsageEventTombstone.count(), 1);
     await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });

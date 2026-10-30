@@ -23,7 +23,7 @@ async function verifyUnchanged(file) {
   }
 }
 
-export async function readProtectedCleanupJsonHandle(file) {
+export async function readProtectedCleanupJsonHandle(file, { withDigest = false } = {}) {
   const buffer = Buffer.alloc(Number(file.info.size) + 1);
   let position = 0;
   while (position < buffer.length) {
@@ -33,13 +33,16 @@ export async function readProtectedCleanupJsonHandle(file) {
   }
   await verifyUnchanged(file);
   if (position !== Number(file.info.size)) throw new Error("Cleanup input size changed while being read");
-  try { return JSON.parse(buffer.subarray(0, position).toString("utf8")); }
+  try {
+    const value = JSON.parse(buffer.subarray(0, position).toString("utf8"));
+    return withDigest ? { value, bytes: position, sha256: createHash("sha256").update(buffer.subarray(0, position)).digest("hex") } : value;
+  }
   catch { throw new Error("Cleanup input is not valid JSON"); }
 }
 
-export async function readProtectedCleanupJson(path) {
+export async function readProtectedCleanupJson(path, options) {
   const file = await openProtectedCleanupFile(path);
-  try { return await readProtectedCleanupJsonHandle(file); }
+  try { return await readProtectedCleanupJsonHandle(file, options); }
   finally { await file.handle.close(); }
 }
 

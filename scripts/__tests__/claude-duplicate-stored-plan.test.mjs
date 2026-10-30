@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan } from "../lib/claude-duplicate-stored-plan.mjs";
+import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan, storedPlanDigest, fingerprint } from "../lib/claude-duplicate-stored-plan.mjs";
 import { mkdtemp, writeFile, chmod, symlink, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { openProtectedCleanupFile, readProtectedCleanupJson, readProtectedCleanupJsonHandle, verifyProtectedSqliteBackup } from "../lib/protected-cleanup-file.mjs";
+import { writeStoredCleanupShards, readReviewedCleanupIndex, readReviewedCleanupShard, writePrivateCleanupJson, validateReviewedCleanupShards } from "../lib/stored-cleanup-artifacts.mjs";
 
 const proof = { idempotencyKey: "duplicate", keeperIdempotencyKey: "keeper", label: "token:output", model: "claude-test", quantity: 20,
   occurredAt: "2026-10-29T12:00:01.000Z", keeperOccurredAt: "2026-10-29T12:00:00.000Z", sourceProofHash: "source-sha", messageProofHash: "message-sha" };
@@ -143,4 +144,51 @@ test("historical tombstones are counted as uncertain history without changing ro
   assert.equal(plan.skipped.compactedOrPreviouslyPruned, 1);
   assert.deepEqual(plan.historicalTombstoneQuantities, { "token:output": 20 });
   assert.deepEqual(db.calls, []);
+});
+test("protected shards bind their own digests and counts to a separately reviewed index", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-reviewed-shards-"));
+  try {
+    const plan = await buildStoredClaudeDuplicatePlan(client([row("duplicate"), row("keeper")]), [proof]);
+    const path = join(directory, "index.json");
+    const written = await writeStoredCleanupShards(path, plan, ["f".repeat(64)]);
+    const index = await readReviewedCleanupIndex(path, written.sha256);
+    assert.equal((await validateReviewedCleanupShards(path, index)).candidatesValidated, 1);
+    assert.equal(index.totalCandidates, 1);
+    assert.equal(index.shards[0].count, 1);
+    assert.equal((await readReviewedCleanupShard(path, index, index.shards[0])).digest, index.shards[0].reviewedDigest);
+    await assert.rejects(readReviewedCleanupIndex(path, "a".repeat(64)), /independently reviewed/);
+    await writeFile(join(directory, index.shards[0].name), '{"tampered":true}', { mode: 0o600 });
+    await assert.rejects(readReviewedCleanupShard(path, index, index.shards[0]), /differs from reviewed/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("global preflight rejects cross-shard keeper deletion even with internally valid shard digests", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-cross-shard-"));
+  try {
+    const plan = await buildStoredClaudeDuplicatePlan(client([row("duplicate"), row("keeper")]), [proof]);
+    const secondRow = row("keeper"), third = row("third");
+    const entries = [plan.approved[0], { proof: { ...proof, idempotencyKey: "keeper", keeperIdempotencyKey: "third" }, row: secondRow, keeper: third, rowFingerprint: fingerprint(secondRow), keeperFingerprint: fingerprint(third) }];
+    const master = storedPlanDigest(entries), shards = [];
+    for (let i = 0; i < entries.length; i++) {
+      const name = "shard-" + i + ".json", reviewedDigest = storedPlanDigest([entries[i]]);
+      const written = await writePrivateCleanupJson(join(directory, name), { version: 1, parentDigest: master, approved: [entries[i]], digest: reviewedDigest });
+      shards.push({ name, count: 1, reviewedDigest, ...written });
+    }
+    const index = { version: 1, kind: "claude-duplicate-cleanup-index", planDigest: master, sourceManifestHashes: ["f".repeat(64)], totalCandidates: 2, shards };
+    const path = join(directory, "index.json"), written = await writePrivateCleanupJson(path, index);
+    const reviewed = await readReviewedCleanupIndex(path, written.sha256);
+    await assert.rejects(validateReviewedCleanupShards(path, reviewed), /keeper dependency/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("reviewed index cannot traverse paths or change global keeper dependencies", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-shard-path-"));
+  try {
+    const plan = await buildStoredClaudeDuplicatePlan(client([row("duplicate"), row("keeper")]), [proof]);
+    const path = join(directory, "index.json");
+    const written = await writeStoredCleanupShards(path, plan, ["f".repeat(64)]);
+    const changed = { ...written.index, shards: [{ ...written.index.shards[0], name: "../escape.json" }] };
+    const invalidPath = join(directory, "invalid-index.json");
+    const invalid = await writePrivateCleanupJson(invalidPath, changed);
+    await assert.rejects(readReviewedCleanupIndex(invalidPath, invalid.sha256), /shard reference/);
+    await assert.rejects(writeStoredCleanupShards(join(directory, "too-large-index.json"), plan, ["f".repeat(64)], { shardSize: 101 }), /one transaction/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

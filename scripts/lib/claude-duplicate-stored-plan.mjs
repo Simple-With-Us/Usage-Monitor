@@ -7,7 +7,15 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
 }
 export const fingerprint = (row) => createHash("sha256").update(JSON.stringify(stable(row ?? null))).digest("hex");
-export const storedPlanDigest = (approved) => fingerprint(approved.map(({ proof, rowFingerprint, keeperFingerprint }) => ({ proof, rowFingerprint, keeperFingerprint })));
+export function createStoredPlanDigest() {
+  const hash = createHash("sha256").update("[");
+  let first = true;
+  return { add({ proof, rowFingerprint, keeperFingerprint }) {
+    if (!first) hash.update(",");
+    first = false; hash.update(JSON.stringify(stable({ proof, rowFingerprint, keeperFingerprint })));
+  }, finish() { return hash.update("]").digest("hex"); } };
+}
+export const storedPlanDigest = (approved) => { const hash = createStoredPlanDigest(); approved.forEach((entry) => hash.add(entry)); return hash.finish(); };
 
 function mergeHostProofs(proofs) {
   const groups = new Map(), requiredKeepers = new Set();
@@ -40,11 +48,12 @@ function matches(row, proof, keeper = false) {
     new Date(row.occurredAt).toISOString() === (keeper ? proof.keeperOccurredAt : proof.occurredAt);
 }
 
-export async function buildStoredClaudeDuplicatePlan(client, proofs) {
+export async function buildStoredClaudeDuplicatePlan(client, proofs, { onProgress = async () => {} } = {}) {
   const merged = mergeHostProofs(proofs);
   proofs = merged.normalized;
   const approved = [], skipped = { absent: 0, keeperAbsent: 0, mismatch: 0, compactedOrPreviouslyPruned: 0, ...merged.skipped };
   const historicalTombstoneQuantities = {};
+  await onProgress({ phase: "proofs-normalized", normalizedProofs: proofs.length, matchedCandidates: 0 });
   const seen = new Set();
   for (let offset = 0; offset < proofs.length; offset += 200) {
     const batch = proofs.slice(offset, offset + 200);
@@ -74,6 +83,9 @@ export async function buildStoredClaudeDuplicatePlan(client, proofs) {
         ["host.name", "project", "project.name", "projectName", "_producerInstanceId"].some((key) =>
           row.metadata?.[key] !== keeper.metadata?.[key])) { skipped.mismatch++; continue; }
       approved.push({ proof, row, keeper, rowFingerprint: fingerprint(row), keeperFingerprint: fingerprint(keeper) });
+    }
+    if ((offset + 200) % 1000 === 0 || offset + 200 >= proofs.length) {
+      await onProgress({ phase: "matching-proofs", processedProofs: Math.min(offset + 200, proofs.length), normalizedProofs: proofs.length, matchedCandidates: approved.length, skipped: { ...skipped } });
     }
   }
   const deleted = new Set(approved.map(({ row }) => row.idempotencyKey));
@@ -110,4 +122,24 @@ export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDig
     await new Promise((resolve) => setImmediate(resolve));
   }
   return { deleted, tombstonesWritten: deleted, keepersPreserved: plan.approved.length };
+}
+
+export async function verifyAppliedStoredClaudePlan(client, plan) {
+  let candidatesRemaining = 0, matchingTombstones = 0, keeperChecksFailed = 0;
+  for (let offset = 0; offset < plan.approved.length; offset += 100) {
+    const batch = plan.approved.slice(offset, offset + 100);
+    const keys = [...new Set(batch.flatMap(({ row, keeper }) => [row.idempotencyKey, keeper.idempotencyKey]))];
+    const rows = await client.externalUsageEvent.findMany({ where: { idempotencyKey: { in: keys } } });
+    const byKey = new Map(rows.map((row) => [row.idempotencyKey, row]));
+    const tombstones = await client.externalUsageEventTombstone.findMany({ where: { idempotencyKey: { in: batch.map(({ row }) => row.idempotencyKey) } }, select: { idempotencyKey: true, occurredAt: true } });
+    const pruned = new Map(tombstones.map((row) => [row.idempotencyKey, row]));
+    for (const entry of batch) {
+      if (byKey.has(entry.row.idempotencyKey)) candidatesRemaining++;
+      const tombstone = pruned.get(entry.row.idempotencyKey);
+      if (tombstone && new Date(tombstone.occurredAt).toISOString() === new Date(entry.row.occurredAt).toISOString()) matchingTombstones++;
+      if (fingerprint(byKey.get(entry.keeper.idempotencyKey)) !== entry.keeperFingerprint) keeperChecksFailed++;
+    }
+  }
+  return { verified: candidatesRemaining === 0 && matchingTombstones === plan.approved.length && keeperChecksFailed === 0,
+    candidatesRemaining, matchingTombstones, keeperChecksFailed };
 }
