@@ -142,13 +142,35 @@ test("hub ACK schema rejects invalid counters and incomplete counts without quar
   const config = { ...base, destination: "hub", token: "test-only-bearer-00000000000000000000" };
   const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
   const good = { ok: true, received: 1, written: 1, ignored: 0 };
-  for (const body of [{ ...good, ok: false }, { ...good, received: "1" }, { ...good, written: -1 }, { ...good, ignored: 0.5 }, { ...good, received: 2 }, { ...good, ignored: 1 }, { ...good, unexpected: true }]) {
+  for (const body of [{ ...good, ok: false }, { ...good, received: "1" }, { ...good, written: -1 }, { ...good, written: 0 }, { ...good, ignored: 0.5 }, { ...good, received: 2 }, { ...good, ignored: 1 }, { ...good, unexpected: true }]) {
     const result = await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(body)) });
     assert.equal(result.delivered, 0);
     assert.equal(result.quarantined, 0);
     assert.equal(result.pending, true);
   }
   assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(good)) })).delivered, 1);
+}));
+
+test("coherent partial hub ACKs durably narrow and isolate only the ignored row", () => fixture(async (base) => {
+  const config = { ...base, destination: "hub", token: "test-only-bearer-00000000000000000000" };
+  const root = await enqueueCollectorSentry([0, 1, 2].flatMap((i) => tokens({ collectorCallId: `partial-hub-${i}`, extraId: `partial-hub-${i}`, model: i === 1 ? "bad-model" : "good-model" })), identity, config);
+  let delivered = 0;
+  let quarantined = 0;
+  for (let invocation = 0; invocation < 20 && (delivered < 2 || quarantined < 1); invocation += 1) {
+    let requests = 0;
+    const result = await drainCollectorSentry(root, config, { requestLimit: 1, fetchImpl: async (_url, options) => {
+      requests += 1;
+      const payload = JSON.parse(options.body);
+      const spans = payload.resourceSpans.flatMap((resource) => resource.scopeSpans.flatMap((scope) => scope.spans));
+      const ignored = spans.filter((span) => span.attributes.some((a) => a.key === "gen_ai.request.model" && a.value.stringValue === "bad-model")).length;
+      return Response.json({ ok: true, received: spans.length - ignored, written: spans.length - ignored, ignored });
+    } });
+    assert.ok(requests <= 1);
+    delivered += result.delivered;
+    quarantined += result.quarantined;
+  }
+  assert.equal(delivered, 2);
+  assert.equal(quarantined, 1);
 }));
 
 test("one rejected observation is isolated without blocking the remaining records", () => fixture(async (config) => {

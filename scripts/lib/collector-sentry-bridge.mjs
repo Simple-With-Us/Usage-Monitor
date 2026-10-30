@@ -193,7 +193,8 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       const raw = text ? JSON.parse(text) : {};
       if (config.destination === "hub") {
         const result = HubAckSchema.safeParse(raw);
-        if (!result.success || result.data.received !== group.length || result.data.written !== group.length || result.data.ignored !== 0) throw new Error("Hub acknowledgement is incomplete or invalid");
+        if (!result.success || result.data.received !== result.data.written || result.data.received > group.length || result.data.ignored !== group.length - result.data.received) throw new Error("Hub acknowledgement is incomplete or invalid");
+        poisoned = result.data.ignored > 0;
       } else {
         const result = otlpAckSchema(logs).safeParse(raw);
         if (!result.success) throw new Error("OTLP acknowledgement is invalid");
