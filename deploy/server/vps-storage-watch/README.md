@@ -17,10 +17,10 @@ Each alert posts to `#Alerts-Log` › `vps-storage` as the Operator and tags bot
 | File | Installed as |
 |---|---|
 | `vps-storage-watch.sh` | `/root/vps-storage-watch.sh`, the watch and the alerts |
-| `vps-storage-watch-with-metrics.sh` | `/root/vps-storage-watch-with-metrics.sh`, which runs the watch and then the supplement under one lock |
-| `vps-status-supplement.py` | `/root/vps-status-supplement.py`, which adds processes, tools and history to the snapshot |
 | `vps-storage-watch.cron` | `/etc/cron.d/vps-storage-watch` |
 | `vps-storage-watch.env.example` | the template for `/etc/vps-storage-watch.env` |
+
+The schedule runs `/root/vps-storage-watch-with-metrics.sh`, which holds one lock while it runs this watch and then `/root/vps-status-supplement.py`.  Both of those belong to HogHunter (`scripts/server-status/run-watch.sh` and `supplement.py`), so they are installed from there, never from this repo.
 
 The database paths are host inventory, so they are not in this public repo.  They live in `/etc/vps-storage-watch.env` (root, mode 0600), and `install.sh` refuses to run until all three are set.  If one goes missing later, the watch skips only that database (its snapshot size is `null`, never a made-up zero) and keeps the rest running.  The Operator's Zulip login is `/root/.zuliprc-operator`, which the watch reads at run time and this repo never holds.
 

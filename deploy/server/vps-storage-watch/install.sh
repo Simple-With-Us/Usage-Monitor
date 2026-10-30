@@ -1,6 +1,8 @@
 #!/bin/bash
 # Install vps-storage-watch on the fleet server from this checkout (run as root, or through sudo).
-# Copies the three scripts to /root and the schedule to /etc/cron.d, keeping a dated backup of any file it replaces.
+# Copies the watch to /root and the schedule to /etc/cron.d, keeping a dated backup of any file it replaces.
+# The schedule runs /root/vps-storage-watch-with-metrics.sh, the shared-lock wrapper that HogHunter owns
+# (scripts/server-status/run-watch.sh, with its supplement.py):  install those from HogHunter, never from here.
 # It never writes /etc/vps-storage-watch.env:  create that from vps-storage-watch.env.example first.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -27,6 +29,4 @@ place() { # source target mode
 }
 
 place "$here/vps-storage-watch.sh" /root/vps-storage-watch.sh 0755
-place "$here/vps-storage-watch-with-metrics.sh" /root/vps-storage-watch-with-metrics.sh 0755
-place "$here/vps-status-supplement.py" /root/vps-status-supplement.py 0750
 place "$here/vps-storage-watch.cron" /etc/cron.d/vps-storage-watch 0644
