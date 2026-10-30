@@ -64,11 +64,11 @@ const DEFAULTS = {
   bucket: "usage-monitor-prod-v3",
   prefix: "weekly/",
   region: "auto",
-  // Jay 2026-10-29 fleet policy: keep the newest 3 weekly generations (3 weeks,
-  // ~150 MB compressed against a 10 GiB free tier), matching the privacy-policy
+  // Jay 2026-10-29 fleet policy: keep the newest 2 weekly generations (at most
+  // ~2 weeks, ~100 MB compressed against a 10 GiB free tier), matching the privacy-policy
   // copy in src/app/privacy/page.tsx. Prune still runs only after the fresh
   // upload is verified. R2_ARCHIVE_KEEP_GENERATIONS / --keep override this.
-  keepGenerations: 3,
+  keepGenerations: 2,
   statusPath: "/data/.r2-archive-status.json",
   // Pages per sqlite3_backup_step(); matches the pre-migration backup default.
   backupRatePages: 100,
