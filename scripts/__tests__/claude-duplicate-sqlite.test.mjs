@@ -1,0 +1,55 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, chmod } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPrismaClient } from "../lib/create-prisma-client.mjs";
+import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan } from "../lib/claude-duplicate-stored-plan.mjs";
+import { writeStoredCleanupShards } from "../lib/stored-cleanup-artifacts.mjs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+test("real SQLite deletes exact duplicates with tombstones and rolls back on tombstone collision", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-cleanup-test-"));
+  const db = createPrismaClient({ databaseUrl: "file:" + join(directory, "test.db") });
+  try {
+    const schema = await readFile(new URL("../../prisma/schema.prisma", import.meta.url), "utf8");
+    const model = /model ExternalUsageEvent \{([\s\S]*?)\n\}/.exec(schema)[1];
+    const types = { String: "TEXT", Int: "INTEGER", Float: "REAL", DateTime: "DATETIME", Json: "JSON" };
+    const columns = [...model.matchAll(/^\s+(\w+)\s+(String|Int|Float|DateTime|Json)\??\s/gm)].map(([, name, type]) => `"${name}" ${types[type]}${name === "id" ? " PRIMARY KEY" : name === "idempotencyKey" ? " UNIQUE" : ""}`);
+    await db.$executeRawUnsafe(`CREATE TABLE "ExternalUsageEvent" (${columns.join(",")})`);
+    await db.$executeRawUnsafe('CREATE TABLE "ExternalUsageEventTombstone" ("idempotencyKey" TEXT PRIMARY KEY, "occurredAt" DATETIME NOT NULL, "prunedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    const base = { sourceApp: "claude-code", provider: "anthropic", service: "claude-code", metricType: "usage", unit: "token", label: "token:output", quantity: 20, keyRef: "claude-test", billingMode: "estimated", confidence: "estimated", metadata: { collector: "transcript", model: "claude-test" } };
+    const proof = { idempotencyKey: "duplicate", keeperIdempotencyKey: "keeper", label: base.label, model: base.keyRef, quantity: 20, occurredAt: "2026-10-29T12:00:01.000Z", keeperOccurredAt: "2026-10-29T12:00:00.000Z" };
+    await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "keeper", occurredAt: new Date(proof.keeperOccurredAt) } });
+    await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "duplicate", occurredAt: new Date(proof.occurredAt) } });
+    const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
+    assert.equal(plan.approved.length, 1);
+    const indexPath = join(directory, "index.json"), backupPath = join(directory, "backup.db");
+    const index = await writeStoredCleanupShards(indexPath, plan, ["f".repeat(64)]);
+    await db.$executeRaw`VACUUM INTO ${backupPath}`;
+    await chmod(backupPath, 0o600);
+    const backupSha = createHash("sha256").update(await readFile(backupPath)).digest("hex");
+    const cli = fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url));
+    const environment = { ...process.env, VITEST: "true", DATABASE_URL: "file:" + join(directory, "test.db") };
+    const applyArgs = [cli, "--apply", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256, "--full-backup-verified", "--full-backup-path", backupPath, "--full-backup-sha256", backupSha];
+    const applied = spawnSync(process.execPath, applyArgs, { env: environment, encoding: "utf8" });
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(JSON.parse(applied.stdout).deletedThisRun, 1);
+    const resumed = spawnSync(process.execPath, applyArgs, { env: environment, encoding: "utf8" });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(JSON.parse(resumed.stdout).deletedThisRun, 0);
+    assert.equal(JSON.parse(resumed.stdout).resumedFromReceipts, 1);
+    const verified = spawnSync(process.execPath, [cli, "--verify", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256], { env: environment, encoding: "utf8" });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(JSON.parse(verified.stdout).verified, true);
+    assert.equal(await db.externalUsageEvent.count(), 1);
+    assert.equal(await db.externalUsageEventTombstone.count(), 1);
+    await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });
+    await db.externalUsageEventTombstone.create({ data: { idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });
+    const collision = await buildStoredClaudeDuplicatePlan(db, [{ ...proof, idempotencyKey: "collision" }]);
+    await assert.rejects(applyStoredClaudeDuplicatePlan(db, collision, { reviewedDigest: collision.digest, backupDigest: "a".repeat(64), reviewedBackupDigest: "a".repeat(64) }));
+    assert.equal(await db.externalUsageEvent.count(), 2);
+  } finally { await db.$disconnect(); await rm(directory, { recursive: true, force: true }); }
+});

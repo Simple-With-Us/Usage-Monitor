@@ -383,6 +383,11 @@ jobs:
       - name: Test detached collector runtime updates
         run: npm run test:collector-runtime
 
+      - name: Test Claude Duplicate Cleanup
+        env:
+          VITEST: "true"
+        run: node --test scripts/__tests__/claude-duplicate-cleanup.test.mjs scripts/__tests__/claude-duplicate-stored-plan.test.mjs scripts/__tests__/claude-duplicate-sqlite.test.mjs
+
       - name: Test CF token map
         run: npm run test:cf-token-map
 
