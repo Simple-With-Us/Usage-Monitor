@@ -1,3 +1,9 @@
+## Current (2026-10-30 CODEX — Repository Report Library)
+
+`docs/reports/README.md` is the entry point for saved reports, audits, reviews and research.  Historical files retain their original paths and links.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The central document collector and placement are tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
 ## Current (2026-10-29 CODEX — Host-Isolated Unit Tests)
 
 Unit tests no longer select live `/data` R2 guard files when the runner has a production-style data mount.
