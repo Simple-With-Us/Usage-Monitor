@@ -62,7 +62,9 @@ dbs:
       #   LITESTREAM_S3_REGION=eu-central-003
       #   keys: fleet-usage-monitor-backup (write) — NOT the monitor read-only key
       bucket: ${LITESTREAM_S3_BUCKET}
-      path: api-usage-monitor/prod.db
+      # Fresh baseline after the prior chain failed an independent restore.
+      # Keep the previous prefix intact for incident recovery and inspection.
+      path: api-usage-monitor/prod-recovery-v1.db
       region: ${LITESTREAM_S3_REGION}
       endpoint: ${LITESTREAM_S3_ENDPOINT}
       access-key-id: ${LITESTREAM_S3_ACCESS_KEY_ID}
