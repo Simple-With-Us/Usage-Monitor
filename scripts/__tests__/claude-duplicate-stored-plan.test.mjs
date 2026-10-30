@@ -19,7 +19,7 @@ function client(rows) {
       findMany: async ({ where }) => structuredClone(records.filter((row) => where.idempotencyKey.in.includes(row.idempotencyKey))),
       deleteMany: async ({ where }) => { calls.push("delete"); const count = records.filter((row) => where.id.in.includes(row.id)).length; records = records.filter((row) => !where.id.in.includes(row.id)); return { count }; },
     },
-    externalUsageEventTombstone: { createMany: async () => { calls.push("tombstone"); } },
+    externalUsageEventTombstone: { createMany: async () => { calls.push("tombstone"); }, findMany: async () => [] },
     $executeRawUnsafe: async () => calls.push("writer-lock"),
     $transaction: async (fn) => fn(db), calls,
   };
@@ -130,4 +130,13 @@ test("CLI failures disclose only the fixed phase and error name", async () => {
     assert.equal(source.status, 1);
     assert.deepEqual(JSON.parse(source.stderr), { phase: "cleanup-source-plan", errorName: "Error" });
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("historical tombstones are counted as uncertain history without changing rollups", async () => {
+  const db = client([row("keeper")]);
+  db.externalUsageEventTombstone.findMany = async () => [{ idempotencyKey: "duplicate", occurredAt: proof.occurredAt }];
+  const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
+  assert.equal(plan.approved.length, 0);
+  assert.equal(plan.skipped.compactedOrPreviouslyPruned, 1);
+  assert.deepEqual(plan.historicalTombstoneQuantities, { "token:output": 20 });
+  assert.deepEqual(db.calls, []);
 });

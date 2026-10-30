@@ -43,19 +43,31 @@ function matches(row, proof, keeper = false) {
 export async function buildStoredClaudeDuplicatePlan(client, proofs) {
   const merged = mergeHostProofs(proofs);
   proofs = merged.normalized;
-  const approved = [], skipped = { absent: 0, keeperAbsent: 0, mismatch: 0, ...merged.skipped };
+  const approved = [], skipped = { absent: 0, keeperAbsent: 0, mismatch: 0, compactedOrPreviouslyPruned: 0, ...merged.skipped };
+  const historicalTombstoneQuantities = {};
   const seen = new Set();
   for (let offset = 0; offset < proofs.length; offset += 200) {
     const batch = proofs.slice(offset, offset + 200);
     const keys = [...new Set(batch.flatMap((proof) => [proof.idempotencyKey, proof.keeperIdempotencyKey]))];
     const rows = await client.externalUsageEvent.findMany({ where: { idempotencyKey: { in: keys } } });
     const byKey = new Map(rows.map((row) => [row.idempotencyKey, row]));
+    const missingKeys = batch.filter((proof) => !byKey.has(proof.idempotencyKey)).map((proof) => proof.idempotencyKey);
+    const tombstones = missingKeys.length ? await client.externalUsageEventTombstone.findMany({ where: { idempotencyKey: { in: missingKeys } }, select: { idempotencyKey: true, occurredAt: true } }) : [];
+    const pruned = new Map(tombstones.map((row) => [row.idempotencyKey, row]));
     for (const proof of batch) {
       if (seen.has(proof.idempotencyKey)) throw new Error("Duplicate candidate identity in proof manifest");
       seen.add(proof.idempotencyKey);
       if (proof.idempotencyKey === proof.keeperIdempotencyKey) throw new Error("Candidate is its own keeper");
       const row = byKey.get(proof.idempotencyKey), keeper = byKey.get(proof.keeperIdempotencyKey);
-      if (!row) { skipped.absent++; continue; }
+      if (!row) {
+        skipped.absent++;
+        const tombstone = pruned.get(proof.idempotencyKey);
+        if (tombstone && new Date(tombstone.occurredAt).toISOString() === proof.occurredAt) {
+          skipped.compactedOrPreviouslyPruned++;
+          historicalTombstoneQuantities[proof.label] = (historicalTombstoneQuantities[proof.label] ?? 0) + proof.quantity;
+        }
+        continue;
+      }
       if (!keeper) { skipped.keeperAbsent++; continue; }
       if (!matches(row, proof) || !matches(keeper, proof, true) ||
         row.projectId !== keeper.projectId || row.environment !== keeper.environment ||
@@ -66,7 +78,7 @@ export async function buildStoredClaudeDuplicatePlan(client, proofs) {
   }
   const deleted = new Set(approved.map(({ row }) => row.idempotencyKey));
   if (approved.some(({ keeper }) => deleted.has(keeper.idempotencyKey))) throw new Error("Plan would delete a required keeper");
-  return { approved, skipped, digest: storedPlanDigest(approved) };
+  return { approved, skipped, historicalTombstoneQuantities, digest: storedPlanDigest(approved) };
 }
 
 /** Caller must persist a protected backup and verify its digest before calling. */

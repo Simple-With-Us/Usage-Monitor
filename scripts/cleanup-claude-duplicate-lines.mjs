@@ -51,7 +51,7 @@ try {
     const handle = await open(output, "wx", 0o600);
     try { await handle.writeFile(JSON.stringify({ ...plan, sourceManifestHashes: manifests.map(fingerprint) })); await handle.sync(); }
     finally { await handle.close(); }
-    console.log(JSON.stringify({ mode: "dry-run", matchedCandidates: plan.approved.length, skipped: plan.skipped, reviewedDigest: plan.digest }));
+    console.log(JSON.stringify({ mode: "dry-run", matchedCandidates: plan.approved.length, skipped: plan.skipped, historicalTombstoneQuantities: plan.historicalTombstoneQuantities, reviewedDigest: plan.digest }));
   } else {
     if (!Array.isArray(parsed.approved) || storedPlanDigest(parsed.approved) !== parsed.digest) throw new Error("Stored plan hash mismatch");
     // This exact protected plan includes complete candidate and keeper backups.
