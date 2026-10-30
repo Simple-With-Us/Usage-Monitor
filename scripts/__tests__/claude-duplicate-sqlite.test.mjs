@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPrismaClient } from "../lib/create-prisma-client.mjs";
@@ -44,6 +44,12 @@ test("real SQLite deletes exact duplicates with tombstones and rolls back on tom
     const verified = spawnSync(process.execPath, [cli, "--verify", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256], { env: environment, encoding: "utf8" });
     assert.equal(verified.status, 0, verified.stderr);
     assert.equal(JSON.parse(verified.stdout).verified, true);
+    const summaryFailure = join(directory, "summary-failure.mjs");
+    await writeFile(summaryFailure, 'console.log = () => { throw Object.assign(new Error("private summary payload"), { code: "P2028" }); };');
+    const failedSummary = spawnSync(process.execPath, ["--import", summaryFailure, cli, "--verify", "--stored-plan-index", indexPath, "--reviewed-index-digest", index.sha256], { env: environment, encoding: "utf8" });
+    assert.equal(failedSummary.status, 1);
+    assert.deepEqual(JSON.parse(failedSummary.stderr), { phase: "cleanup-maintenance", errorName: "Error", operation: "write-summary", prismaCode: "P2028" });
+    assert.equal(failedSummary.stderr.includes("private"), false);
     assert.equal(await db.externalUsageEvent.count(), 1);
     assert.equal(await db.externalUsageEventTombstone.count(), 1);
     await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });

@@ -80,6 +80,8 @@ async function main() {
         else if (apply) throw new Error("Previously receipted shard no longer matches database state");
         if ((ordinal + 1) % 50 === 0) await writeCleanupProgress(input + ".progress.json", { phase: apply ? "applying-shards" : "verifying-shards", ...totals, expectedCandidates: index.totalCandidates });
       }
+      delete diagnosticContext.shardOrdinal;
+      operation("write-summary");
       const verified = totals.confirmedDeleted === index.totalCandidates && totals.shardsVerified === index.shards.length;
       console.log(JSON.stringify({ mode: apply ? "apply" : "verify", verified, expectedCandidates: index.totalCandidates, ...totals, reviewedIndexDigest: indexDigest }));
       if (!verified) process.exitCode = 1;
