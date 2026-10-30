@@ -1061,11 +1061,13 @@ describe("POST /api/ingest/usage producer scoping", () => {
   it.each([false, true])("grants receipt authority only to a scoped BotFleet credential: scoped=%s", async (scoped) => {
     vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "botfleet:botfleet-test-scoped");
     const payload = structuredClone(botFleetReceipt);
-    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1" });
+    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64) });
     const response = await POST(nextRequest(payload, scoped ? "botfleet-test-scoped" : USAGE_TOKEN, undefined, 2));
     expect(response.status).toBe(202);
     const persisted = externalUsageMocks.persist.mock.calls[0][0][0];
     expect(persisted.metadata._botFleetReceiptCredential).toBe(scoped ? "botfleet-v1" : undefined);
+    if (scoped) expect(persisted.metadata._botFleetReceiptSignature).toMatch(/^[a-f0-9]{64}$/);
+    else expect(persisted.metadata._botFleetReceiptSignature).toBeUndefined();
   });
 
   it("accepts a scoped token when events match allowedSourceApps", async () => {

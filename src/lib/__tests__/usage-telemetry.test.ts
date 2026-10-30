@@ -964,7 +964,7 @@ describe("reserved derived-cost metadata keys", () => {
   it("strips producer-supplied receipt authority from legacy metadata", () => {
     const [event] = parseUsageTelemetryBatch({
       sourceApp: "botfleet", provider: "anthropic", metricType: "usage", unit: "token", quantity: 10,
-      metadata: { _botFleetReceiptCredential: "botfleet-v1", legitimate: "kept" },
+      metadata: { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64), legitimate: "kept" },
     });
     expect(event.metadata).toEqual({ legitimate: "kept" });
   });

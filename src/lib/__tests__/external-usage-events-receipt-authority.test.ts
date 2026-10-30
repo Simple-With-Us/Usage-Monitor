@@ -14,7 +14,7 @@ describe("receipt authority across idempotent replay", () => {
     quantity: 10, unit: "token", occurredAt: new Date("2026-10-30T12:00:00Z"),
   };
   const metadata = (trusted: boolean) => ({
-    model: "test-model", ...(trusted ? { _botFleetReceiptCredential: "botfleet-v1" } : {}),
+    model: "test-model", ...(trusted ? { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "a".repeat(64) } : {}),
   });
 
   beforeAll(async () => {

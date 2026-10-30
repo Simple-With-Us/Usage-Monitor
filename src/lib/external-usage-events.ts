@@ -351,7 +351,7 @@ function comparableEvent(
     withoutDerivedCostMetadata(value.metadata ?? null),
     // Authentication is receiver-owned and may differ across a credential
     // rollout; replay never upgrades or removes the stored receipt authority.
-    ["_botFleetReceiptCredential", ...(options.ignoreMetadataKeys ?? [])]
+    ["_botFleetReceiptCredential", "_botFleetReceiptSignature", ...(options.ignoreMetadataKeys ?? [])]
   );
   const metadata = options.ignoreCanonicalAi
     ? withoutCanonicalAiMetadata(serverComparable)
