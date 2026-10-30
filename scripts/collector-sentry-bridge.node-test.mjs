@@ -25,6 +25,8 @@ test("configuration is explicit, project scoped and refuses non-Sentry destinati
   const env = { COLLECTOR_SENTRY_ENABLED: "1", COLLECTOR_TELEMETRY_HUB_ENDPOINT: "http://127.0.0.1:4318", COLLECTOR_TELEMETRY_HUB_TOKENS_JSON: JSON.stringify({ "claude-code": "test-only-scoped-source-bearer-00000000000000" }) };
   assert.equal(collectorSentryConfig(env, "claude-code").destination, "hub");
   assert.equal(collectorSentryConfig(env, "openai-codex"), null);
+  const ipv6 = collectorSentryConfig({ ...env, COLLECTOR_TELEMETRY_HUB_ENDPOINT: "http://[::1]:4318" }, "claude-code");
+  assert.equal(new URL(ipv6.endpoint).hostname, "[::1]");
 });
 
 test("only authoritative source calls become spans; serialization and IDs remain unchanged", () => {
@@ -75,6 +77,30 @@ test("partial rejection isolates a durable quarantine and malformed responses re
   assert.equal((await drainCollectorSentry(root, config, { fetchImpl: accepted })).delivered, 1);
 }));
 
+test("malformed OTLP ACK fields remain pending without quarantining or acknowledging", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  for (const body of [null, [], { partialSuccess: { rejectedSpans: -1 } }, { partialSuccess: { rejectedSpans: true } }, { partialSuccess: { rejectedSpans: "not-a-count" } }, { partialSuccess: { rejectedSpans: "9007199254740992" } }, { partialSuccess: { rejectedLogRecords: 1 } }]) {
+    const result = await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(body)) });
+    assert.equal(result.delivered, 0);
+    assert.equal(result.quarantined, 0);
+    assert.equal(result.pending, true);
+  }
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: accepted })).delivered, 1);
+}));
+
+test("hub ACK schema rejects invalid counters and incomplete counts without quarantine", () => fixture(async (base) => {
+  const config = { ...base, destination: "hub", token: "test-only-bearer-00000000000000000000" };
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  const good = { ok: true, received: 1, written: 1, ignored: 0 };
+  for (const body of [{ ...good, ok: false }, { ...good, received: "1" }, { ...good, written: -1 }, { ...good, ignored: 0.5 }, { ...good, received: 2 }, { ...good, ignored: 1 }, { ...good, unexpected: true }]) {
+    const result = await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(body)) });
+    assert.equal(result.delivered, 0);
+    assert.equal(result.quarantined, 0);
+    assert.equal(result.pending, true);
+  }
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(good)) })).delivered, 1);
+}));
+
 test("one rejected observation is isolated without blocking the remaining records", () => fixture(async (config) => {
   const root = await enqueueCollectorSentry(tokens(), identity, config);
   const result = await drainCollectorSentry(root, config, { fetchImpl: async (_url, init) => {
@@ -120,6 +146,31 @@ test("PID reuse recovers ownership only after process birth changes", () => fixt
   db.close();
   assert.equal((await drainCollectorSentry(root, config, { isAlive: () => true, birthOf: () => "old-birth", fetchImpl: accepted })).delivered, 0);
   assert.equal((await drainCollectorSentry(root, config, { isAlive: () => true, birthOf: () => "new-birth", fetchImpl: accepted })).delivered, 1);
+}));
+
+test("birth probes run off the writer lease once per PID and recovery does not steal replaced ownership", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens(), identity, config);
+  const path = join(root, "outbox.sqlite");
+  const seeded = new DatabaseSync(path);
+  seeded.exec("UPDATE events SET state='sending', owner='old-owner', pid=123, birth='old-birth'");
+  seeded.close();
+  let otherProbes = 0;
+  const result = await drainCollectorSentry(root, config, { isAlive: () => true, fetchImpl: accepted, birthOf: async (pid) => {
+    const probe = new DatabaseSync(path);
+    probe.exec("PRAGMA busy_timeout=0; BEGIN IMMEDIATE");
+    if (pid === 123) {
+      otherProbes += 1;
+      probe.exec("UPDATE events SET owner='replacement-owner', birth='replacement-birth' WHERE pid=123");
+    }
+    probe.exec("COMMIT");
+    probe.close();
+    return pid === 123 ? "observed-new-birth" : "current-birth";
+  } });
+  assert.equal(otherProbes, 1);
+  assert.equal(result.delivered, 0);
+  const checked = new DatabaseSync(path);
+  assert.equal(checked.prepare("SELECT COUNT(*) AS n FROM events WHERE owner='replacement-owner' AND state='sending'").get().n, 4);
+  checked.close();
 }));
 
 test("explicit pruning is bounded beyond checkpoint replay horizon and keeps pending/new receipts", () => fixture(async (config) => {

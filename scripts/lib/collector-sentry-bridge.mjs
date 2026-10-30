@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, chmod } from "node:fs/promises";
+import { mkdir, chmod, readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { z } from "zod";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { scrubInternalEvent, scrubOtlpAttributes, rebuildLogBody, scalarFromAnyValue } from "../telemetry-hub/allowlist.mjs";
@@ -13,6 +14,18 @@ import { projectHubTelemetry, telemetryIdentifier } from "../telemetry-hub/metad
 export const COLLECTOR_CALL_ID = Symbol.for("usage-monitor.collector-call-id");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const tokenTypes = new Set(["input", "output", "cacheRead", "cacheCreation"]);
+const runFile = promisify(execFile);
+const AckCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const OtlpCount = z.union([AckCount, z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number).pipe(AckCount)]);
+const HubAckSchema = z.strictObject({ ok: z.literal(true), received: AckCount, written: AckCount, ignored: AckCount });
+function otlpAckSchema(logs) {
+  const camel = logs ? "rejectedLogRecords" : "rejectedSpans";
+  const snake = logs ? "rejected_log_records" : "rejected_spans";
+  return z.strictObject({
+    partialSuccess: z.strictObject({ [camel]: OtlpCount.optional(), errorMessage: z.string().max(2048).optional() }).optional(),
+    partial_success: z.strictObject({ [snake]: OtlpCount.optional(), error_message: z.string().max(2048).optional() }).optional(),
+  }).refine((ack) => !(ack.partialSuccess && ack.partial_success));
+}
 
 export function collectorSentryConfig(env = process.env, producerId) {
   if (env.COLLECTOR_SENTRY_ENABLED !== "1") return null;
@@ -78,15 +91,15 @@ function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; }
 }
 
-function processBirth(pid) {
+async function processBirth(pid) {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const [stat, bootId] = await Promise.all([readFile(`/proc/${pid}/stat`, "utf8"), readFile("/proc/sys/kernel/random/boot_id", "utf8")]);
     const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-    const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    return hash(`${boot}:${start}`);
+    return hash(`${bootId.trim()}:${start}`);
   } catch {
     try {
-      const start = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      const { stdout } = await runFile("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 });
+      const start = stdout.trim();
       return start ? hash(start) : undefined;
     } catch { return undefined; }
   }
@@ -172,13 +185,15 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
     if (!response.ok && !poisoned) throw new Error("Outbox destination did not accept delivery");
     if (response.ok) {
       const text = await response.text();
-      const result = text ? JSON.parse(text) : {};
-      const partial = result.partialSuccess ?? result.partial_success;
-      poisoned = Number(partial?.rejectedSpans ?? partial?.rejected_spans ?? partial?.rejectedLogRecords ?? partial?.rejected_log_records ?? 0) > 0;
-      if (config.destination === "hub" && (result.ok !== true || result.received !== group.length || result.written !== group.length || result.ignored !== 0)) {
-        // Missing ACK fields are transport uncertainty, not evidence of a bad row.
-        if (typeof result.received !== "number" || typeof result.written !== "number") throw new Error("Hub acknowledgement is incomplete");
-        poisoned = true;
+      const raw = text ? JSON.parse(text) : {};
+      if (config.destination === "hub") {
+        const result = HubAckSchema.safeParse(raw);
+        if (!result.success || result.data.received !== group.length || result.data.written !== group.length || result.data.ignored !== 0) throw new Error("Hub acknowledgement is incomplete or invalid");
+      } else {
+        const result = otlpAckSchema(logs).safeParse(raw);
+        if (!result.success) throw new Error("OTLP acknowledgement is invalid");
+        const partial = result.data.partialSuccess ?? result.data.partial_success;
+        poisoned = (partial?.rejectedSpans ?? partial?.rejected_spans ?? partial?.rejectedLogRecords ?? partial?.rejected_log_records ?? 0) > 0;
       }
     }
     if (poisoned) {
@@ -198,19 +213,30 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
   };
 
   try {
+    const invocationBirth = await birthOf(process.pid) ?? null;
     for (let count = 0; count < limit && Date.now() < deadline;) {
       let rows;
+      const heldRows = db.prepare("SELECT id, owner, pid, birth FROM events WHERE state='sending' LIMIT 1000").all();
+      const processChecks = new Map();
+      for (const held of heldRows) {
+        if (!Number.isSafeInteger(held.pid) || held.pid <= 0 || processChecks.has(held.pid)) continue;
+        processChecks.set(held.pid, (async () => {
+          const alive = held.pid === process.pid || isAlive(held.pid);
+          return { alive, birth: held.pid === process.pid ? invocationBirth : alive ? await birthOf(held.pid) : undefined };
+        })());
+      }
+      const statuses = new Map(await Promise.all([...processChecks].map(async ([pid, pending]) => [pid, await pending])));
+      const stale = heldRows.filter((held) => {
+        const status = statuses.get(held.pid);
+        return status && (!status.alive || (held.birth && status.birth && held.birth !== status.birth));
+      });
       db.exec("BEGIN IMMEDIATE");
       try {
-        for (const held of db.prepare("SELECT id, pid, birth FROM events WHERE state='sending'").all()) {
-          const validPid = Number.isSafeInteger(held.pid) && held.pid > 0;
-          const birth = validPid ? birthOf(held.pid) : undefined;
-          if (validPid && (!isAlive(held.pid) || (held.birth && birth && held.birth !== birth))) db.prepare("UPDATE events SET state='pending', owner=NULL, pid=NULL, birth=NULL WHERE id=?").run(held.id);
-        }
+        const recover = db.prepare("UPDATE events SET state='pending', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND state='sending' AND owner IS ? AND pid IS ? AND birth IS ?");
+        for (const held of stale) recover.run(held.id, held.owner, held.pid, held.birth);
         rows = db.prepare("SELECT id, payload FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(100, limit - count));
         const claim = db.prepare("UPDATE events SET state='sending', owner=?, pid=?, birth=? WHERE id=?");
-        const birth = birthOf(process.pid) ?? null;
-        for (const row of rows) claim.run(owner, process.pid, birth, row.id);
+        for (const row of rows) claim.run(owner, process.pid, invocationBirth, row.id);
         db.exec("COMMIT");
       } catch (error) { if (db.isTransaction) db.exec("ROLLBACK"); throw error; }
       if (!rows.length) break;

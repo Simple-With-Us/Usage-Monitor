@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectHubTelemetry } from "./telemetry-hub/metadata-projection.mjs";
 import { scrubInternalEvent } from "./telemetry-hub/allowlist.mjs";
+import { normalizeLogRecord } from "./telemetry-hub/internal-event.mjs";
 
 const token = "test-only-bearer-000000000000000000000000000000";
 const source = { id: "codex-server", platform: "codex-cli", token };
@@ -68,7 +69,21 @@ test("auth precedes decoding and server identity overrides claims before allowli
     const firstId = events[0].eventId;
     await fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(payload()) });
     assert.equal(events[1].eventId, firstId);
+    const forged = payload();
+    forged.resourceSpans[0].resource.attributes[0].value.stringValue = "another-claimed-platform";
+    forged.resourceSpans[0].scopeSpans[0].spans[0].attributes.find((attr) => attr.key === "agent.platform").value.stringValue = "another-claimed-platform";
+    await fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(forged) });
+    assert.equal(events[2].eventId, firstId);
   } finally { await receiver.close(); }
+});
+
+test("authenticated log identity ignores caller platform aliases and remains source namespaced", () => {
+  const log = { timeUnixNano: "1793361600000000000", traceId: "a".repeat(32), spanId: "b".repeat(16), body: { stringValue: "private body" }, attributes: [{ key: "agent.platform", value: { stringValue: "claim-one" } }] };
+  const identity = { sourceId: "server-codex", platform: "openai-codex" };
+  const first = normalizeLogRecord(log, {}, identity);
+  const otherClaim = { ...log, attributes: [{ key: "agent.platform", value: { stringValue: "claim-two" } }] };
+  assert.equal(normalizeLogRecord(otherClaim, {}, identity).eventId, first.eventId);
+  assert.notEqual(normalizeLogRecord(log, {}, { ...identity, sourceId: "mac-codex" }).eventId, first.eventId);
 });
 
 test("collector-to-hub uses scoped bearer, stable OTLP identity and requires durable ACK", async () => {

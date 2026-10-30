@@ -430,12 +430,12 @@ async function handleRequest(request, response, { journal, logger, source }) {
   }
 
   const projected = isTraces ? projectTraces(checked.data) : projectLogs(checked.data);
+  const identity = source ? { sourceId: source.id, platform: source.platform } : {};
   const normalized = isTraces
-    ? normalizeOtlpTraces(projected.payload)
-    : normalizeOtlpLogs(projected.payload);
+    ? normalizeOtlpTraces(projected.payload, identity)
+    : normalizeOtlpLogs(projected.payload, identity);
   if (source) {
     for (const event of normalized.events) {
-      event.eventId = createHash("sha256").update(JSON.stringify([source.id, event.eventId])).digest("hex");
       event.platform = source.platform;
       event.authenticatedSource = source.id;
       event.serviceName = `telemetry-hub.${source.id}`;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +63,13 @@ try {
     { env, encoding: "utf8" },
   );
   assert(invalid.status !== 0, "unknown SHA rejected");
+  const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const installed = join(root, "installed");
+  mkdirSync(join(installed, "node_modules"), { recursive: true });
+  symlinkSync(join(repoRoot, "node_modules", "zod"), join(installed, "node_modules", "zod"));
+  execFileSync("bash", [join(repoRoot, "scripts", "install-collectors.sh")], { env: { ...process.env, UM_COLLECTORS_HOME: installed } });
+  assert(existsSync(join(installed, "scripts", "telemetry-hub", "metadata-projection.mjs")), "installed runtime includes the bridge transport dependency graph");
+  assert(!existsSync(join(installed, "scripts", "telemetry-hub", "__tests__")), "transport test fixtures stay out of the installed runtime");
   console.log("ok local-collector-runtime");
 } finally {
   rmSync(root, { recursive: true, force: true });

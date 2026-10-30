@@ -42,6 +42,7 @@ mkdir -p "$DEST/scripts"
 # Entry points and shared libs only; no tests, iOS tooling, or deploy scripts.
 rsync -a --delete --delete-excluded \
   --include='/lib/' --include='/lib/*.mjs' \
+  --include='/telemetry-hub/' --include='/telemetry-hub/*.mjs' \
   --include='/*-collector.mjs' \
   --include='/run-subscription-quota-collector.sh' \
   --include='/antigravity-statusline-telemetry.mjs' \
@@ -58,10 +59,11 @@ fi
 SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf 'sha=%s\ninstalled=%s\nsource=%s\n' "$SHA" "$(date -u +%FT%TZ)" "$SRC" > "$DEST/VERSION"
 
-# Smoke test: every entry point must at least parse and resolve its imports.
+# Syntax-check entry points, then resolve the common bridge dependency graph.
 for f in "$DEST"/scripts/*-collector.mjs; do
   node --check "$f"
 done
+node --input-type=module -e 'await import(process.argv[1]);' "$DEST/scripts/lib/collector-sentry-bridge.mjs"
 bash -n "$DEST/scripts/run-subscription-quota-collector.sh"
 echo "installed $SHA -> $DEST"
 
