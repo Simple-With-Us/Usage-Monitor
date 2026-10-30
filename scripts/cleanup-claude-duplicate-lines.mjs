@@ -3,6 +3,10 @@ import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan, verifyAppliedStoredClaudePlan } from "./lib/claude-duplicate-stored-plan.mjs";
 import { readProtectedCleanupJson, verifyProtectedSqliteBackup } from "./lib/protected-cleanup-file.mjs";
 import { writePrivateCleanupJson, writeCleanupProgress, writeStoredCleanupShards, readReviewedCleanupIndex, readReviewedCleanupShard, validateReviewedCleanupShards } from "./lib/stored-cleanup-artifacts.mjs";
+import { cleanupFailureDiagnostic } from "./lib/cleanup-diagnostics.mjs";
+
+const diagnosticContext = { operation: "arguments" };
+const operation = (name) => { diagnosticContext.operation = name; };
 
 async function main() {
   const args = process.argv.slice(2);
@@ -16,21 +20,27 @@ async function main() {
   if (!inventory) {
     if (!input) throw new Error("Explicit protected input file required");
     if (indexed) {
+      operation("read-index");
       index = await readReviewedCleanupIndex(input, value("--reviewed-index-digest"));
+      operation("validate-shards");
       await validateReviewedCleanupShards(input, index, { onProgress: (state) => writeCleanupProgress(input + ".progress.json", state) });
     }
-    else { inputReceipt = await readProtectedCleanupJson(input, { withDigest: true }); parsed = inputReceipt.value; }
+    else { operation("read-proof"); inputReceipt = await readProtectedCleanupJson(input, { withDigest: true }); parsed = inputReceipt.value; }
   }
   if (apply && (!args.includes("--full-backup-verified") || !value("--full-backup-path") || !value("--full-backup-sha256") || !value("--reviewed-index-digest"))) throw new Error("Apply requires independently reviewed plan and full backup digests");
   let backupDigest;
   if (apply) {
+    operation("verify-backup");
     const livePath = process.env.DATABASE_URL?.replace(/^file:/, "").split("?")[0];
     backupDigest = await verifyProtectedSqliteBackup(resolve(value("--full-backup-path")), livePath ? resolve(livePath) : undefined, value("--full-backup-sha256"));
   }
+  operation("create-client");
   const prisma = createPrismaClient();
+  let primaryFailed = false;
   try {
-    if (args.includes("--litestream-wal-owner-verified")) await prisma.$queryRaw`PRAGMA wal_autocheckpoint = 0`;
+    if (args.includes("--litestream-wal-owner-verified")) { operation("configure-wal"); await prisma.$queryRaw`PRAGMA wal_autocheckpoint = 0`; }
     if (inventory) {
+      operation("inventory");
       const raw = await prisma.externalUsageEvent.aggregate({ where: { sourceApp: "claude-code", metricType: "usage", unit: "token" }, _count: { _all: true }, _min: { occurredAt: true }, _max: { occurredAt: true } });
       const rollups = await prisma.externalUsageEventDailyRollup.aggregate({ where: { sourceApp: "claude-code", metricType: "usage", unit: "token" }, _count: { _all: true }, _min: { day: true }, _max: { day: true } });
       console.log(JSON.stringify({ mode: "inventory", raw, rollups }));
@@ -38,23 +48,30 @@ async function main() {
       const indexDigest = value("--reviewed-index-digest");
       const totals = { confirmedDeleted: 0, deletedThisRun: 0, resumedFromReceipts: 0, shardsVerified: 0, candidatesRemaining: 0, matchingTombstones: 0, keeperChecksFailed: 0, missingReceipts: 0 };
       for (let ordinal = 0; ordinal < index.shards.length; ordinal++) {
+        diagnosticContext.shardOrdinal = ordinal + 1;
         const entry = index.shards[ordinal];
+        operation("read-shard");
         const plan = await readReviewedCleanupShard(input, index, entry);
         const receiptPath = input + ".receipt-" + String(ordinal + 1).padStart(6, "0") + ".json";
         let receipt, check;
+        operation("read-receipt");
         try { receipt = await readProtectedCleanupJson(receiptPath); }
         catch (error) { if (error.code !== "ENOENT") throw error; }
         if (receipt && (receipt.indexDigest !== indexDigest || receipt.shardSha256 !== entry.sha256 || receipt.reviewedDigest !== entry.reviewedDigest || receipt.deleted !== entry.count || !/^[a-f0-9]{64}$/.test(receipt.backupDigest ?? "") || (apply && receipt.backupDigest !== backupDigest))) throw new Error("Cleanup receipt does not match the reviewed shard");
         if (apply && !receipt) {
-          const result = await applyStoredClaudeDuplicatePlan(prisma, plan, { reviewedDigest: entry.reviewedDigest, backupDigest, reviewedBackupDigest: value("--full-backup-sha256") });
+          operation("apply-shard");
+          const result = await applyStoredClaudeDuplicatePlan(prisma, plan, { reviewedDigest: entry.reviewedDigest, backupDigest, reviewedBackupDigest: value("--full-backup-sha256"), onOperation: operation });
           if (result.deleted !== entry.count) throw new Error("Shard deletion count differs from reviewed count");
+          operation("verify-shard");
           check = await verifyAppliedStoredClaudePlan(prisma, plan);
           if (!check.verified) throw new Error("Committed shard did not pass exact verification");
           receipt = { indexDigest, shardSha256: entry.sha256, reviewedDigest: entry.reviewedDigest, backupDigest, deleted: result.deleted };
+          operation("write-receipt");
           await writePrivateCleanupJson(receiptPath, receipt);
           totals.deletedThisRun += result.deleted;
         } else if (receipt) totals.resumedFromReceipts += receipt.deleted;
         else totals.missingReceipts++;
+        operation("verify-shard");
         check ??= await verifyAppliedStoredClaudePlan(prisma, plan);
         totals.candidatesRemaining += check.candidatesRemaining;
         totals.matchingTombstones += check.matchingTombstones;
@@ -63,6 +80,8 @@ async function main() {
         else if (apply) throw new Error("Previously receipted shard no longer matches database state");
         if ((ordinal + 1) % 50 === 0) await writeCleanupProgress(input + ".progress.json", { phase: apply ? "applying-shards" : "verifying-shards", ...totals, expectedCandidates: index.totalCandidates });
       }
+      delete diagnosticContext.shardOrdinal;
+      operation("write-summary");
       const verified = totals.confirmedDeleted === index.totalCandidates && totals.shardsVerified === index.shards.length;
       console.log(JSON.stringify({ mode: apply ? "apply" : "verify", verified, expectedCandidates: index.totalCandidates, ...totals, reviewedIndexDigest: indexDigest }));
       if (!verified) process.exitCode = 1;
@@ -82,20 +101,27 @@ async function main() {
       const proofs = manifests.flatMap((manifest) => manifest.candidates);
       if (proofs.length > 1_000_000) throw new Error("Combined proof limit exceeded");
       await progress({ phase: "normalizing-proofs", sourceProofs: proofs.length });
+      operation("build-plan");
       const plan = await buildStoredClaudeDuplicatePlan(prisma, proofs, { onProgress: progress });
       for (const manifest of manifests) manifest.candidates = [];
       proofs.length = 0; parsed = undefined;
       await progress({ phase: "writing-plan-shards", matchedCandidates: plan.approved.length, skipped: plan.skipped });
+      operation("write-plan");
       const result = await writeStoredCleanupShards(output, plan, sourceManifestHashes, { onProgress: progress });
       await progress({ phase: "dry-run-complete", matchedCandidates: plan.approved.length, shards: result.index.shards.length, indexSha256: result.sha256 });
       console.log(JSON.stringify({ mode: "dry-run", matchedCandidates: plan.approved.length, skipped: plan.skipped, historicalTombstoneQuantities: plan.historicalTombstoneQuantities,
         reviewedPlanDigest: plan.digest, reviewedIndexDigest: result.sha256, indexBytes: result.bytes, shards: result.index.shards.length, largestShardBytes: Math.max(0, ...result.index.shards.map((entry) => entry.bytes)) }));
     }
-  } finally { await prisma.$disconnect(); }
+  } catch (error) { primaryFailed = true; throw error; }
+  finally {
+    try { await prisma.$disconnect(); }
+    catch (error) {
+      if (!primaryFailed) { operation("disconnect"); delete diagnosticContext.shardOrdinal; throw error; }
+    }
+  }
 }
 
 main().catch((error) => {
-  const errorName = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error?.name ?? "") ? error.name : "Error";
-  console.error(JSON.stringify({ phase: "cleanup-maintenance", errorName }));
+  console.error(JSON.stringify(cleanupFailureDiagnostic(error, diagnosticContext)));
   process.exitCode = 1;
 });

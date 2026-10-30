@@ -94,7 +94,7 @@ export async function buildStoredClaudeDuplicatePlan(client, proofs, { onProgres
 }
 
 /** Caller must persist a protected backup and verify its digest before calling. */
-export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDigest, backupDigest, reviewedBackupDigest } = {}) {
+export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDigest, backupDigest, reviewedBackupDigest, onOperation = () => {} } = {}) {
   if (plan.digest !== storedPlanDigest(plan.approved) || plan.digest !== reviewedDigest ||
     !/^[a-f0-9]{64}$/.test(backupDigest ?? "") || backupDigest !== reviewedBackupDigest) throw new Error("Reviewed plan and verified backup digest required");
   if (plan.approved.some((entry) => fingerprint(entry.row) !== entry.rowFingerprint || fingerprint(entry.keeper) !== entry.keeperFingerprint)) {
@@ -104,8 +104,10 @@ export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDig
   for (let offset = 0; offset < plan.approved.length; offset += 100) {
     const batch = plan.approved.slice(offset, offset + 100);
     await client.$transaction(async (tx) => {
+      onOperation("writer-lock");
       await tx.$executeRaw`UPDATE "ExternalUsageEvent" SET "quantity" = "quantity" WHERE "id" = ${batch[0].row.id}`;
       const keys = [...new Set(batch.flatMap(({ row, keeper }) => [row.idempotencyKey, keeper.idempotencyKey]))];
+      onOperation("reread-rows");
       const current = await tx.externalUsageEvent.findMany({ where: { idempotencyKey: { in: keys } } });
       const byKey = new Map(current.map((row) => [row.idempotencyKey, row]));
       for (const entry of batch) {
@@ -114,9 +116,12 @@ export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDig
           throw new Error("Candidate or keeper changed after review; remaining cleanup aborted");
         }
       }
+      onOperation("write-tombstones");
       await tx.externalUsageEventTombstone.createMany({ data: batch.map(({ row }) => ({ idempotencyKey: row.idempotencyKey, occurredAt: row.occurredAt })) });
+      onOperation("delete-candidates");
       const result = await tx.externalUsageEvent.deleteMany({ where: { id: { in: batch.map(({ row }) => row.id) } } });
       if (result.count !== batch.length) throw new Error("Exact deletion count mismatch");
+      onOperation("commit-shard");
     }, { timeout: 10_000 });
     deleted += batch.length;
     await new Promise((resolve) => setImmediate(resolve));
