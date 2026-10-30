@@ -497,6 +497,25 @@ describe("POST /api/ingest/usage admission", () => {
     release?.();
   });
 
+  it.each(["SQLITE_BUSY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED_SHAREDCACHE"])(
+    "returns retryable receiver_busy for %s without acknowledging data",
+    async (originalCode) => {
+      externalUsageMocks.persist.mockRejectedValueOnce({
+        code: "P1008",
+        meta: { driverAdapterError: { cause: { originalCode } } },
+      });
+      const response = await POST(v2Request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(await response.json()).toMatchObject({
+        ok: false, error: { code: "receiver_busy", retryable: true, retryAfterSeconds: 5 },
+      });
+      const release = tryAcquireIngestAdmission();
+      expect(release).not.toBeNull();
+      release?.();
+    }
+  );
+
   it("accepts an exact signed receipt only for its dedicated token and provider ID", async () => {
     const response = await POST(receiptRequest());
     expect(response.status).toBe(202);
