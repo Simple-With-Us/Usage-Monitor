@@ -197,6 +197,103 @@ describe("chunked month-to-date external-cost scan", () => {
     expect(byKey.get("openai|codex||cost")?.costUsd).toBeCloseTo(3, 10);
   });
 
+  it("matches old SQLite aggregates while yielding between dashboard pages", async () => {
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "ExternalUsageEvent"
+        ("id", "idempotencyKey", "sourceApp", "provider", "metricType", "costUsd", "requests", "quantity", "limit", "limitWindow", "occurredAt", "metadata", "billingMode", "confidence", "createdAt")
+      WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 4500)
+      SELECT 'dash-' || printf('%05d', x), 'dash-idem-' || printf('%05d', x),
+        'dashboard-bulk', CASE WHEN x <= 4000 THEN 'bulk-provider' ELSE 'null-provider' END,
+        'usage', CASE WHEN x % 4 = 0 THEN NULL WHEN x % 4 = 1 THEN 0 ELSE 0.25 END,
+        CASE WHEN x % 3 = 0 THEN NULL ELSE 1 END,
+        CASE WHEN x % 5 = 0 THEN NULL ELSE x END,
+        CASE WHEN x = 3999 THEN 900 WHEN x = 4000 THEN 901 ELSE NULL END,
+        CASE WHEN x IN (3999, 4000) THEN 'month' ELSE NULL END,
+        '2026-10-04T12:00:00.000+00:00',
+        CASE WHEN x = 3 THEN '{"_derivedCostUsd":"1abc"}' WHEN x % 3 = 0 THEN '{"_derivedCostUsd":0.125}' ELSE NULL END,
+        'estimated', 'estimated', '2026-10-04T12:00:00.000+00:00'
+      FROM c
+    `);
+    const providerUuid = "123e4567-e89b-42d3-a456-426614174000";
+    const digest = "ab".repeat(32);
+    await prisma.externalUsageEvent.createMany({
+      data: [
+        ev({ id: "dash-analytics", idempotencyKey: "dash-analytics", sourceApp: "claude-code", provider: "anthropic", service: "claude-code", metricType: "cost", costUsd: 100 }),
+        ev({ id: "dash-valid-receipt", idempotencyKey: `billing-receipt:v1:${digest}`, sourceApp: "billing-receipt-import", provider: "billing", service: "api-prepaid-funding", label: "receipt_cash_paid", keyRef: `provider:${providerUuid}:billing-receipt:${digest}`, billingMode: "actual", confidence: "actual", metricType: "cost", unit: "usd", costUsd: 25 }),
+        ev({ id: "dash-bad-receipt", idempotencyKey: "dash-bad-receipt", sourceApp: "billing-receipt-import", provider: "billing", service: "api-prepaid-funding", label: "receipt_cash_paid", keyRef: "bad", billingMode: "actual", confidence: "actual", metricType: "cost", unit: "usd", costUsd: 7 }),
+        ev({ id: "dash-quota", idempotencyKey: "dash-quota", sourceApp: "dashboard-bulk", provider: "bulk-provider", metricType: "quota_sync", costUsd: 500 }),
+      ],
+    });
+
+    const { summarizeExternalUsageEvents, buildDailySpendSeries } = await import("../external-usage-events");
+    const oldGroups = await prisma.$queryRawUnsafe<Array<{ provider: string; metricType: string; count: bigint; priced: bigint; cost: number | null; latest: string }>>(`
+      SELECT "provider", "metricType", COUNT(*) AS "count", COUNT("costUsd") AS "priced",
+        SUM("costUsd") AS "cost", MAX("occurredAt") AS "latest"
+      FROM "ExternalUsageEvent"
+      WHERE "occurredAt" >= '2026-10-01T00:00:00.000+00:00' AND "occurredAt" <= '2026-10-05T00:00:00.000+00:00'
+        AND "metricType" NOT IN ('quota_sync', 'credit_balance')
+        AND ("sourceApp" <> 'billing-receipt-import' OR "service" IS NULL OR "service" <> 'api-prepaid-funding' OR "label" IS NULL OR "label" <> 'receipt_cash_paid' OR "billingMode" <> 'actual' OR "metricType" <> 'cost' OR "confidence" <> 'actual')
+      GROUP BY "provider", "metricType"
+    `);
+    const oldDaily = await prisma.$queryRawUnsafe<Array<{ day: string; cost: number }>>(`
+      SELECT date("occurredAt") AS "day", COALESCE(SUM("costUsd"), 0) AS "cost"
+      FROM "ExternalUsageEvent"
+      WHERE "occurredAt" >= '2026-10-01T00:00:00.000+00:00' AND "occurredAt" <= '2026-10-05T00:00:00.000+00:00'
+        AND "metricType" NOT IN ('quota_sync', 'credit_balance') GROUP BY date("occurredAt")
+    `);
+    const oldDerived = await prisma.$queryRawUnsafe<Array<{ total: number; count: bigint }>>(`
+      SELECT COALESCE(SUM(json_extract("metadata", '$._derivedCostUsd')), 0) AS "total", COUNT(*) AS "count"
+      FROM "ExternalUsageEvent" WHERE "occurredAt" >= '2026-10-01T00:00:00.000+00:00' AND json_extract("metadata", '$._derivedCostUsd') IS NOT NULL
+    `);
+    const previousFlag = process.env.INGEST_COST_DERIVATION_ENABLED;
+    process.env.INGEST_COST_DERIVATION_ENABLED = "true";
+    let summary: Awaited<ReturnType<typeof summarizeExternalUsageEvents>>;
+    let daily: Awaited<ReturnType<typeof buildDailySpendSeries>>;
+    let timerTurns = 0;
+    const timer = setInterval(() => { timerTurns += 1; }, 0);
+    try {
+      summary = await summarizeExternalUsageEvents(MONTH_START, MONTH_START, NOW);
+      daily = await buildDailySpendSeries(MONTH_START, MONTH_START, NOW);
+    } finally {
+      clearInterval(timer);
+      if (previousFlag === undefined) delete process.env.INGEST_COST_DERIVATION_ENABLED;
+      else process.env.INGEST_COST_DERIVATION_ENABLED = previousFlag;
+    }
+    expect(timerTurns).toBeGreaterThan(0);
+    for (const old of oldGroups) {
+      const isAnalytics = old.provider === "anthropic";
+      const actual = summary.groups.find((group) => group.provider === old.provider && group.metricType === old.metricType);
+      expect(actual?.eventCount).toBe(Number(old.count));
+      expect(actual?.pricedEventCount).toBe(isAnalytics ? 0 : Number(old.priced));
+      expect(actual?.totalCostUsd).toBeCloseTo(isAnalytics ? 0 : old.cost ?? 0, 8);
+      expect(actual?.latestAt).toBe(new Date(old.latest).toISOString());
+    }
+    expect(summary.derivedCostEstimateEventCount).toBe(Number(oldDerived[0].count));
+    expect(summary.derivedCostEstimateUsd).toBeCloseTo(oldDerived[0].total, 8);
+    expect(summary.groups.find((group) => group.provider === "bulk-provider")?.limit).toBe(901);
+    expect(summary.groups.find((group) => group.provider === "anthropic")?.estimatedApiEquivalentUsd).toBe(100);
+    expect(summary.groups.find((group) => group.provider === "billing")).toMatchObject({ totalCostUsd: 7, receiptCashPaidUsd: 25 });
+    expect(daily).toEqual(oldDaily.map((row) => ({ day: row.day, totalCostUsd: row.cost })));
+  });
+
+  it("preserves the mixed rollup/raw daily split for a non-midnight cutoff", async () => {
+    const cutoff = new Date("2026-10-03T12:00:00.000Z");
+    await prisma.externalUsageEventDailyRollup.createMany({ data: [
+      { day: new Date("2026-10-02T00:00:00.000Z"), groupKey: "mixed-1", sourceApp: "history", provider: "p", billingMode: "estimated", metricType: "cost", confidence: "estimated", eventCount: 1, pricedEventCount: 1, unpricedEventCount: 0, unclassifiedCostEventCount: 0, totalCostUsd: 10, latestOccurredAt: new Date("2026-10-02T10:00:00.000Z") },
+      { day: new Date("2026-10-03T00:00:00.000Z"), groupKey: "mixed-2", sourceApp: "history", provider: "p", billingMode: "estimated", metricType: "cost", confidence: "estimated", eventCount: 1, pricedEventCount: 1, unpricedEventCount: 0, unclassifiedCostEventCount: 0, totalCostUsd: 20, latestOccurredAt: new Date("2026-10-03T11:00:00.000Z") },
+    ] });
+    await prisma.externalUsageEvent.createMany({ data: [
+      ev({ id: "mixed-before-cutoff", idempotencyKey: "mixed-before-cutoff", costUsd: 5, occurredAt: new Date("2026-10-03T10:00:00.000Z") }),
+      ev({ id: "mixed-after-cutoff", idempotencyKey: "mixed-after-cutoff", costUsd: 7, occurredAt: new Date("2026-10-03T13:00:00.000Z") }),
+    ] });
+    const { buildDailySpendSeries } = await import("../external-usage-events");
+    const actual = await buildDailySpendSeries(new Date("2026-10-02T00:00:00.000Z"), cutoff, NOW);
+    expect(actual).toEqual([
+      { day: "2026-10-02", totalCostUsd: 10 },
+      { day: "2026-10-03", totalCostUsd: 27 },
+    ]);
+  });
+
   it("walks multiple chunks on an (occurredAt, id) cursor and yields to the event loop", async () => {
     // 12,000 rows at one identical timestamp: pagination must rely on the
     // id half of the cursor, and crossing several chunk boundaries

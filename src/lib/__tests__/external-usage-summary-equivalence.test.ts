@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// E1 equivalence proof: summarizeExternalUsageEvents used to fold the whole
-// raw month in JS via cursor pagination; it now runs ONE SQL groupBy plus a
-// small receipt-candidate query. This test drives BOTH algorithms from a
-// single in-memory fixture:
+// Equivalence proof: summarizeExternalUsageEvents folds bounded raw SQL
+// pages alongside the receipt-candidate query. This test drives both the
+// current algorithm and its prior-fold reference from one in-memory fixture:
 //
-//   - the NEW implementation (real module code), with prisma mocks that
-//     compute the groupBy / findMany result shapes from the fixture exactly
-//     the way SQLite would, and
+//   - the current implementation (real module code), with Prisma mocks that
+//     return raw event pages and receipt candidates from the fixture, and
 //   - a REFERENCE implementation below that is a line-for-line copy of the
 //     old JS fold (kept here, not in src/, so no dead code ships),
 //
@@ -16,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const prismaMock = vi.hoisted(() => ({
   externalUsageEvent: { findMany: vi.fn(), groupBy: vi.fn() },
   externalUsageEventDailyRollup: { findMany: vi.fn() },
+  $queryRaw: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
@@ -251,7 +250,7 @@ const ROLLUPS = [
 // ---------------------------------------------------------------------------
 
 // The fixed-shape receipt-candidate superset, mirroring
-// rawReceiptCashCandidates' where clause (and, complemented, the groupBy's
+// rawReceiptCashCandidates' where clause (and, complemented, the raw scan's
 // NON_RECEIPT_CANDIDATE_WHERE exclusion).
 function isReceiptCandidateShape(event: {
   sourceApp: string;
@@ -274,6 +273,29 @@ function isReceiptCandidateShape(event: {
 type FixtureEvent = (typeof RAW_EVENTS)[number];
 
 function installFixtureMocks() {
+  let summaryRows: Array<Record<string, unknown>> = [];
+  let initialized = false;
+  prismaMock.$queryRaw.mockImplementation((query: unknown) => {
+    const sql = typeof (query as { sql?: unknown })?.sql === "string"
+      ? (query as { sql: string }).sql
+      : "";
+    if (!sql.includes('"limit", "limitWindow"')) return Promise.resolve([]);
+    if (!initialized) {
+      initialized = true;
+      const values = (query as { values?: unknown[] })?.values ?? [];
+      const dates = values.filter((value): value is Date => value instanceof Date);
+      const [from, through] = dates;
+      summaryRows = RAW_EVENTS
+        .filter((event) => (!from || event.occurredAt >= from) && (!through || event.occurredAt <= through))
+        .filter((event) => !["quota_sync", "credit_balance"].includes(event.metricType) && !isReceiptCandidateShape(event))
+        .map((event) => ({ ...event }))
+        .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id));
+    }
+    const page = summaryRows.slice(0, 2_000);
+    summaryRows = summaryRows.slice(page.length);
+    return Promise.resolve(page);
+  });
+
   prismaMock.externalUsageEvent.findMany.mockImplementation(
     (args?: { where?: { occurredAt?: { gte?: Date } } }) => {
       const gte = args?.where?.occurredAt?.gte;
@@ -281,83 +303,6 @@ function installFixtureMocks() {
         RAW_EVENTS.filter(
           (event) => isReceiptCandidateShape(event) && (!gte || event.occurredAt >= gte)
         )
-      );
-    }
-  );
-
-  prismaMock.externalUsageEvent.groupBy.mockImplementation(
-    (args: {
-      by: string[];
-      where: { occurredAt: { gte: Date }; metricType: { notIn: string[] } };
-    }) => {
-      const gte = args.where.occurredAt.gte;
-      const notIn = new Set(args.where.metricType.notIn);
-      const rows = RAW_EVENTS.filter(
-        (event) =>
-          event.occurredAt >= gte &&
-          !notIn.has(event.metricType) &&
-          !isReceiptCandidateShape(event)
-      );
-      const buckets = new Map<
-        string,
-        {
-          dims: unknown[];
-          countAll: number;
-          countCost: number;
-          sumCost: number | null;
-          sumRequests: number | null;
-          sumQuantity: number | null;
-          max: Date | null;
-        }
-      >();
-      for (const event of rows) {
-        const dims = args.by.map(
-          (field) => (event as unknown as Record<string, unknown>)[field] ?? null
-        );
-        const key = JSON.stringify(dims);
-        let bucket = buckets.get(key);
-        if (!bucket) {
-          bucket = {
-            dims,
-            countAll: 0,
-            countCost: 0,
-            sumCost: null,
-            sumRequests: null,
-            sumQuantity: null,
-            max: null,
-          };
-          buckets.set(key, bucket);
-        }
-        bucket.countAll += 1;
-        if (event.costUsd != null) {
-          bucket.countCost += 1;
-          bucket.sumCost = (bucket.sumCost ?? 0) + event.costUsd;
-        }
-        if (event.requests != null) {
-          bucket.sumRequests = (bucket.sumRequests ?? 0) + event.requests;
-        }
-        if (event.quantity != null) {
-          bucket.sumQuantity = (bucket.sumQuantity ?? 0) + event.quantity;
-        }
-        if (!bucket.max || event.occurredAt > bucket.max) {
-          bucket.max = event.occurredAt;
-        }
-      }
-      return Promise.resolve(
-        Array.from(buckets.values()).map((bucket) => {
-          const row: Record<string, unknown> = {};
-          args.by.forEach((field, index) => {
-            row[field] = bucket.dims[index];
-          });
-          row._sum = {
-            costUsd: bucket.sumCost,
-            requests: bucket.sumRequests,
-            quantity: bucket.sumQuantity,
-          };
-          row._count = { _all: bucket.countAll, costUsd: bucket.countCost };
-          row._max = { occurredAt: bucket.max };
-          return row;
-        })
       );
     }
   );
@@ -608,6 +553,7 @@ describe("summarizeExternalUsageEvents E1 equivalence", () => {
     installFixtureMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
 
     const actual = await summarizeExternalUsageEvents(since, rawCutoff);

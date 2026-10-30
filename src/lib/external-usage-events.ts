@@ -1013,25 +1013,47 @@ function deriveAnalyticsTokenUsdBySource(
 async function sumDerivedCostEstimates(
   rawSince: Date
 ): Promise<{ totalUsd: number; eventCount: number }> {
-  const rows = await prisma.$queryRaw<Array<{ totalUsd: unknown; eventCount: unknown }>>`
-    SELECT
-      COALESCE(SUM(json_extract("metadata", '$._derivedCostUsd')), 0) AS "totalUsd",
-      COUNT(*) AS "eventCount"
-    FROM "ExternalUsageEvent"
-    WHERE "occurredAt" >= ${rawSince}
-      AND json_extract("metadata", '$._derivedCostUsd') IS NOT NULL
-  `;
-  const row = rows[0];
-  return {
-    totalUsd: Number(row?.totalUsd ?? 0),
-    eventCount: Number(row?.eventCount ?? 0),
-  };
+  let totalUsd = 0;
+  let eventCount = 0;
+  let cursor: RawEventScanCursor | null = null;
+  for (;;) {
+    // Keep the old since-only semantics.  Fetch bounded rows before applying
+    // JSON extraction so a sparse metadata key cannot make one SQLite SUM
+    // walk the entire retained table without yielding to the event loop.
+    const rows = await prisma.$queryRaw<
+      Array<{
+        id: string;
+        occurredAt: Date | string;
+        hasDerivedCost: number | bigint;
+        derivedCostUsd: number | bigint;
+      }>
+    >(Prisma.sql`
+      SELECT
+        "id",
+        "occurredAt",
+        json_extract("metadata", '$._derivedCostUsd') IS NOT NULL AS "hasDerivedCost",
+        CAST(json_extract("metadata", '$._derivedCostUsd') AS REAL) AS "derivedCostUsd"
+      FROM "ExternalUsageEvent"
+      WHERE ${rawEventScanStartClause(rawSince, cursor)}
+      ORDER BY "occurredAt" ASC, "id" ASC
+      LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+    `);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const row of rows) {
+      if (!row.hasDerivedCost) continue;
+      eventCount += 1;
+      totalUsd += Number(row.derivedCostUsd ?? 0);
+    }
+    if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+    cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+    await yieldEventLoopTurn();
+  }
+  return { totalUsd, eventCount };
 }
 
-// The dashboard portfolio panel polls this every 60s. The SQL groupBy below
-// already collapsed ~336 cursor round trips to one aggregate query; this
-// short process-local memo additionally dedupes back-to-back polls, matching
-// the accepted staleness of the budget-status SWR cache (also 60s). Disabled
+// The dashboard portfolio panel polls this every 60s.  This short process-local
+// memo dedupes back-to-back bounded scans, matching the accepted staleness of
+// the budget-status SWR cache (also 60s).  Disabled
 // under vitest like the MTD scan memo; invalidated post-ingest through the
 // same clearMtdScanMemo() path budget-status already calls.
 const USAGE_EVENTS_SUMMARY_MEMO_DEFAULT_TTL_MS = 60_000;
@@ -1160,19 +1182,9 @@ export async function buildDailySpendSeries(
   // $queryRaw degrades to rollup-only data rather than throwing.
   if (rawSince <= until && typeof prisma.$queryRaw === "function") {
     try {
-      const rawRows = await prisma.$queryRaw<Array<{ day: string; totalUsd: unknown }>>`
-        SELECT
-          date("occurredAt") AS "day",
-          COALESCE(SUM("costUsd"), 0) AS "totalUsd"
-        FROM "ExternalUsageEvent"
-        WHERE "occurredAt" >= ${rawSince}
-          AND "occurredAt" <= ${until}
-          AND "metricType" NOT IN ('quota_sync', 'credit_balance')
-        GROUP BY date("occurredAt")
-      `;
-      for (const row of rawRows) {
-        if (!row?.day) continue;
-        byDay.set(row.day, (byDay.get(row.day) ?? 0) + Number(row.totalUsd ?? 0));
+      const rawRowsByDay = await scanRawDailySpendByDay(rawSince, until);
+      for (const [day, totalUsd] of rawRowsByDay) {
+        byDay.set(day, (byDay.get(day) ?? 0) + totalUsd);
       }
     } catch {
       // Best-effort — the series degrades to whatever rollup data covers.
@@ -1184,18 +1196,133 @@ export async function buildDailySpendSeries(
     .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
 }
 
+async function scanRawDailySpendByDay(
+  rawSince: Date,
+  until: Date
+): Promise<Map<string, number>> {
+  const byDay = new Map<string, number>();
+  let cursor: RawEventScanCursor | null = null;
+  for (;;) {
+    const rows = await prisma.$queryRaw<
+      Array<{ id: string; occurredAt: Date | string; costUsd: number | null }>
+    >(Prisma.sql`
+      SELECT "id", "occurredAt", "costUsd"
+      FROM "ExternalUsageEvent"
+      WHERE ${rawEventScanStartClause(rawSince, cursor)}
+        AND "occurredAt" <= ${until}
+        AND "metricType" NOT IN ('quota_sync', 'credit_balance')
+      ORDER BY "occurredAt" ASC, "id" ASC
+      LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+    `);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const row of rows) {
+      const day = rawEventScanCursorFromRow(row).occurredAt.toISOString().slice(0, 10);
+      byDay.set(day, (byDay.get(day) ?? 0) + Number(row.costUsd ?? 0));
+    }
+    if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+    cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+    await yieldEventLoopTurn();
+  }
+  return byDay;
+}
+
 /**
- * E1: SQL-groupBy rewrite of the old cursor-paginated JS fold. The raw side
- * is ONE aggregate query grouped by every summary dimension (plus limit /
- * limitWindow so their latest-non-null semantics survive pre-aggregation)
- * instead of ~336 findMany round trips folding 1,000-row pages in JS.
+ * The raw side uses bounded keyset pages and folds each event into the same
+ * summary dimensions as the prior SQL groupBy.  Processing rows in
+ * occurredAt/id order preserves latest-non-null limit semantics across page
+ * boundaries without one unbounded SQLite aggregate.
  *
- * Receipt-cash rows keep their exact per-row identity validation: the
- * groupBy excludes the fixed-shape receipt candidate superset
- * (NON_RECEIPT_CANDIDATE_WHERE) and candidates are folded individually, so
- * validated receipts land in receiptCashPaidUsd and malformed receipt-shaped
- * rows fall back to ordinary cost - identical to the MTD cost aggregate and
- * to the old fold.
+ * Receipt-cash rows keep their exact per-row identity validation: the raw
+ * scan excludes the fixed-shape receipt candidate superset and candidates
+ * are folded individually, so validated receipts land in receiptCashPaidUsd
+ * and malformed receipt-shaped rows fall back to ordinary cost.
+ */
+async function scanRawUsageSummaryEvents(
+  rawSince: Date,
+  upperBound: Date,
+  groups: Map<string, SummaryAccumulator>
+): Promise<number> {
+  let eventCount = 0;
+  let cursor: RawEventScanCursor | null = null;
+  for (;;) {
+    const rows = await prisma.$queryRaw<
+      Array<{
+        id: string;
+        occurredAt: Date | string;
+        sourceApp: string;
+        environment: string | null;
+        provider: string;
+        service: string | null;
+        label: string | null;
+        projectId: string | null;
+        metricType: string;
+        unit: string | null;
+        limit: number | null;
+        limitWindow: string | null;
+        costUsd: number | null;
+        requests: number | null;
+        quantity: number | null;
+      }>
+    >(Prisma.sql`
+      SELECT
+        "id", "occurredAt", "sourceApp", "environment", "provider", "service",
+        "label", "projectId", "metricType", "unit", "limit", "limitWindow",
+        "costUsd", "requests", "quantity"
+      FROM "ExternalUsageEvent"
+      WHERE ${rawEventScanStartClause(rawSince, cursor)}
+        AND "occurredAt" <= ${upperBound}
+        AND "metricType" NOT IN (${Prisma.join(Array.from(STATUS_METRIC_TYPES))})
+        AND (
+          "sourceApp" <> ${BILLING_RECEIPT_SOURCE_APP}
+          OR "service" IS NULL
+          OR "service" <> ${API_PREPAID_FUNDING_SERVICE}
+          OR "label" IS NULL
+          OR "label" <> ${RECEIPT_CASH_LABEL}
+          OR "billingMode" <> 'actual'
+          OR "metricType" <> 'cost'
+          OR "confidence" <> 'actual'
+        )
+      ORDER BY "occurredAt" ASC, "id" ASC
+      LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+    `);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+
+    for (const row of rows) {
+      const latestAt = rawEventScanCursorFromRow(row).occurredAt.toISOString();
+      const isAnalytics = isSubscriptionAnalyticsTelemetry(row);
+      eventCount += 1;
+      addSummaryContribution(groups, {
+        sourceApp: row.sourceApp,
+        environment: row.environment,
+        provider: row.provider,
+        service: row.service,
+        projectId: row.projectId,
+        metricType: row.metricType,
+        unit: row.unit,
+        eventCount: 1,
+        pricedEventCount: isAnalytics || row.costUsd == null ? 0 : 1,
+        unpricedEventCount: isAnalytics || row.costUsd != null ? 0 : 1,
+        unclassifiedCostEventCount: 0,
+        totalCostUsd: isAnalytics ? 0 : row.costUsd ?? 0,
+        receiptCashPaidUsd: 0,
+        estimatedApiEquivalentUsd: isAnalytics ? row.costUsd ?? 0 : 0,
+        totalRequests: row.requests ?? 0,
+        totalQuantity: row.quantity ?? 0,
+        limit: row.limit,
+        limitWindow: row.limitWindow,
+        latestAt,
+      });
+    }
+
+    if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+    cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+    await yieldEventLoopTurn();
+  }
+  return eventCount;
+}
+
+/**
+ * Summarizes historical rollups plus bounded raw event pages.
  */
 async function summarizeExternalUsageEventsUnserialized(
   since: Date,
@@ -1217,29 +1344,8 @@ async function summarizeExternalUsageEventsUnserialized(
   const rollupDayLt = upperBound < rawCutoff
     ? new Date(Date.UTC(upperBound.getUTCFullYear(), upperBound.getUTCMonth(), upperBound.getUTCDate() + 1))
     : rawCutoff;
-  const [rawGroups, rollups, derivedCostEstimates] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: [
-        "sourceApp",
-        "environment",
-        "provider",
-        "service",
-        "label",
-        "projectId",
-        "metricType",
-        "unit",
-        "limit",
-        "limitWindow",
-      ],
-      where: {
-        occurredAt: { gte: rawSince, lte: upperBound },
-        metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-        ...NON_RECEIPT_CANDIDATE_WHERE,
-      },
-      _sum: { costUsd: true, requests: true, quantity: true },
-      _count: { _all: true, costUsd: true },
-      _max: { occurredAt: true },
-    }),
+  const [scannedRawEventCount, rollups, derivedCostEstimates] = await Promise.all([
+    scanRawUsageSummaryEvents(rawSince, upperBound, groups),
     since < rawCutoff
       ? prisma.externalUsageEventDailyRollup.findMany({
           where: {
@@ -1280,47 +1386,7 @@ async function summarizeExternalUsageEventsUnserialized(
       : Promise.resolve({ totalUsd: 0, eventCount: 0 }),
   ]);
 
-  let rawEventCount = receiptCandidates.length;
-
-  for (const row of rawGroups) {
-    // occurredAt is a non-nullable column and every group has at least one
-    // row, so _max.occurredAt is always set; skip defensively if a future
-    // engine ever returns null.
-    if (!row._max.occurredAt) continue;
-    rawEventCount += row._count._all;
-    const isAnalytics = isSubscriptionAnalyticsTelemetry({
-      sourceApp: row.sourceApp,
-      service: row.service,
-      provider: row.provider,
-      metricType: row.metricType,
-      label: row.label,
-    });
-    addSummaryContribution(groups, {
-      sourceApp: row.sourceApp,
-      environment: row.environment,
-      provider: row.provider,
-      service: row.service,
-      projectId: row.projectId,
-      metricType: row.metricType,
-      unit: row.unit,
-      eventCount: row._count._all,
-      pricedEventCount: isAnalytics ? 0 : row._count.costUsd,
-      unpricedEventCount: isAnalytics
-        ? 0
-        : row._count._all - row._count.costUsd,
-      unclassifiedCostEventCount: 0,
-      totalCostUsd: isAnalytics ? 0 : row._sum.costUsd ?? 0,
-      receiptCashPaidUsd: 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? row._sum.costUsd ?? 0
-        : 0,
-      totalRequests: row._sum.requests ?? 0,
-      totalQuantity: row._sum.quantity ?? 0,
-      limit: row.limit,
-      limitWindow: row.limitWindow,
-      latestAt: row._max.occurredAt.toISOString(),
-    });
-  }
+  const rawEventCount = scannedRawEventCount + receiptCandidates.length;
 
   // Receipt candidates are rare (only exact receipt-shaped rows); folding
   // them per-row preserves the old fold's validated-receipt semantics.
@@ -1560,18 +1626,6 @@ export async function sumMonthToDateReceiptCashByProviderId(
 
 type ReceiptCashEventLikeWithCost = Parameters<typeof receiptCashProviderId>[0];
 
-// One-time diagnostic: log how many raw ExternalUsageEvent rows the
-// current-month scan below actually covers. rawSince == monthStart for
-// every current-month call (the daily-rollup branch never applies to the
-// current month - only to days older than the raw-retention cutoff), so
-// this is effectively "how big is the current month's raw event volume,"
-// which is what determines whether the ~11.4s this query used to take
-// (see the SWR cache on computeBudgetStatus in budget-status.ts) is normal
-// telemetry volume or a sign retention isn't keeping up. Logged once per
-// process rather than per-call since the cache above means this now runs
-// rarely anyway, and the count barely changes call-to-call.
-let loggedExternalEventsRawSizeOnce = false;
-
 // Provider totals and project attribution both scan and materialize the
 // current month's raw ExternalUsageEvent rows. A stale provider-cache hit can
 // start its refresh in the background and return immediately; a stale project
@@ -1637,19 +1691,15 @@ export function __resetMonthToDateExternalCostScanMemoForTests(): void {
 }
 
 /**
- * Return a narrow superset of possible raw receipt-cash rows. Full identity
+ * Return a narrow superset of possible raw receipt-cash rows.  Full identity
  * validation still happens through isReceiptCashEvent so a malformed
  * receipt-like row remains ordinary cost.
  *
  * The main aggregate excludes this fixed-shape superset without an id list,
- * then the caller adds every invalid candidate back individually. That avoids
+ * then the caller adds every invalid candidate back individually.  That avoids
  * an unbounded SQLite `NOT IN (?, ...)` parameter list while excluding valid
  * receipts before SUM (so receipt subtraction cannot introduce float drift).
- * It also lets the main groupBy use only the dimensions that affect money
- * semantics. Previously label/keyRef/billingMode/unit/confidence were all
- * group dimensions solely so the loop could recognize receipts;
- * high-cardinality keyRef values therefore made the database return nearly
- * one group per event.
+ * Receipt identity metadata stays out of the general raw event scan.
  */
 async function rawReceiptCashCandidates(rawSince: Date, now: Date) {
   return prisma.externalUsageEvent.findMany({
@@ -1686,22 +1736,6 @@ async function rawReceiptCashCandidates(rawSince: Date, now: Date) {
     },
   });
 }
-
-// Exact logical complement of rawReceiptCashCandidates' fixed-shape filter.
-// Nullable service/label columns need explicit null branches: relying on SQL
-// `NOT (a AND b ...)` would drop NULL rows under three-valued logic.
-const NON_RECEIPT_CANDIDATE_WHERE: Prisma.ExternalUsageEventWhereInput = {
-  OR: [
-    { sourceApp: { not: BILLING_RECEIPT_SOURCE_APP } },
-    { service: null },
-    { service: { not: API_PREPAID_FUNDING_SERVICE } },
-    { label: null },
-    { label: { not: RECEIPT_CASH_LABEL } },
-    { billingMode: { not: "actual" } },
-    { metricType: { not: "cost" } },
-    { confidence: { not: "actual" } },
-  ],
-};
 
 export async function sumMonthToDateExternalCostByProvider(
   monthStart: Date,
@@ -1900,28 +1934,6 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   attribution: ExternalCostAttributionRow[];
 }> {
   const rawSince = monthStart > rawCutoff ? monthStart : rawCutoff;
-
-  if (!loggedExternalEventsRawSizeOnce) {
-    loggedExternalEventsRawSizeOnce = true;
-    if (typeof prisma.externalUsageEvent?.count === "function") {
-      try {
-        prisma.externalUsageEvent
-          .count({ where: { occurredAt: { gte: rawSince, lte: now } } })
-          .then((rawSinceRows) => {
-            // eslint-disable-next-line no-console -- one-time diagnostic
-            console.info(
-              "[external-events-size]",
-              JSON.stringify({ rawSinceRows, monthStart, rawCutoff })
-            );
-          })
-          .catch((error) => {
-            console.warn("[external-events-size] row-count diagnostic failed", error);
-          });
-      } catch (error) {
-        console.warn("[external-events-size] row-count diagnostic failed", error);
-      }
-    }
-  }
 
   const mtdScanStartedAt = performance.now();
   const { receiptCandidates, rawGroups, rollups } = await (async () => {
