@@ -146,12 +146,12 @@ test("UM posting remains independent from Sentry rejection and disabled bridge w
       Object.assign(process.env, { COLLECTOR_SENTRY_ENABLED: "1", COLLECTOR_SENTRY_STATE_DIR: config.stateRoot, SENTRY_OTLP_ENDPOINT: config.endpoint, SENTRY_PUBLIC_KEY: config.publicKey });
       let umBody;
       globalThis.fetch = async (url, init) => {
-        if (url.includes("sentry.io")) return new Response("", { status: 503 });
+        if (new URL(url).hostname === new URL(config.endpoint).hostname) return new Response("", { status: 503 });
         umBody = JSON.parse(init.body);
         return new Response(JSON.stringify({ received: 4, persisted: 4, duplicates: 0, pruned: 0, rejected: 0 }));
       };
       const events = tokens({ collectorCallId: "call" });
-      const result = await postUsageBatches({ events, ingestUrl: "https://usage.example/api/ingest/usage", ingestToken: "test-only", ...identity, log() {} });
+      const result = await postUsageBatches({ events, ingestUrl: "https://usage.example/api/ingest/usage?note=sentry.io", ingestToken: "test-only", ...identity, log() {} });
       assert.equal(result.persisted, 4);
       assert.equal(JSON.stringify(umBody.events), JSON.stringify(events));
       const root = await enqueueCollectorSentry([], identity, config);
