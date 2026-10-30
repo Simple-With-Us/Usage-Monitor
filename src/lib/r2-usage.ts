@@ -211,6 +211,7 @@ export interface R2UsageAssessment {
   exceededMetric?: "storage" | "classA" | "classB";
   metricsSource: R2MetricsSource;
   metricsError?: string;
+  checkpointTransitionError?: string;
   buckets?: R2BucketStorageSample[];
   litestreamUsesR2?: boolean;
   autoDisabled?: boolean;
@@ -384,14 +385,7 @@ async function retryPendingR2CheckpointHandoff(): Promise<void> {
   if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
   await serializeR2Transition(async () => {
     if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
-    try {
-      await handOffR2CheckpointToApp();
-    } catch (error) {
-      console.error("[r2-usage] Retry of R2 checkpoint handoff failed:", error);
-      throw new Error("R2 kill remains active; SQLite checkpoint handoff retry failed", {
-        cause: error,
-      });
-    }
+    await handOffR2CheckpointToApp();
   });
 }
 
@@ -656,6 +650,7 @@ export async function clearR2AutoDisable(
 
 async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
   const r2Target = isLitestreamR2Endpoint();
+  if (r2Target && !isR2AutoDisabled()) return;
   const canResumeSupervisor = r2Target && r2SupervisorCanResume();
   if (r2Target) {
     process.env.LITESTREAM_ACTIVE = "false";
@@ -764,7 +759,13 @@ async function enforceR2AutoDisableSerialized(reason: string): Promise<void> {
         : " (R2 archival writes disabled; non-R2 replica left running)")
   );
   if (checkpointHandoffError) {
-    console.error("[r2-usage] R2 kill persisted but SQLite checkpoint handoff failed:", checkpointHandoffError);
+    const errorName =
+      checkpointHandoffError instanceof Error
+        ? checkpointHandoffError.name.slice(0, 48)
+        : "unknown";
+    console.error(
+      `[r2-usage] R2 kill persisted but SQLite checkpoint handoff failed (error=${errorName})`
+    );
     throw new Error("R2 kill persisted but SQLite checkpoint handoff failed", {
       cause: checkpointHandoffError,
     });
@@ -2603,8 +2604,22 @@ export async function runR2UsageCheck(
   fetchImpl: typeof fetch = fetch,
   now: Date = new Date()
 ): Promise<R2UsageAssessment> {
+  let checkpointTransitionError: string | undefined;
+  const recordCheckpointTransitionError = (message: string, error: unknown) => {
+    checkpointTransitionError ??= message;
+    const errorName = error instanceof Error ? error.name.slice(0, 48) : "unknown";
+    console.error(`[r2-usage] ${message} (error=${errorName})`);
+  };
+
   // Retry prior checkpoint transfers before cached inventory or other paths.
-  await retryPendingR2CheckpointHandoff();
+  try {
+    await retryPendingR2CheckpointHandoff();
+  } catch (error) {
+    recordCheckpointTransitionError(
+      "SQLite checkpoint handoff retry failed; the R2 kill remains active",
+      error
+    );
+  }
   const credentials = resolveR2UsageCredentials();
   let assessment: R2UsageAssessment;
   const failClosed = r2FreeTierFailClosedRequired();
@@ -2648,9 +2663,16 @@ export async function runR2UsageCheck(
           "[r2-usage] FAIL CLOSED: cannot measure R2 free tier with R2 Litestream in production — disabling R2 writes"
         );
         if (!isR2AutoDisabled()) {
-          await enforceR2AutoDisable(
-            `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       } else {
         console.warn(
@@ -2764,9 +2786,16 @@ export async function runR2UsageCheck(
           metricsError: message,
         });
         if (failClosed && !isR2AutoDisabled()) {
-          await enforceR2AutoDisable(
-            `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       }
     }
@@ -2849,7 +2878,14 @@ export async function runR2UsageCheck(
       metric === "storage"
         ? `R2 free-tier absolute storage ≥ ${R2_THRESHOLD_PCT}% (live MTD ${status.mtdPct}%)`
         : `R2 free-tier ${metric} ≥ ${R2_THRESHOLD_PCT}% absolute or projected (MTD ${status.mtdPct}%, projected ${status.projectedPct}%)`;
-    await enforceR2AutoDisable(reason);
+    try {
+      await enforceR2AutoDisable(reason);
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 kill persisted; checkpoint handoff is pending",
+        error
+      );
+    }
   }
 
   // Auto-resume when storage is healthy (hysteresis) and ops are fine.
@@ -2874,11 +2910,21 @@ export async function runR2UsageCheck(
     console.warn(
       `[r2-usage] auto-resume: ${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
     );
-    await clearR2AutoDisable(
-      `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
-    );
+    try {
+      await clearR2AutoDisable(
+        `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
+      );
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 resume transition failed; the kill remains active",
+        error
+      );
+    }
   }
 
+  if (checkpointTransitionError) {
+    assessment.checkpointTransitionError = checkpointTransitionError.slice(0, 160);
+  }
   assessment.autoDisabled = isR2AutoDisabled();
   assessment.litestreamUsesR2 = isLitestreamR2Endpoint();
 

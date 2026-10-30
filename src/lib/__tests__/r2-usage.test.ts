@@ -9,6 +9,7 @@ import {
   enforceR2AutoDisable,
   clearR2AutoDisable,
   hasR2AutoResumeMarker,
+  isR2EmergencyAlertSent,
   R2_AUTO_RESUMED_FLAG_FILENAME,
   sendPushoverNotification,
   formatDailyPushoverMessage,
@@ -1156,6 +1157,21 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
+    it("leaves an already-healthy R2 checkpoint owner unchanged on clear", async () => {
+      configureManagedR2Supervisor(true);
+      const checkpoint = vi.fn(async () => {
+        throw new Error("healthy R2 should not transfer checkpoint ownership");
+      });
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await clearR2AutoDisable("idempotent healthy clear");
+
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+      expect(hasR2AutoResumeMarker()).toBe(false);
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
     it("hands checkpoint ownership to and from the R2 supervisor around kill and resume", async () => {
       configureManagedR2Supervisor(true);
       const checkpointChanges: number[] = [];
@@ -1273,6 +1289,38 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
+    it("finalizes and sends the emergency alert after a failed fail-closed handoff", async () => {
+      configureManagedR2Supervisor(true);
+      vi.stubEnv("NODE_ENV", "production");
+      process.env.PUSHOVER_USER_KEY = "test-user";
+      process.env.PUSHOVER_USAGE_API_TOKEN = "test-app";
+      const checkpoint = vi.fn(async () => {
+        throw new Error("transient pragma failure");
+      });
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+      const requests: string[] = [];
+      const fetchImpl: typeof fetch = async (input) => {
+        const url = String(input);
+        requests.push(url);
+        return url.includes("list-type=2")
+          ? new Response("AccessDenied", { status: 403 })
+          : new Response("ok", { status: 200 });
+      };
+
+      const assessment = await runR2UsageCheck(
+        fetchImpl,
+        new Date("2026-10-30T15:00:00.000Z")
+      );
+
+      expect(checkpoint).toHaveBeenCalledWith(1_000);
+      expect(assessment.autoDisabled).toBe(true);
+      expect(assessment.checkpointTransitionError).toBe(
+        "R2 fail-closed kill persisted; checkpoint handoff is pending"
+      );
+      expect(isR2EmergencyAlertSent()).toBe(true);
+      expect(requests).toContain("https://api.pushover.net/1/messages.json");
+    });
+
     it("rolls checkpoint ownership back when atomic resume-marker preparation fails", async () => {
       configureManagedR2Supervisor(true);
       const disabledPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
@@ -1363,6 +1411,13 @@ describe("R2 usage monitoring & auto-disable", () => {
 
     it("serializes an in-flight resume before a newer kill transition", async () => {
       configureManagedR2Supervisor(true);
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled before concurrent transition\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
       let releaseCheckpoint!: () => void;
       const checkpointStarted = new Promise<void>((resolve) => {
         releaseCheckpoint = resolve;
