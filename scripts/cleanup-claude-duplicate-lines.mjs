@@ -4,6 +4,7 @@ import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan, storedPlanDigest, fingerprint } from "./lib/claude-duplicate-stored-plan.mjs";
 import { readProtectedCleanupJson, verifyProtectedSqliteBackup } from "./lib/protected-cleanup-file.mjs";
 
+async function main() {
 const args = process.argv.slice(2);
 const value = (flag) => { const index = args.indexOf(flag); return index < 0 ? undefined : args[index + 1]; };
 const apply = args.includes("--apply");
@@ -58,3 +59,10 @@ try {
     console.log(JSON.stringify({ mode: "apply", ...result }));
   }
 } finally { await prisma.$disconnect(); }
+}
+
+main().catch((error) => {
+  const errorName = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error?.name ?? "") ? error.name : "Error";
+  console.error(JSON.stringify({ phase: "cleanup-maintenance", errorName }));
+  process.exitCode = 1;
+});

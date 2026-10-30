@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { deriveUsageTelemetryV2IdempotencyKey } from "@jaywedgeworth22/congress-trading-shared";
 import { planClaudeDuplicateLines, finalizeClaudeDuplicateCandidates } from "./lib/claude-duplicate-cleanup.mjs";
 
+async function main() {
 const args = process.argv.slice(2);
 const option = (name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 const root = option("--claude-home");
@@ -50,3 +51,10 @@ const handle = await open(output, "wx", 0o600);
 try { await handle.writeFile(JSON.stringify(manifest)); } finally { await handle.close(); }
 console.log(JSON.stringify({ scannedFiles, ambiguousMessages, candidates: candidates.length, totals,
   manifestHash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex") }));
+}
+
+main().catch((error) => {
+  const errorName = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error?.name ?? "") ? error.name : "Error";
+  console.error(JSON.stringify({ phase: "cleanup-source-plan", errorName }));
+  process.exitCode = 1;
+});

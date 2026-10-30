@@ -4,6 +4,8 @@ import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan } from "
 import { mkdtemp, writeFile, chmod, symlink, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { openProtectedCleanupFile, readProtectedCleanupJson, readProtectedCleanupJsonHandle, verifyProtectedSqliteBackup } from "../lib/protected-cleanup-file.mjs";
 
 const proof = { idempotencyKey: "duplicate", keeperIdempotencyKey: "keeper", label: "token:output", model: "claude-test", quantity: 20,
@@ -114,5 +116,18 @@ test("backup validation rejects symlinks and the live inode using held descripto
     await assert.rejects(verifyProtectedSqliteBackup(link));
     await assert.rejects(verifyProtectedSqliteBackup(backup, backup), /separate from the live/);
     await verifyProtectedSqliteBackup(backup);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("CLI failures disclose only the fixed phase and error name", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cleanup-safe-failure-"));
+  try {
+    const path = join(directory, "private-plan.json");
+    await writeFile(path, "sensitive-plan-payload", { mode: 0o600 });
+    const maintenance = spawnSync(process.execPath, [fileURLToPath(new URL("../cleanup-claude-duplicate-lines.mjs", import.meta.url)), "--proof-manifest", path], { encoding: "utf8" });
+    assert.equal(maintenance.status, 1);
+    assert.deepEqual(JSON.parse(maintenance.stderr), { phase: "cleanup-maintenance", errorName: "Error" });
+    const source = spawnSync(process.execPath, [fileURLToPath(new URL("../plan-claude-duplicate-cleanup.mjs", import.meta.url)), "--claude-home", directory, "--manifest", path, "--since", "sensitive-invalid-date"], { encoding: "utf8" });
+    assert.equal(source.status, 1);
+    assert.deepEqual(JSON.parse(source.stderr), { phase: "cleanup-source-plan", errorName: "Error" });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
