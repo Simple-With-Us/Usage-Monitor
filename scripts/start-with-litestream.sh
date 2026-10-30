@@ -35,7 +35,7 @@ DB_PATH="/data/prod.db"
 export APP_STARTUP_WRAPPER="start-with-litestream-v2"
 # Never trust a deploy-provided supervisor claim.  It is set only below after
 # this wrapper starts the R2 watcher for this process.
-unset LITESTREAM_R2_SUPERVISOR_ACTIVE
+unset LITESTREAM_R2_SUPERVISOR_ACTIVE LITESTREAM_R2_SUPERVISOR_PID
 
 log() {
   echo "[start-with-litestream] $*"
@@ -313,6 +313,7 @@ if [[ "${litestream_enabled}" == "true" && "${litestream_endpoint_is_r2}" == "tr
   R2_WATCH_PID=$!
   if kill -0 "${R2_WATCH_PID}" 2>/dev/null; then
     export LITESTREAM_R2_SUPERVISOR_ACTIVE=true
+    export LITESTREAM_R2_SUPERVISOR_PID="${R2_WATCH_PID}"
   else
     log "WARNING: R2 watcher did not start; runtime checkpoint handoff is disabled."
   fi

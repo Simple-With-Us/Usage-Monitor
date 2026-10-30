@@ -51,6 +51,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     process.env = { ...originalEnv };
     delete (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"];
     delete process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE;
+    delete process.env.LITESTREAM_R2_SUPERVISOR_PID;
     delete process.env.APP_STARTUP_WRAPPER;
     delete process.env.LITESTREAM_EMERGENCY_DISABLE;
     delete process.env.R2_WRITES_DISABLED;
@@ -1132,7 +1133,13 @@ describe("R2 usage monitoring & auto-disable", () => {
   describe("durable auto-resume over an env-pinned kill switch", () => {
     function configureManagedR2Supervisor(active: boolean, watcherActive = active): void {
       process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
-      process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = watcherActive ? "true" : "false";
+      if (watcherActive) {
+        process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "true";
+        process.env.LITESTREAM_R2_SUPERVISOR_PID = String(process.pid);
+      } else {
+        process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "false";
+        delete process.env.LITESTREAM_R2_SUPERVISOR_PID;
+      }
       process.env.LITESTREAM_S3_BUCKET = "test-r2-bucket";
       process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
       process.env.LITESTREAM_S3_ACCESS_KEY_ID = "test-access-key";
@@ -1219,6 +1226,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
       process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
       process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "false";
+      process.env.LITESTREAM_R2_SUPERVISOR_PID = "2147483647";
       process.env.LITESTREAM_ACTIVE = "false";
       process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
       process.env.R2_WRITES_DISABLED = "true";
@@ -1234,6 +1242,27 @@ describe("R2 usage monitoring & auto-disable", () => {
 
       expect(checkpoint).not.toHaveBeenCalled();
       expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("does not claim checkpoint ownership when the recorded watcher has exited", async () => {
+      configureManagedR2Supervisor(false);
+      process.env.LITESTREAM_R2_SUPERVISOR_PID = "2147483647";
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled at boot\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
+      const checkpoint = vi.fn(async () => {});
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await clearR2AutoDisable("resume with an exited watcher");
+
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(hasR2AutoResumeMarker()).toBe(true);
       expect(isR2AutoDisabled()).toBe(false);
     });
 

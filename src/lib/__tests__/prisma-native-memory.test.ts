@@ -182,6 +182,7 @@ describe("applySqliteNativeMemoryPragmas", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.stubEnv("LITESTREAM_ACTIVE", "true");
     vi.stubEnv("LITESTREAM_R2_SUPERVISOR_ACTIVE", "true");
+    vi.stubEnv("LITESTREAM_R2_SUPERVISOR_PID", String(process.pid));
     vi.stubEnv("APP_STARTUP_WRAPPER", "start-with-litestream-v2");
     vi.stubEnv("LITESTREAM_S3_BUCKET", "test-r2-bucket");
     vi.stubEnv("LITESTREAM_S3_ENDPOINT", "account.r2.cloudflarestorage.com");

@@ -348,6 +348,14 @@ export function isLitestreamR2Endpoint(
 }
 
 function r2SupervisorCanResume(): boolean {
+  const supervisorPid = Number(process.env.LITESTREAM_R2_SUPERVISOR_PID);
+  if (!Number.isSafeInteger(supervisorPid) || supervisorPid <= 0) return false;
+  try {
+    process.kill(supervisorPid, 0);
+  } catch {
+    return false;
+  }
+
   return (
     process.env.APP_STARTUP_WRAPPER === "start-with-litestream-v2" &&
     process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE === "true" &&
