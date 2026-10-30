@@ -207,20 +207,24 @@ function sqliteWalAutocheckpointPages(): number {
 }
 
 /**
- * Global hook (no import needed by callers, so r2-usage.ts stays free of a
- * Prisma dependency): set only after this process disabled app-side
- * autocheckpoints.  The R2 kill switch calls it when it flips
- * LITESTREAM_ACTIVE to false at runtime, so the WAL cannot grow without a
- * checkpointer if replication stops.
+ * Persistent global hook keeps r2-usage.ts free of a Prisma import while
+ * allowing the R2 supervisor to transfer checkpoint ownership in both
+ * directions at runtime.  Callers may request only the two policy values.
  */
-export const RESTORE_WAL_AUTOCHECKPOINT_HOOK = "__apiUsageMonitorRestoreWalAutocheckpoint";
+export const SET_WAL_AUTOCHECKPOINT_HOOK = "__apiUsageMonitorSetWalAutocheckpoint";
 
-function registerWalAutocheckpointRestoreHook(): void {
-  (globalThis as Record<string, unknown>)[RESTORE_WAL_AUTOCHECKPOINT_HOOK] = async () => {
-    await prisma.$queryRawUnsafe(
-      `PRAGMA wal_autocheckpoint = ${SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES}`
-    );
-    delete (globalThis as Record<string, unknown>)[RESTORE_WAL_AUTOCHECKPOINT_HOOK];
+function registerWalAutocheckpointHook(): void {
+  (globalThis as Record<string, unknown>)[SET_WAL_AUTOCHECKPOINT_HOOK] = async (
+    pages: number
+  ) => {
+    if (pages !== 0 && pages !== SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES) {
+      throw new Error("Unsupported SQLite wal_autocheckpoint policy");
+    }
+    await prisma.$queryRawUnsafe(`PRAGMA wal_autocheckpoint = ${pages}`);
+    const applied = await readSqliteMemoryPragmas();
+    if (applied.walAutocheckpointPages !== pages) {
+      throw new Error("SQLite wal_autocheckpoint policy did not take effect");
+    }
   };
 }
 
@@ -328,7 +332,7 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
         await prisma.$queryRawUnsafe(
           `PRAGMA wal_autocheckpoint = ${target.walAutocheckpointPages}`
         );
-        if (target.walAutocheckpointPages === 0) registerWalAutocheckpointRestoreHook();
+        registerWalAutocheckpointHook();
         // Read the values back on the same connection and confirm they took.
         // A mismatch is logged loudly (never swallowed): it would mean a future
         // engine change rejected a PRAGMA, or connection_limit was raised above
@@ -377,4 +381,5 @@ export function resetSqliteNativeMemoryPragmasForTests(): void {
     );
   }
   globalForPrisma.__apiUsageMonitorSqlitePragmasApplied = undefined;
+  delete (globalThis as Record<string, unknown>)[SET_WAL_AUTOCHECKPOINT_HOOK];
 }

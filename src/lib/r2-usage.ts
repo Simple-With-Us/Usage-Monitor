@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 /**
  * Cloudflare R2 free-tier monitor + automatic shutoff.
@@ -68,7 +68,7 @@ export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
  * Precedence, and it must match `r2_kill_active()` in
  * scripts/start-with-litestream.sh exactly:
  *   1. the disable flag FILE wins — an explicit, persisted kill
- *   2. otherwise an env-set kill applies UNLESS this marker exists
+ *   2. otherwise an env-set kill applies UNLESS the auto-resume marker exists
  *   3. otherwise not killed
  * enforceR2AutoDisable() deletes this marker, so a fresh breach always
  * supersedes an older resume and the two can never both be live.
@@ -211,6 +211,7 @@ export interface R2UsageAssessment {
   exceededMetric?: "storage" | "classA" | "classB";
   metricsSource: R2MetricsSource;
   metricsError?: string;
+  checkpointTransitionError?: string;
   buckets?: R2BucketStorageSample[];
   litestreamUsesR2?: boolean;
   autoDisabled?: boolean;
@@ -303,6 +304,7 @@ export function __resetR2UsageStateForTests(): void {
   loggedResumeOverride = false;
   liveS3ListCache = null;
   r2ProductStatusCache = new Map();
+  setR2CheckpointHandoffPending(false);
   if (cachedFallbackFlagDir) {
     try {
       fs.rmSync(cachedFallbackFlagDir, { recursive: true, force: true });
@@ -343,6 +345,56 @@ export function isLitestreamR2Endpoint(
   } catch {
     return false;
   }
+}
+
+function r2SupervisorCanResume(): boolean {
+  const supervisorPid = Number(process.env.LITESTREAM_R2_SUPERVISOR_PID);
+  if (!Number.isSafeInteger(supervisorPid) || supervisorPid <= 0) return false;
+  try {
+    process.kill(supervisorPid, 0);
+  } catch {
+    return false;
+  }
+
+  return (
+    process.env.APP_STARTUP_WRAPPER === "start-with-litestream-v2" &&
+    process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE === "true" &&
+    isLitestreamR2Endpoint() &&
+    Boolean(
+      process.env.LITESTREAM_S3_BUCKET?.trim() &&
+        process.env.LITESTREAM_S3_ENDPOINT?.trim() &&
+        process.env.LITESTREAM_S3_ACCESS_KEY_ID?.trim() &&
+        process.env.LITESTREAM_S3_SECRET_ACCESS_KEY?.trim()
+    )
+  );
+}
+
+async function setWalAutocheckpointPages(pages: 0 | 1_000): Promise<void> {
+  const setWalAutocheckpoint = (globalThis as Record<string, unknown>)[
+    "__apiUsageMonitorSetWalAutocheckpoint"
+  ];
+  if (typeof setWalAutocheckpoint !== "function") {
+    throw new Error("SQLite WAL checkpoint ownership hook is unavailable");
+  }
+  await (setWalAutocheckpoint as (pages: 0 | 1_000) => Promise<void>)(pages);
+}
+
+async function handOffR2CheckpointToApp(): Promise<void> {
+  try {
+    await setWalAutocheckpointPages(1_000);
+    setR2CheckpointHandoffPending(false);
+  } catch (error) {
+    setR2CheckpointHandoffPending(true);
+    throw error;
+  }
+}
+
+async function retryPendingR2CheckpointHandoff(): Promise<void> {
+  if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+  await serializeR2Transition(async () => {
+    if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+    await handOffR2CheckpointToApp();
+  });
 }
 
 export function resolveR2UsageCredentials(
@@ -508,9 +560,63 @@ export function hasR2AutoResumeMarker(): boolean {
 
 let loggedResumeOverride = false;
 
+// Transitions mutate shared process flags and checkpoint ownership across
+// awaits.  Keep their effects ordered across duplicated Next module instances
+// so a slow resume cannot commit after a newer kill has already engaged.
+const r2TransitionLeaseKey = Symbol.for("usage-monitor.r2-transition-lease");
+const r2TransitionRegistry = globalThis as typeof globalThis & Record<symbol, unknown>;
+const r2CheckpointHandoffPendingKey = Symbol.for(
+  "usage-monitor.r2-checkpoint-handoff-pending"
+);
+
+function isR2CheckpointHandoffPending(): boolean {
+  return r2TransitionRegistry[r2CheckpointHandoffPendingKey] === true;
+}
+
+function setR2CheckpointHandoffPending(pending: boolean): void {
+  r2TransitionRegistry[r2CheckpointHandoffPendingKey] = pending;
+}
+
+function serializeR2Transition<T>(operation: () => Promise<T>): Promise<T> {
+  const tail = (r2TransitionRegistry[r2TransitionLeaseKey] as Promise<void> | undefined) ??
+    Promise.resolve();
+  const result = tail.then(operation, operation);
+  r2TransitionRegistry[r2TransitionLeaseKey] = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function writeR2AutoResumeMarkerAtomically(reason: string): void {
+  const markerPath = getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME);
+  const tempPath = `${markerPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  const contents =
+    `Auto-resumed at ${new Date().toISOString()}: ${reason}\n` +
+    "This overrides LITESTREAM_EMERGENCY_DISABLE / R2_WRITES_DISABLED if they\n" +
+    "are still set in the environment.  Delete this file to force the kill\n" +
+    "switch back on; a fresh free-tier breach deletes it automatically.\n";
+
+  try {
+    fs.writeFileSync(tempPath, contents, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(tempPath, markerPath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup; an uncommitted temp file is never a marker.
+    }
+    throw err;
+  }
+}
+
 export function isR2AutoDisabled(): boolean {
   // An explicit, persisted kill beats everything — including a resume marker,
-  // though enforceR2AutoDisable() deletes the marker so they never coexist.
+  // though enforceR2AutoDisable() deletes the marker first.
   if (flagFileExists(R2_DISABLED_FLAG_FILENAME)) return true;
 
   const envKill =
@@ -519,7 +625,7 @@ export function isR2AutoDisabled(): boolean {
   if (!envKill) return false;
 
   // See R2_AUTO_RESUMED_FLAG_FILENAME: an env-sourced kill is a default, not a
-  // verdict. Once auto-resume has confirmed usage is back under the resume
+  // verdict.  Once auto-resume has confirmed usage is back under the resume
   // threshold, that decision has to survive the restart that re-injects the
   // variable — otherwise the switch can never come off without a human.
   if (hasR2AutoResumeMarker()) {
@@ -544,33 +650,65 @@ export function isR2AutoDisabled(): boolean {
  * watcher stop R2-backed Litestream without needing a redeploy.
  */
 /** Clear free-tier kill switch so litestream can resume after prune/restart. */
-export function clearR2AutoDisable(reason = "usage back under the resume threshold"): void {
-  delete process.env.LITESTREAM_EMERGENCY_DISABLE;
-  delete process.env.R2_WRITES_DISABLED;
-  process.env.LITESTREAM_EMERGENCY_DISABLE = "false";
-  process.env.R2_WRITES_DISABLED = "false";
-  loggedResumeOverride = false;
-  try {
-    const flag = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
-    if (fs.existsSync(flag)) fs.unlinkSync(flag);
-  } catch (err) {
-    console.error("[r2-usage] Failed clearing emergency disable flag:", err);
+export async function clearR2AutoDisable(
+  reason = "usage back under the resume threshold"
+): Promise<void> {
+  return serializeR2Transition(() => clearR2AutoDisableSerialized(reason));
+}
+
+async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
+  const r2Target = isLitestreamR2Endpoint();
+  if (r2Target && !isR2AutoDisabled()) return;
+  const canResumeSupervisor = r2Target && r2SupervisorCanResume();
+  if (r2Target) {
+    process.env.LITESTREAM_ACTIVE = "false";
+    if (canResumeSupervisor) {
+      // The supervisor must keep Litestream stopped until SQLite has given
+      // checkpoint ownership back to the replicator.
+      await setWalAutocheckpointPages(0);
+      setR2CheckpointHandoffPending(false);
+    }
   }
   // Persist the decision. Mutating process.env alone made this a no-op across
   // restarts whenever the switch came from deploy config — see the constant's
   // doc comment for the production incident that caused.
   try {
-    fs.writeFileSync(
-      getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME),
-      `Auto-resumed at ${new Date().toISOString()}: ${reason}\n` +
-        "This overrides LITESTREAM_EMERGENCY_DISABLE / R2_WRITES_DISABLED if they\n" +
-        "are still set in the environment. Delete this file to force the kill\n" +
-        "switch back on; a fresh free-tier breach deletes it automatically.\n",
-      { encoding: "utf8", mode: 0o600 }
-    );
+    // Publish a complete marker while the old kill flag remains authoritative;
+    // removing that flag below commits the prepared resume.
+    writeR2AutoResumeMarkerAtomically(reason);
   } catch (err) {
-    console.error("[r2-usage] Failed writing auto-resume marker:", err);
+    if (canResumeSupervisor) {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
+        console.error("[r2-usage] Failed restoring SQLite checkpoint policy after resume-marker failure:", rollbackError);
+      });
+    }
+    throw new Error("Failed writing R2 auto-resume marker", { cause: err });
   }
+  try {
+    const flag = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
+    if (fs.existsSync(flag)) fs.unlinkSync(flag);
+  } catch (err) {
+    // Removing the old kill flag is the commit point.  Until it succeeds, the
+    // flag wins over this marker, so roll checkpoints back and keep R2 inactive.
+    try {
+      const marker = getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME);
+      if (fs.existsSync(marker)) fs.unlinkSync(marker);
+    } catch (cleanupError) {
+      console.error("[r2-usage] Failed cleaning uncommitted auto-resume marker:", cleanupError);
+    }
+    if (canResumeSupervisor) {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
+        console.error("[r2-usage] Failed restoring SQLite checkpoint policy after kill-flag failure:", rollbackError);
+      });
+    }
+    throw new Error("Failed clearing R2 emergency disable flag", { cause: err });
+  }
+  delete process.env.LITESTREAM_EMERGENCY_DISABLE;
+  delete process.env.R2_WRITES_DISABLED;
+  process.env.LITESTREAM_EMERGENCY_DISABLE = "false";
+  process.env.R2_WRITES_DISABLED = "false";
+  if (r2Target) process.env.LITESTREAM_ACTIVE = canResumeSupervisor ? "true" : "false";
+  loggedResumeOverride = false;
   try {
     const alert = getFlagFilePath(R2_EMERGENCY_ALERT_FLAG_FILENAME);
     if (fs.existsSync(alert)) fs.unlinkSync(alert);
@@ -580,7 +718,13 @@ export function clearR2AutoDisable(reason = "usage back under the resume thresho
   inMemoryEmergencyAlertSent = false;
 }
 
-export function enforceR2AutoDisable(reason: string): void {
+export async function enforceR2AutoDisable(reason: string): Promise<void> {
+  return serializeR2Transition(() => enforceR2AutoDisableSerialized(reason));
+}
+
+async function enforceR2AutoDisableSerialized(reason: string): Promise<void> {
+  const r2Target = isLitestreamR2Endpoint();
+  let checkpointHandoffError: unknown;
   process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
   process.env.R2_WRITES_DISABLED = "true";
   // A fresh breach supersedes any earlier auto-resume, so drop the marker
@@ -591,24 +735,20 @@ export function enforceR2AutoDisable(reason: string): void {
   } catch (err) {
     console.error("[r2-usage] Failed clearing auto-resume marker:", err);
   }
-  // Also clear the "active" claim so readiness/runtime-health immediately
-  // report backup as stopped (start-with-litestream only sets this at boot).
-  process.env.LITESTREAM_ACTIVE = "false";
-  // Litestream owned WAL checkpoints (src/lib/prisma.ts sets
-  // wal_autocheckpoint=0 while it replicates).  Hand them back to SQLite so the
-  // WAL stays bounded if replication stops.  The hook name matches
-  // RESTORE_WAL_AUTOCHECKPOINT_HOOK in prisma.ts; it exists only after that
-  // pragma was applied, so tests and non-Litestream runs skip this.
-  const restoreWalAutocheckpoint = (globalThis as Record<string, unknown>)[
-    "__apiUsageMonitorRestoreWalAutocheckpoint"
-  ];
-  if (typeof restoreWalAutocheckpoint === "function") {
-    void Promise.resolve()
-      .then(() => (restoreWalAutocheckpoint as () => Promise<void>)())
-      .catch((err) => {
-        console.error("[r2-usage] Failed restoring SQLite wal_autocheckpoint:", err);
-      });
+  if (
+    r2Target &&
+    r2SupervisorCanResume() &&
+    (process.env.LITESTREAM_ACTIVE === "true" || isR2CheckpointHandoffPending())
+  ) {
+    try {
+      await handOffR2CheckpointToApp();
+    } catch (err) {
+      checkpointHandoffError = err;
+    }
   }
+  // Keep B2 and unknown targets active; the R2 archival kill is independent
+  // of the primary replica destination.
+  if (r2Target) process.env.LITESTREAM_ACTIVE = "false";
   try {
     const filePath = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
     fs.writeFileSync(
@@ -624,8 +764,20 @@ export function enforceR2AutoDisable(reason: string): void {
     `[r2-usage] R2 free-tier auto-disable engaged: ${reason}` +
       (isLitestreamR2Endpoint()
         ? " (Litestream endpoint is R2 — replication will stop)"
-        : " (Litestream endpoint is not R2 — non-R2 replica left running; unexpected in production)")
+        : " (R2 archival writes disabled; non-R2 replica left running)")
   );
+  if (checkpointHandoffError) {
+    const errorName =
+      checkpointHandoffError instanceof Error
+        ? checkpointHandoffError.name.slice(0, 48)
+        : "unknown";
+    console.error(
+      `[r2-usage] R2 kill persisted but SQLite checkpoint handoff failed (error=${errorName})`
+    );
+    throw new Error("R2 kill persisted but SQLite checkpoint handoff failed", {
+      cause: checkpointHandoffError,
+    });
+  }
 }
 
 
@@ -2460,6 +2612,22 @@ export async function runR2UsageCheck(
   fetchImpl: typeof fetch = fetch,
   now: Date = new Date()
 ): Promise<R2UsageAssessment> {
+  let checkpointTransitionError: string | undefined;
+  const recordCheckpointTransitionError = (message: string, error: unknown) => {
+    checkpointTransitionError ??= message;
+    const errorName = error instanceof Error ? error.name.slice(0, 48) : "unknown";
+    console.error(`[r2-usage] ${message} (error=${errorName})`);
+  };
+
+  // Retry prior checkpoint transfers before cached inventory or other paths.
+  try {
+    await retryPendingR2CheckpointHandoff();
+  } catch (error) {
+    recordCheckpointTransitionError(
+      "SQLite checkpoint handoff retry failed; the R2 kill remains active",
+      error
+    );
+  }
   const credentials = resolveR2UsageCredentials();
   let assessment: R2UsageAssessment;
   const failClosed = r2FreeTierFailClosedRequired();
@@ -2503,9 +2671,16 @@ export async function runR2UsageCheck(
           "[r2-usage] FAIL CLOSED: cannot measure R2 free tier with R2 Litestream in production — disabling R2 writes"
         );
         if (!isR2AutoDisabled()) {
-          enforceR2AutoDisable(
-            `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       } else {
         console.warn(
@@ -2619,9 +2794,16 @@ export async function runR2UsageCheck(
           metricsError: message,
         });
         if (failClosed && !isR2AutoDisabled()) {
-          enforceR2AutoDisable(
-            `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       }
     }
@@ -2704,7 +2886,14 @@ export async function runR2UsageCheck(
       metric === "storage"
         ? `R2 free-tier absolute storage ≥ ${R2_THRESHOLD_PCT}% (live MTD ${status.mtdPct}%)`
         : `R2 free-tier ${metric} ≥ ${R2_THRESHOLD_PCT}% absolute or projected (MTD ${status.mtdPct}%, projected ${status.projectedPct}%)`;
-    enforceR2AutoDisable(reason);
+    try {
+      await enforceR2AutoDisable(reason);
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 kill persisted; checkpoint handoff is pending",
+        error
+      );
+    }
   }
 
   // Auto-resume when storage is healthy (hysteresis) and ops are fine.
@@ -2729,11 +2918,21 @@ export async function runR2UsageCheck(
     console.warn(
       `[r2-usage] auto-resume: ${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
     );
-    clearR2AutoDisable(
-      `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
-    );
+    try {
+      await clearR2AutoDisable(
+        `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
+      );
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 resume transition failed; the kill remains active",
+        error
+      );
+    }
   }
 
+  if (checkpointTransitionError) {
+    assessment.checkpointTransitionError = checkpointTransitionError.slice(0, 160);
+  }
   assessment.autoDisabled = isR2AutoDisabled();
   assessment.litestreamUsesR2 = isLitestreamR2Endpoint();
 
