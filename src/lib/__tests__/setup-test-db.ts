@@ -455,6 +455,9 @@ CREATE UNIQUE INDEX "ProviderProjectAllocation_providerId_projectId_key" ON "Pro
 CREATE INDEX "UsageSnapshotDailyRollup_day_idx" ON "UsageSnapshotDailyRollup"("day");
 CREATE UNIQUE INDEX "UsageSnapshotDailyRollup_providerId_day_key" ON "UsageSnapshotDailyRollup"("providerId", "day");
 CREATE UNIQUE INDEX "ExternalUsageEvent_idempotencyKey_key" ON "ExternalUsageEvent"("idempotencyKey");
+CREATE INDEX "ExternalUsageEvent_occurredAt_idx" ON "ExternalUsageEvent"("occurredAt");
+CREATE INDEX "ExternalUsageEvent_metricType_occurredAt_idx" ON "ExternalUsageEvent"("metricType", "occurredAt");
+CREATE INDEX "ExternalUsageEvent_mtd_scan_cover_idx" ON "ExternalUsageEvent"("occurredAt", "id", "provider", "sourceApp", "service", "label", "projectId", "metricType", "costUsd", "billingMode", "confidence");
 CREATE INDEX "ExternalUsageEvent_sourceApp_occurredAt_idx" ON "ExternalUsageEvent"("sourceApp", "occurredAt");
 CREATE INDEX "ExternalUsageEvent_provider_occurredAt_idx" ON "ExternalUsageEvent"("provider", "occurredAt");
 CREATE INDEX "ExternalUsageEvent_keyRef_occurredAt_idx" ON "ExternalUsageEvent"("keyRef", "occurredAt");

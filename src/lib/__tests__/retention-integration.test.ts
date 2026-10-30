@@ -125,17 +125,20 @@ describe("retention integration", () => {
   });
 
   it("keeps old rollup tombstones so late producer retries remain idempotent", async () => {
-    await prisma.externalUsageEventTombstone.create({
-      data: {
-        idempotencyKey: "old-but-still-protected",
-        occurredAt: new Date("2025-01-01T00:00:00.000Z"),
-        prunedAt: new Date("2025-01-02T00:00:00.000Z"),
-      },
+    await prisma.externalUsageEventTombstone.createMany({
+      data: ["old-but-still-protected", "old-protected-two", "old-protected-three"].map(
+        (idempotencyKey) => ({
+          idempotencyKey,
+          occurredAt: new Date("2025-01-01T00:00:00.000Z"),
+          prunedAt: new Date("2025-01-02T00:00:00.000Z"),
+        })
+      ),
     });
 
     const result = await runDataRetentionMaintenance(NOW);
 
     expect(result.tombstonesPruned).toBe(0);
+    expect(result.tombstoneCount).toBe(3);
     expect(
       await prisma.externalUsageEventTombstone.findUnique({
         where: { idempotencyKey: "old-but-still-protected" },
