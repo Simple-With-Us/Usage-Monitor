@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Equivalence proof: summarizeExternalUsageEvents folds bounded raw SQL
-// pages alongside the receipt-candidate query. This test drives both the
+// Equivalence proof: summarizeExternalUsageEvents folds native SQLite
+// aggregate rows alongside the receipt-candidate query.  This test drives both the
 // current algorithm and its prior-fold reference from one in-memory fixture:
 //
-//   - the current implementation (real module code), with Prisma mocks that
-//     return raw event pages and receipt candidates from the fixture, and
+//   - the current implementation (real module code), with aggregate-boundary
+//     and receipt-candidate mocks returning fixture data, and
 //   - a REFERENCE implementation below that is a line-for-line copy of the
 //     old JS fold (kept here, not in src/, so no dead code ships),
 //
@@ -16,8 +16,12 @@ const prismaMock = vi.hoisted(() => ({
   externalUsageEventDailyRollup: { findMany: vi.fn() },
   $queryRaw: vi.fn(),
 }));
+const aggregateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/sqlite-usage-aggregates", () => ({
+  querySqliteUsageAggregate: aggregateMock,
+}));
 
 import {
   STATUS_METRIC_TYPES,
@@ -273,18 +277,8 @@ function isReceiptCandidateShape(event: {
 type FixtureEvent = (typeof RAW_EVENTS)[number];
 
 function installFixtureMocks() {
-  let summaryRows: Array<Record<string, unknown>> = [];
-  let initialized = false;
-  prismaMock.$queryRaw.mockImplementation((query: unknown) => {
-    const sql = typeof (query as { sql?: unknown })?.sql === "string"
-      ? (query as { sql: string }).sql
-      : "";
-    if (!sql.includes('"limit", "limitWindow"')) return Promise.resolve([]);
-    if (!initialized) {
-      initialized = true;
-      const values = (query as { values?: unknown[] })?.values ?? [];
-      const dates = values.filter((value): value is Date => value instanceof Date);
-      const [from, through] = dates;
+  aggregateMock.mockImplementation((mode: string, from: Date, through?: Date) => {
+    if (mode === "summary") {
       const events = RAW_EVENTS
         .filter((event) => (!from || event.occurredAt >= from) && (!through || event.occurredAt <= through))
         .filter((event) => !["quota_sync", "credit_balance"].includes(event.metricType) && !isReceiptCandidateShape(event))
@@ -308,27 +302,27 @@ function installFixtureMocks() {
           bucket.lastId = event.id;
         }
       }
-      const pageLast = events[events.length - 1];
-      summaryRows = Array.from(buckets.values()).map((bucket) => ({
+      return Promise.resolve(Array.from(buckets.values()).map((bucket) => ({
         ...bucket.dims,
         eventCount: bucket.count,
         pricedEventCount: bucket.priced,
         totalCostUsd: bucket.cost,
         totalRequests: bucket.requests,
         totalQuantity: bucket.quantity,
-        latestAt: bucket.latest,
-        groupLastId: bucket.lastId,
-        pageCount: events.length,
-        pageLastOccurredAt: pageLast?.occurredAt ?? from,
-        pageLastId: pageLast?.id ?? "",
+        packedLatest: `${bucket.latest.toISOString().replace("Z", "+00:00")}\u0001${bucket.lastId}`,
       })).sort((a, b) => {
-        const at = new Date(a.latestAt as Date).getTime() - new Date(b.latestAt as Date).getTime();
-        return at || String(a.groupLastId).localeCompare(String(b.groupLastId));
-      });
+        return String(a.packedLatest) < String(b.packedLatest)
+          ? -1
+          : String(a.packedLatest) > String(b.packedLatest)
+            ? 1
+            : 0;
+      }));
     }
-    const page = summaryRows;
-    summaryRows = [];
-    return Promise.resolve(page);
+    if (mode === "derived") return Promise.resolve([{ totalUsd: 0, eventCount: 0 }]);
+    return Promise.resolve([]);
+  });
+  prismaMock.$queryRaw.mockImplementation(() => {
+    return Promise.resolve([]);
   });
 
   prismaMock.externalUsageEvent.findMany.mockImplementation(
@@ -588,6 +582,7 @@ describe("summarizeExternalUsageEvents E1 equivalence", () => {
     installFixtureMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
+    aggregateMock.mockResolvedValueOnce([]);
     prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
 
