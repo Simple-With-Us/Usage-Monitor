@@ -36,6 +36,8 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 
 ## Rollouts
 
+- [Repository Report Library — October 30, 2026](../rollouts/2026-10-30-repository-report-library.md)
+
 - [2026-07-04-data-retention-alert-delivery](../rollouts/2026-07-04-data-retention-alert-delivery.md)
 - [2026-07-10-migrate-safe-dry-run-fix](../rollouts/2026-07-10-migrate-safe-dry-run-fix.md)
 - [2026-07-10-subscription-knob-linkage](../rollouts/2026-07-10-subscription-knob-linkage.md)
@@ -56,12 +58,10 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-07-15-monet-codex-cap-pickup-closeout](../rollouts/2026-07-15-monet-codex-cap-pickup-closeout.md)
 - [2026-07-15-monet-eval-sweep](../rollouts/2026-07-15-monet-eval-sweep.md)
 - [2026-07-15-pickup-codex-cap-handoff-to-monet](../rollouts/2026-07-15-pickup-codex-cap-handoff-to-monet.md)
-- [2026-07-15-private-billing-receipt-import](../rollouts/2026-07-15-private-billing-receipt-import.md)
 - [2026-07-15-st-gemini-infisical-bootstrap](../rollouts/2026-07-15-st-gemini-infisical-bootstrap.md)
 - [2026-07-15-st-primary-bridge-reader](../rollouts/2026-07-15-st-primary-bridge-reader.md)
 - [2026-07-17-cloudflare-cost-coverage-warning](../rollouts/2026-07-17-cloudflare-cost-coverage-warning.md)
 - [2026-07-17-github-direct-billing](../rollouts/2026-07-17-github-direct-billing.md)
-- [2026-07-18-extension-credential-containment](../rollouts/2026-07-18-extension-credential-containment.md)
 - [2026-07-18-garage-backup-monitoring](../rollouts/2026-07-18-garage-backup-monitoring.md)
 - [2026-07-18-oracle-always-free-migration](../rollouts/2026-07-18-oracle-always-free-migration.md)
 - [2026-07-18-oracle-production-cutover](../rollouts/2026-07-18-oracle-production-cutover.md)
@@ -112,7 +112,6 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-08-13-prefer-pushover](../rollouts/2026-08-13-prefer-pushover.md)
 - [2026-08-14-apex-icloud-receipts-routing](../rollouts/2026-08-14-apex-icloud-receipts-routing.md)
 - [2026-08-14-backup-restore-proof](../rollouts/2026-08-14-backup-restore-proof.md)
-- [2026-08-14-cf-token-map](../rollouts/2026-08-14-cf-token-map.md)
 - [2026-08-14-cloudflare-four-accounts](../rollouts/2026-08-14-cloudflare-four-accounts.md)
 - [2026-08-14-gemini-3-7-flash](../rollouts/2026-08-14-gemini-3-7-flash.md)
 - [2026-08-14-onboard-links-and-economics](../rollouts/2026-08-14-onboard-links-and-economics.md)
@@ -186,4 +185,3 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-10-29-telemetry-dedupe](../rollouts/2026-10-29-telemetry-dedupe.md)
 - [2026-10-29-telemetry-parity-audit](../rollouts/2026-10-29-telemetry-parity-audit.md)
 - [2026-10-30-backup-storage-inventory](../rollouts/2026-10-30-backup-storage-inventory.md)
-- [Repository Report Library — October 30, 2026](../rollouts/2026-10-30-repository-report-library.md)
