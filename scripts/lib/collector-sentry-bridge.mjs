@@ -246,9 +246,10 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       try {
         const recover = db.prepare("UPDATE events SET state='pending', owner=NULL, pid=NULL, birth=NULL WHERE id=? AND state='sending' AND owner IS ? AND pid IS ? AND birth IS ?");
         for (const held of stale) recover.run(held.id, held.owner, held.pid, held.birth);
-        const candidates = db.prepare("SELECT id, payload, retry_batch_size FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(100, limit - count));
+        const candidates = db.prepare("SELECT id, retry_batch_size FROM events WHERE state='pending' ORDER BY rowid LIMIT ?").all(Math.min(100, limit - count));
         const batchSize = candidates.reduce((size, row) => Math.min(size, Number.isSafeInteger(row.retry_batch_size) && row.retry_batch_size > 0 ? row.retry_batch_size : 1), 100);
-        rows = candidates.slice(0, batchSize);
+        const picked = candidates.slice(0, batchSize).map((row) => row.id);
+        rows = picked.length ? db.prepare(`SELECT id, payload FROM events WHERE id IN (${picked.map(() => "?").join(",")}) ORDER BY rowid`).all(...picked) : [];
         const claim = db.prepare("UPDATE events SET state='sending', owner=?, pid=?, birth=? WHERE id=?");
         for (const row of rows) claim.run(owner, process.pid, invocationBirth, row.id);
         db.exec("COMMIT");
