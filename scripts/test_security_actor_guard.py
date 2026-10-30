@@ -40,6 +40,9 @@ class ActorGuard(unittest.TestCase):
     def test_existing_trusted_bot(self):
         self.assertEqual(self.gate("swu-echo[bot]"), 0)
 
+    def test_codex_relay_bot(self):
+        self.assertEqual(self.gate("swu-codex[bot]"), 0)
+
     def test_human_unchanged(self):
         self.assertEqual(self.gate("jaywedgeworth22"), 0)
 
