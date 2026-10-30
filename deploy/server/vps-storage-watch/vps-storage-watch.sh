@@ -1,6 +1,6 @@
 #!/bin/bash
 # [INSTINCT] vps-storage-watch - prod app DB growth + device free watcher for the fleet server.
-# Every 15 min via /etc/cron.d/vps-storage-watch. Alert-only; posts to Zulip #alerts as the Operator and tags both
+# Every 15 min via /etc/cron.d/vps-storage-watch. Alert-only; posts to Zulip #Alerts-Log as the Operator and tags both
 # Housekeepers and Jay (owner, Oct 29 2026:  every resource alert tags the Housekeepers and Jay).
 # Also writes /root/vps-storage-status.json for HogHunter / Usage Monitor to read over SSH.
 #
@@ -35,7 +35,7 @@ mark_alerted() { date +%s > "$STATE/alerted.$1"; }
 alert() { # title body
   curl -sS -m 15 -u "$(grep '^email=' "$ZRC" | cut -d= -f2-):$(grep '^key=' "$ZRC" | cut -d= -f2-)" \
     "$(grep '^site=' "$ZRC" | cut -d= -f2-)/api/v1/messages" \
-    --data-urlencode "type=stream" --data-urlencode "to=alerts" \
+    --data-urlencode "type=stream" --data-urlencode "to=Alerts-Log" \
     --data-urlencode "topic=vps-storage" \
     --data-urlencode "content=[INSTINCT] VPS storage - $1
 $2

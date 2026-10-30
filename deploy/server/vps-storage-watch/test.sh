@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test vps-storage-watch.sh against temporary files:  a database that grows past its 1-hour threshold posts one
-# alert to #alerts › vps-storage that tags both Housekeepers and Jay, the cooldown holds the next pass, and a
+# alert to #Alerts-Log › vps-storage that tags both Housekeepers and Jay, the cooldown holds the next pass, and a
 # missing database path stops the run before anything is posted.
 # usage: deploy/server/vps-storage-watch/test.sh
 set -eu
@@ -37,7 +37,7 @@ truncate -s 200M "$work/ct.db"
 run "$work/env"
 [ "$(posts)" -eq 1 ] || fail "expected one post, got $(posts)"
 post=$(cat "$work"/post.*)
-grep -qx 'to=alerts' <<<"$post" || fail "not posted to #alerts"
+grep -qx 'to=Alerts-Log' <<<"$post" || fail "not posted to #Alerts-Log"
 grep -qx 'topic=vps-storage' <<<"$post" || fail "wrong topic"
 grep -q 'ct_db growth SPIKE (1h)' <<<"$post" || fail "no spike title"
 grep -qx '@\*\*BF-Housekeeper|1216054\*\* @\*\*GB-Housekeeper|1215533\*\* @\*\*Jay Wedgeworth|1211974\*\*' <<<"$post" \

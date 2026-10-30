@@ -10,7 +10,7 @@ It alerts on database growth only:
 | Congress.Trade | over 512 MiB | over 100 MiB |
 | Usage Monitor | over 512 MiB | over 100 MiB |
 
-Each alert posts to `#alerts` › `vps-storage` as the Operator and tags both Housekeepers and Jay (owner, Oct 29, 2026:  every resource alert tags the Housekeepers and Jay).  Each threshold waits six hours before it can alert again.
+Each alert posts to `#Alerts-Log` › `vps-storage` as the Operator and tags both Housekeepers and Jay (owner, Oct 29, 2026:  every resource alert tags the Housekeepers and Jay).  Each threshold waits six hours before it can alert again.  It posts to #Alerts-Log, not #Alerts, because #Alerts holds only the alert ingress's standing status blocks (owner, Oct 29, 2026).
 
 ## Files
 
