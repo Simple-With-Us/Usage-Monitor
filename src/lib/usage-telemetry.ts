@@ -26,6 +26,7 @@ const RESERVED_V2_METADATA_KEYS = new Set([
   "_usageTelemetrySchemaVersion",
   "_producerEventId",
   "_producerInstanceId",
+  "_botFleetReceiptCredential",
   "_providerConnectionRef",
   "_billingAccountRef",
   "_coverageDeclared",

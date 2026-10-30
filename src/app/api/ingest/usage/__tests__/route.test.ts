@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import botFleetReceipt from "@/lib/__tests__/fixtures/botfleet-singlecall-v2.json";
 
 const externalUsageMocks = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -1055,6 +1056,16 @@ describe("POST /api/ingest/usage producer scoping", () => {
       "USAGE_INGEST_PRODUCER_TOKENS",
       `socratic-trade:${tokA},congress-trade:${tokB}`
     );
+  });
+
+  it.each([false, true])("grants receipt authority only to a scoped BotFleet credential: scoped=%s", async (scoped) => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "botfleet:botfleet-test-scoped");
+    const payload = structuredClone(botFleetReceipt);
+    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1" });
+    const response = await POST(nextRequest(payload, scoped ? "botfleet-test-scoped" : USAGE_TOKEN, undefined, 2));
+    expect(response.status).toBe(202);
+    const persisted = externalUsageMocks.persist.mock.calls[0][0][0];
+    expect(persisted.metadata._botFleetReceiptCredential).toBe(scoped ? "botfleet-v1" : undefined);
   });
 
   it("accepts a scoped token when events match allowedSourceApps", async () => {

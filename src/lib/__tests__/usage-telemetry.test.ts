@@ -961,6 +961,13 @@ describe("parseUsageTelemetryBatch reserved sourceApp", () => {
 });
 
 describe("reserved derived-cost metadata keys", () => {
+  it("strips producer-supplied receipt authority from legacy metadata", () => {
+    const [event] = parseUsageTelemetryBatch({
+      sourceApp: "botfleet", provider: "anthropic", metricType: "usage", unit: "token", quantity: 10,
+      metadata: { _botFleetReceiptCredential: "botfleet-v1", legitimate: "kept" },
+    });
+    expect(event.metadata).toEqual({ legitimate: "kept" });
+  });
   it("strips producer-supplied _derivedCost* keys so a monitor-computed estimate cannot be forged (v1)", () => {
     const events = parseUsageTelemetryBatch({
       sourceApp: "evil-producer",

@@ -16,7 +16,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { externalUsageEvent: { findMany } },
 }));
 
-import { dropEventsCoveredByBotFleet } from "../botfleet-coverage";
+import { dropEventsCoveredByBotFleet, stampBotFleetReceiptCredential } from "../botfleet-coverage";
 import { oneSidedCorrelationKeys, withoutMetadataKeys } from "../telemetry-correlation";
 import type { ParsedUsageTelemetryEvent } from "../usage-telemetry";
 import { parseUsageTelemetryV2Batch } from "../usage-telemetry";
@@ -36,7 +36,7 @@ async function receipt(extra: Record<string, unknown> = {}) {
     idempotencyKey: await deriveUsageTelemetryV2IdempotencyKey({ producerId: "botfleet", eventId }),
     sourceApp: "botfleet", provider: "anthropic", metricType: "usage", unit: "token", quantity: 20, requests: 1,
     metadata: {
-      _usageTelemetrySchemaVersion: 2, _producerEventId: eventId, _producerInstanceId: "host-a",
+      _usageTelemetrySchemaVersion: 2, _producerEventId: eventId, _producerInstanceId: "host-a", _botFleetReceiptCredential: "botfleet-v1",
       childHarness: "claudeAgent", childSessionId: "child-1", usageReported: true,
       billedCallProofVersion: 1, billedCallId: "msg-1", billedCallModel: "claude-test",
       billedCallOutput: 5, billedCallCacheRead: 3, billedCallCacheWrite: 2,
@@ -52,7 +52,9 @@ describe("exact single-call billing receipts", () => {
     const parsed = await parseUsageTelemetryV2Batch(senderFixture);
     expect(parsed.rejected).toBe(0);
     expect(parsed.events).toHaveLength(1);
-    findMany.mockResolvedValue(parsed.events);
+    findMany.mockResolvedValue(stampBotFleetReceiptCredential(parsed.events, {
+      credentialId: "botfleet", token: "test-only", allowedSourceApps: new Set(["botfleet"]),
+    }));
     const events = [{ ...child({ "session.id": "fixture-session", "call.id": "fixture-call", _producerInstanceId: "fixture-host" }), quantity: 20 }];
     expect((await dropEventsCoveredByBotFleet(events, { BOTFLEET_CHILD_COVERAGE_DROP: "1" })).skippedBotFleetCovered).toBe(1);
   });
@@ -70,6 +72,7 @@ describe("exact single-call billing receipts", () => {
   });
 
   it.each([
+    { _botFleetReceiptCredential: undefined }, { _botFleetReceiptCredential: "unscoped" },
     { billedCallProofVersion: 2 }, { billedCallId: "other" }, { childSessionId: "other" },
     { childHarness: "opencodeGo" }, { billedCallModel: "other" }, { _aiModelServed: "other" },
     { billedCallOutput: 4 }, { _aiTokensOutput: 4 }, { _aiTokensInput: undefined },

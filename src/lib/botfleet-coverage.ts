@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { deriveUsageTelemetryV2IdempotencyKey } from "@jaywedgeworth22/congress-trading-shared";
 import { prisma } from "@/lib/prisma";
 import { AI_METADATA_KEYS } from "@/lib/ai-usage-metadata";
+import type { IngestCredential } from "@/lib/ingest-auth";
 
 export interface BotFleetCoverageResult {
   events: ParsedUsageTelemetryEvent[];
@@ -25,6 +26,21 @@ function count(value: unknown): value is number {
 
 function singleCallEventId(session: string, call: string): string {
   return `bf-call-v1:${createHash("sha256").update(JSON.stringify([session, call])).digest("hex")}`;
+}
+
+/** Only the HTTP receiver may grant receipt authority to a scoped BotFleet issuer. */
+export function stampBotFleetReceiptCredential(
+  events: ParsedUsageTelemetryEvent[], credential: IngestCredential | null
+): ParsedUsageTelemetryEvent[] {
+  if (credential?.credentialId !== "botfleet" || credential.allowedSourceApps?.size !== 1 ||
+    !credential.allowedSourceApps.has("botfleet")) return events;
+  return events.map((event) => {
+    const meta = record(event.metadata);
+    if (event.sourceApp !== "botfleet" || meta._usageTelemetrySchemaVersion !== 2 ||
+      meta.billedCallProofVersion !== 1 || typeof meta._producerEventId !== "string" ||
+      !/^bf-call-v1:[a-f0-9]{64}$/.test(meta._producerEventId)) return event;
+    return { ...event, metadata: { ...meta, _botFleetReceiptCredential: "botfleet-v1" } };
+  });
 }
 
 /** Only a persisted, reconciled single-call receipt can cover child token slices. */
@@ -80,7 +96,8 @@ export async function dropEventsCoveredByBotFleet(
       if (![input, output, read, write5m, write1h].every(count)) continue;
       const total = (input as number) + (output as number) + (read as number) + (write5m as number) + (write1h as number);
       if (!Number.isSafeInteger(total)) continue;
-      if (meta._usageTelemetrySchemaVersion !== 2 || meta._producerEventId !== candidate.eventId ||
+      if (meta._botFleetReceiptCredential !== "botfleet-v1" ||
+        meta._usageTelemetrySchemaVersion !== 2 || meta._producerEventId !== candidate.eventId ||
         meta._producerInstanceId !== candidate.host || meta.childHarness !== "claudeAgent" ||
         meta.childSessionId !== candidate.session || meta.usageReported !== true ||
         meta.billedCallProofVersion !== 1 || meta.billedCallId !== candidate.call ||
