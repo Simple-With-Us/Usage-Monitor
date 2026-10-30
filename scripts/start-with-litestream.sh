@@ -17,10 +17,10 @@
 # error. This prevents a deploy from silently running without its intended
 # backup path.
 #
-# backup-sqlite-before-migrate.mjs then migrate-safe.mjs run exactly once in
-# both paths, before the server starts, and always against the post-restore (or
-# existing) database file. An existing database cannot be migrated unless a
-# transaction-consistent local backup passes SQLite integrity verification.
+# A read-only Prisma schema diff skips the expensive pre-migration snapshot only
+# when the database is already in sync.  Schema drift or a failed diff still
+# requires the verified backup before migrate-safe.mjs can change the database.
+# Both checks run against the post-restore (or existing) database file.
 #
 # Uses `exec` for the final process in each branch so it becomes PID 1 (or
 # litestream's supervised child) and receives Render's SIGTERM directly for
@@ -235,7 +235,7 @@ if [[ -d "/data/.pre-migration-backups" ]]; then
 fi
 
 log "creating and verifying pre-migration SQLite backup when a database exists."
-node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs"
+node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs" --if-schema-changed
 
 
 log "checking provider billing links before enforcing uniqueness."

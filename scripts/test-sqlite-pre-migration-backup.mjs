@@ -35,11 +35,11 @@ assert.notEqual(
   "backup directory must be fsynced after atomic promotion"
 );
 
-function run(databaseUrl, overrides = {}, cwd = repoRoot) {
+function run(databaseUrl, overrides = {}, cwd = repoRoot, args = []) {
   const env = { ...process.env, DATABASE_URL: databaseUrl };
   delete env.SQLITE_PRE_MIGRATION_BACKUP_RETENTION;
   Object.assign(env, overrides);
-  return spawnSync(process.execPath, [script], {
+  return spawnSync(process.execPath, [script, ...args], {
     cwd,
     env,
     encoding: "utf8",
@@ -101,10 +101,14 @@ try {
   // Keep the WAL-mode source connection open while the child backs it up.
   // This proves the online backup API captures committed WAL-backed rows and
   // does not depend on unsafe filesystem copying.
-  const first = run(`file:${databasePath}`, {
-    SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2",
-  });
+  const first = run(
+    `file:${databasePath}`,
+    { SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
   expectStatus("WAL backup", first, 0);
+  assert.match(first.stdout, /schema change detected/);
   assert.match(first.stdout, /verified .*\.backup\.db/);
   let backups = backupFiles(databasePath);
   assert.equal(backups.length, 1);
@@ -142,6 +146,36 @@ try {
   assert.equal(backups.length, 2, "retention must keep exactly the newest two backups");
   for (const path of backups) assertBackup(path, ["alpha", "beta", "gamma"]);
   source.close();
+
+  const inSyncPath = join(temp, "in-sync.db");
+  const inSyncPush = spawnSync(
+    "npx",
+    ["--no-install", "prisma", "db", "push"],
+    {
+      cwd: repoRoot,
+      env: { ...process.env, DATABASE_URL: `file:${inSyncPath}` },
+      encoding: "utf8",
+    }
+  );
+  expectStatus("in-sync database setup", inSyncPush, 0);
+  const inSyncBackup = run(`file:${inSyncPath}`, {}, repoRoot, ["--if-schema-changed"]);
+  expectStatus("in-sync schema backup skip", inSyncBackup, 0);
+  assert.match(inSyncBackup.stdout, /schema is already in sync; pre-migration backup not required/);
+  assert.equal(backupFiles(inSyncPath).length, 0);
+
+  const fallbackPath = join(temp, "diff-probe-fallback.db");
+  const fallbackDb = new DatabaseSync(fallbackPath);
+  fallbackDb.exec("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sample (value) VALUES ('fallback');");
+  fallbackDb.close();
+  const fallbackBackup = run(
+    `file:${fallbackPath}`,
+    { PATH: "" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
+  expectStatus("schema-diff probe failure backup", fallbackBackup, 0);
+  assert.match(fallbackBackup.stdout, /verified backup remains required/);
+  assertBackup(backupFiles(fallbackPath)[0], ["fallback"]);
 
   const relativeDirectory = join(temp, "relative");
   mkdirSync(relativeDirectory);

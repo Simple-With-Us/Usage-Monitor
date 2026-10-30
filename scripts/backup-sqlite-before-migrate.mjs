@@ -45,6 +45,8 @@ const DEFAULT_RETENTION = 1; // free-tier disk: one pre-migrate snapshot is enou
 const MAX_RETENTION = 10;
 const BACKUP_DIRECTORY = ".pre-migration-backups";
 const BACKUP_TIMEOUT_MS = backupTimeoutMs();
+const SCHEMA_DIFF_TIMEOUT_MS = 60_000;
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function log(message) {
   console.log(`[sqlite-pre-migration-backup] ${message}`);
@@ -257,7 +259,43 @@ function createSnapshotWithDeadline(databasePath, partialPath) {
   }
 }
 
-async function main() {
+function schemaDiffStatus() {
+  const result = spawnSync(
+    "npx",
+    [
+      "--no-install",
+      "prisma",
+      "migrate",
+      "diff",
+      "--exit-code",
+      "--from-config-datasource",
+      "--to-schema=prisma/schema.prisma",
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        PATH: process.env.PATH ?? "",
+        DATABASE_URL: process.env.DATABASE_URL ?? "",
+        NODE_ENV: process.env.NODE_ENV ?? "production",
+      },
+      encoding: "utf8",
+      timeout: SCHEMA_DIFF_TIMEOUT_MS,
+    }
+  );
+
+  if (result.status === 0) return "in-sync";
+  if (result.status === 2) return "changed";
+
+  const reason = result.error?.code === "ETIMEDOUT"
+    ? `timed out after ${SCHEMA_DIFF_TIMEOUT_MS} ms`
+    : result.error
+      ? `could not run (${result.error.code ?? result.error.message})`
+      : `failed with ${result.status ?? result.signal ?? "unknown status"}`;
+  log(`WARNING: read-only Prisma schema diff ${reason}; verified backup remains required.`);
+  return "unknown";
+}
+
+async function main({ skipWhenSchemaSynced = false } = {}) {
   // Backups contain every credential and usage row in the database. Ensure a
   // newly-created directory/file is private even before the explicit chmod.
   process.umask(0o077);
@@ -269,6 +307,17 @@ async function main() {
   }
   if (!lstatSync(databasePath).isFile()) {
     throw new Error(`database path is not a regular file: ${databasePath}`);
+  }
+
+  if (skipWhenSchemaSynced) {
+    const diffStatus = schemaDiffStatus();
+    if (diffStatus === "in-sync") {
+      log("database schema is already in sync; pre-migration backup not required");
+      return;
+    }
+    if (diffStatus === "changed") {
+      log("database schema change detected; verified pre-migration backup required");
+    }
   }
 
   const retention = retentionCount(
@@ -337,7 +386,11 @@ const execution =
           }
           assertIntegrity(args[1]);
         })
-      : main();
+      : args[0] === "--if-schema-changed" && args.length === 1
+        ? main({ skipWhenSchemaSynced: true })
+        : args.length === 0
+          ? main()
+          : Promise.reject(new Error("unknown backup command argument"));
 
 execution.catch((error) => {
   console.error(

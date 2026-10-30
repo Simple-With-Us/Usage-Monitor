@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.28
-FROM node:26.12.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim AS build
 
 # python3 + make + g++ are required by the builder stage only.  better-sqlite3
 # 13.0.3 dropped its `install` script (`prebuild-install || node-gyp rebuild --release`),
@@ -45,7 +45,7 @@ RUN npm run build \
   && test -x bin/litestream \
   && ./bin/litestream version
 
-FROM node:26.12.0-bookworm-slim AS runtime
+FROM node:24.22.1-bookworm-slim AS runtime
 
 # Coolify / CI pass the git SHA as SOURCE_COMMIT (or COOLIFY_CONTAINER_NAME alone).
 # Bake it into the image so /api/health revision is correct even when a stale

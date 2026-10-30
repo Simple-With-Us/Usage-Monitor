@@ -276,18 +276,34 @@ function runMigrateSafe(dbFile) {
   }
 }
 
-// Pushes a given schema file directly (bypassing migrate-safe.mjs) — used
-// only to construct fixture DBs in known shapes, not to exercise the fix.
+// Builds a fixture database from an empty source without using db push's
+// destructive override.  This constructs known test shapes without weakening
+// the production migration guard or Prisma's AI-process safety check.
 function pushSchemaDirect(schemaPath, dbFile) {
-  execFileSync(
+  const env = { ...process.env, DATABASE_URL: `file:${dbFile}` };
+  const sql = execFileSync(
     "npx",
-    ["prisma", "db", "push", `--schema=${schemaPath}`, "--accept-data-loss"],
+    [
+      "--no-install",
+      "prisma",
+      "migrate",
+      "diff",
+      "--from-empty",
+      `--to-schema=${schemaPath}`,
+      "--script",
+    ],
     {
       cwd: REPO_ROOT,
-      env: { ...process.env, DATABASE_URL: `file:${dbFile}` },
+      env,
       stdio: "pipe",
     }
   );
+  execFileSync("npx", ["--no-install", "prisma", "db", "execute", "--stdin"], {
+    cwd: REPO_ROOT,
+    env,
+    input: sql,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
 }
 
 // Textually strips the ProviderProjectAllocation model (a table) and

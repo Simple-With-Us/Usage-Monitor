@@ -82,8 +82,11 @@ Local pre-migration snapshots on `/data` still exist.
 - `scripts/start-with-litestream.sh` — the container entrypoint. If all four
   required `LITESTREAM_S3_*` vars are set and `bin/litestream` exists: restores
   first if `/data/prod.db` doesn't exist yet (fresh disk or disaster recovery).
-  In both enabled and disabled modes it then runs
-  `backup-sqlite-before-migrate.mjs` and `migrate-safe.mjs` in that order.
+  In both enabled and disabled modes it then runs the schema-aware
+  `backup-sqlite-before-migrate.mjs` gate and `migrate-safe.mjs` in that order.
+  A read-only Prisma diff skips the snapshot only when the live database is
+  already in sync.  Schema drift or a failed diff still requires a verified
+  snapshot before any schema synchronization.
   **R2 endpoints:** litestream runs as a sibling of `npm start` so the free-tier
   kill switch can stop replication without taking down the app. **Non-R2 S3:**
   `exec litestream replicate -exec "npm start"` (litestream is PID 1).
@@ -94,9 +97,10 @@ Local pre-migration snapshots on `/data` still exist.
 - `scripts/backup-sqlite-before-migrate.mjs` — transaction-consistent SQLite
   `VACUUM INTO` snapshot plus `PRAGMA integrity_check` inside a child process
   with a bounded deadline, private file modes, atomic promotion, and bounded
-  same-disk retention.  `SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` is an Infisical
+  same-disk retention when the read-only Prisma diff finds schema drift or
+  cannot prove the database is in sync.  `SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` is an Infisical
   env-sync startup knob (default 300000 ms, maximum 900000 ms); timeout fails
-  startup closed.  It is the immediate schema rollback layer; Litestream/B2
+  startup closed.  It is the immediate schema rollback layer; Litestream/B2
   remains the off-disk disaster-recovery replica.
 - `scripts/litestream-restore.sh` — manual disaster-recovery restore to a
   scratch path, run inside the production app container (see below).
