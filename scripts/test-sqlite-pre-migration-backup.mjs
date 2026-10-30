@@ -12,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -158,10 +159,43 @@ try {
     }
   );
   expectStatus("in-sync database setup", inSyncPush, 0);
-  const inSyncBackup = run(`file:${inSyncPath}`, {}, repoRoot, ["--if-schema-changed"]);
+  const inSyncBackupDirectory = join(temp, ".pre-migration-backups");
+  mkdirSync(inSyncBackupDirectory, { recursive: true });
+  for (let index = 0; index < 3; index += 1) {
+    const retainedPath = join(
+      inSyncBackupDirectory,
+      `in-sync.db.pre-migration-2026010${index + 1}T000000000Z-${index}.backup.db`
+    );
+    writeFileSync(retainedPath, `old backup ${index}`);
+    const timestamp = new Date(Date.UTC(2026, 0, index + 1));
+    utimesSync(retainedPath, timestamp, timestamp);
+  }
+  const stalePartial = join(
+    inSyncBackupDirectory,
+    "in-sync.db.pre-migration-20260104T000000000Z-4.partial"
+  );
+  writeFileSync(stalePartial, "incomplete backup");
+  const staleTimestamp = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  utimesSync(stalePartial, staleTimestamp, staleTimestamp);
+
+  const inSyncBackup = run(
+    `file:${inSyncPath}`,
+    { SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
   expectStatus("in-sync schema backup skip", inSyncBackup, 0);
   assert.match(inSyncBackup.stdout, /schema is already in sync; pre-migration backup not required/);
-  assert.equal(backupFiles(inSyncPath).length, 0);
+  assert.equal(
+    backupFiles(inSyncPath).length,
+    2,
+    "in-sync startup must still repair retention overflow"
+  );
+  assert.equal(
+    existsSync(stalePartial),
+    false,
+    "in-sync startup must still remove stale partial backups"
+  );
 
   const fallbackPath = join(temp, "diff-probe-fallback.db");
   const fallbackDb = new DatabaseSync(fallbackPath);

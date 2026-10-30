@@ -309,17 +309,6 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     throw new Error(`database path is not a regular file: ${databasePath}`);
   }
 
-  if (skipWhenSchemaSynced) {
-    const diffStatus = schemaDiffStatus();
-    if (diffStatus === "in-sync") {
-      log("database schema is already in sync; pre-migration backup not required");
-      return;
-    }
-    if (diffStatus === "changed") {
-      log("database schema change detected; verified pre-migration backup required");
-    }
-  }
-
   const retention = retentionCount(
     process.env.SQLITE_PRE_MIGRATION_BACKUP_RETENTION
   );
@@ -332,6 +321,17 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
   // set while creating the replacement. If the new backup fails, the previous
   // verified backups remain available instead of being pruned preemptively.
   pruneToRetention(backupDirectory, prefix, retention);
+
+  if (skipWhenSchemaSynced) {
+    const diffStatus = schemaDiffStatus();
+    if (diffStatus === "in-sync") {
+      log("database schema is already in sync; pre-migration backup not required");
+      return;
+    }
+    if (diffStatus === "changed") {
+      log("database schema change detected; verified pre-migration backup required");
+    }
+  }
 
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
   const stem = `${prefix}${timestamp}-${process.pid}`;
