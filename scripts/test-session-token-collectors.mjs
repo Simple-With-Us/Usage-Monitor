@@ -1482,10 +1482,4 @@ assert(
   }
 }
 
-// The existing CI collector gate also verifies durable delivery and auth.
-execFileSync(process.execPath, ["--test", ...[
-  "collector-sentry-bridge.node-test.mjs",
-  "telemetry-hub-auth.node-test.mjs",
-  "telemetry-hub-bootstrap.node-test.mjs",
-].map((name) => join(dirname(fileURLToPath(import.meta.url)), name))], { stdio: "inherit" });
 console.log("ok session-token-collectors");

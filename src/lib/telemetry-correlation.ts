@@ -15,6 +15,9 @@
 /** The harness's own session id (Claude `sessionId`, opencode `ses_…`, Codex thread). */
 export const SESSION_ID_METADATA_KEY = "session.id";
 
+/** The producer's authoritative call/message identity, when available. */
+export const CALL_ID_METADATA_KEY = "call.id";
+
 /** Which orchestrator launched the session, when a collector can tell ("botfleet"). */
 export const LAUNCHER_METADATA_KEY = "agent.launcher";
 
@@ -23,6 +26,7 @@ export const LAUNCHER_SESSION_METADATA_KEY = "agent.launcher.session";
 
 export const CORRELATION_METADATA_KEYS: readonly string[] = [
   SESSION_ID_METADATA_KEY,
+  CALL_ID_METADATA_KEY,
   LAUNCHER_METADATA_KEY,
   LAUNCHER_SESSION_METADATA_KEY,
 ];

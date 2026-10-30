@@ -70,6 +70,7 @@ export async function GET(request: NextRequest) {
     const order =
       searchParams.get("order") === "asc" ? ("asc" as const) : ("desc" as const);
     const metricTypeFilter = searchParams.get("metricType");
+    const sourceAppFilter = searchParams.get("sourceApp")?.trim();
 
     const where = {
       occurredAt: {
@@ -82,6 +83,7 @@ export async function GET(request: NextRequest) {
           : { projectId: projectFilter }
         : {}),
       ...(metricTypeFilter ? { metricType: metricTypeFilter } : {}),
+      ...(sourceAppFilter ? { sourceApp: sourceAppFilter } : {}),
     };
 
     const rows = await prisma.externalUsageEvent.findMany({
