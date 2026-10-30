@@ -62,6 +62,23 @@ test("poison isolation bounds requests while healthy rows remain pending and eve
   assert.equal(quarantined, 15);
 }));
 
+test("claim honors narrowed rows beyond the pending head", () => fixture(async (config) => {
+  const events = [0, 1, 2].flatMap((i) => tokens({ collectorCallId: `window-${i}`, extraId: `window-${i}` }));
+  const root = await enqueueCollectorSentry(events, identity, config);
+  const db = new DatabaseSync(join(root, "outbox.sqlite"));
+  db.exec("UPDATE events SET retry_batch_size=1 WHERE rowid=(SELECT rowid FROM events ORDER BY rowid LIMIT 1 OFFSET 1)");
+  db.close();
+  let batchLength;
+  const result = await drainCollectorSentry(root, config, { requestLimit: 1, fetchImpl: async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    batchLength = payload.resourceSpans.flatMap((resource) => resource.scopeSpans.flatMap((scope) => scope.spans)).length;
+    return accepted();
+  } });
+  assert.equal(batchLength, 1);
+  assert.equal(result.delivered, 1);
+  assert.equal(result.pending, true);
+}));
+
 test("only authoritative source calls become spans; serialization and IDs remain unchanged", () => {
   const plain = tokens();
   const known = tokens({ collectorCallId: "message-id", extraMetadata: { prompt: "PRIVATE_CONTENT", response: "PRIVATE_CONTENT", sessionId: "PRIVATE_CONTENT" } });
