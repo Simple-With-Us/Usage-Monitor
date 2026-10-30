@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { awsUriEncode, signS3Request } from "./lib/s3-sigv4.mjs";
 import {
   archiveKeyFor,
+  archiveKeyTimeMs,
   classifyFailure,
   isManagedArchiveKey,
   resolveArchiveConfig,
@@ -24,6 +25,7 @@ import {
   selectPruneTargets,
 } from "./ops/r2-weekly-archive.mjs";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
 let failures = 0;
 let passes = 0;
 
@@ -153,6 +155,46 @@ await test("selectPruneTargets keeps the fresh upload plus keep-1 older generati
     "weekly/prod-2026-07-29T00-00-00Z.db.gz",
     "weekly/prod-2026-07-22T00-00-00Z.db.gz",
   ]);
+});
+
+await test("selectPruneTargets never keeps an archive more than 14 days older than the fresh one", () => {
+  // Jay 2026-10-30: the 2 weeks counts from day 1. Two failed weeks in a row
+  // left the previous good copy 21 days old; keep=2 alone would keep it.
+  const objects = [
+    { key: "weekly/prod-2026-07-22T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-00Z.db.gz" },
+  ];
+  const fresh = "weekly/prod-2026-08-12T00-00-00Z.db.gz";
+  assert.deepEqual(selectPruneTargets(objects, fresh, 2), ["weekly/prod-2026-07-22T00-00-00Z.db.gz"]);
+
+  // A raised keep (R2_ARCHIVE_KEEP_GENERATIONS=4) is capped too; exactly 14 days stays.
+  const weekly = [
+    { key: "weekly/prod-2026-07-22T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-07-29T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-05T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-00Z.db.gz" },
+  ];
+  assert.deepEqual(selectPruneTargets(weekly, fresh, 4), ["weekly/prod-2026-07-22T00-00-00Z.db.gz"]);
+
+  // Run-time jitter: 14 days + 1 second is over the cap.
+  const jitter = [
+    { key: "weekly/prod-2026-07-29T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-01Z.db.gz" },
+  ];
+  assert.deepEqual(selectPruneTargets(jitter, "weekly/prod-2026-08-12T00-00-01Z.db.gz", 2), [
+    "weekly/prod-2026-07-29T00-00-00Z.db.gz",
+  ]);
+
+  // The normal weekly shape is untouched: fresh + the 7-day-old copy.
+  assert.deepEqual(selectPruneTargets(weekly.slice(2), fresh, 2), []);
+});
+
+await test("archiveKeyTimeMs parses the key stamp", () => {
+  assert.equal(
+    archiveKeyTimeMs("weekly/prod-2026-08-12T09-48-45Z.db.gz"),
+    Date.parse("2026-08-12T09:48:45Z")
+  );
+  assert.ok(Number.isNaN(archiveKeyTimeMs("weekly/README.txt")));
 });
 
 await test("selectPruneTargets never proposes deleting the fresh upload", () => {
@@ -380,10 +422,14 @@ await test("runArchive prunes only after verification, honouring the keep count"
     const dbPath = join(dir, "prod.db");
     makeDatabase(dbPath);
     const s3 = makeS3Stub();
-    // Three pre-existing generations plus an unrelated litestream object.
-    s3.store.set("weekly/prod-2026-07-22T00-00-00Z.db.gz", Buffer.from("old-1"));
-    s3.store.set("weekly/prod-2026-07-29T00-00-00Z.db.gz", Buffer.from("old-2"));
-    s3.store.set("weekly/prod-2026-08-05T00-00-00Z.db.gz", Buffer.from("old-3"));
+    // Three pre-existing generations (all inside the 14-day cap, relative to
+    // the real clock the fresh key uses) plus an unrelated litestream object.
+    const old1 = archiveKeyFor("weekly/", new Date(Date.now() - 9 * DAY_MS));
+    const old2 = archiveKeyFor("weekly/", new Date(Date.now() - 8 * DAY_MS));
+    const old3 = archiveKeyFor("weekly/", new Date(Date.now() - 7 * DAY_MS));
+    s3.store.set(old1, Buffer.from("old-1"));
+    s3.store.set(old2, Buffer.from("old-2"));
+    s3.store.set(old3, Buffer.from("old-3"));
     s3.store.set("api-usage-monitor/prod.db/0001/0000.ltx", Buffer.from("litestream"));
 
     const result = await runArchive({
@@ -394,9 +440,9 @@ await test("runArchive prunes only after verification, honouring the keep count"
 
     assert.equal(result.pruned.length, 2);
     assert.ok(s3.store.has(result.key), "fresh upload retained");
-    assert.ok(s3.store.has("weekly/prod-2026-08-05T00-00-00Z.db.gz"), "newest old generation retained");
-    assert.ok(!s3.store.has("weekly/prod-2026-07-29T00-00-00Z.db.gz"));
-    assert.ok(!s3.store.has("weekly/prod-2026-07-22T00-00-00Z.db.gz"));
+    assert.ok(s3.store.has(old3), "newest old generation retained");
+    assert.ok(!s3.store.has(old2));
+    assert.ok(!s3.store.has(old1));
     assert.ok(
       s3.store.has("api-usage-monitor/prod.db/0001/0000.ltx"),
       "the frozen litestream history must never be touched"
@@ -407,6 +453,32 @@ await test("runArchive prunes only after verification, honouring the keep count"
     const verifyGet = s3.calls.findIndex((c) => c.method === "GET" && c.key === result.key);
     assert.ok(verifyGet !== -1, "verification GET must happen");
     assert.ok(firstDelete > verifyGet, "no deletion may happen before verification");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("runArchive applies the 14-day cap even when --keep would retain more", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const dbPath = join(dir, "prod.db");
+    makeDatabase(dbPath);
+    const s3 = makeS3Stub();
+    const stale = archiveKeyFor("weekly/", new Date(Date.now() - 20 * DAY_MS));
+    const lastWeek = archiveKeyFor("weekly/", new Date(Date.now() - 7 * DAY_MS));
+    s3.store.set(stale, Buffer.from("stale"));
+    s3.store.set(lastWeek, Buffer.from("last-week"));
+
+    const result = await runArchive({
+      env: baseEnv(dir, dbPath),
+      argv: ["--keep", "4"],
+      fetchImpl: s3.fetchImpl,
+    });
+
+    assert.deepEqual(result.pruned, [stale]);
+    assert.ok(s3.store.has(result.key), "fresh upload retained");
+    assert.ok(s3.store.has(lastWeek), "7-day-old copy retained");
+    assert.ok(!s3.store.has(stale), "20-day-old copy pruned by the 14-day cap");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -69,6 +69,11 @@ const DEFAULTS = {
   // copy in src/app/privacy/page.tsx. Prune still runs only after the fresh
   // upload is verified. R2_ARCHIVE_KEEP_GENERATIONS / --keep override this.
   keepGenerations: 2,
+  // Jay 2026-10-30: "the 2 weeks counts from day 1". Hard cap on top of
+  // keepGenerations: after a verified upload, any archive more than 14 days
+  // older than the fresh one is pruned, so a skipped/failed week or a raised
+  // R2_ARCHIVE_KEEP_GENERATIONS can never keep a copy past 2 weeks.
+  maxAgeDays: 14,
   statusPath: "/data/.r2-archive-status.json",
   // Pages per sqlite3_backup_step(); matches the pre-migration backup default.
   backupRatePages: 100,
@@ -172,11 +177,29 @@ export function isManagedArchiveKey(key, prefix) {
   return /^prod-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.db\.gz$/.test(remainder);
 }
 
+/** Epoch ms of a `prod-YYYY-MM-DDTHH-MM-SSZ.db.gz` archive key, or NaN. */
+export function archiveKeyTimeMs(key) {
+  const match = /prod-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z\.db\.gz$/.exec(
+    typeof key === "string" ? key : ""
+  );
+  if (!match) return Number.NaN;
+  return Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}Z`);
+}
+
 /**
  * Which existing objects to delete, given the freshly uploaded key.
+ * Keeps the newest `keepGenerations` (fresh upload included), then also drops
+ * any kept archive more than `maxAgeDays` older than the fresh upload. The
+ * fresh upload itself is never a candidate.
  * Pure so the retention rule is unit-testable without touching R2.
  */
-export function selectPruneTargets(objects, freshKey, keepGenerations, prefix = DEFAULTS.prefix) {
+export function selectPruneTargets(
+  objects,
+  freshKey,
+  keepGenerations,
+  prefix = DEFAULTS.prefix,
+  maxAgeDays = DEFAULTS.maxAgeDays
+) {
   const archives = objects
     .filter((o) => isManagedArchiveKey(o.key, prefix))
     .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0)); // newest first
@@ -185,6 +208,14 @@ export function selectPruneTargets(objects, freshKey, keepGenerations, prefix = 
   for (const object of archives) {
     if (keep.size >= keepGenerations) break;
     keep.add(object.key);
+  }
+  const freshMs = archiveKeyTimeMs(freshKey);
+  const referenceMs = Number.isFinite(freshMs) ? freshMs : Date.now();
+  const cutoffMs = referenceMs - maxAgeDays * 24 * 60 * 60 * 1000;
+  for (const key of [...keep]) {
+    if (key === freshKey) continue;
+    const keyMs = archiveKeyTimeMs(key);
+    if (Number.isFinite(keyMs) && keyMs < cutoffMs) keep.delete(key);
   }
   return archives.filter((o) => !keep.has(o.key)).map((o) => o.key);
 }
@@ -412,7 +443,7 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     });
     log(
       `done — ${key} verified, ${pruneTargets.length} superseded archive(s) pruned, ` +
-        `${config.keepGenerations} generation(s) retained`
+        `up to ${config.keepGenerations} generation(s) retained, none older than ${DEFAULTS.maxAgeDays} days`
     );
     return result;
   } finally {
