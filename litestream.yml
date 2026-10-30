@@ -54,6 +54,8 @@ levels:
 
 dbs:
   - path: /data/prod.db
+    # Keep this replica generation separate from the previous local LTX chain.
+    meta-path: /data/.prod-recovery-v1.db-litestream
     replica:
       type: s3
       # Expected production values (Infisical prod):

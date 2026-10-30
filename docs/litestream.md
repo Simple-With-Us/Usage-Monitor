@@ -13,7 +13,8 @@ integrity check on 2026-10-29 while the live database passed its quick check.  
 is retained for incident inspection and is not the active restore source.  The
 replacement prefix starts from a full snapshot of the checked live database;
 the old local Litestream metadata was preserved separately before initializing
-the new chain.  Never reuse the old metadata against an empty replica prefix.
+the new chain.  The explicit `meta-path` keeps this generation separate across
+deployments.  Never reuse the old metadata against an empty replica prefix.
 
 Coolify must use **Consistent name (no rolling updates)** for this application,
 with a 60-second stop grace period.  Two overlapping containers would otherwise
