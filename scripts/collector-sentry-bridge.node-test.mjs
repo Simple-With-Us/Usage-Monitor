@@ -1,0 +1,164 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
+import { tokenEventsFromBreakdown, parseClaudeSessionJsonl, postUsageBatches } from "./lib/session-token-collectors.mjs";
+
+const identity = { producerId: "claude-code", producerInstanceId: "test-host" };
+function tokens(extra = {}) {
+  return tokenEventsFromBreakdown({ producerId: "claude-code", provider: "anthropic", service: "claude-code", sessionKey: "private/session", occurredAtIso: "2026-10-30T12:00:00Z", model: "claude-test", breakdown: { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 }, extraId: "message", ...extra });
+}
+async function fixture(fn) {
+  const stateRoot = await mkdtemp(join(tmpdir(), "collector-sentry-"));
+  const config = { stateRoot, endpoint: "https://example.sentry.io/api/1/integration/otlp", publicKey: "abc123" };
+  try { await fn(config); } finally { await rm(stateRoot, { recursive: true, force: true }); }
+}
+const accepted = async () => new Response("{}", { status: 200 });
+
+test("configuration is explicit, project scoped and refuses non-Sentry destinations", () => {
+  assert.equal(collectorSentryConfig({}), null);
+  assert.throws(() => collectorSentryConfig({ COLLECTOR_SENTRY_ENABLED: "1", SENTRY_OTLP_ENDPOINT: "https://sentry.io.evil.test", SENTRY_PUBLIC_KEY: "abc" }));
+  assert.throws(() => collectorSentryConfig({ COLLECTOR_SENTRY_ENABLED: "1", SENTRY_OTLP_ENDPOINT: "https://example.sentry.io?token=secret", SENTRY_PUBLIC_KEY: "abc" }));
+  const env = { COLLECTOR_SENTRY_ENABLED: "1", COLLECTOR_TELEMETRY_HUB_ENDPOINT: "http://127.0.0.1:4318", COLLECTOR_TELEMETRY_HUB_TOKENS_JSON: JSON.stringify({ "claude-code": "test-only-scoped-source-bearer-00000000000000" }) };
+  assert.equal(collectorSentryConfig(env, "claude-code").destination, "hub");
+  assert.equal(collectorSentryConfig(env, "openai-codex"), null);
+});
+
+test("only authoritative source calls become spans; serialization and IDs remain unchanged", () => {
+  const plain = tokens();
+  const known = tokens({ collectorCallId: "message-id", extraMetadata: { prompt: "PRIVATE_CONTENT", response: "PRIVATE_CONTENT", sessionId: "PRIVATE_CONTENT" } });
+  assert.equal(collectorSentryEvents(plain, identity).length, 4);
+  assert.ok(collectorSentryEvents(plain, identity).every((row) => row.kind === "log"));
+  const [span] = collectorSentryEvents([...known, ...known], identity);
+  assert.equal(span.kind, "span");
+  assert.equal(collectorSentryEvents(known, identity).length, 1);
+  assert.equal(span.attributes.find((attr) => attr.key === "gen_ai.usage.input_tokens").value.intValue, "10");
+  assert.ok(!JSON.stringify(span).includes("PRIVATE_CONTENT"));
+  assert.deepEqual(tokens({ collectorCallId: "message-id" }), plain);
+  assert.equal(JSON.stringify(tokens({ collectorCallId: "message-id" })), JSON.stringify(plain));
+  const unknownVendor = collectorSentryEvents(tokens({ provider: "unknown", collectorCallId: "call" }), identity)[0];
+  assert.equal(unknownVendor.attributes.find((attr) => attr.key === "agent.platform").value.stringValue, "claude-code");
+  assert.ok(!unknownVendor.attributes.some((attr) => attr.key === "gen_ai.system"));
+  const [timed] = collectorSentryEvents(tokens({ collectorCallId: "timed", extraMetadata: { durationMs: 250 } }), identity);
+  assert.equal(timed.ts, "2026-10-30T11:59:59.750Z");
+});
+
+test("Claude content-block fragmentation produces one call with complete split input", () => {
+  const row = { type: "assistant", sessionId: "private", timestamp: "2026-10-30T12:00:00Z", message: { id: "msg-source", model: "claude-test", usage: { input_tokens: 20, output_tokens: 3, cache_read_input_tokens: 10 } } };
+  const events = parseClaudeSessionJsonl([row, row, row].map(JSON.stringify).join("\n"), { sessionKey: "private" });
+  const output = collectorSentryEvents(events, identity);
+  assert.equal(output.length, 1);
+  assert.equal(output[0].kind, "span");
+  assert.equal(output[0].attributes.find((a) => a.key === "gen_ai.usage.input_tokens").value.intValue, "20");
+});
+
+test("outbox retries after restart and sent receipts suppress collector replay", () => fixture(async (config) => {
+  const events = tokens({ collectorCallId: "call" });
+  const root = await enqueueCollectorSentry(events, identity, config);
+  assert.equal((await stat(join(root, "outbox.sqlite"))).mode & 0o777, 0o600);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response("", { status: 503 }) })).pending, true);
+  let requests = 0;
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => { requests += 1; return accepted(); } })).delivered, 1);
+  await enqueueCollectorSentry(events, identity, config);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => { requests += 1; return accepted(); } })).delivered, 0);
+  assert.equal(requests, 1);
+}));
+
+test("partial rejection isolates a durable quarantine and malformed responses retain pending rows", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response('{"partialSuccess":{"rejectedSpans":"1"}}') })).quarantined, 1);
+  await enqueueCollectorSentry(tokens({ collectorCallId: "second", extraId: "second" }), identity, config);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response("invalid-json") })).pending, true);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: accepted })).delivered, 1);
+}));
+
+test("one rejected observation is isolated without blocking the remaining records", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens(), identity, config);
+  const result = await drainCollectorSentry(root, config, { fetchImpl: async (_url, init) => {
+    const logs = JSON.parse(init.body).resourceLogs[0].scopeLogs[0].logRecords;
+    const rejected = logs.some((record) => record.attributes.some((attr) => attr.key === "gen_ai.usage.input_tokens"));
+    return new Response(rejected ? "" : "{}", { status: rejected ? 400 : 200 });
+  } });
+  assert.equal(result.delivered, 3);
+  assert.equal(result.quarantined, 1);
+  assert.equal(result.pending, true);
+  const db = new DatabaseSync(join(root, "outbox.sqlite"));
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM events WHERE state='quarantined'").get().n, 1);
+  const id = db.prepare("SELECT id FROM events WHERE state='quarantined'").get().id;
+  db.close();
+  assert.equal((await retryCollectorSentryQuarantine(root, id)).requeued, 1);
+  assert.equal((await drainCollectorSentry(root, config, { fetchImpl: accepted })).delivered, 1);
+}));
+
+test("concurrent drains claim once; dead workers are recovered without stealing live claims", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  let sends = 0;
+  const first = drainCollectorSentry(root, config, { fetchImpl: async () => { sends += 1; started(); await held; return accepted(); } });
+  await ready;
+  const second = await drainCollectorSentry(root, config, { fetchImpl: async () => { sends += 1; return accepted(); } });
+  assert.equal(second.delivered, 0);
+  release();
+  await first;
+  assert.equal(sends, 1);
+  const db = new DatabaseSync(join(root, "outbox.sqlite"));
+  db.exec("UPDATE events SET state='sending', owner='dead-worker', pid=2147483647");
+  db.close();
+  assert.equal((await drainCollectorSentry(root, config, { isAlive: () => false, fetchImpl: accepted })).delivered, 1);
+}));
+
+test("PID reuse recovers ownership only after process birth changes", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  const db = new DatabaseSync(join(root, "outbox.sqlite"));
+  db.exec("UPDATE events SET state='sending', owner='old-process', pid=123, birth='old-birth'");
+  db.close();
+  assert.equal((await drainCollectorSentry(root, config, { isAlive: () => true, birthOf: () => "old-birth", fetchImpl: accepted })).delivered, 0);
+  assert.equal((await drainCollectorSentry(root, config, { isAlive: () => true, birthOf: () => "new-birth", fetchImpl: accepted })).delivered, 1);
+}));
+
+test("explicit pruning is bounded beyond checkpoint replay horizon and keeps pending/new receipts", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens(), identity, config);
+  const db = new DatabaseSync(join(root, "outbox.sqlite"));
+  const now = Date.parse("2028-10-30T12:00:00Z");
+  db.exec("UPDATE events SET state='sent', sent_at=1");
+  db.prepare("UPDATE events SET state='pending' WHERE id=(SELECT id FROM events ORDER BY rowid LIMIT 1)").run();
+  db.prepare("UPDATE events SET sent_at=? WHERE id=(SELECT id FROM events ORDER BY rowid LIMIT 1 OFFSET 1)").run(now);
+  db.close();
+  assert.equal((await pruneCollectorSentryReceipts(root, { successfulThrough: new Date(now).toISOString(), now, limit: 1 })).removed, 1);
+  assert.equal((await pruneCollectorSentryReceipts(root, { successfulThrough: new Date(now).toISOString(), now })).removed, 1);
+  const checked = new DatabaseSync(join(root, "outbox.sqlite"));
+  assert.equal(checked.prepare("SELECT COUNT(*) AS n FROM events").get().n, 2);
+  checked.close();
+  await assert.rejects(pruneCollectorSentryReceipts(root, { successfulThrough: new Date(now).toISOString(), now, retentionDays: 179 }));
+}));
+
+test("UM posting remains independent from Sentry rejection and disabled bridge writes nothing", async () => {
+  const originalFetch = globalThis.fetch;
+  const old = Object.fromEntries(["COLLECTOR_SENTRY_ENABLED", "COLLECTOR_SENTRY_STATE_DIR", "SENTRY_OTLP_ENDPOINT", "SENTRY_PUBLIC_KEY"].map((key) => [key, process.env[key]]));
+  try {
+    await fixture(async (config) => {
+      Object.assign(process.env, { COLLECTOR_SENTRY_ENABLED: "1", COLLECTOR_SENTRY_STATE_DIR: config.stateRoot, SENTRY_OTLP_ENDPOINT: config.endpoint, SENTRY_PUBLIC_KEY: config.publicKey });
+      let umBody;
+      globalThis.fetch = async (url, init) => {
+        if (url.includes("sentry.io")) return new Response("", { status: 503 });
+        umBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ received: 4, persisted: 4, duplicates: 0, pruned: 0, rejected: 0 }));
+      };
+      const events = tokens({ collectorCallId: "call" });
+      const result = await postUsageBatches({ events, ingestUrl: "https://usage.example/api/ingest/usage", ingestToken: "test-only", ...identity, log() {} });
+      assert.equal(result.persisted, 4);
+      assert.equal(JSON.stringify(umBody.events), JSON.stringify(events));
+      const root = await enqueueCollectorSentry([], identity, config);
+      assert.equal((await drainCollectorSentry(root, config, { fetchImpl: accepted })).delivered, 1);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+});

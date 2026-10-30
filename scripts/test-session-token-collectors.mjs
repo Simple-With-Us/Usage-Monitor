@@ -1235,6 +1235,31 @@ try {
     "opencode token rows name their session as a correlation key",
   );
   assert(
+    ocCollected.every((e) => e.metadata["session.id"] === "ses_1" && !("agent.launcher" in e.metadata)),
+    "opencode cost and context rows also carry session correlation",
+  );
+  const fleetDb = new DatabaseSync(dbPath);
+  fleetDb.exec(
+    "CREATE TABLE session_v2 (id text PRIMARY KEY, project_id text, parent_id text, directory text, title text, " +
+      "cost real, tokens_input integer, tokens_output integer, tokens_reasoning integer, tokens_cache_read integer, " +
+      "tokens_cache_write integer, summary_additions integer, summary_deletions integer, summary_files integer, " +
+      "time_created integer, time_updated integer, time_compacting integer, time_archived integer)",
+  );
+  fleetDb.prepare("INSERT INTO session_v2 (id, directory) VALUES (?, ?)").run("ses_1", "/home/test/.botfleet/workspaces/child");
+  fleetDb.close();
+  const fleetCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
+  assert(
+    fleetCollected.every((e) => e.metadata["session.id"] === "ses_1" && e.metadata["agent.launcher"] === "botfleet"),
+    "opencode BotFleet correlation covers tokens, cost and context without dropping rows",
+  );
+  assert(
+    ocCollected.every((event) => fleetCollected.some((fleetEvent) => fleetEvent.eventId === event.eventId)),
+    "opencode launcher correlation preserves every existing event id",
+  );
+  const restoreDb = new DatabaseSync(dbPath);
+  restoreDb.exec("DROP TABLE session_v2");
+  restoreDb.close();
+  assert(
     ocCollected.filter((e) => e.label.startsWith("context:")).length === 2 &&
       ocCollected
         .filter((e) => e.label.startsWith("context:"))
@@ -1457,4 +1482,10 @@ assert(
   }
 }
 
+// The existing CI collector gate also verifies durable delivery and auth.
+execFileSync(process.execPath, ["--test", ...[
+  "collector-sentry-bridge.node-test.mjs",
+  "telemetry-hub-auth.node-test.mjs",
+  "telemetry-hub-bootstrap.node-test.mjs",
+].map((name) => join(dirname(fileURLToPath(import.meta.url)), name))], { stdio: "inherit" });
 console.log("ok session-token-collectors");

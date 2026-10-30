@@ -29,6 +29,7 @@ export const INTERNAL_EVENT_FIELDS = Object.freeze([
   "eventId",
   "ts",
   "platform",
+  "vendor",
   "model",
   "operation",
   "tokens",
@@ -301,6 +302,7 @@ export function normalizeSpan(span, resourceAttributes = {}) {
     eventId,
     ts: nanosToIso(span.endTimeUnixNano) ?? nanosToIso(span.startTimeUnixNano) ?? new Date().toISOString(),
     platform,
+    vendor: readString(flat["gen_ai.system"], 80),
     model,
     operation,
     tokens,
@@ -366,6 +368,7 @@ export function normalizeLogRecord(record, resourceAttributes = {}) {
     eventId,
     ts: nanosToIso(record.timeUnixNano) ?? nanosToIso(record.observedTimeUnixNano) ?? new Date().toISOString(),
     platform,
+    vendor: readString(flat["gen_ai.system"], 80),
     model: readString(flat["gen_ai.request.model"] ?? flat["model"], 160),
     operation: readString(flat["gen_ai.operation.name"], 120) ?? "log",
     tokens: {

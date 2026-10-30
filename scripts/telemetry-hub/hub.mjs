@@ -25,15 +25,17 @@
 // prints counts and key names only.  It never prints a producer value.
 
 import { realpathSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createLogger } from "./internal-event.mjs";
 import { Journal } from "./journal.mjs";
-import { createReceiver } from "./otlp-receiver.mjs";
+import { createReceiver, parseReceiverSources } from "./otlp-receiver.mjs";
 import { createSentrySender } from "./sentry-sender.mjs";
 import { createUmSender } from "./um-sender.mjs";
+import { projectHubTelemetry } from "./metadata-projection.mjs";
 
 const DEFAULT_STATE_DIR = join(homedir(), ".local", "state", "telemetry-hub");
 const DRY_RUN_STATE_SUFFIX = "-dry-run";
@@ -106,6 +108,11 @@ export async function runDeliveryPass({ umSender, sentrySender, logger }) {
   return { um, sentry };
 }
 
+export function receiverJournal(journal, { metadataOnly = false } = {}) {
+  if (!metadataOnly) return journal;
+  return { appendBatch: (events) => journal.appendBatch(events.map(projectHubTelemetry)) };
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
@@ -123,7 +130,8 @@ export async function main(argv = process.argv.slice(2)) {
   const journal = new Journal({ dir: stateDir, logger });
   await journal.open();
 
-  const umSender = createUmSender({
+  const sentryOnly = process.env.TELEMETRY_HUB_SENTRY_ONLY === "1";
+  const umSender = sentryOnly ? { destinations: [], runOnce: async () => ({ ok: true, disabled: true }) } : createUmSender({
     journal,
     baseUrl: options.umBaseUrl?.trim() || process.env.UM_BASE_URL?.trim() || undefined,
     dryRun: options.dryRun,
@@ -141,8 +149,10 @@ export async function main(argv = process.argv.slice(2)) {
 
   let receiver;
   if (options.receiver) {
-    receiver = createReceiver({ journal, logger, port: options.port });
+    receiver = createReceiver({ journal: receiverJournal(journal, { metadataOnly: process.env.TELEMETRY_HUB_METADATA_ONLY === "1" }), logger, port: options.port,
+      host: process.env.TELEMETRY_HUB_BIND_HOST || "127.0.0.1", sources: parseReceiverSources(process.env.TELEMETRY_HUB_SOURCES_JSON) });
     await receiver.listen();
+    if (process.env.TELEMETRY_HUB_READINESS_FILE) await writeFile(process.env.TELEMETRY_HUB_READINESS_FILE, JSON.stringify({ host: receiver.host, port: options.port }), { mode: 0o600 });
     logger.info("the otlp receiver is listening", { host: receiver.host, port: options.port });
   }
 
@@ -157,6 +167,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (stopping) return;
     stopping = true;
     if (receiver) await receiver.close();
+    if (process.env.TELEMETRY_HUB_READINESS_FILE) await unlink(process.env.TELEMETRY_HUB_READINESS_FILE).catch(() => {});
     await journal.close();
   };
   process.on("SIGINT", () => {
