@@ -109,6 +109,7 @@ describe("parseMuseSubscriptionStatus", () => {
     expect(byBucket[WEEKLY_BUCKET].planType).toBe(
       "The user is on the Power subscription",
     );
+    expect(byBucket[WEEKLY_BUCKET].label).toBe("Weekly limit");
     expect(byBucket[ADDITIONAL_BUCKET].remainingPercent).toBe(81);
     expect(byBucket[ADDITIONAL_BUCKET].usedPercent).toBe(19);
     expect(byBucket[ADDITIONAL_BUCKET].metadataExtras).toEqual({
