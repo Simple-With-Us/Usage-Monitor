@@ -1,7 +1,8 @@
-import { readFile, open, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 import { buildStoredClaudeDuplicatePlan, applyStoredClaudeDuplicatePlan, storedPlanDigest, fingerprint } from "./lib/claude-duplicate-stored-plan.mjs";
+import { readProtectedCleanupJson, verifyProtectedSqliteBackup } from "./lib/protected-cleanup-file.mjs";
 
 const args = process.argv.slice(2);
 const value = (flag) => { const index = args.indexOf(flag); return index < 0 ? undefined : args[index + 1]; };
@@ -11,9 +12,7 @@ const input = value(apply ? "--stored-plan" : "--proof-manifest");
 let parsed;
 if (!inventory) {
   if (!input) throw new Error("Explicit protected input file required");
-  const inputStat = await stat(input);
-  if (!inputStat.isFile() || (inputStat.mode & 0o777) !== 0o600) throw new Error("Input must be a regular mode600 file");
-  parsed = JSON.parse(await readFile(input, "utf8"));
+  parsed = await readProtectedCleanupJson(input);
 }
 if (inventory && apply) throw new Error("Inventory cannot be combined with apply");
 if (apply && (!args.includes("--full-backup-verified") || !value("--full-backup-path") || !value("--reviewed-digest"))) {
@@ -21,17 +20,8 @@ if (apply && (!args.includes("--full-backup-verified") || !value("--full-backup-
 }
 if (apply) {
   const backupPath = resolve(value("--full-backup-path"));
-  const backup = await stat(backupPath);
-  if (!backup.isFile() || backup.size === 0) throw new Error("Verified full database backup is unavailable");
-  const handle = await open(backupPath, "r");
-  const header = Buffer.alloc(16);
-  try { await handle.read(header, 0, 16, 0); } finally { await handle.close(); }
-  if (!header.equals(Buffer.from("SQLite format 3\u0000"))) throw new Error("Verified full backup is not a SQLite snapshot");
   const livePath = process.env.DATABASE_URL?.replace(/^file:/, "").split("?")[0];
-  if (livePath) {
-    const live = await stat(resolve(livePath));
-    if (backup.ino === live.ino && backup.dev === live.dev) throw new Error("Full backup must be separate from the live database");
-  }
+  await verifyProtectedSqliteBackup(backupPath, livePath ? resolve(livePath) : undefined);
 }
 const prisma = createPrismaClient();
 try {
@@ -48,9 +38,7 @@ try {
     const otherInputs = args.flatMap((arg, index) => arg === "--proof-manifest" ? [args[index + 1]] : []).slice(1);
     const manifests = [parsed];
     for (const path of otherInputs) {
-      const info = await stat(path);
-      if (!info.isFile() || (info.mode & 0o777) !== 0o600) throw new Error("Every host manifest must be protected mode600");
-      const next = JSON.parse(await readFile(path, "utf8"));
+      const next = await readProtectedCleanupJson(path);
       if (next.version !== 1 || !Array.isArray(next.candidates)) throw new Error("Unsupported additional host manifest");
       manifests.push(next);
     }
