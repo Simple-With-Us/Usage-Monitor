@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { openProtectedCleanupFile, readProtectedCleanupJson, readProtectedCleanupJsonHandle, verifyProtectedSqliteBackup } from "../lib/protected-cleanup-file.mjs";
 
 const proof = { idempotencyKey: "duplicate", keeperIdempotencyKey: "keeper", label: "token:output", model: "claude-test", quantity: 20,
   occurredAt: "2026-10-29T12:00:01.000Z", keeperOccurredAt: "2026-10-29T12:00:00.000Z", sourceProofHash: "source-sha", messageProofHash: "message-sha" };
+const verified = (plan) => ({ reviewedDigest: plan.digest, backupDigest: "a".repeat(64), reviewedBackupDigest: "a".repeat(64) });
 const row = (key, changes = {}) => ({ id: key, idempotencyKey: key, sourceApp: "claude-code", provider: "anthropic", service: "claude-code", metricType: "usage", unit: "token", label: "token:output", quantity: 20, keyRef: "claude-test", costUsd: null, requests: null, credits: null, limit: null, billingMode: "estimated", confidence: "estimated", projectId: "project-one", environment: "production", occurredAt: key === "keeper" ? proof.keeperOccurredAt : proof.occurredAt, metadata: { collector: "transcript", model: "claude-test", "host.name": "test-host" }, ...changes });
 function client(rows) {
   let records = rows;
@@ -20,7 +22,7 @@ function client(rows) {
       deleteMany: async ({ where }) => { calls.push("delete"); const count = records.filter((row) => where.id.in.includes(row.id)).length; records = records.filter((row) => !where.id.in.includes(row.id)); return { count }; },
     },
     externalUsageEventTombstone: { createMany: async () => { calls.push("tombstone"); }, findMany: async () => [] },
-    $executeRawUnsafe: async () => calls.push("writer-lock"),
+    $executeRaw: async () => calls.push("writer-lock"),
     $transaction: async (fn) => fn(db), calls,
   };
   return db;
@@ -29,7 +31,7 @@ test("only exact stored candidate and keeper identities qualify", async () => {
   const db = client([row("duplicate"), row("keeper"), row("unrelated")]);
   const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
   assert.equal(plan.approved.length, 1);
-  const result = await applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: plan.digest });
+  const result = await applyStoredClaudeDuplicatePlan(db, plan, verified(plan));
   assert.equal(result.deleted, 1);
   assert.deepEqual(db.calls, ["writer-lock", "tombstone", "delete"]);
   const remaining = await db.externalUsageEvent.findMany({ where: { idempotencyKey: { in: ["keeper", "unrelated"] } } });
@@ -53,7 +55,7 @@ test("a changed row or keeper after review aborts before any tombstone/delete", 
     const db = client(records);
     const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
     records.find((record) => record.id === changed).quantity = 21;
-    await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: plan.digest }), /changed after review/);
+    await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, verified(plan)), /changed after review/);
     assert.deepEqual(db.calls, ["writer-lock"]);
   }
 });
@@ -62,14 +64,14 @@ test("missing backup/review digest or changed source proof prevents writes", asy
   const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
   await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan), /digest required/);
   plan.approved[0].proof = { ...proof, sourceProofHash: "changed" };
-  await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: plan.digest }), /digest required/);
+  await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, verified(plan)), /digest required/);
   assert.deepEqual(db.calls, []);
 });
 test("tampering with backed-up deletion IDs cannot redirect the reviewed deletion", async () => {
   const db = client([row("duplicate"), row("keeper")]);
   const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
   plan.approved[0].row = { ...plan.approved[0].row, id: "keeper" };
-  await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: plan.digest }), /backup row differs/);
+  await assert.rejects(applyStoredClaudeDuplicatePlan(db, plan, verified(plan)), /backup row differs/);
   assert.deepEqual(db.calls, []);
 });
 test("cross-host identity collisions and keeper dependencies preserve rows", async () => {
@@ -112,10 +114,12 @@ test("backup validation rejects symlinks and the live inode using held descripto
   try {
     const backup = join(directory, "backup.db"), link = join(directory, "backup-link.db");
     await writeFile(backup, Buffer.from("SQLite format 3\u0000"), { mode: 0o600 });
+    const expected = createHash("sha256").update(Buffer.from("SQLite format 3\u0000")).digest("hex");
     await symlink(backup, link);
-    await assert.rejects(verifyProtectedSqliteBackup(link));
-    await assert.rejects(verifyProtectedSqliteBackup(backup, backup), /separate from the live/);
-    await verifyProtectedSqliteBackup(backup);
+    await assert.rejects(verifyProtectedSqliteBackup(link, undefined, expected));
+    await assert.rejects(verifyProtectedSqliteBackup(backup, backup, expected), /separate from the live/);
+    assert.equal(await verifyProtectedSqliteBackup(backup, undefined, expected), expected);
+    await assert.rejects(verifyProtectedSqliteBackup(backup, undefined, "f".repeat(64)), /checksum differs/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test("CLI failures disclose only the fixed phase and error name", async () => {

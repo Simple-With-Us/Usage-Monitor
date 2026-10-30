@@ -22,13 +22,13 @@ test("real SQLite deletes exact duplicates with tombstones and rolls back on tom
     await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "duplicate", occurredAt: new Date(proof.occurredAt) } });
     const plan = await buildStoredClaudeDuplicatePlan(db, [proof]);
     assert.equal(plan.approved.length, 1);
-    await applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: plan.digest });
+    await applyStoredClaudeDuplicatePlan(db, plan, { reviewedDigest: plan.digest, backupDigest: "a".repeat(64), reviewedBackupDigest: "a".repeat(64) });
     assert.equal(await db.externalUsageEvent.count(), 1);
     assert.equal(await db.externalUsageEventTombstone.count(), 1);
     await db.externalUsageEvent.create({ data: { ...base, idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });
     await db.externalUsageEventTombstone.create({ data: { idempotencyKey: "collision", occurredAt: new Date(proof.occurredAt) } });
     const collision = await buildStoredClaudeDuplicatePlan(db, [{ ...proof, idempotencyKey: "collision" }]);
-    await assert.rejects(applyStoredClaudeDuplicatePlan(db, collision, { reviewedDigest: collision.digest, backupDigest: collision.digest }));
+    await assert.rejects(applyStoredClaudeDuplicatePlan(db, collision, { reviewedDigest: collision.digest, backupDigest: "a".repeat(64), reviewedBackupDigest: "a".repeat(64) }));
     assert.equal(await db.externalUsageEvent.count(), 2);
   } finally { await db.$disconnect(); await rm(directory, { recursive: true, force: true }); }
 });

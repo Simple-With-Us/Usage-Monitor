@@ -82,8 +82,9 @@ export async function buildStoredClaudeDuplicatePlan(client, proofs) {
 }
 
 /** Caller must persist a protected backup and verify its digest before calling. */
-export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDigest, backupDigest } = {}) {
-  if (plan.digest !== storedPlanDigest(plan.approved) || plan.digest !== reviewedDigest || plan.digest !== backupDigest) throw new Error("Reviewed plan and verified backup digest required");
+export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDigest, backupDigest, reviewedBackupDigest } = {}) {
+  if (plan.digest !== storedPlanDigest(plan.approved) || plan.digest !== reviewedDigest ||
+    !/^[a-f0-9]{64}$/.test(backupDigest ?? "") || backupDigest !== reviewedBackupDigest) throw new Error("Reviewed plan and verified backup digest required");
   if (plan.approved.some((entry) => fingerprint(entry.row) !== entry.rowFingerprint || fingerprint(entry.keeper) !== entry.keeperFingerprint)) {
     throw new Error("Stored backup row differs from its reviewed fingerprint");
   }
@@ -91,7 +92,7 @@ export async function applyStoredClaudeDuplicatePlan(client, plan, { reviewedDig
   for (let offset = 0; offset < plan.approved.length; offset += 100) {
     const batch = plan.approved.slice(offset, offset + 100);
     await client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe('UPDATE "ExternalUsageEvent" SET "quantity" = "quantity" WHERE "id" = ?', batch[0].row.id);
+      await tx.$executeRaw`UPDATE "ExternalUsageEvent" SET "quantity" = "quantity" WHERE "id" = ${batch[0].row.id}`;
       const keys = [...new Set(batch.flatMap(({ row, keeper }) => [row.idempotencyKey, keeper.idempotencyKey]))];
       const current = await tx.externalUsageEvent.findMany({ where: { idempotencyKey: { in: keys } } });
       const byKey = new Map(current.map((row) => [row.idempotencyKey, row]));

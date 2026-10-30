@@ -1,8 +1,10 @@
-import { readdir, readFile, stat, open } from "node:fs/promises";
+import { readdir, stat, open } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { resolve, relative, join } from "node:path";
 import { createHash } from "node:crypto";
 import { deriveUsageTelemetryV2IdempotencyKey } from "@jaywedgeworth22/congress-trading-shared";
-import { planClaudeDuplicateLines, finalizeClaudeDuplicateCandidates } from "./lib/claude-duplicate-cleanup.mjs";
+import { createClaudeDuplicateLinePlanner, finalizeClaudeDuplicateCandidates } from "./lib/claude-duplicate-cleanup.mjs";
 
 async function main() {
 const args = process.argv.slice(2);
@@ -25,13 +27,29 @@ async function walk(directory) {
 let candidates = [];
 const seen = new Map();
 let scannedFiles = 0, ambiguousMessages = 0;
-const stamped = await Promise.all((await walk(join(resolve(root), "projects"))).map(async (path) => ({ path, mtime: (await stat(path)).mtimeMs })));
+const stamped = [];
+for (const path of await walk(join(resolve(root), "projects"))) stamped.push({ path, mtime: (await stat(path)).mtimeMs });
 for (const { path, mtime } of stamped.sort((left, right) => left.mtime - right.mtime)) {
   if (mtime < since.getTime()) continue;
-  const raw = await readFile(path, "utf8");
   const sessionKey = relative(resolve(root), path).replaceAll("\\", "/");
-  const sourceProofHash = createHash("sha256").update(raw).digest("hex");
-  const plan = planClaudeDuplicateLines(raw, { sessionKey, seen, sourceProofHash });
+  const planner = createClaudeDuplicateLinePlanner({ sessionKey, seen });
+  const hash = createHash("sha256"), decoder = new StringDecoder("utf8");
+  let pending = "", line = 0;
+  for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) {
+    hash.update(chunk);
+    pending += decoder.write(chunk);
+    let end;
+    while ((end = pending.indexOf("\n")) !== -1) {
+      if (Buffer.byteLength(pending.slice(0, end)) > 64 * 1024 * 1024) throw new Error("Transcript line limit exceeded");
+      planner.addLine(pending.slice(0, end), line++);
+      pending = pending.slice(end + 1);
+    }
+    if (Buffer.byteLength(pending) > 64 * 1024 * 1024) throw new Error("Transcript line limit exceeded");
+  }
+  pending += decoder.end();
+  planner.addLine(pending, line);
+  const sourceProofHash = hash.digest("hex");
+  const plan = planner.finish(sourceProofHash);
   scannedFiles++;
   ambiguousMessages += plan.ambiguousMessages;
   for (const candidate of plan.candidates) {

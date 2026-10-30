@@ -16,19 +16,20 @@ if (!inventory) {
   parsed = await readProtectedCleanupJson(input);
 }
 if (inventory && apply) throw new Error("Inventory cannot be combined with apply");
-if (apply && (!args.includes("--full-backup-verified") || !value("--full-backup-path") || !value("--reviewed-digest"))) {
+if (apply && (!args.includes("--full-backup-verified") || !value("--full-backup-path") || !value("--full-backup-sha256") || !value("--reviewed-digest"))) {
   throw new Error("Apply requires explicit verified full database backup path and reviewed digest");
 }
+let backupDigest;
 if (apply) {
   const backupPath = resolve(value("--full-backup-path"));
   const livePath = process.env.DATABASE_URL?.replace(/^file:/, "").split("?")[0];
-  await verifyProtectedSqliteBackup(backupPath, livePath ? resolve(livePath) : undefined);
+  backupDigest = await verifyProtectedSqliteBackup(backupPath, livePath ? resolve(livePath) : undefined, value("--full-backup-sha256"));
 }
 const prisma = createPrismaClient();
 try {
   if (args.includes("--litestream-wal-owner-verified")) {
     // Connection-local policy: do not checkpoint the live replica owner's WAL.
-    await prisma.$queryRawUnsafe("PRAGMA wal_autocheckpoint = 0");
+    await prisma.$queryRaw`PRAGMA wal_autocheckpoint = 0`;
   }
   if (inventory) {
     const raw = await prisma.externalUsageEvent.aggregate({ where: { sourceApp: "claude-code", metricType: "usage", unit: "token" }, _count: { _all: true }, _min: { occurredAt: true }, _max: { occurredAt: true } });
@@ -55,7 +56,7 @@ try {
   } else {
     if (!Array.isArray(parsed.approved) || storedPlanDigest(parsed.approved) !== parsed.digest) throw new Error("Stored plan hash mismatch");
     // This exact protected plan includes complete candidate and keeper backups.
-    const result = await applyStoredClaudeDuplicatePlan(prisma, parsed, { reviewedDigest: value("--reviewed-digest"), backupDigest: parsed.digest });
+    const result = await applyStoredClaudeDuplicatePlan(prisma, parsed, { reviewedDigest: value("--reviewed-digest"), backupDigest, reviewedBackupDigest: value("--full-backup-sha256") });
     console.log(JSON.stringify({ mode: "apply", ...result }));
   }
 } finally { await prisma.$disconnect(); }

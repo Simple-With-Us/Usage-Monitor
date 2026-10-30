@@ -14,8 +14,9 @@ function stable(value) {
 }
 
 function historicalEvents(row, line, sessionKey) {
-  const model = row.message.model?.trim() || "claude-3-7-sonnet";
-  const occurredAt = new Date(row.timestamp);
+  const model = (typeof row.message.model === "string" && row.message.model.trim()) || "claude-3-7-sonnet";
+  const stamp = typeof row.timestamp === "number" && row.timestamp <= 1e12 ? row.timestamp * 1000 : row.timestamp;
+  const occurredAt = new Date(stamp);
   if (!Number.isFinite(occurredAt.getTime())) return [];
   const usage = row.message.usage;
   return tokenEventsFromBreakdown({ producerId: CLAUDE_PRODUCER_ID,
@@ -28,40 +29,50 @@ function historicalEvents(row, line, sessionKey) {
 }
 
 /** Only identical message IDs, model, and full usage form deletion candidates. */
-export function planClaudeDuplicateLines(text, { sessionKey, sourceProofHash, seen = new Map() } = {}) {
+export function createClaudeDuplicateLinePlanner({ sessionKey, sourceProofHash, seen = new Map() } = {}) {
   if (!sessionKey) throw new Error("Exact collector sessionKey required");
   const candidates = [];
   const ambiguousHashes = new Set();
+  const source = { hash: sourceProofHash };
   let ambiguousMessages = 0;
-  const lines = text.split("\n");
-  for (let line = 0; line < lines.length; line++) {
+  function addLine(text, line) {
     let row;
-    try { row = JSON.parse(lines[line]); } catch { continue; }
+    try { row = JSON.parse(text); } catch { return; }
     const message = row?.message;
-    if (typeof message?.id !== "string" || !message.id || !message.usage || typeof message.usage !== "object") continue;
+    if (typeof message?.id !== "string" || !message.id || !message.usage || typeof message.usage !== "object") return;
     const signature = JSON.stringify(stable({ model: message.model, usage: message.usage }));
     const first = seen.get(message.id);
     if (!first) {
-      seen.set(message.id, { signature, sourceProofHash, events: historicalEvents(row, line, sessionKey) });
-      continue;
+      seen.set(message.id, { signature, source, events: historicalEvents(row, line, sessionKey) });
+      return;
     }
     if (first.signature !== signature || first.events.length === 0 || first.ambiguous) {
       ambiguousMessages++;
       first.ambiguous = true;
       ambiguousHashes.add(createHash("sha256").update(message.id).digest("hex"));
-      continue;
+      return;
     }
     const events = historicalEvents(row, line, sessionKey);
     for (const event of events) {
       const keeper = first.events.find((keep) => keep.label === event.label && keep.quantity === event.quantity);
       if (!keeper || keeper.eventId === event.eventId) continue;
-      candidates.push({ eventId: event.eventId, keeperEventId: keeper.eventId,
+      candidates.push({ keeperSource: first.source, proof: { eventId: event.eventId, keeperEventId: keeper.eventId,
         quantity: event.quantity, label: event.label, occurredAt: event.occurredAt,
         keeperOccurredAt: keeper.occurredAt, model: event.metadata.model,
-        keeperSourceProofHash: first.sourceProofHash,
         usageProofHash: createHash("sha256").update(signature).digest("hex"),
-        messageProofHash: createHash("sha256").update(message.id).digest("hex") });
+        messageProofHash: createHash("sha256").update(message.id).digest("hex") } });
     }
   }
-  return { candidates: candidates.filter((candidate) => !ambiguousHashes.has(candidate.messageProofHash)), ambiguousMessages };
+  function finish(hash = sourceProofHash) {
+    source.hash = hash;
+    return { candidates: candidates.filter(({ proof }) => !ambiguousHashes.has(proof.messageProofHash)).map(({ proof, keeperSource }) =>
+      ({ ...proof, keeperSourceProofHash: keeperSource.hash })), ambiguousMessages };
+  }
+  return { addLine, finish };
+}
+
+export function planClaudeDuplicateLines(text, options) {
+  const planner = createClaudeDuplicateLinePlanner(options);
+  text.split("\n").forEach((line, index) => planner.addLine(line, index));
+  return planner.finish();
 }
