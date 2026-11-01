@@ -303,7 +303,8 @@ jobs:
           # carrying a multiline value only masks its first line.
           while IFS= read -r line; do
             if [ -n "$line" ]; then
-              echo "::add-mask::${line}"
+              line="${line//%/%25}"; line="${line//$'\r'/%0D}"
+              printf '::add-mask::%s\n' "$line"
             fi
           done <<< "$key_material"
           # One line, so GITHUB_ENV carries it natively, and the raw PEM never

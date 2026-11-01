@@ -86,7 +86,8 @@ jobs:
             [ -n "$val" ] || continue
             while IFS= read -r line; do
               if [ -n "$line" ]; then
-                echo "::add-mask::${line}"
+                line="${line//%/%25}"; line="${line//$'\r'/%0D}"
+                printf '::add-mask::%s\n' "$line"
               fi
             done <<< "$val"
             { echo "${name}<<INFISICAL_EOF"; printf '%s\n' "$val"; echo "INFISICAL_EOF"; } >> "$GITHUB_ENV"
