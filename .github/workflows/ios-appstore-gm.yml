@@ -84,10 +84,15 @@ jobs:
                 --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ 2>/dev/null || true
             )"
             [ -n "$val" ] || continue
-            echo "::add-mask::$val"
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                line="${line//%/%25}"; line="${line//$'\r'/%0D}"
+                printf '::add-mask::%s\n' "$line"
+              fi
+            done <<< "$val"
             { echo "${name}<<INFISICAL_EOF"; printf '%s\n' "$val"; echo "INFISICAL_EOF"; } >> "$GITHUB_ENV"
           done
-          unset TOKEN CLIENT_ID CLIENT_SECRET val
+          unset TOKEN CLIENT_ID CLIENT_SECRET val line
 
       - name: Import signing + ASC key
         run: bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"

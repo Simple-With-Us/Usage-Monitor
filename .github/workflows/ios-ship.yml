@@ -299,18 +299,28 @@ jobs:
             echo "::error::Missing ASC key material in Infisical prod."
             exit 1
           fi
+          # Mask every line of the raw PEM before staging it.  One add-mask
+          # carrying a multiline value only masks its first line.
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              line="${line//%/%25}"; line="${line//$'\r'/%0D}"
+              printf '::add-mask::%s\n' "$line"
+            fi
+          done <<< "$key_material"
           # One line, so GITHUB_ENV carries it natively, and the raw PEM never
           # reaches a step environment.  The same form the client reads first.
+          # Mask the base64 form before it reaches GITHUB_ENV: GitHub prints
+          # every later step's env block in the public log.
+          key_b64="$(printf '%s' "$key_material" | base64 | tr -d '\n')"
+          echo "::add-mask::${key_b64}"
           printf 'APPLE_API_KEY_ID=%s\n' "$ASC_KEY_ID" >> "$GITHUB_ENV"
           printf 'APPLE_API_ISSUER_ID=%s\n' "$ASC_ISSUER_ID" >> "$GITHUB_ENV"
-          printf 'APPLE_API_KEY_P8_BASE64=%s\n' \
-            "$(printf '%s' "$key_material" | base64 | tr -d '\n')" \
-            >> "$GITHUB_ENV"
+          printf 'APPLE_API_KEY_P8_BASE64=%s\n' "$key_b64" >> "$GITHUB_ENV"
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
-          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
+          unset key_material key_b64 line TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
       # Plan-build: compute each app's release build ONCE here and hand it to
       # the ship steps as --build, so the two ships of one release can never
