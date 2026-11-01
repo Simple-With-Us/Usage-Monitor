@@ -46,6 +46,16 @@ if ! grep -Fq 'scripts/ios-stage-asc-key.sh' "$workflow"; then
   exit 1
 fi
 
+# The base64 form must be masked before it is written to GITHUB_ENV.
+# GitHub prints later steps' env blocks, so an unmasked write puts the
+# base64 private key in the public log.
+mask_line="$(grep -n -F '::add-mask::${key_b64}' "$workflow" | head -n 1 | cut -d: -f1 || true)"
+env_line="$(grep -n -F 'APPLE_API_KEY_P8_BASE64=%s' "$workflow" | head -n 1 | cut -d: -f1 || true)"
+if [[ -z "$mask_line" || -z "$env_line" || "$mask_line" -ge "$env_line" ]]; then
+  echo 'base64 ASC key is not masked before it reaches GITHUB_ENV' >&2
+  exit 1
+fi
+
 # A second handoff cannot overwrite the first key, including through aliases.
 bash "$repo_root/scripts/ios-stage-asc-key.sh" < "$tmp_dir/fixture" > "$tmp_dir/stdout" 2> "$tmp_dir/stderr"
 second_path="$(tail -n 1 "$GITHUB_ENV" | sed 's/^ASC_KEY_PATH=//')"
@@ -105,8 +115,23 @@ env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
   ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/imported" \
   bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/workflow-stdout" 2> "$tmp_dir/workflow-stderr"
-if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/workflow-env" "$tmp_dir/workflow-stdout" "$tmp_dir/workflow-stderr"; then
+# Mask carriers are the one place a fixture line may appear: the Actions
+# runner consumes `::add-mask::` lines instead of listing them, but the
+# local harness captures stdout verbatim.  Strip carriers before the leak
+# check, then assert each line and the base64 form were in fact carried.
+grep -v '^::add-mask::' "$tmp_dir/workflow-stdout" > "$tmp_dir/workflow-stdout-unmasked" || true
+if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/workflow-env" "$tmp_dir/workflow-stdout-unmasked" "$tmp_dir/workflow-stderr"; then
   echo 'workflow leaked multiline key material' >&2
+  exit 1
+fi
+while IFS= read -r fixture_line; do
+  grep -Fqx "::add-mask::$fixture_line" "$tmp_dir/workflow-stdout"
+done < "$tmp_dir/fixture"
+workflow_b64="$(sed -n 's/^APPLE_API_KEY_P8_BASE64=//p' "$tmp_dir/workflow-env")"
+[[ -n "$workflow_b64" ]]
+grep -Fqx "::add-mask::$workflow_b64" "$tmp_dir/workflow-stdout"
+if grep -Fq "$workflow_b64" "$tmp_dir/workflow-stdout-unmasked" "$tmp_dir/workflow-stderr"; then
+  echo 'workflow printed the base64 key outside a mask carrier' >&2
   exit 1
 fi
 [[ "$(grep -c '^ASC_KEY_PATH=' "$tmp_dir/workflow-env")" == 1 ]]
