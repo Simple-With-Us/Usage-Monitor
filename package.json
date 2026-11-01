@@ -114,7 +114,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0",
-    "wrangler": "4.153.0"
+    "wrangler": "4.154.0"
   },
   "overrides": {
     "minimatch": "^11.0.0",
