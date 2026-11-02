@@ -29,12 +29,18 @@ describe("datadog-options", () => {
     expect(rum.enabled).toBe(false);
   });
 
-  it("fails closed in production runtime when DD_SERVICE is missing", () => {
+  it("stays dark in production runtime when no Datadog vars are set", () => {
+    const server = resolveDatadogServerConfig({ NODE_ENV: "production" });
+    expect(server.enabled).toBe(false);
+    expect(server.required).toBe(false);
+  });
+
+  it("fails closed when DD_REQUIRE=1 and DD_SERVICE is missing", () => {
     expect(() =>
-      resolveDatadogServerConfig({ NODE_ENV: "production" })
+      resolveDatadogServerConfig({ NODE_ENV: "production", DD_REQUIRE: "1" })
     ).toThrow(DatadogConfigError);
     try {
-      resolveDatadogServerConfig({ NODE_ENV: "production" });
+      resolveDatadogServerConfig({ NODE_ENV: "production", DD_REQUIRE: "1" });
     } catch (error) {
       expect(error).toBeInstanceOf(DatadogConfigError);
       expect((error as DatadogConfigError).missing).toEqual(["DD_SERVICE"]);
@@ -71,7 +77,7 @@ describe("datadog-options", () => {
     });
     expect(server).toMatchObject({
       enabled: true,
-      required: true,
+      required: false,
       service: "usage-monitor",
       env: "production",
       site: "us5.datadoghq.com",
@@ -202,6 +208,7 @@ describe("datadog-options", () => {
   it("reports secret-free readiness and never echoes key values", () => {
     const ready = getDatadogReadiness({
       NODE_ENV: "production",
+      DD_REQUIRE: "1",
       DD_API_KEY: "super-secret-api-key-value",
       DD_AGENT_HOST: "127.0.0.1",
     });

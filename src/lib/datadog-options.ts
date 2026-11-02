@@ -4,8 +4,9 @@
 // (`docs/DATADOG-INTEGRATION-GUIDE.md` and the host agent compose):
 // DD_API_KEY, DD_SITE, DD_ENV, DD_SERVICE, DD_AGENT_HOST,
 // DD_TRACE_AGENT_PORT, plus the public RUM twins NEXT_PUBLIC_DD_*.
-// Never invents secret values.  Incomplete configuration throws
-// (fail closed) instead of starting half-blind.
+// Never invents secret values.  A partial signal (some DD_* set, DD_SERVICE
+// missing) throws instead of starting half-blind;  a fully unconfigured deploy
+// stays dark unless DD_REQUIRE=1 asks for the fail-closed guard.
 
 export type EnvMap = Record<string, string | undefined>;
 
@@ -226,7 +227,10 @@ export function resolveDatadogServerConfig(
   env: EnvMap = process.env
 ): DatadogServerConfig {
   const optedOut = isFalsyEnv(env.DD_TRACE_ENABLED);
-  const required = isProductionRuntime(env) && !optedOut;
+  // Datadog is opt-in:  no deployment is required to run it.  DD_REQUIRE=1
+  // restores the fail-closed guard for whoever wants it (fleet precedent:
+  // ContactLogo's DD_REQUIRE).
+  const required = isTruthyEnv(env.DD_REQUIRE) && !optedOut;
   const signaled = anySignal(env, SERVER_SIGNAL_KEYS);
   const fallbackSampleRate = isProductionRuntime(env)
     ? PRODUCTION_TRACE_SAMPLE_RATE
@@ -372,7 +376,7 @@ export function assertDatadogRuntimeConfig(env: EnvMap = process.env): {
  */
 export function getDatadogReadiness(env: EnvMap = process.env): DatadogReadiness {
   const required =
-    isProductionRuntime(env) && !isFalsyEnv(env.DD_TRACE_ENABLED);
+    isTruthyEnv(env.DD_REQUIRE) && !isFalsyEnv(env.DD_TRACE_ENABLED);
   try {
     const server = resolveDatadogServerConfig(env);
     const rum = resolveDatadogRumConfig(env);

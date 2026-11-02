@@ -160,9 +160,20 @@ describe("usage scheduler instrumentation", () => {
   // into every boot. The SWR cache must stay lazily populated on first
   // request. Advancing timers here catches a re-introduced deferred warm-up,
   // not just a synchronous one.
-  it("fails closed in production Node runtime when DD_SERVICE is missing", async () => {
+  it("boots dark in production Node runtime when no Datadog vars are set", async () => {
     vi.stubEnv("NEXT_RUNTIME", "nodejs");
     vi.stubEnv("NODE_ENV", "production");
+
+    await register();
+
+    expect(mocks.initDatadogTracer).not.toHaveBeenCalled();
+    expect(mocks.startUsagePollingScheduler).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed in production Node runtime when DD_REQUIRE=1 and DD_SERVICE is missing", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "nodejs");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DD_REQUIRE", "1");
 
     await expect(register()).rejects.toThrow(/DD_SERVICE/);
     expect(mocks.startUsagePollingScheduler).not.toHaveBeenCalled();
