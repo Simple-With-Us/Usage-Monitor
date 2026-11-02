@@ -33,9 +33,9 @@ export async function register() {
     });
   }
 
-  // Datadog APM + log injection.  Fail closed on missing/partial keys in
-  // production runtime (not during `next build`).  Sentry stays DSN-gated
-  // and is not replaced.
+  // Datadog APM + log injection.  Opt-in:  a deploy with no DD_* vars stays
+  // dark.  Fail closed on partial keys, or on missing keys when DD_REQUIRE=1
+  // (not during `next build`).  Sentry stays DSN-gated and is not replaced.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { resolveDatadogServerConfig } = await import("@/lib/datadog-options");
     const server = resolveDatadogServerConfig();
