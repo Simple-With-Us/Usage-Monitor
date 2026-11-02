@@ -110,8 +110,75 @@ try {
   }
   if (!/DD_SERVICE is missing/.test(startupSource)) {
     throw new Error(
-      "start-with-litestream.sh must fail closed when production/partial Datadog config is missing DD_SERVICE"
+      "start-with-litestream.sh must fail closed when DD_REQUIRE=1 or partial Datadog config is missing DD_SERVICE"
     );
+  }
+  const ddGuard = startupSource.slice(
+    startupSource.indexOf("dd_opted_out"),
+    startupSource.indexOf("--require dd-trace/init")
+  );
+  if (/NODE_ENV/.test(ddGuard)) {
+    throw new Error(
+      "start-with-litestream.sh must not hard-exit on NODE_ENV=production alone; the Datadog guard is DD_REQUIRE=1 opt-in"
+    );
+  }
+  if (!/DD_REQUIRE/.test(ddGuard)) {
+    throw new Error(
+      "start-with-litestream.sh must fail closed when DD_REQUIRE=1 and DD_SERVICE is missing"
+    );
+  }
+  // Execute the actual Datadog guard, not the full database/startup wrapper.
+  const guardSource = startupSource.slice(startupSource.indexOf("dd_opted_out=false"), startupSource.indexOf('if [[ "${litestream_enabled}" == "true" ]];', startupSource.indexOf("dd_opted_out=false")));
+  for (const [name, overrides, expected] of [
+    ["production dark", { NODE_ENV: "production" }, 0],
+    ["explicit required", { DD_REQUIRE: "1" }, 1],
+    ["truthy required", { DD_REQUIRE: "true" }, 1],
+    ["padded truthy required", { DD_REQUIRE: " True " }, 1],
+    ["mixed-case truthy required", { DD_REQUIRE: "Yes" }, 1],
+    ["padded uppercase required", { DD_REQUIRE: " ON " }, 1],
+    ["partial config", { DD_AGENT_HOST: "127.0.0.1" }, 1],
+    ["trace opt-out", { DD_REQUIRE: "1", DD_TRACE_ENABLED: "false" }, 0],
+    ["padded trace opt-out", { DD_REQUIRE: "1", DD_TRACE_ENABLED: " Off " }, 0],
+    ["mixed-case trace opt-out", { DD_REQUIRE: "1", DD_TRACE_ENABLED: "No" }, 0],
+    ["whitespace service still missing", { DD_REQUIRE: "1", DD_SERVICE: "   " }, 1],
+    ["whitespace service with partial config", { DD_AGENT_HOST: "127.0.0.1", DD_SERVICE: " \t " }, 1],
+    ["whitespace-only signal stays dark", { DD_AGENT_HOST: "   " }, 0],
+    ["padded service configured", { DD_SERVICE: " usage-monitor " }, 0],
+    ["configured opt-in", { DD_SERVICE: "usage-monitor" }, 0],
+  ]) {
+    const env = { PATH: process.env.PATH, ...overrides };
+    const result = spawnSync("bash", ["-c", 'log() { :; }; ' + guardSource], { env, encoding: "utf8" });
+    expectStatus(`Datadog guard ${name}`, result, expected);
+  }
+  // The dd-trace preload decision must apply the same trimmed DD_SERVICE
+  // semantics as the guard: whitespace-only never preloads, padded values do,
+  // an explicit opt-out suppresses the preload even with a service set, and an
+  // existing preload or NODE_OPTIONS content must survive untouched.
+  for (const [name, overrides, expectPreload] of [
+    ["preload on configured service", { DD_SERVICE: "usage-monitor" }, true],
+    ["preload on padded service", { DD_SERVICE: " usage-monitor " }, true],
+    ["no preload for whitespace-only service", { DD_SERVICE: "   " }, false],
+    ["no preload when opted out", { DD_SERVICE: "usage-monitor", DD_TRACE_ENABLED: " off " }, false],
+    ["preload preserves existing NODE_OPTIONS", { DD_SERVICE: "usage-monitor", NODE_OPTIONS: "--max-old-space-size=512" }, true],
+    ["preload not duplicated", { DD_SERVICE: "usage-monitor", NODE_OPTIONS: "--require dd-trace/init" }, true],
+  ]) {
+    const env = { PATH: process.env.PATH, ...overrides };
+    const result = spawnSync(
+      "bash",
+      ["-c", 'log() { :; }; ' + guardSource + '\nprintf "%s" "${NODE_OPTIONS:-}"'],
+      { env, encoding: "utf8" }
+    );
+    expectStatus(`Datadog preload ${name}`, result, 0);
+    const occurrences = result.stdout.split("--require dd-trace/init").length - 1;
+    const expectedCount = expectPreload ? 1 : 0;
+    if (occurrences !== expectedCount) {
+      throw new Error(
+        `Datadog preload ${name}: expected ${expectedCount} dd-trace preload(s), got ${occurrences} (NODE_OPTIONS=${result.stdout})`
+      );
+    }
+    if (name === "preload preserves existing NODE_OPTIONS" && !result.stdout.includes("--max-old-space-size=512")) {
+      throw new Error(`Datadog preload ${name}: existing NODE_OPTIONS was dropped (NODE_OPTIONS=${result.stdout})`);
+    }
   }
   if (!/--require dd-trace\/init/.test(startupSource)) {
     throw new Error(

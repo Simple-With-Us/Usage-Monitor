@@ -136,27 +136,45 @@ if [[ "${STARTUP_PREFLIGHT_ONLY:-false}" == "true" ]]; then
   exit 0
 fi
 
-# Datadog APM fail-closed (existing fleet vars only).  Partial keys or a
-# production start without DD_SERVICE refuse to boot instead of running
-# half-blind.  DD_TRACE_ENABLED=false is the throwaway-container opt-out.
+# Datadog APM is opt-in (existing fleet vars only).  A start with no DD_* vars
+# runs dark.  Partial keys, or DD_REQUIRE=1 without DD_SERVICE, refuse to boot
+# instead of running half-blind.  DD_TRACE_ENABLED=false is the
+# throwaway-container opt-out.
 dd_opted_out=false
-case "${DD_TRACE_ENABLED:-}" in
-  0|false|FALSE|off|OFF|no|NO) dd_opted_out=true ;;
+dd_required=false
+# Trim and lowercase guard inputs to match the TypeScript reference in
+# src/lib/datadog-options.ts (nonEmptyEnv, isTruthyEnv, isFalsyEnv).  Padded or
+# mixed-case values must behave identically in the entrypoint and at runtime,
+# and a whitespace-only value must count as unset.
+dd_trim() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+dd_trace_enabled_norm="$(dd_trim "${DD_TRACE_ENABLED:-}")"
+case "${dd_trace_enabled_norm,,}" in
+  0|false|off|no) dd_opted_out=true ;;
 esac
+dd_require_norm="$(dd_trim "${DD_REQUIRE:-}")"
+case "${dd_require_norm,,}" in
+  1|true|yes|on) dd_required=true ;;
+esac
+dd_service="$(dd_trim "${DD_SERVICE:-}")"
 dd_signaled=false
 for dd_key in DD_SERVICE DD_ENV DD_AGENT_HOST DD_TRACE_AGENT_PORT DD_API_KEY DD_SITE DD_TRACE_ENABLED DD_TRACE_SAMPLE_RATE; do
-  if [[ -n "${!dd_key:-}" ]]; then
+  if [[ -n "$(dd_trim "${!dd_key:-}")" ]]; then
     dd_signaled=true
     break
   fi
 done
 if [[ "${dd_opted_out}" != "true" ]]; then
-  if [[ -z "${DD_SERVICE:-}" && ( "${dd_signaled}" == "true" || "${NODE_ENV:-}" == "production" ) ]]; then
-    log "ERROR: Datadog is required or partially configured but DD_SERVICE is missing."
-    log "Reuse the existing fleet DD_* vars. Do not invent secrets. Set DD_TRACE_ENABLED=false only for throwaway containers."
+  if [[ -z "${dd_service}" && ( "${dd_signaled}" == "true" || "${dd_required}" == "true" ) ]]; then
+    log "ERROR: Datadog is required (DD_REQUIRE=1) or partially configured but DD_SERVICE is missing."
+    log "Reuse the existing fleet DD_* vars. Do not invent secrets. DD_REQUIRE=1 keeps the fail-closed guard; DD_TRACE_ENABLED=false opts a throwaway container out."
     exit 1
   fi
-  if [[ -n "${DD_SERVICE:-}" ]]; then
+  if [[ -n "${dd_service}" ]]; then
     case " ${NODE_OPTIONS:-} " in
       *" --require dd-trace/init "*|*" --require dd-trace/init") ;;
       *)
