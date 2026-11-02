@@ -1,7 +1,35 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+// The loader tests mock Prisma's groupBy with a faithful where-filter +
+// grouping simulation over fixture rows, so a missing sourceApp pin in the
+// loader's where clause makes the foreign-producer rows below leak into the
+// result and fail the test — the mock applies only the filters the loader
+// actually sends.
+const mocks = vi.hoisted(() => ({
+  groupBy: vi.fn(),
+  rows: [] as Array<{
+    provider: string;
+    sourceApp: string;
+    metricType: string;
+    unit: string | null;
+    keyRef: string | null;
+    quantity: number | null;
+    occurredAt: Date;
+  }>,
+}));
+
+vi.mock("@/lib/prisma", () => ({
+  prisma: {
+    externalUsageEvent: {
+      groupBy: mocks.groupBy,
+    },
+  },
+}));
+
 import {
   buildMuseCodeBurnReport,
   isContributorModelId,
+  loadMuseCodeBurnGroups,
   type MuseCodeBurnGroups,
 } from "../muse-code-burn";
 
@@ -133,5 +161,176 @@ describe("buildMuseCodeBurnReport", () => {
       "muse-wonder-1.0",
       "muse-wonder-full-1.0",
     ]);
+  });
+});
+
+type FixtureRow = (typeof mocks.rows)[number];
+
+function fixtureRow(overrides: Partial<FixtureRow>): FixtureRow {
+  return {
+    provider: "muse-code",
+    sourceApp: "muse-code",
+    metricType: "usage",
+    unit: "token",
+    keyRef: "muse-spark-1.3-contributor",
+    quantity: 0,
+    occurredAt: new Date("2026-11-02T11:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+/** Simulate Prisma groupBy: apply the where equality/range filters the
+ * loader sent, then group by the requested fields with the requested
+ * aggregates. */
+function simulateGroupBy(args: {
+  by: string[];
+  where: Record<string, unknown>;
+  _sum?: unknown;
+  _count?: unknown;
+  _min?: unknown;
+  _max?: unknown;
+}) {
+  const where = args.where as {
+    provider?: string;
+    sourceApp?: string;
+    metricType?: string;
+    unit?: string;
+    occurredAt: { gte: Date; lte: Date };
+  };
+  const filtered = mocks.rows.filter(
+    (row) =>
+      (where.provider === undefined || row.provider === where.provider) &&
+      (where.sourceApp === undefined || row.sourceApp === where.sourceApp) &&
+      (where.metricType === undefined ||
+        row.metricType === where.metricType) &&
+      (where.unit === undefined || row.unit === where.unit) &&
+      row.occurredAt >= where.occurredAt.gte &&
+      row.occurredAt <= where.occurredAt.lte
+  );
+  const buckets = new Map<string, FixtureRow[]>();
+  for (const row of filtered) {
+    const key = args.by
+      .map((field) => String(row[field as keyof FixtureRow]))
+      .join("|");
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(row);
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()].map((items) => {
+    const out: Record<string, unknown> = {};
+    for (const field of args.by) {
+      out[field] = items[0][field as keyof FixtureRow];
+    }
+    if (args._sum) {
+      out._sum = {
+        quantity: items.reduce((sum, row) => sum + (row.quantity ?? 0), 0),
+      };
+    }
+    if (args._count) out._count = { _all: items.length };
+    if (args._min) {
+      out._min = {
+        occurredAt: new Date(
+          Math.min(...items.map((row) => row.occurredAt.getTime()))
+        ),
+      };
+    }
+    if (args._max) {
+      out._max = {
+        occurredAt: new Date(
+          Math.max(...items.map((row) => row.occurredAt.getTime()))
+        ),
+      };
+    }
+    return out;
+  });
+}
+
+describe("loadMuseCodeBurnGroups", () => {
+  beforeEach(() => {
+    mocks.groupBy.mockReset();
+    mocks.rows = [];
+    mocks.groupBy.mockImplementation(async (args: Parameters<typeof simulateGroupBy>[0]) =>
+      simulateGroupBy(args)
+    );
+  });
+
+  it("pins sourceApp to the CodeCaps producer in both groupBy queries", async () => {
+    await loadMuseCodeBurnGroups(WINDOW_START, WINDOW_END);
+
+    expect(mocks.groupBy).toHaveBeenCalledTimes(2);
+    for (const call of mocks.groupBy.mock.calls) {
+      expect(call[0].where).toMatchObject({
+        provider: "muse-code",
+        sourceApp: "muse-code",
+        metricType: "usage",
+        unit: "token",
+      });
+    }
+  });
+
+  it("excludes provider muse-code rows from other producers (deepseek-dsh, opencode)", async () => {
+    mocks.rows = [
+      // CodeCaps rows — the only ones that count.
+      fixtureRow({
+        keyRef: "muse-spark-1.3-contributor",
+        quantity: 900_000,
+        occurredAt: new Date("2026-11-02T11:00:00.000Z"),
+      }),
+      fixtureRow({
+        keyRef: "muse-wonder-1.0",
+        quantity: 100_000,
+        occurredAt: new Date("2026-11-02T11:30:00.000Z"),
+      }),
+      // DeepSeek Harness maps its "meta"/"muse*" upstreams onto provider
+      // "muse-code" but posts as sourceApp "deepseek-dsh".
+      fixtureRow({
+        sourceApp: "deepseek-dsh",
+        keyRef: "muse-wonder-1.0",
+        quantity: 500_000,
+        occurredAt: new Date("2026-11-02T10:45:00.000Z"),
+      }),
+      // opencode does the same mapping for providerID "meta"/"muse*".
+      fixtureRow({
+        sourceApp: "opencode",
+        keyRef: "muse-spark-1.3",
+        quantity: 700_000,
+        occurredAt: new Date("2026-11-02T11:59:00.000Z"),
+      }),
+    ];
+
+    const loaded = await loadMuseCodeBurnGroups(WINDOW_START, WINDOW_END);
+
+    expect(loaded.groups).toEqual([
+      { model: "muse-spark-1.3-contributor", tokens: 900_000, eventCount: 1 },
+      { model: "muse-wonder-1.0", tokens: 100_000, eventCount: 1 },
+    ]);
+    // The activity bounds come from the same filtered query, so the foreign
+    // rows' earlier/later timestamps must not widen them.
+    expect(loaded.firstOccurredAt).toEqual(
+      new Date("2026-11-02T11:00:00.000Z")
+    );
+    expect(loaded.lastOccurredAt).toEqual(
+      new Date("2026-11-02T11:30:00.000Z")
+    );
+
+    const report = build(loaded);
+    expect(report.totalTokens).toBe(1_000_000);
+    expect(report.contributorTokens).toBe(900_000);
+    expect(report.contributorShare).toBeCloseTo(0.9);
+  });
+
+  it("fails closed to empty groups when the query throws", async () => {
+    mocks.groupBy.mockRejectedValue(new Error("sqlite busy"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = await loadMuseCodeBurnGroups(WINDOW_START, WINDOW_END);
+      expect(loaded).toEqual({
+        groups: [],
+        firstOccurredAt: null,
+        lastOccurredAt: null,
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

@@ -83,6 +83,14 @@ export interface MuseCodeBurnReport {
  * window.  Two bounded groupBy queries (by model, and one activity row),
  * never raw rows.  Fails closed to empty groups on any query error (see
  * module docblock) rather than throwing into the route.
+ *
+ * The where clause also pins sourceApp to "muse-code" (the CodeCaps
+ * producerId, which v2 ingest normalization persists as sourceApp):
+ * provider alone is NOT producer identity — the DeepSeek Harness and
+ * opencode session collectors map their "meta"/"muse*" upstreams onto
+ * provider "muse-code" while posting as sourceApp "deepseek-dsh" /
+ * "opencode", and those token rows must not enter CodeCaps burn totals
+ * or contributor share.
  */
 export async function loadMuseCodeBurnGroups(
   windowStart: Date,
@@ -97,6 +105,7 @@ export async function loadMuseCodeBurnGroups(
   try {
     const where = {
       provider: MUSE_CODE_BURN_PROVIDER,
+      sourceApp: MUSE_CODE_BURN_PROVIDER,
       metricType: "usage",
       unit: "token",
       occurredAt: { gte: windowStart, lte: windowEnd },
