@@ -16,10 +16,10 @@ or filed as Planned board rows — see the effort board (2026-07-15 MONET reconc
 | `ag/sync-effort-log-deploy` | AG | CONTENT_MERGED | DELETE_SAFE: Single-line docs/EFFORT-LOG.md edit marking the 'Add MIT License' task as Deployed in the repo mirror. |
 | `ag/ui-updates` | AG | CONTENT_MERGED | DELETE_SAFE: UI/UX finalization pass and ProviderTable sorting/date-formatting improvements. |
 | `ag/ui-ux-refinements-clean` | AG | CONTENT_MERGED | DELETE_SAFE: UI/UX refinements for responsiveness/accessibility across login, dashboard, provider-detail, settings pages plus a ProviderCard duplicate-re |
-| `agent/ag-alert-cleanup` | AG | CONTENT_MERGED | DELETE_SAFE: Branch name was reused for two different features over time: (1) originally 'disable noisy Agent Sync Relay / Anthropic must-keep-funded ale |
+| `agent/ag-alert-cleanup` | AG | CONTENT_MERGED | DELETE_SAFE: Branch name was reused for two different features over time: (1) originally 'disable noisy fleet relay / Anthropic must-keep-funded ale |
 | `chore/remove-temp-migration-route` | OTHER | CONTENT_MERGED | DELETE_SAFE: Removes the temporary Postgres-to-SQLite migration route added early in the project's history; part of original repo bootstrap/consolidation |
 | `claude/adapter-resilience` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds per-adapter HTTP timeouts, bounded 429/5xx retry with Retry-After handling and exponential backoff, per-provider request budget, and re |
-| `claude/agent-sync-stanza` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds the AGENTS.md 'Inter-agent coordination' section (Slack #agent-sync channel + AGENT-SYNC.md protocol pointer) and the effort-log-protoc |
+| claude coordination-stanza branch (merged, retired) | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds the AGENTS.md 'Inter-agent coordination' section (the fleet coordination channel + the fleet handbook protocol pointer) and the effort-log-protoc |
 | `claude/board-backlog-pass` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Docs-only effort-board reconciliation: marks completed rows and seeds a 2026-07-04 backlog pass. |
 | `claude/board-effort-sync-refinements` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Docs-only: records effort-sync review refinements from PR #40 on the effort board. |
 | `claude/board-nextwave-c2` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Appends a 'next-wave cycle 2' planning section to docs/EFFORT-LOG.md (repo mirror of the effort board). |
