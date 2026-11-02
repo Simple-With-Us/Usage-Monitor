@@ -229,8 +229,9 @@ export function resolveDatadogServerConfig(
   const optedOut = isFalsyEnv(env.DD_TRACE_ENABLED);
   // Datadog is opt-in:  no deployment is required to run it.  DD_REQUIRE=1
   // restores the fail-closed guard for whoever wants it (fleet precedent:
-  // ContactLogo's DD_REQUIRE).
-  const required = isTruthyEnv(env.DD_REQUIRE) && !optedOut;
+  // ContactLogo's DD_REQUIRE).  The Next.js build phase stays exempt:  a build
+  // is not a runtime, so DD_REQUIRE=1 must never abort `next build`.
+  const required = isTruthyEnv(env.DD_REQUIRE) && !optedOut && !isNextBuildPhase(env);
   const signaled = anySignal(env, SERVER_SIGNAL_KEYS);
   const fallbackSampleRate = isProductionRuntime(env)
     ? PRODUCTION_TRACE_SAMPLE_RATE
@@ -376,7 +377,9 @@ export function assertDatadogRuntimeConfig(env: EnvMap = process.env): {
  */
 export function getDatadogReadiness(env: EnvMap = process.env): DatadogReadiness {
   const required =
-    isTruthyEnv(env.DD_REQUIRE) && !isFalsyEnv(env.DD_TRACE_ENABLED);
+    isTruthyEnv(env.DD_REQUIRE) &&
+    !isFalsyEnv(env.DD_TRACE_ENABLED) &&
+    !isNextBuildPhase(env);
   try {
     const server = resolveDatadogServerConfig(env);
     const rum = resolveDatadogRumConfig(env);

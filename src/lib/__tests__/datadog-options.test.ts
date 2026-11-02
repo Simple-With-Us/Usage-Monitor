@@ -57,6 +57,16 @@ describe("datadog-options", () => {
     expect(server.required).toBe(false);
   });
 
+  it("keeps the build phase exempt even with DD_REQUIRE=1", () => {
+    const server = resolveDatadogServerConfig({
+      NODE_ENV: "production",
+      NEXT_PHASE: "phase-production-build",
+      DD_REQUIRE: "1",
+    });
+    expect(server.enabled).toBe(false);
+    expect(server.required).toBe(false);
+  });
+
   it("fails closed on a partial APM signal without DD_SERVICE", () => {
     expect(() =>
       resolveDatadogServerConfig({

@@ -110,8 +110,36 @@ try {
   }
   if (!/DD_SERVICE is missing/.test(startupSource)) {
     throw new Error(
-      "start-with-litestream.sh must fail closed when production/partial Datadog config is missing DD_SERVICE"
+      "start-with-litestream.sh must fail closed when DD_REQUIRE=1 or partial Datadog config is missing DD_SERVICE"
     );
+  }
+  const ddGuard = startupSource.slice(
+    startupSource.indexOf("dd_opted_out"),
+    startupSource.indexOf("--require dd-trace/init")
+  );
+  if (/NODE_ENV/.test(ddGuard)) {
+    throw new Error(
+      "start-with-litestream.sh must not hard-exit on NODE_ENV=production alone; the Datadog guard is DD_REQUIRE=1 opt-in"
+    );
+  }
+  if (!/DD_REQUIRE/.test(ddGuard)) {
+    throw new Error(
+      "start-with-litestream.sh must fail closed when DD_REQUIRE=1 and DD_SERVICE is missing"
+    );
+  }
+  // Execute the actual Datadog guard, not the full database/startup wrapper.
+  const guardSource = startupSource.slice(startupSource.indexOf("dd_opted_out=false"), startupSource.indexOf('if [[ "${litestream_enabled}" == "true" ]];', startupSource.indexOf("dd_opted_out=false")));
+  for (const [name, overrides, expected] of [
+    ["production dark", { NODE_ENV: "production" }, 0],
+    ["explicit required", { DD_REQUIRE: "1" }, 1],
+    ["truthy required", { DD_REQUIRE: "true" }, 1],
+    ["partial config", { DD_AGENT_HOST: "127.0.0.1" }, 1],
+    ["trace opt-out", { DD_REQUIRE: "1", DD_TRACE_ENABLED: "false" }, 0],
+    ["configured opt-in", { DD_SERVICE: "usage-monitor" }, 0],
+  ]) {
+    const env = { PATH: process.env.PATH, ...overrides };
+    const result = spawnSync("bash", ["-c", 'log() { :; }; ' + guardSource], { env, encoding: "utf8" });
+    expectStatus(`Datadog guard ${name}`, result, expected);
   }
   if (!/--require dd-trace\/init/.test(startupSource)) {
     throw new Error(
