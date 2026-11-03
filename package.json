@@ -61,7 +61,7 @@
     "test:apple-projects": "bash scripts/verify-apple-projects.sh",
     "test:antigravity-collector": "node scripts/test-antigravity-collector.mjs",
     "test:session-token-collectors": "node scripts/test-session-token-collectors.mjs",
-    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs",
+    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs",
     "test:cf-token-map": "bash scripts/test-cf-token-map.sh",
     "test:replica-status-probe": "bash scripts/test-replica-status-probe.sh",
     "test:quota-wrapper": "bash scripts/test-subscription-quota-wrapper.sh",
