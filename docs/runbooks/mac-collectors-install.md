@@ -73,6 +73,16 @@ collector path after `current` changes.  Automatic cleanup removes only
 abandoned staging directories; deleting a published release requires separately
 proving that no running collector or injector can still use it.
 
+A measured fixture snapshot used 9,369,413–9,507,511 bytes (about 9.4–9.5 MB)
+per published tree.  A forward update that publishes one canonical and one
+compatibility tree therefore adds about 19 MB in that fixture; identical
+content-addressed trees are reused.  These are fixture measurements, not deployed
+inventory or storage bounds; Git history, dependencies, overlay changes, and
+migration bootstrap can change the cost.  [UM-1657](https://linear.app/simple-with-us/issue/UM-1657/add-lease-protected-bounded-retention-for-published-collector-runtimes)
+tracks bounded reclamation with a stable external launcher, process leases,
+and a verified pre-lease cutover.  Published-tree garbage collection is not
+implemented yet.
+
 ## Why a collector can sit at HTTP 409 for weeks (UM-1469)
 
 Every v2 event is stamped with `metadata._producerInstanceId`, the sending

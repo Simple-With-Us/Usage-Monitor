@@ -227,6 +227,33 @@ fs.renameSync = (source, target) => {
   assert(readFileSync(join(runtime, "previous", "scripts", "lib", "infisical-service-token.mjs")).equals(firstTrackedCompatibility), "tracked compatibility file stays unchanged after overlay refresh");
   truthfulReceipt(runtime);
 
+  const fsckCountHook = join(root, "fsck-count-hook.mjs");
+  const fsckCountFile = join(root, "fsck-count.json");
+  writeFileSync(fsckCountHook, `import cp from 'node:child_process'; import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const original = cp.execFileSync;
+let count = 0;
+cp.execFileSync = (command, args, ...rest) => {
+  if (command === '/usr/bin/git' && args.includes('fsck')) count++;
+  return original(command, args, ...rest);
+};
+process.on('exit', () => fs.writeFileSync(${JSON.stringify(fsckCountFile)}, JSON.stringify(count)));
+syncBuiltinESMExports();\n`);
+  for (const [action, limit] of [["activation", 18], ["rollback", 14]]) {
+    const home = join(root, `fsck-count-${action}`);
+    cpSync(runtime, home, { recursive: true, verbatimSymlinks: true });
+    const args = action === "activation" ? ["--sha", thirdSha] : ["--rollback"];
+    const counted = spawnSync(process.execPath, ["--import", fsckCountHook, updater, ...args, "--runtime-root", home], { env, encoding: "utf8" });
+    assert(counted.status === 0, `bounded-count ${action} succeeds: ${counted.stderr}`);
+    const count = JSON.parse(readFileSync(fsckCountFile, "utf8"));
+    assert(Number.isSafeInteger(count) && count > 0 && count <= limit, `${action} performs at most ${limit} integrity scans for the controlled bound-release fixture; observed ${count}`);
+    const expectedCurrent = action === "activation" ? thirdSha : firstSha;
+    const expectedPrevious = action === "activation" ? firstSha : thirdSha;
+    assert(git(join(home, "current"), ["rev-parse", "HEAD"]) === expectedCurrent && git(join(home, "previous"), ["rev-parse", "HEAD"]) === expectedPrevious, "scan-count optimization preserves release direction");
+    const receipt = JSON.parse(readFileSync(join(home, "runtime-state.json"), "utf8"));
+    assert(receipt.currentSha === expectedCurrent && receipt.previousSha === expectedPrevious, "scan-count operation writes a truthful receipt");
+    console.log(JSON.stringify({ fixture: "fsck-count-bound", action, count, limit }));
+  }
+
   const lateCorruptionRuntime = join(root, "late-git-object-corruption");
   cpSync(runtime, lateCorruptionRuntime, { recursive: true, verbatimSymlinks: true });
   const lateCorruptionRelease = join(lateCorruptionRuntime, thirdRelease);
