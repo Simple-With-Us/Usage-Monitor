@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
@@ -302,8 +302,13 @@ syncBuiltinESMExports();\n`);
   const referenceEntries = [];
   function referenceWalk(name) {
     const path = join(memoryRuntime, memoryRelease, name);
-    const info = lstatSync(path);
-    referenceEntries.push({ name, directory: info.isDirectory(), executable: Boolean(info.mode & 0o100), bytes: info.isDirectory() ? Buffer.alloc(0) : readFileSync(path) });
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let info;
+    try {
+      info = fstatSync(fd);
+      assert(info.isDirectory() || info.isFile(), "reference digest requires a directory or regular file");
+      referenceEntries.push({ name, directory: info.isDirectory(), executable: Boolean(info.mode & 0o100), bytes: info.isDirectory() ? Buffer.alloc(0) : readFileSync(fd) });
+    } finally { closeSync(fd); }
     if (info.isDirectory()) for (const entry of readdirSync(path)) referenceWalk(`${name}/${entry}`);
   }
   referenceWalk("node_modules/zod");
