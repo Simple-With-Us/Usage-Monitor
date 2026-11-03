@@ -171,13 +171,13 @@ export function checkCollectorInstall(source, destination) {
   return { sourceSha: head, zodSpec, installDependencies: custody.installDependencies, checked };
 }
 
-if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]))) {
-  try {
+try {
+  if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]))) {
     if (process.argv.length !== 4) throw new Error("Expected source checkout and installed directory");
     const result = checkCollectorInstall(process.argv[2], process.argv[3]);
     console.log(`${result.sourceSha} ${result.zodSpec} ${result.installDependencies ? "1" : "0"}`);
-  } catch (error) {
-    console.error(`[collector-install-preflight] ${error.message}`);
-    process.exitCode = 1;
   }
+} catch (error) {
+  console.error(`[collector-install-preflight] ${error.message}`);
+  process.exitCode = 1;
 }

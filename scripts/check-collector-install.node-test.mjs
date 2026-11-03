@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, linkSync, mkdtempSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkCollectorInstall } from "./check-collector-install.mjs";
 
 const scripts = dirname(fileURLToPath(import.meta.url));
@@ -322,6 +322,30 @@ test("the CLI emits verified configuration through an aliased checkout", () => f
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, `${baseline} ^4.6.6 1\n`);
+}));
+
+test("a missing argv path during import returns a controlled failure without rejecting the module", () => fixture(({ root, source }) => {
+  const helper = pathToFileURL(join(source, "scripts", "check-collector-install.mjs")).href;
+  const missing = join(root, "missing-entrypoint");
+  const code = `process.argv[1] = ${JSON.stringify(missing)}; const imported = await import(${JSON.stringify(helper)}); console.log(typeof imported.checkCollectorInstall);`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", code], { encoding: "utf8", timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "function\n", "guard failure is handled without an uncaught module evaluation error");
+  assert.match(result.stderr, /^\[collector-install-preflight\] ENOENT:/);
+  assert.doesNotMatch(result.stderr, /\n\s+at |uncaughtException/);
+}));
+
+test("a direct CLI with a missing source checkout fails with only a controlled diagnostic", () => fixture(({ root, source }) => {
+  const destination = join(root, "uncreated-install");
+  const result = spawnSync(process.execPath, [join(source, "scripts", "check-collector-install.mjs"), join(root, "missing-source"), destination], { encoding: "utf8", timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "[collector-install-preflight] Cannot verify collector source history\n");
+  assert.equal(existsSync(destination), false);
 }));
 
 test("an aliased installer still refuses modified source before writes", () => fixture(context => {
