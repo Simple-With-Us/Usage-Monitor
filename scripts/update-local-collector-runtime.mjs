@@ -305,10 +305,12 @@ function validateTrackedScripts(releasePath, sha) {
 function validateRelease(releasePath, sha, { rollback = false, legacy = false, installDependencies = false } = {}) {
   directory(releasePath);
   const name = relative(dirname(releasePath), releasePath);
-  if (/^(?:release|compat)-/.test(name)) releaseByName(dirname(dirname(releasePath)), name);
+  const bound = /^(?:release|compat)-/.test(name);
+  if (bound && releaseByName(dirname(dirname(releasePath)), name).sha !== sha) fail("Release HEAD does not match the requested SHA");
   directory(join(releasePath, "scripts"));
   directory(join(releasePath, "scripts", "lib"));
-  validateTrackedScripts(releasePath, sha);
+  // Bound resolution just checked tracked source and dependencies at this same use boundary.
+  if (!bound) validateTrackedScripts(releasePath, sha);
   for (const script of REQUIRED_SCRIPTS) {
     if (legacy && NEW_SCRIPTS.has(script)) continue;
     const path = join(releasePath, "scripts", script);
@@ -441,6 +443,13 @@ function activate(runtimeRoot, target, { rollback = false } = {}) {
 }
 
 function migrateLegacyLinks(runtimeRoot, args) {
+  const hasLegacyLink = ["current", "previous"].some((name) => {
+    const link = join(runtimeRoot, name);
+    if (!stat(link)?.isSymbolicLink()) return false;
+    return /^[a-f0-9]{40}$/.test(relative(join(runtimeRoot, "releases"), resolve(dirname(link), readlinkSync(link))));
+  });
+  // No migration consumes these releases; the following receipt still validates both links.
+  if (!hasLegacyLink) return;
   const current = releaseFromLink(runtimeRoot, "current");
   const previous = releaseFromLink(runtimeRoot, "previous", { legacyMigrationSource: true });
   if (!current?.legacy && !previous?.legacy) return;
