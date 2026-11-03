@@ -45,6 +45,55 @@ test("scope violations fail before fetching secrets", async (t) => {
     assert.equal(fake.calls.length, 1);
   }
 });
+test("raw ASCII service-token custody supports every profile without changing the file", async (t) => {
+  const { path } = fixture(t);
+  for (const ending of ["", "\n", "\r\n"]) {
+    const raw = `st.raw-sentinel${ending}`;
+    writeFileSync(path, raw);
+    for (const profile of Object.keys(pairs)) {
+      const fake = fakeFetch(profile);
+      const result = await prepareCollector({ profile, mode: "service-token", path, env: {}, fetchImpl: fake.fetchImpl });
+      assert.equal(fake.calls.length, 2);
+      for (const call of fake.calls) assert.equal(call.options.headers.authorization, "Bearer st.raw-sentinel");
+      assert.deepEqual(Object.keys(result.env).sort(), ["COLLECTOR_STRICT_INJECTED_SECRETS", ...pairs[profile]].sort());
+      assert.equal(JSON.stringify(result).includes("st.raw-sentinel"), false);
+      assert.equal(readFileSync(path, "utf8"), raw);
+    }
+  }
+});
+test("raw custody preserves metadata verification before secret lookup", async (t) => {
+  const { path } = fixture(t);
+  writeFileSync(path, "st.raw-sentinel");
+  const fake = fakeFetch("kimi", { ...metadata, permissions: ["read", "write"] });
+  await assert.rejects(prepareCollector({ profile: "kimi", mode: "service-token", path, env: {}, fetchImpl: fake.fetchImpl }), /service_token_verification_failed/);
+  assert.equal(fake.calls.length, 1);
+});
+test("malformed raw custody and raw machine-identity custody fail before network", async (t) => {
+  const { path, dir } = fixture(t);
+  let calls = 0;
+  const fetchImpl = async () => { calls++; throw new Error("network must not run"); };
+  const run = (mode = "service-token", custodyPath = path) => prepareCollector({ profile: "kimi", mode, path: custodyPath, env: {}, fetchImpl });
+  for (const raw of ["st.", " st.raw-sentinel", "st.raw sentinel", "st.raw\tsentinel", "st.raw\nsentinel", "st.raw-sentinel\n\n", "st.raw-sentinel\r\n\n", "st.raw-sentinel\r", "st.raw\0sentinel", "st.raw-\u00e9", "st.raw-\uFFFD", '"st.raw-sentinel"', "st." + "x".repeat(16384)]) {
+    writeFileSync(path, raw);
+    await assert.rejects(run());
+  }
+  writeFileSync(path, "st.raw-sentinel");
+  await assert.rejects(run("machine-identity"));
+  chmodSync(path, 0o644); await assert.rejects(run()); chmodSync(path, 0o600);
+  const link = join(dir, "raw-link"); symlinkSync(path, link); await assert.rejects(run("service-token", link));
+  writeFileSync(path, '{"token":"st.raw-sentinel","extra":"value"}'); await assert.rejects(run());
+  assert.equal(calls, 0);
+});
+test("raw custody failures disclose neither custody bytes nor path", (t) => {
+  const { path } = fixture(t);
+  writeFileSync(path, "st.raw-sentinel\ninvalid");
+  const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "service-token", path], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Collector credential injection failed.");
+  assert.equal(result.stderr.includes("raw-sentinel"), false);
+  assert.equal(result.stderr.includes(path), false);
+});
 test("custody and ambiguous authentication fail before network", async (t) => {
   const { dir, path } = fixture(t);
   let calls = 0; const fetchImpl = async () => { calls++; throw new Error(); };

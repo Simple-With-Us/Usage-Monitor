@@ -127,9 +127,12 @@ All five run on `/opt/homebrew/opt/node@24/bin/node` (opencode and ZCode need
 `node:sqlite`).  The Kimi and ZCode templates use the detached runtime's
 `collector-injector.mjs`; the Muse Code template uses the same launcher.  Choose
 `service-token` or `machine-identity` for `AUTH_MODE`, and point the template at
-an absolute owner-owned regular JSON custody file with mode `0600`, never a
-symlink.  For service-token mode the file contains only `{"token":"..."}`; for
+an absolute owner-owned regular custody file with mode `0600`, never a
+symlink.  For service-token mode the file contains either a raw ASCII `st.` token
+(optionally followed by one LF or CRLF) or only `{"token":"..."}`; for
 machine-identity mode it contains only `{"clientId":"...","clientSecret":"..."}`.
+Raw tokens cannot contain spaces, control characters, or non-ASCII bytes.  Existing
+custody files are read without rewriting or converting them.
 Use a dedicated Usage Monitor identity, never shared Automation credentials.
 The service token must have exactly read access to the Usage Monitor project,
 `prod:/telemetry`; the launcher verifies its metadata before fetching.  The
