@@ -115,12 +115,12 @@ describe("transferMuseCodeAccessToken", () => {
     expect(result.writeStatus).toBe(201);
   });
 
-  it("does not POST after non-404 PATCH failures and does not expose API error bodies", async () => {
+  it("does not POST after a 409 PATCH conflict or expose its API error body", async () => {
     const fetchImpl = vi.fn(async (url, init = {}) => {
       if (new URL(url).pathname === "/api/v2/service-token") {
         return new Response(JSON.stringify(metadata("write")), { status: 200 });
       }
-      return new Response(`private ${ACCESS_TOKEN_FIXTURE} body`, { status: 403 });
+      return new Response(`private ${ACCESS_TOKEN_FIXTURE} conflict body`, { status: 409 });
     });
     try {
       await transferMuseCodeAccessToken({
@@ -128,7 +128,7 @@ describe("transferMuseCodeAccessToken", () => {
       });
       throw new Error("expected write rejection");
     } catch (error) {
-      expect(error).toMatchObject({ code: "secret-write-rejected", status: 403 });
+      expect(error).toMatchObject({ code: "secret-write-rejected", status: 409 });
       expect(error.message).not.toContain("private");
       expect(error.message).not.toContain(ACCESS_TOKEN_FIXTURE);
     }
