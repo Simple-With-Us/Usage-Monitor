@@ -9,8 +9,8 @@ vi.mock("@/lib/infisical-connections", async (original) => ({
   ...await original<typeof import("@/lib/infisical-connections")>(),
   loadInfisicalConnection: vi.fn(async () => null),
   resolveInfisicalConnection: vi.fn(async (source: import("../infisical-connections").InfisicalSource) => {
-    const module = await original<typeof import("@/lib/infisical-connections")>();
-    return module.infisicalConnectionFromEnv(source);
+    const connections = await original<typeof import("@/lib/infisical-connections")>();
+    return connections.infisicalConnectionFromEnv(source);
   }),
 }));
 
