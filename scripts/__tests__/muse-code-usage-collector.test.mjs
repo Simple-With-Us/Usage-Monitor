@@ -6,7 +6,8 @@ import {
   fetchMuseCodeKey,
   quotaEventsFromMuseCode,
   quotaReadingsFromMuseCode,
-  readMuseCodeAccessTokenFromKeychain,
+  resolveMuseCodeAccessToken,
+  resolveMuseCodeIngestToken,
 } from "../muse-code-usage-collector.mjs";
 
 const OBSERVED = new Date("2026-09-15T12:00:00.000Z");
@@ -240,7 +241,7 @@ describe("fetchMuseCodeKey (HTTP shape)", () => {
 
     try {
       await expect(fetchMuseCodeKey("dummy-token", { fetchImpl })).rejects.toThrow(
-        /HTTP 401 from api\.meta\.ai/,
+        /authorization required from api\.meta\.ai/,
       );
     } finally {
       expect(bodyRead).toBe(false);
@@ -248,96 +249,20 @@ describe("fetchMuseCodeKey (HTTP shape)", () => {
   });
 });
 
-describe("readMuseCodeAccessTokenFromKeychain", () => {
-  let logSpy;
-  beforeEach(() => {
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+describe("resolveMuseCodeAccessToken", () => {
+  it("reads only the injected access-token variable and trims whitespace", () => {
+    expect(resolveMuseCodeAccessToken({ MUSE_CODE_ACCESS_TOKEN: "  token-fixture  " })).toBe("token-fixture");
+    expect(resolveMuseCodeAccessToken({})).toBeNull();
+    expect(resolveMuseCodeAccessToken({ MUSE_CODE_ACCESS_TOKEN: "  " })).toBeNull();
+    expect(resolveMuseCodeAccessToken({ MUSE_CODE_KEYCHAIN_SERVICE: "legacy-service" })).toBeNull();
   });
-  afterEach(() => {
-    logSpy.mockRestore();
-  });
+});
 
-  it("returns the access_token when the keychain JSON parses on darwin", async () => {
-    const stdout = JSON.stringify({ access_token: "tk_live_FIXTURE" });
-    const execFileImpl = vi.fn(async () => ({ stdout }));
-    const token = await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform: "darwin" });
-    expect(token).toBe("tk_live_FIXTURE");
-    const [bin, args] = execFileImpl.mock.calls[0];
-    expect(bin).toBe("security");
-    expect(args).toEqual(["find-generic-password", "-s", "ai.meta.dev.credentials", "-a", "meta", "-w"]);
-  });
-
-  it("logs the Always-Allow message and returns null when execFile rejects with SIGTERM (keychain ACL timeout)", async () => {
-    const error = new Error("killed");
-    error.killed = true;
-    error.signal = "SIGTERM";
-    const execFileImpl = vi.fn(async () => {
-      throw error;
-    });
-    const token = await readMuseCodeAccessTokenFromKeychain({
-      execFileImpl,
-      platform: "darwin",
-      timeoutMs: 9_000,
-    });
-    expect(token).toBeNull();
-    // Verify the explicit message that Jay will see in launchd logs.
-    const lines = logSpy.mock.calls.map((args) => String(args[0])).join("\n");
-    expect(lines).toMatch(/Always Allow/);
-    expect(lines).toMatch(/ai\.meta\.dev\.credentials/);
-    expect(lines).toMatch(/Skipping this run \(exit 0, zero events\)/);
-    expect(lines).not.toContain("tk_live_FIXTURE");
-  });
-
-  it("logs the Always-Allow message and returns null when execFile rejects with a non-zero exit (e.g. ACL denied rc=36)", async () => {
-    const error = new Error("security: SecKeychainSearchCopyNext");
-    error.code = 36;
-    const execFileImpl = vi.fn(async () => {
-      throw error;
-    });
-    const token = await readMuseCodeAccessTokenFromKeychain({
-      execFileImpl,
-      platform: "darwin",
-    });
-    expect(token).toBeNull();
-    const lines = logSpy.mock.calls.map((args) => String(args[0])).join("\n");
-    expect(lines).toMatch(/Always Allow/);
-    expect(lines).toMatch(/ai\.meta\.dev\.credentials/);
-  });
-
-  it("returns null and logs the non-darwin hint on a non-darwin platform", async () => {
-    const execFileImpl = vi.fn();
-    const token = await readMuseCodeAccessTokenFromKeychain({
-      execFileImpl,
-      platform: "linux",
-    });
-    expect(token).toBeNull();
-    expect(execFileImpl).not.toHaveBeenCalled();
-    const lines = logSpy.mock.calls.map((args) => String(args[0])).join("\n");
-    expect(lines).toMatch(/not on macOS/i);
-    expect(lines).toMatch(/ai\.meta\.dev\.credentials/);
-  });
-
-  it("returns null when stdout is empty", async () => {
-    const execFileImpl = vi.fn(async () => ({ stdout: "  " }));
-    expect(await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform: "darwin" })).toBeNull();
-  });
-
-  it("returns null and logs a hint when stdout is non-JSON", async () => {
-    const execFileImpl = vi.fn(async () => ({ stdout: "not json at all" }));
-    const token = await readMuseCodeAccessTokenFromKeychain({
-      execFileImpl,
-      platform: "darwin",
-    });
-    expect(token).toBeNull();
-    const lines = logSpy.mock.calls.map((args) => String(args[0])).join("\n");
-    expect(lines).toMatch(/non-JSON content/);
-  });
-
-  it("returns null when JSON has no access_token string", async () => {
-    const execFileImpl = vi.fn(async () => ({ stdout: JSON.stringify({ other: "field" }) }));
-    expect(
-      await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform: "darwin" }),
-    ).toBeNull();
+describe("resolveMuseCodeIngestToken", () => {
+  it("reads scoped or compatibility ingest tokens from environment only", () => {
+    expect(resolveMuseCodeIngestToken({ MUSE_CODE_INGEST_TOKEN: " scoped-token " })).toBe("scoped-token");
+    expect(resolveMuseCodeIngestToken({ MUSE_CODE_INGEST_TOKEN: " ", USAGE_INGEST_TOKEN: "compat-token" })).toBe("compat-token");
+    expect(resolveMuseCodeIngestToken({})).toBeNull();
   });
 });
 
@@ -350,25 +275,30 @@ describe("collectMuseCode wiring", () => {
     logSpy.mockRestore();
   });
 
-  it("returns status=skipped when the keychain is unavailable (no fetch, no events)", async () => {
-    const execFileImpl = vi.fn();
+  it("skips when the Infisical access token is unavailable without making a request", async () => {
     const fetchImpl = vi.fn();
-    const result = await collectMuseCode({
-      execFileImpl,
-      fetchImpl,
-      platform: "linux",
-      now: OBSERVED,
+    const result = await collectMuseCode({ accessToken: null, fetchImpl, now: OBSERVED });
+    expect(result).toMatchObject({
+      status: "skipped",
+      reason: "access-token-missing",
+      events: [],
     });
-    expect(result.status).toBe("skipped");
-    expect(result.events).toEqual([]);
-    expect(execFileImpl).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("fetches /muse-code/key once and emits both windows when the keychain works", async () => {
-    const execFileImpl = vi.fn(async () => ({
-      stdout: JSON.stringify({ access_token: "tk_live_FIXTURE" }),
-    }));
+  it("skips a rejected access token without producing quota events", async () => {
+    const fetchImpl = vi.fn(async () => new Response("private response body", { status: 401 }));
+    const result = await collectMuseCode({ accessToken: "fixture-token", fetchImpl, now: OBSERVED });
+    expect(result).toMatchObject({
+      status: "skipped",
+      reason: "access-token-rejected",
+      events: [],
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).not.toContain("private response body");
+  });
+
+  it("fetches /muse-code/key once and emits both windows with an injected token", async () => {
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify(goodPayload()), {
         status: 200,
@@ -376,9 +306,8 @@ describe("collectMuseCode wiring", () => {
       }),
     );
     const result = await collectMuseCode({
-      execFileImpl,
+      accessToken: "tk_live_FIXTURE",
       fetchImpl,
-      platform: "darwin",
     });
     expect(result.status).toBe("ok");
     expect(result.events).toHaveLength(2);
@@ -392,9 +321,6 @@ describe("collectMuseCode wiring", () => {
   });
 
   it("emits zero events when the payload reports is_subs_active=false", async () => {
-    const execFileImpl = vi.fn(async () => ({
-      stdout: JSON.stringify({ access_token: "tk_live_FIXTURE" }),
-    }));
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify(goodPayload({ is_subs_active: false })), {
         status: 200,
@@ -402,9 +328,8 @@ describe("collectMuseCode wiring", () => {
       }),
     );
     const result = await collectMuseCode({
-      execFileImpl,
+      accessToken: "tk_live_FIXTURE",
       fetchImpl,
-      platform: "darwin",
     });
     expect(result.status).toBe("skipped");
     expect(result.events).toEqual([]);
