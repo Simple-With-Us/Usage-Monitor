@@ -99,21 +99,83 @@ test('Next build config wires explicit Sentry release identity',async()=>{
  assert.ok(builder.indexOf('SOURCE_COMMIT=${SOURCE_COMMIT}')<builder.lastIndexOf('npm run build'));
 });
 
-async function nextBuildConfig(env, onPluginLoad=()=>{}) {
+async function nextBuildConfig(env, onPluginLoad=()=>{}, phase='phase-production-build') {
  const {readFileSync}=await import('node:fs');
  const {runInNewContext}=await import('node:vm');
  const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
  let options, calls=0;
  const context={__dirname:'/app',process:{env},module:{exports:{}},require:(name)=>{
    if(name==='path')return {join:()=>'/app'};
+   if(name==='next/constants')return {PHASE_PRODUCTION_BUILD:'phase-production-build',PHASE_DEVELOPMENT_SERVER:'phase-development-server'};
    if(name==='./scripts/sentry-build-release.cjs')return {sentryBuildRelease:()=>sentryBuildRelease(env)};
    assert.equal(name,'@sentry/nextjs/config');
    onPluginLoad();
    return {withSentryConfig:(config,input)=>{calls++;options=input;return config;}};
  }};
  runInNewContext(readFileSync(new URL('../next.config.js',import.meta.url),'utf8'),context);
- return {options,calls,config:context.module.exports};
+ const config=await context.module.exports(phase);
+ return {options,calls,config};
 }
+test('runtime token without source SHA does not load the upload plugin or fail startup',async()=>{
+ for(const phase of ['phase-production-server','phase-development-server']) {
+   for(const source of [undefined,'','unknown',newer.slice(0,12)]) {
+     const {calls,config}=await nextBuildConfig({NODE_ENV:'production',SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:source},()=>{},phase);
+     assert.equal(calls,0);
+     assert.equal(config.poweredByHeader,false);
+   }
+ }
+ const {calls,options}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SENTRY_DSN:'test-only'},()=>{},'phase-production-server');
+ assert.equal(calls,1);
+ assert.equal(options.authToken,undefined);
+ assert.equal(options.sourcemaps.disable,true);
+ assert.equal(options.errorHandler,undefined);
+});
+test('Next production server loads config with a runtime token and no source SHA',async()=>{
+ const {spawnSync}=await import('node:child_process');
+ const {fileURLToPath}=await import('node:url');
+ const result=spawnSync(process.execPath,['-e',`
+   require('next/dist/server/config').default(
+     require('next/constants').PHASE_PRODUCTION_SERVER, process.cwd()
+   ).then(config => {
+     if (config.poweredByHeader !== false) process.exitCode = 1;
+   }).catch(() => { process.exitCode = 1; });
+ `],{
+   cwd:fileURLToPath(new URL('..',import.meta.url)),
+   env:{NODE_ENV:'production',SENTRY_AUTH_TOKEN:'test-only',NEXT_TELEMETRY_DISABLED:'1'},
+   encoding:'utf8',timeout:30000,
+ });
+ assert.equal(result.status,0,'Next production server config must load without build-only release metadata');
+});
+test('Next runtime loader preserves Sentry client tracing without upload credentials',async()=>{
+ const {spawnSync}=await import('node:child_process');
+ const {fileURLToPath}=await import('node:url');
+ const result=spawnSync(process.execPath,['-e',`
+   const assert = require('node:assert/strict');
+   const sentry = require('@sentry/nextjs/config');
+   const original = sentry.withSentryConfig;
+   let observed = false;
+   sentry.withSentryConfig = (config, options) => {
+     observed = true;
+     assert.equal(options.authToken, undefined);
+     assert.equal(options.errorHandler, undefined);
+     assert.equal(options.sourcemaps.disable, true);
+     return original(config, options);
+   };
+   require('next/dist/server/config').default(
+     require('next/constants').PHASE_PRODUCTION_SERVER, process.cwd()
+   ).then(config => {
+     assert.equal(observed, true);
+     assert.equal(config.poweredByHeader, false);
+     assert.ok(config.experimental.clientTraceMetadata.includes('sentry-trace'));
+     assert.ok(config.experimental.clientTraceMetadata.includes('baggage'));
+   }).catch(() => { process.exitCode = 1; });
+ `],{
+   cwd:fileURLToPath(new URL('..',import.meta.url)),
+   env:{NODE_ENV:'production',SENTRY_AUTH_TOKEN:'test-only',SENTRY_DSN:'test-only',NEXT_TELEMETRY_DISABLED:'1'},
+   encoding:'utf8',timeout:30000,
+ });
+ assert.equal(result.status,0,'Runtime must preserve real Sentry tracing options without build-only credentials');
+});
 test('credential-free builds avoid uploads and the plugin when no DSN is set',async()=>{
  assert.equal((await nextBuildConfig({})).calls,0);
  const {options}=await nextBuildConfig({NEXT_PUBLIC_SENTRY_DSN:'test-only'});
