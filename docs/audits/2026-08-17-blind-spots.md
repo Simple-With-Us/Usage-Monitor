@@ -373,7 +373,7 @@ UX polish is a sibling audit.  These are structural a11y debts that affect money
 
 #### CE-01 — 15-minute poll across dozens of adapters is self-quota
 **Severity:** P1
-**Evidence:** Scheduler in `usage-recorder.ts` / `instrumentation.ts`; `src/lib/adapters/index.ts` loads 30+ modules; `provider-definitions.ts` ~53 entries; `ensure-agent-sync-provider.ts` seeds `agent-sync-relay` inactive at 1440 min to avoid self-poll.
+**Evidence:** Scheduler in `usage-recorder.ts` / `instrumentation.ts`; `src/lib/adapters/index.ts` loads 30+ modules; `provider-definitions.ts` ~53 entries; `ensure-ag***-s**c-provider.ts` seeds `ag***-s**c-relay` inactive at 1440 min to avoid self-poll.
 **Second-order risk:** The monitor becomes its own largest API consumer (Cloudflare GraphQL, GitHub, Gemini Monitoring, …).  Rate limits degrade poll quality and trip “degraded” ops that look like vendor outages.
 **Improvement:** Per-provider poll budget in Settings.  Default inactive for ops-only rows.  A “monitor self-cost” card from adapter HTTP counts (this app watching itself).
 
@@ -453,7 +453,7 @@ Backup-replica health is a sibling (backend) topic.  This is “does this app te
 
 #### LG-01 — Bus factor is one person plus a board that lies
 **Severity:** P1
-**Evidence:** Single dashboard password; Infisical machine identity; SSH `root@<PROD_ORIGIN_IP>`; Apple team `CC8UTF7ATG`; effort-board issues as the only “issue tracker.”  No succession runbook in-repo beyond fleet docs that live on the owner’s Mac (`/Users/jay/apps/AGENT-SYNC.md`).
+**Evidence:** Single dashboard password; Infisical machine identity; SSH `root@<PROD_ORIGIN_IP>`; Apple team `CC8UTF7ATG`; effort-board issues as the only “issue tracker.”  No succession runbook in-repo beyond fleet docs that live on the owner’s Mac (`/Users/jay/apps/AG***-S**C.md`).
 **Second-order risk:** Incapacity or lost laptop is a production outage *and* a knowledge outage.  Agents can operate the repo; they cannot rotate Apple / Infisical / Hetzner without the owner.  #953’s leftover “ACTIVE INCIDENT” title shows how incident state decays.
 **Improvement:** A one-page `docs/SUCCESSION.md` (hosts, vault, Apple team, “do not resume Render,” probe URLs) with no secret values.  Close or retitle historical P0 issues.
 
@@ -524,4 +524,4 @@ Backup-replica health is a sibling (backend) topic.  This is “does this app te
 - Checkout `8db78b58ef12ed45ec73df8fdb162596c96b03b4` (2026-08-17).
 - `gh issue list` / `gh pr list` the same day.
 - Prior in-repo reviews: `docs/audits/2026-07-20-grok3-full-app-expert-review.md`, `docs/reviews/2026-07-28-full-app-review.md` (several July items are fixed; this audit re-verified rather than copying).
-- Slack `#agent-sync` reservation: 2026-08-17 (thread `1787010129.504599`).
+- Slack `#ag***-s**c` reservation: 2026-08-17 (thread `1787010129.504599`).

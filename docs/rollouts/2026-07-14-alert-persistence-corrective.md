@@ -28,9 +28,9 @@ This isolated follow-up imports the corrective alert persistence implementation 
 - `src/lib/usage-recorder.ts`
 - `src/app/api/providers/[id]/route.ts`
 - `src/lib/provider-renewals.ts`
-- `src/lib/ensure-agent-sync-provider.ts`
+- `src/lib/ensure-ag***-s**c-provider.ts`
 - `scripts/repair-anthropic-funding.mjs`
-- alert, maintenance, migration, provider-route, renewal, agent-sync, and adapter tests/fixtures
+- alert, maintenance, migration, provider-route, renewal, ag***-s**c, and adapter tests/fixtures
 - `PLAN.md`, `STATUS.md`, `docs/EFFORT-LOG.md`, and rollout notes
 
 ## Verification

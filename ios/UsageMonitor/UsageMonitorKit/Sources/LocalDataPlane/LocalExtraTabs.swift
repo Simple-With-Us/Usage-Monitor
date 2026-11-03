@@ -51,10 +51,10 @@ struct LocalFleetTab: View {
 
                 Section {
                     let syncVal = isDemo ? "Running" : "Not Connected"
-                    LabeledContent("agent-sync") {
+                    LabeledContent("operator") {
                         StatusBadge(syncVal, status: isDemo ? .ok : .neutral, systemImage: isDemo ? "checkmark.circle.fill" : "circle")
                     }
-                    .copyableRow(label: "agent-sync", value: syncVal)
+                    .copyableRow(label: "operator", value: syncVal)
                     // Not-enabled services are intentionally not listed
                     // (owner 2026-08-31: no flags/rows for disabled processes).
                 } header: {
