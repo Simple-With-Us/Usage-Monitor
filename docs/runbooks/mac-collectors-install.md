@@ -29,6 +29,13 @@ copy does not update itself.
 
 Check what is live with `cat ~/apps/usage-monitor-collectors/VERSION`.
 
+The updater fetches the fixed public GitHub HTTPS repository without
+authentication.  It deliberately ignores inherited Git variables and system/global
+Git configuration and disables credential prompts; authenticated/private mirrors
+or custom CA/proxy settings available only through Git configuration are not
+supported.  This prevents inherited configuration from redirecting the approved
+origin or changing Git's interpretation of the release checkout.
+
 The detached updater (`scripts/update-local-collector-runtime.mjs`) publishes
 canonical releases as `release-<git-sha>-<content-sha256>` and compatibility
 releases as `compat-<git-sha>-<content-sha256>`.  Both identities cover the exact

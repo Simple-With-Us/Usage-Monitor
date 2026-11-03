@@ -521,7 +521,8 @@ function acquireLock(runtimeRoot) {
   // Darwin ps exposes start time at second resolution.  Bind its verified
   // command title to this nonce too so same-second PID reuse cannot match.
   if (process.platform === "darwin") {
-    process.title = `um-collector-updater-${nonce}`;
+    // argv capacity can truncate the title; put the complete nonce before the label.
+    process.title = `${nonce} um-collector-updater`;
     if (!run("ps", ["-p", String(process.pid), "-o", "command="], { capture: true }).includes(nonce)) fail("Cannot verify updater process nonce");
   }
   const ownName = `${process.pid}-${processIdentity(process.pid)}-${nonce}`;
