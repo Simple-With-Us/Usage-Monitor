@@ -258,6 +258,23 @@ export function codexSessionId(text) {
   return undefined;
 }
 
+/** Read only the session's own metadata, never a later working-directory hint. */
+export function codexSessionCwd(text) {
+  for (const line of text.split("\n")) {
+    if (!line.includes('"session_meta"')) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row?.type !== "session_meta") continue;
+      if (typeof row.payload?.id !== "string" || !row.payload.id.trim()) return undefined;
+      const cwd = row.payload?.cwd;
+      return typeof cwd === "string" && cwd.startsWith("/") ? cwd : undefined;
+    } catch {
+      // Keep looking for a valid session_meta row.
+    }
+  }
+  return undefined;
+}
+
 /** Add correlation metadata to already-built events.  The eventId is not
  *  touched, and the monitor ignores a correlation key that only one side of a
  *  replay carries, so tagging an event the monitor already stored is safe. */
