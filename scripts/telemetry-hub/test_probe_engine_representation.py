@@ -4,10 +4,14 @@ import copy
 import hashlib
 import importlib.util
 import io
+import http.client
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import stat
+import struct
 import sys
 import unittest
 import urllib.parse
@@ -65,6 +69,11 @@ class FakeEngine:
         self.ids.add(identifier)
 
     def request(self, method, path, body=None):
+        if method != "GET":
+            self.calls.append(("GET", "/info"))
+            _, info = self.route("GET", "/info", None)
+            if hashlib.sha256(info["ID"].encode()).hexdigest() != DAEMON:
+                raise P.Stop("same-connection daemon mismatch")
         self.calls.append((method, path))
         mutation = method != "GET"
         if mutation:
@@ -230,20 +239,75 @@ class ProbeTests(unittest.TestCase):
         engine = FakeEngine()
         engine.daemon_change_after = 1
         probe, _, evidence = self.candidate(engine)
-        with self.assertRaisesRegex(P.Stop, "daemon"):
+        with self.assertRaisesRegex(P.Stop, "outcome unknown"):
             probe.run()
         self.assertEqual(len(engine.mutations), 1)
         self.assertFalse(evidence.cleaned)
 
     def test_unexplained_inspect_default_stops_without_silent_normalization(self):
         engine = FakeEngine()
-        engine.created_change = lambda item, index: item["HostConfig"].update(UnexpectedDefault=True) if index == 1 else None
+        engine.created_change = lambda item, index: item["HostConfig"].update(Dns=[]) if index == 1 else None
         probe, _, evidence = self.candidate(engine)
         with self.assertRaisesRegex(P.Stop, "representation mismatch"):
             probe.run()
         self.assertEqual(evidence.files["mismatch.json"]["fields"], ["HostConfig"])
         self.assertEqual(len(engine.mutations), 3)
         self.assertFalse(evidence.cleaned)
+
+    def test_every_unapproved_host_access_field_blocks_a_and_presend_b(self):
+        changes = {
+            "uts": lambda host: host.update(UTSMode="host"),
+            "userns": lambda host: host.update(UsernsMode="host"),
+            "pid": lambda host: host.update(PidMode="host"),
+            "ipc": lambda host: host.update(IpcMode="host"),
+            "cgroupns": lambda host: host.update(CgroupnsMode="host"),
+            "cgroup-parent": lambda host: host.update(CgroupParent="/unrelated"),
+            "cid-file": lambda host: host.update(ContainerIDFile="/unrelated/file"),
+            "runtime": lambda host: host.update(Runtime="unreviewed"),
+            "device-rules": lambda host: host.update(DeviceCgroupRules=["a"]),
+            "device-request": lambda host: host.update(DeviceRequests=[{"Driver": "unreviewed"}]),
+            "sysctls": lambda host: host.update(Sysctls={"kernel.example": "synthetic"}),
+            "annotations": lambda host: host.update(Annotations={"hook": "synthetic"}),
+            "storage": lambda host: host.update(StorageOpt={"unreviewed": "synthetic"}),
+            "groups": lambda host: host.update(GroupAdd=["0"]),
+            "unknown": lambda host: host.update(FutureHostPrivilege=True),
+            "bind-propagation": lambda host: host["Mounts"][1]["BindOptions"].update(Propagation="rshared"),
+            "bind-create": lambda host: host["Mounts"][1]["BindOptions"].update(CreateMountpoint=True),
+            "volume-driver": lambda host: host["Mounts"][0]["VolumeOptions"].update(DriverConfig={"Name": "unreviewed"}),
+            "volume-subpath": lambda host: host["Mounts"][0]["VolumeOptions"].update(Subpath="unreviewed"),
+            "volume-copy": lambda host: host["Mounts"][0]["VolumeOptions"].update(NoCopy=False),
+            "mount-option": lambda host: host["Mounts"][0].update(FutureMountPrivilege=True),
+        }
+        for name, change in changes.items():
+            for stage in ("a-inspect", "b-presend"):
+                with self.subTest(field=name, stage=stage):
+                    engine, evidence = FakeEngine(), MemoryEvidence()
+                    if stage == "a-inspect":
+                        engine.created_change = lambda item, index: change(item["HostConfig"]) if index == 0 else None
+                    else:
+                        write = evidence.write
+                        def changed_after_validation(name, value):
+                            write(name, value)
+                            if name == "container-0-confirmed.json":
+                                change(value["HostConfig"])
+                        evidence.write = changed_after_validation
+                    probe, _, _ = self.candidate(engine, evidence)
+                    with self.assertRaises(P.Stop):
+                        probe.run()
+                    self.assertEqual(len(engine.mutations), 2)
+                    self.assertFalse(evidence.cleaned)
+
+    def test_unreviewed_config_or_nested_healthcheck_cannot_be_forwarded(self):
+        for change in (lambda item: item["Config"].update(NetworkingConfig={"EndpointsConfig": {"host": {}}}),
+                       lambda item: item["Config"]["Healthcheck"].update(Interval=1),
+                       lambda item: item["Config"].update(Volumes={"/unrelated": {}})):
+            engine = FakeEngine()
+            engine.created_change = lambda item, index: change(item) if index == 0 else None
+            probe, _, evidence = self.candidate(engine)
+            with self.assertRaises(P.Stop):
+                probe.run()
+            self.assertEqual(len(engine.mutations), 2)
+            self.assertFalse(evidence.cleaned)
 
     def test_cleanup_fresh_ownership_recheck_blocks_deleting_changed_container(self):
         probe, engine, evidence = self.candidate()
@@ -286,22 +350,41 @@ class ProbeTests(unittest.TestCase):
 
 
 class Response:
-    def __init__(self, raw=b"{}", status=200):
+    def __init__(self, raw=b"{}", status=200, will_close=False, after_read=None):
         self.raw, self.status = raw, status
+        self.will_close, self.after_read = will_close, after_read
 
     def read1(self, length):
         chunk, self.raw = self.raw[:length], self.raw[length:]
+        if not chunk and self.after_read:
+            self.after_read()
         return chunk
 
 
 class Connection:
-    def __init__(self, response):
+    def __init__(self, response, *, daemon_info=False):
         self.response, self.sock, self.sent, self.closed = response, Mock(), [], False
+        self.daemon_info, self.token, self.info_closing, self.after_info = daemon_info, "original", False, None
+        self.daemon_id = "synthetic-daemon"
+
+    def begin(self, deadline):
+        self.closed = False
+        deadline.remaining()
+        return self.identity()
+
+    def identity(self):
+        return self.token
+
+    def reset_response_budget(self):
+        pass
 
     def request(self, *args, **kwargs):
         self.sent.append((args, kwargs))
 
     def getresponse(self):
+        if self.daemon_info and self.sent[-1][0][1] == "/v1.53/info":
+            return Response(P.canonical({"ID": self.daemon_id}).encode(), 200,
+                            will_close=self.info_closing, after_read=self.after_info)
         return self.response
 
     def close(self):
@@ -339,7 +422,8 @@ class TransportTests(unittest.TestCase):
 
     def test_container_delete_requires_exact_registered_id_and_no_force(self):
         connection = Connection(Response(b"", 204))
-        engine = P.FixtureEngine(armed=True, connection=lambda: connection)
+        connection.daemon_info = True
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=lambda: connection)
         identifier = "a" * 64
         with self.assertRaises(P.Stop):
             engine.request("DELETE", f"/containers/{identifier}?v=false&force=false&link=false")
@@ -351,7 +435,7 @@ class TransportTests(unittest.TestCase):
 
     def test_changed_create_body_refuses_before_io(self):
         factory = Mock()
-        engine = P.FixtureEngine(armed=True, connection=factory)
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=factory)
         body = P.source_payload()
         engine.permit_body(P.NAMES[0], body)
         changed = copy.deepcopy(body)
@@ -362,20 +446,147 @@ class TransportTests(unittest.TestCase):
 
     def test_mutation_is_never_repeated_and_deadline_is_terminal(self):
         connection = Connection(Response(b"{}", 201))
-        engine = P.FixtureEngine(armed=True, connection=lambda: connection)
+        connection.daemon_info = True
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=lambda: connection)
         body = P.source_payload()
         engine.permit_body(P.NAMES[0], body)
         route = "/containers/create?name=" + P.NAMES[0]
         engine.request("POST", route, body)
         with self.assertRaisesRegex(P.Stop, "already attempted"):
             engine.request("POST", route, body)
-        self.assertEqual(len(connection.sent), 1)
+        self.assertEqual(len(connection.sent), 2)
         ticks = iter([0, 16])
         connection = Connection(Response())
         engine = P.FixtureEngine(connection=lambda: connection, clock=lambda: next(ticks))
         with self.assertRaises(P.Stop):
             engine.request("GET", "/info")
         self.assertTrue(connection.closed)
+
+    def test_info_and_mutation_share_one_connection_despite_socket_path_replacement(self):
+        verified = Connection(Response(b"{}", 201), daemon_info=True)
+        replacement = Connection(Response(b"{}", 201), daemon_info=True)
+        replacement.daemon_id = "unreviewed-daemon"
+        replaced = []
+        verified.after_info = lambda: replaced.append(True)
+        factory = Mock(side_effect=[verified, replacement])
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=factory)
+        body = P.source_payload()
+        engine.permit_body(P.NAMES[0], body)
+        engine.request("POST", "/containers/create?name=" + P.NAMES[0], body)
+        self.assertEqual(factory.call_count, 1)
+        self.assertTrue(replaced)
+        self.assertEqual([args[0] for args, _ in verified.sent], ["GET", "POST"])
+        self.assertEqual(replacement.sent, [])
+
+    def test_changed_connection_closing_or_wrong_daemon_blocks_before_mutation_send(self):
+        for change in (lambda connection: setattr(connection, "after_info", lambda: setattr(connection, "token", "replacement")),
+                       lambda connection: setattr(connection, "info_closing", True),
+                       lambda connection: setattr(connection, "daemon_id", "unreviewed-daemon")):
+            connection = Connection(Response(b"{}", 201), daemon_info=True)
+            change(connection)
+            factory = Mock(return_value=connection)
+            engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=factory)
+            body = P.source_payload()
+            engine.permit_body(P.NAMES[0], body)
+            with self.assertRaises(P.Stop):
+                engine.request("POST", "/containers/create?name=" + P.NAMES[0], body)
+            self.assertEqual([args[0] for args, _ in connection.sent], ["GET"])
+            self.assertEqual(factory.call_count, 1)
+            self.assertTrue(connection.closed)
+
+    def test_closed_host_policy_is_checked_before_create_registration_or_io(self):
+        factory = Mock()
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=factory)
+        body = P.source_payload()
+        body["HostConfig"]["UTSMode"] = "host"
+        with self.assertRaisesRegex(P.Stop, "HostConfig"):
+            engine.permit_body(P.NAMES[0], body)
+        self.assertEqual(engine.bodies, {})
+        factory.assert_not_called()
+
+
+class TickClock:
+    def __init__(self):
+        self.now = 0
+
+    def __call__(self):
+        return self.now
+
+
+class RawSocket:
+    def __init__(self, raw=b"", *, clock=None, drip=False):
+        self.raw, self.clock, self.drip = raw, clock, drip
+        self.receives, self.timeouts, self.sent, self.connects = 0, [], [], []
+        self.closed = False
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def recv_into(self, buffer):
+        # Return status line together, then deliver a header one byte per read.
+        limit = self.raw.index(b"\n") + 1 if self.drip and self.receives == 0 else 1 if self.drip else len(buffer)
+        count = min(len(buffer), len(self.raw), limit)
+        buffer[:count], self.raw = self.raw[:count], self.raw[count:]
+        self.receives += 1
+        if self.clock is not None:
+            self.clock.now += 1
+        return count
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+    def connect(self, path):
+        self.connects.append(path)
+
+    def getsockopt(self, *args):
+        return struct.pack("3i", 12345, 0, 0)
+
+    def fileno(self):
+        return -1 if self.closed else 7
+
+    def close(self):
+        self.closed = True
+
+
+class AbsoluteDeadlineTests(unittest.TestCase):
+    def test_incremental_headers_cannot_extend_total_deadline(self):
+        clock = TickClock()
+        raw = RawSocket(b"HTTP/1.1 200 OK\r\nX-Synthetic: " + b"x" * 100 + b"\r\nContent-Length: 0\r\n\r\n", clock=clock, drip=True)
+        wrapped = P.DeadlineSocket(raw, P.Deadline(clock))
+        response = http.client.HTTPResponse(wrapped)
+        with self.assertRaisesRegex(P.Stop, "absolute"):
+            response.begin()
+        self.assertLessEqual(clock.now, 15)
+        self.assertGreater(raw.receives, 1)
+        self.assertEqual(raw.timeouts, sorted(raw.timeouts, reverse=True))
+        response.close()
+        wrapped.close()
+
+    def test_real_http_connection_never_reopens_a_closed_pinned_socket(self):
+        raw = RawSocket()
+        fake_stat = type("Info", (), {"st_mode": stat.S_IFSOCK | 0o600, "st_uid": 0})()
+        with patch.object(P.os, "lstat", return_value=fake_stat), patch.object(P.socket, "socket", return_value=raw) as factory:
+            connection = P.UnixConnection()
+            connection.begin(P.Deadline(lambda: 0))
+            original = connection.sock
+            connection.sock = None
+            with self.assertRaises(http.client.NotConnected):
+                connection.request("POST", "/v1.53/containers/create", body=b"{}")
+            self.assertEqual(factory.call_count, 1)
+            self.assertEqual(raw.connects, [P.SOCKET])
+            with self.assertRaisesRegex(P.Stop, "reconnect"):
+                connection.connect()
+            original.close()
+
+    def test_header_and_body_share_wire_limit(self):
+        raw = RawSocket(b"HTTP/1.1 200 OK\r\nX-Synthetic: " + b"x" * 100 + b"\r\n\r\n")
+        wrapped = P.DeadlineSocket(raw, P.Deadline(lambda: 0))
+        with patch.object(P, "MAX_BYTES", 32):
+            response = http.client.HTTPResponse(wrapped)
+            with self.assertRaisesRegex(P.Stop, "wire"):
+                response.begin()
+            response.close()
+        wrapped.close()
 
 
 @unittest.skipUnless(Path("/proc/self/mountinfo").exists() and Path("/dev/shm").is_dir(), "Linux RAM fixture required")
