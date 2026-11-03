@@ -140,12 +140,27 @@ test("unmeasured calls survive the full hub and Sentry log round trip without du
   assert.deepEqual({ traceId: record.traceId, spanId: record.spanId }, traceAndSpanIds(call.eventId));
   assert.deepEqual(collectorSentryEvents(source, identity), [call]);
   assert.ok(!Object.hasOwn(forwarded[0], "durationMs"));
-  for (const durationMs of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const durationMs of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, 1n]) {
     const [invalid] = collectorSentryEvents(tokens({ collectorCallId: "invalid-timing", extraMetadata: { durationMs } }), identity);
     assert.equal(invalid.kind, "log");
     assert.ok(!Object.hasOwn(invalid, "durationMs"));
     assert.ok(!invalid.attributes.some((attr) => attr.key === "duration_ms"));
   }
+});
+
+test("an actual maximum-safe duration cannot abort mixed calls or manufacture an invalid start", () => {
+  const invalid = tokens({ collectorCallId: "invalid-range", extraId: "invalid-range", extraMetadata: { durationMs: Number.MAX_SAFE_INTEGER } });
+  const valid = timedTokens({ collectorCallId: "valid-range", extraId: "valid-range" });
+  const zero = timedTokens({ collectorCallId: "zero-range", extraId: "zero-range", extraMetadata: { durationMs: 0 } });
+  const withoutTiming = collectorSentryEvents(tokens({ collectorCallId: "invalid-range", extraId: "invalid-range" }), identity)[0];
+  const rows = collectorSentryEvents([...invalid, ...valid, ...zero], identity);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], withoutTiming);
+  assert.equal(rows[0].attributes.find((attr) => attr.key === "gen_ai.usage.input_tokens").value.intValue, "10");
+  assert.equal(rows[1].kind, "span");
+  assert.equal(rows[1].durationMs, 250);
+  assert.equal(rows[2].kind, "span");
+  assert.equal(rows[2].durationMs, 0);
 });
 
 test("measured zero duration stays a span and retains its source identity", () => {
@@ -221,6 +236,30 @@ test("unmeasured native spans retain their error status when delivered as logs",
     return accepted();
   } });
   assert.equal(result.delivered, 1);
+}));
+
+test("legacy durations outside the timestamp domain drain as logs with timing removed only from the wire", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "invalid-legacy-range" }), identity, config);
+  const path = join(root, "outbox.sqlite");
+  const db = new DatabaseSync(path);
+  const row = db.prepare("SELECT id,payload FROM events").get();
+  const legacy = { ...JSON.parse(row.payload), kind: "span", durationMs: Number.MAX_SAFE_INTEGER };
+  legacy.attributes.push({ key: "duration_ms", value: { stringValue: String(Number.MAX_SAFE_INTEGER) } });
+  const payload = JSON.stringify(legacy);
+  db.prepare("UPDATE events SET payload=? WHERE id=?").run(payload, row.id);
+  db.close();
+  const result = await drainCollectorSentry(root, config, { fetchImpl: async (url, init) => {
+    assert.ok(url.endsWith("/v1/logs"));
+    const [record] = JSON.parse(init.body).resourceLogs[0].scopeLogs[0].logRecords;
+    assert.ok(!record.attributes.some((attr) => attr.key === "duration_ms"));
+    assert.ok(!record.body.stringValue.includes("duration_ms"));
+    assert.deepEqual({ traceId: record.traceId, spanId: record.spanId }, traceAndSpanIds(row.id));
+    return accepted();
+  } });
+  assert.equal(result.delivered, 1);
+  const checked = new DatabaseSync(path);
+  assert.equal(checked.prepare("SELECT payload FROM events WHERE id=?").get(row.id).payload, payload);
+  checked.close();
 }));
 
 test("distinct output fragments accumulate reasoning once per deduped event", () => {
