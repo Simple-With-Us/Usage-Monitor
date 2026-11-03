@@ -2,13 +2,13 @@
 
 **Review window:** October 30–November 3, 2026, through the 8:46 AM closeout.  This is a historical lessons-learned snapshot, not a current runtime inventory.  It summarizes implementation, bounded historical reconciliation, and verified outcomes; it does not establish present-day deployment or collection state.
 
-## What happened
+## What Happened
 
 The work addressed SQLite ingest contention, duplicate historical telemetry, collector profile discovery, unmeasured calls, ambiguous OTLP acknowledgments, and verification of a telemetry hub upgrade.  The reported SQLite `Operation has timed out` wording did not establish its cause: a two-connection WAL regression reproduced the same adapter error from a snapshot write conflict, while the original production root cause remains unproven.  The ingest path now reserves the SQLite writer before replay checks and returns a bounded busy response for explicit busy/locked errors ([PR #1842](https://github.com/Simple-With-Us/Usage-Monitor/pull/1842)).
 
 A reviewed historical cleanup removed 201,252 exact duplicates across 2,013 shards, with matching tombstones and no keeper failures or missing receipts.  It retained 4,317 candidates without sufficient keeper proof and 548 older rollup groups.  These are bounded results, not permission for additional deletion ([PR #1846](https://github.com/Simple-With-Us/Usage-Monitor/pull/1846)).  For the October 29–30 Claude catch-up, 49,976 components projected to 12,508 unmeasured-call logs; the bounded delivery stored all 12,508, with no measured spans.  A separate historical child catch-up verified all eight retained Usage Monitor events, including one completed usage call with input 9,414, output 2, and cache read 512 tokens.  One associated Sentry span was stored with those token values and an exact `duration_ms` tag of 1,960 ms; the backend’s built-in duration differed by 0.0002 ms, within an explicitly stated 0.001 ms tolerance.
 
-## Lessons to carry forward
+## Lessons To Carry Forward
 
 1. **Use an evidence ladder for telemetry claims.**  A configured endpoint or flag proves intent; a validated ACK supports receiver acceptance; an explicit persisted-count receipt reports insertion; and an independent stored-row read verifies storage.  HTTP success alone is insufficient, and an idempotent duplicate may add no new row.  Accounting or suppression requires its own proof, such as an authenticated billed-call identity and exact quantities.  The child Usage Monitor receipt alone did not establish first-class project attribution or Sentry storage; the latter needed a separate query.
 
@@ -26,6 +26,6 @@ A reviewed historical cleanup removed 201,252 exact duplicates across 2,013 shar
 
 8. **Make system boundaries and limits explicit.**  Native collectors own source observation and event identity; the collector delivery journal owns durable intent and receipts; the hub owns transport and ACK handling; Usage Monitor owns accepted usage rows and accounting semantics; Sentry owns its stored observability records.  A clean bounded log sample found no current ingest failures or timeout messages, but it did not establish the original SQLite timeout cause.  Likewise, stored child events and Sentry spans are separate evidence.  Keep each claim with its owning system and verifier.
 
-## Public implementation references
+## Public Implementation References
 
 The implementation and source/CI boundaries are described in [the October 30 telemetry handoff](../rollouts/2026-10-30-telemetry-handoff.md), [the November 3 partial-ACK report](../rollouts/2026-11-03-sentry-partial-acks.md), and [the November 3 unmeasured-call report](../rollouts/2026-11-03-unmeasured-collector-calls.md).  Those notes distinguish repository changes from production deployment and receipt evidence.
