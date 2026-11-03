@@ -29,7 +29,7 @@ export interface AgentPlatformMeta {
   provider: string;
   description: string;
   dataCapability: string;
-  fidelityTier: "realtime_otlp" | "session_jsonl" | "process_only" | "unavailable";
+  fidelityTier: "realtime_otlp" | "session_jsonl" | "local_database" | "process_only" | "unavailable";
   tokenTelemetryKind: TokenTelemetryKind;
   notes: string;
   defaultMonthlySeatCostUsd: number;
@@ -158,14 +158,24 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     name: "Kimi Code",
     provider: "Moonshot AI",
     description: "Kimi Code CLI and ACP seat.",
-    dataCapability: "Live process detection. Exact token telemetry is not available.",
-    fidelityTier: "unavailable",
-    tokenTelemetryKind: "none",
+    dataCapability: "Exact per-turn tokens from durable usage.record rows in wire.jsonl",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
     notes:
-      "Kimi Code's local wire log exposes request models and a turn-counting estimate, but no provider input/output usage ledger.  Usage is not reported.",
+      "The local collector reads durable usage.record rows with usageScope=turn.  Input, output, cache-read, and cache-creation counts come from the record's native fields; model estimates and non-turn records are excluded.",
     defaultMonthlySeatCostUsd: 0,
-    unavailableReason:
-      "Kimi Code does not expose exact local token usage.  This is not zero usage.",
+  },
+  {
+    id: "zcode",
+    name: "ZCode",
+    provider: "Z.ai",
+    description: "ZCode CLI and ACP seat.",
+    dataCapability: "Exact per-call tokens from the local model_usage SQLite ledger",
+    fidelityTier: "local_database",
+    tokenTelemetryKind: "local_database",
+    notes:
+      "The local collector reads model_usage rows from ZCode's SQLite database.  Input excludes cached reads and cache creation; output includes reasoning, which remains metadata-only.",
+    defaultMonthlySeatCostUsd: 0,
   },
   {
     id: "opencode",
@@ -200,7 +210,24 @@ const TOKEN_TELEMETRY_KIND_BY_APP = new Map(
 export function platformIdForSourceApp(sourceApp: string): string {
   const normalized = sourceApp.trim().toLowerCase();
   if (normalized === CURSOR_ADMIN_SOURCE_APP) return "cursor-agent";
-  return normalized === "antigravity-statusline" ? "antigravity-cli" : normalized;
+  const aliases: Record<string, string> = {
+    "antigravity-statusline": "antigravity-cli",
+    kimi: "kimi-code",
+    "kimi-code-cli": "kimi-code",
+    "moonshot-kimi": "kimi-code",
+    "z-code": "zcode",
+    "z-ai": "zcode",
+    "z.ai": "zcode",
+    zai: "zcode",
+    zhipu: "zcode",
+    zhipuai: "zcode",
+    "zhipu-ai": "zcode",
+    bigmodel: "zcode",
+    "bigmodel.cn": "zcode",
+    glm: "zcode",
+    "glm-code": "zcode",
+  };
+  return aliases[normalized] ?? normalized;
 }
 
 /** Claude Code OTLP cost wins over token-catalog PAYG when both exist. */
@@ -234,7 +261,7 @@ export interface AgentPlatformStatus {
   isRunningOnMac: boolean;
   macStatus: "running" | "idle" | "stopped" | "unknown";
   dataCapability: string;
-  fidelityTier: "realtime_otlp" | "session_jsonl" | "process_only" | "unavailable";
+  fidelityTier: "realtime_otlp" | "session_jsonl" | "local_database" | "process_only" | "unavailable";
   notes: string;
   monthlySeatCostUsd: number;
   billedMonthlySeatCostUsd: number;
@@ -661,6 +688,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       agentProcesses[appKey] === "running" ||
       (appKey === "deepseek-dsh" && agentProcesses.deepseek === "running") ||
       (appKey === "kimi-code" && agentProcesses.kimi === "running") ||
+      (appKey === "zcode" && agentProcesses.zcode === "running") ||
       (appKey === "grok-build" && (macProcesses["grok-leader"] === "running" || agentProcesses["grok-build"] === "running")) ||
       (appKey === "claude-code" && (macProcesses["claude-remote-control"] === "running" || agentProcesses["claude-code"] === "running"));
 

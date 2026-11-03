@@ -519,6 +519,8 @@ describe("provider grouping", () => {
       "google-antigravity",
       "xai",
       "minimax",
+      "moonshot",
+      "zcode",
       "grok-bot",
       "cursor",
       "muse",
@@ -531,11 +533,22 @@ describe("provider grouping", () => {
     expect(byProvider.get("minimax")?.windows).toEqual([]);
     expect(byProvider.get("minimax")?.providerLabel).toBe("MiniMax");
     expect(byProvider.get("minimax")?.expected).toBe(true);
+    expect(byProvider.get("moonshot")?.providerLabel).toBe("Moonshot AI");
+    expect(byProvider.get("moonshot")?.expected).toBe(true);
+    expect(byProvider.get("moonshot")?.windows).toEqual([]);
+    expect(byProvider.get("zcode")?.providerLabel).toBe("Z.ai");
+    expect(byProvider.get("zcode")?.expected).toBe(true);
+    expect(byProvider.get("zcode")?.windows).toEqual([]);
   });
 
   it("collapses provider aliases onto one canonical group", () => {
     expect(quotaProviderKey("google")).toBe("google-antigravity");
     expect(quotaProviderKey("openai-codex")).toBe("openai");
+    expect(quotaProviderKey("moonshot-kimi")).toBe("moonshot");
+    expect(quotaProviderKey("kimi-code")).toBe("moonshot");
+    expect(quotaProviderKey("z.ai")).toBe("zcode");
+    expect(quotaProviderKey("glm")).toBe("zcode");
+    expect(quotaProviderKey("bigmodel.cn")).toBe("zcode");
     expect(quotaProviderLabel("grok-build")).toBe("Grok");
     expect(quotaProviderVia("google")).toBe("antigravity");
     expect(quotaProviderVia("anthropic")).toBeNull();
