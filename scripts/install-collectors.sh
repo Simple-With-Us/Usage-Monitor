@@ -41,6 +41,10 @@ esac
 # Validate the entire existing graph before rsync can overwrite or delete it.
 INSTALL_PREFLIGHT="$(node "$SRC/scripts/check-collector-install.mjs" "$SRC" "$DEST")"
 read -r SHA ZOD_VERSION INSTALL_ZOD <<< "$INSTALL_PREFLIGHT"
+if [[ ! "$SHA" =~ ^[a-f0-9]{40}$ || ! "$ZOD_VERSION" =~ ^[~^]?4\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ! "$INSTALL_ZOD" =~ ^[01]$ || "$INSTALL_PREFLIGHT" != "$SHA $ZOD_VERSION $INSTALL_ZOD" ]]; then
+  echo "refusing to install: invalid collector preflight output" >&2
+  exit 2
+fi
 mkdir -p "$DEST/scripts"
 # Entry points and shared libs only; no tests, iOS tooling, or deploy scripts.
 rsync -a --delete --delete-excluded \

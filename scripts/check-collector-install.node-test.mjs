@@ -37,12 +37,12 @@ function fixture(check, { temporaryRoot = tmpdir() } = {}) {
 }
 
 function snapshot(path) {
-  if (!existsSync(path)) {
-    try { return { link: readlinkSync(path) }; }
-    catch { return null; }
+  try { return { link: readlinkSync(path) }; }
+  catch (error) {
+    if (error.code === "ENOENT") return null;
+    if (error.code !== "EINVAL") throw error;
   }
   const info = lstatSync(path);
-  if (info.isSymbolicLink()) return { link: readlinkSync(path) };
   if (info.isDirectory()) return Object.fromEntries(readdirSync(path).sort().map(name => [name, snapshot(join(path, name))]));
   if (!info.isFile()) return { special: true };
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -53,7 +53,7 @@ function snapshot(path) {
   } finally { closeSync(fd); }
 }
 
-function installerRefuses({ root, source, destination }, pattern) {
+function installerRefuses({ root, source, destination }, pattern, preflightOutput) {
   const before = snapshot(destination);
   const bin = join(root, "guard-bin"); mkdirSync(bin);
   const marker = join(root, "unexpected-install-write");
@@ -61,7 +61,11 @@ function installerRefuses({ root, source, destination }, pattern) {
     const path = join(bin, name);
     writeFileSync(path, "#!/bin/sh\nprintf invoked >> \"$FIXTURE_MUTATION_MARKER\"\nexit 99\n"); chmodSync(path, 0o700);
   }
-  const result = spawnSync("bash", [join(source, "scripts", "install-collectors.sh")], { encoding: "utf8", timeout: 15000, env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, UM_COLLECTORS_HOME: destination, FIXTURE_MUTATION_MARKER: marker } });
+  if (preflightOutput !== undefined) {
+    const node = join(bin, "node");
+    writeFileSync(node, "#!/bin/sh\nprintf '%s' \"$FIXTURE_PREFLIGHT_OUTPUT\"\n"); chmodSync(node, 0o700);
+  }
+  const result = spawnSync("bash", [join(source, "scripts", "install-collectors.sh")], { encoding: "utf8", timeout: 15000, env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, UM_COLLECTORS_HOME: destination, FIXTURE_MUTATION_MARKER: marker, FIXTURE_PREFLIGHT_OUTPUT: preflightOutput } });
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0);
@@ -262,4 +266,32 @@ test("a missing installation below an aliased ancestor is refused before writes"
   const alias = join(context.root, "aliased-destination-parent"); symlinkSync(physical, alias);
   installerRefuses({ ...context, destination: join(alias, "new-install") }, /Installer output ancestors must not traverse symlinks/);
   assert.equal(existsSync(join(physical, "new-install")), false);
+}));
+
+test("the CLI emits verified configuration through an aliased checkout", () => fixture(({ root, source, destination, baseline }) => {
+  const alias = join(root, "checkout-alias"); symlinkSync(source, alias);
+  const result = spawnSync(process.execPath, [join(alias, "scripts", "check-collector-install.mjs"), alias, destination], { encoding: "utf8", timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${baseline} ^4.6.6 1\n`);
+}));
+
+test("an aliased installer still refuses modified source before writes", () => fixture(context => {
+  const alias = join(context.root, "checkout-alias"); symlinkSync(context.source, alias);
+  writeFileSync(join(context.source, "scripts", "grok-usage-collector.mjs"), "export const independent = true;\n");
+  installerRefuses({ ...context, source: alias }, /Collector source must match its tracked commit/);
+}));
+
+for (const output of ["", "bad-sha ^4.6.6 1", `${"a".repeat(40)} latest 1`, `${"a".repeat(40)} ^4.6.6 2`, `${"a".repeat(40)} ^4.6.6 1 extra`, `${"a".repeat(40)} ^4.6.6 1\nextra`]) {
+  test(`invalid preflight output ${JSON.stringify(output)} cannot authorize installer writes`, () => fixture(context => {
+    installerRefuses(context, /invalid collector preflight output/, output);
+  }));
+}
+
+test("snapshot records link metadata without opening its target", () => fixture(({ root }) => {
+  const fifo = join(root, "target-fifo"); execFileSync("mkfifo", [fifo], { timeout: 10000 });
+  const alias = join(root, "fifo-link"); symlinkSync(fifo, alias);
+  assert.deepEqual(snapshot(alias), { link: fifo });
+  rmSync(fifo);
+  assert.deepEqual(snapshot(alias), { link: fifo });
 }));

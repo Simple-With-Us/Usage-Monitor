@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const DIRECTORIES = new Set(["lib", "telemetry-hub"]);
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -162,7 +162,7 @@ export function checkCollectorInstall(source, destination) {
   return { sourceSha: head, zodSpec, installDependencies: custody.installDependencies, checked };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]))) {
   try {
     if (process.argv.length !== 4) throw new Error("Expected source checkout and installed directory");
     const result = checkCollectorInstall(process.argv[2], process.argv[3]);
