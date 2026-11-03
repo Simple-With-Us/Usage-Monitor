@@ -5,6 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/adapters/helpers", () => ({
   fetchJson: vi.fn(),
 }));
+vi.mock("@/lib/infisical-connections", async (original) => ({
+  ...await original<typeof import("@/lib/infisical-connections")>(),
+  loadInfisicalConnection: vi.fn(async () => null),
+  resolveInfisicalConnection: vi.fn(async (source: import("../infisical-connections").InfisicalSource) => {
+    const module = await original<typeof import("@/lib/infisical-connections")>();
+    return module.infisicalConnectionFromEnv(source);
+  }),
+}));
 
 import { fetchJson } from "@/lib/adapters/helpers";
 import { SECRETS_PROBES } from "../platform-status/probes/secrets";
@@ -68,6 +76,7 @@ describe("platform-status secrets probes", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     for (const name of INFISICAL_ENV_VARS) vi.stubEnv(name, "");
+    for (const source of ["ST", "CT", "SHARED", "UM"]) vi.stubEnv(`INFISICAL_${source}_PROJECT_ID`, `mock-${source.toLowerCase()}-project-id`);
     fetchJsonMock.mockReset();
     fetchJsonMock.mockImplementation(async () => {
       throw new Error("unexpected upstream call");
@@ -83,10 +92,7 @@ describe("platform-status secrets probes", () => {
     expect(SECRETS_PROBES).toHaveLength(1);
     expect(infisical.name).toBe("Infisical");
     expect(infisical.category).toBe("secrets");
-    expect(infisical.requiredEnv).toEqual([
-      "INFISICAL_AUTOMATION_CLIENT_ID",
-      "INFISICAL_AUTOMATION_CLIENT_SECRET",
-    ]);
+    expect(infisical.requiredEnv).toEqual([]);
   });
 
   it("reports unconfigured, without any request, when no machine identity is set", async () => {
@@ -94,10 +100,10 @@ describe("platform-status secrets probes", () => {
     expect(fetchJsonMock).not.toHaveBeenCalled();
   });
 
-  it("treats the automation pair as credentials for every project scope", () => {
+  it("does not borrow the automation pair for any project scope", () => {
     vi.stubEnv("INFISICAL_AUTOMATION_CLIENT_ID", "automation-client-id");
     vi.stubEnv("INFISICAL_AUTOMATION_CLIENT_SECRET", CLIENT_SECRET);
-    expect(infisical.isConfigured()).toBe(true);
+    expect(infisical.isConfigured()).toBe(false);
   });
 
   it("ignores a half-configured identity for the purpose of being configured", () => {

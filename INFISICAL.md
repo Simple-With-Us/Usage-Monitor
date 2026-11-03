@@ -17,12 +17,23 @@ Usage-Monitor-specific application of it.
   and ignore a non-prod value; `scripts/infisical-run.mjs` and
   `scripts/cursor-cloud-start.sh` exit non-zero on one.  Deployment-specific project identifiers are maintained
   in the private operations inventory, not committed here.
-- The shared fleet automation machine identity holds Admin on this project.
-  The server authenticates with universal-auth as that identity
-  (`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET`, falling back to the
-  `INFISICAL_AUTOMATION_CLIENT_ID` / `INFISICAL_AUTOMATION_CLIENT_SECRET`
-  names); the values are provisioned through the existing env sync and are
-  never committed, printed, or logged — names and metadata only.
+- Authentication is an explicit project connection: either a dedicated machine identity or scoped service tokens.  The shared fleet Automation identity is never a fallback.  Settings → Connections → Infisical Connections manages the choice for each project use.
+
+## Connection Credentials And Folder Routes
+
+Saved connections use the existing AES-GCM encryption key and server-only `AppSetting` rows.  No schema migration is required.  The dashboard session gates every connection API; read responses return configured flags and scope metadata without credentials.  Blank credential fields preserve an existing value only when its project, identity and folder/permission coordinates remain unchanged.  Removing a token from the submitted list explicitly removes that saved route.  Disable Connection persists an encrypted disabled marker, removes saved credentials, suppresses environment-authentication fallback for that source, and immediately stops the Usage Monitor settings client when applicable.  Saving newly verified credentials explicitly enables the connection again.
+
+Service-token connections accept at most two unique tokens for an Infisical project across the app's source aliases, counting effective environment routes as well as saved connections and deduplicating token reuse.  This limit is checked in the save transaction.  Declare exact read and write folders, and each token's exact permissions and folders.  The application verifies the token's own `/api/v2/service-token` metadata, including project, `prod` environment, complete scope set, permission set and expiry, before using it.  A successful secret-path query is never scope proof.  Root `/` does not include child folders; globs, imports, ambiguous routing and duplicate mapped names across folders are rejected.  Provider sync reads all declared read folders.  A read-only token cannot perform a write.  Unexpanded secret references fail closed rather than becoming provider credentials or runtime settings.
+
+Machine-identity connections verify read access before saving.  Declared machine-identity write permissions remain explicitly unverified in the API metadata and editor; Infisical must authorize each real settings write.  The application never creates or deletes a probe secret to test a grant.
+
+Legacy raw responses can omit project/environment/folder fields.  Only a token whose own verified metadata contains one exact folder makes those omissions unambiguous; any returned contradictory identity is rejected.  A multi-folder token must receive the exact identity fields in each response, or the operation fails closed.
+
+Environment bootstrap remains separate from the encrypted UI store because the app must receive its encryption key before opening that store.  Set an explicit app client pair (`INFISICAL_CLIENT_ID` and `INFISICAL_CLIENT_SECRET`, or the complete `INFISICAL_UM_*` pair) or `INFISICAL_UM_READ_TOKEN`.  Provider scopes consume `INFISICAL_{ST,CT,SHARED,UM}_READ_TOKEN` and optional `_WRITE_TOKEN`; `_READ_PATHS` and `_WRITE_PATHS` declare comma-separated exact folders and default to that scope's `_SECRET_PATH` (or `/`).  Environment read tokens are read-only and environment write tokens are write-only; the connection editor also supports explicitly declared read-and-write tokens.  `INFISICAL_ST_PRIMARY_READ_TOKEN` serves only the existing exact bridge folder when its opt-in sync is enabled.  Routine ST, CT and Shared pulls do not need write tokens; the separate opt-in ST Gemini bootstrap needs its explicit ST root write route.
+
+Runtime settings read all declared read folders and write each existing key back to its exact original folder.  A new key targets the primary read folder and needs a write grant for that folder.  Saving the Usage Monitor connection verifies and loads its replacement client before persisting and atomically switching the runtime cache; verification or persistence failure keeps the previous client.  Concurrent edits are rejected instead of overwriting a newer saved connection.
+
+Do not deploy the removal of an existing Automation bootstrap until the replacement service-token access, required concrete secret values, injected app startup and token registry entries have been verified through the authorized migration task.  Inventory root secret references before choosing scopes; do not grant recursive access to bypass a reference failure.  This implementation does not mint, rotate or revoke tokens, change provider permissions, or migrate live credentials by itself.
 
 ## What lives in Infisical
 

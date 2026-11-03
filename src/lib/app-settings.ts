@@ -284,15 +284,10 @@ export interface AppSettingsCredentials {
 function resolveCredentials(
   env: NodeJS.ProcessEnv = process.env
 ): AppSettingsCredentials {
-  // Prefer dedicated runtime credentials; fall back to the shared fleet
-  // automation machine identity (Admin on this project's usage-monitor
-  // project — see INFISICAL.md).  Values are never logged.
-  const clientId =
-    env.INFISICAL_CLIENT_ID?.trim() ||
-    env.INFISICAL_AUTOMATION_CLIENT_ID?.trim();
-  const clientSecret =
-    env.INFISICAL_CLIENT_SECRET?.trim() ||
-    env.INFISICAL_AUTOMATION_CLIENT_SECRET?.trim();
+  // Dedicated app credentials only; pairs never borrow fleet credentials.
+  const generic = Boolean(env.INFISICAL_CLIENT_ID?.trim() || env.INFISICAL_CLIENT_SECRET?.trim());
+  const clientId = generic ? env.INFISICAL_CLIENT_ID?.trim() : env.INFISICAL_UM_CLIENT_ID?.trim();
+  const clientSecret = generic ? env.INFISICAL_CLIENT_SECRET?.trim() : env.INFISICAL_UM_CLIENT_SECRET?.trim();
   return {
     clientId: clientId || undefined,
     clientSecret: clientSecret || undefined,
@@ -424,7 +419,7 @@ export class AppSettingsService {
       console.warn(
         "[app-settings] No Infisical universal-auth credentials " +
           "(INFISICAL_CLIENT_ID/INFISICAL_CLIENT_SECRET or " +
-          "INFISICAL_AUTOMATION_CLIENT_ID/INFISICAL_AUTOMATION_CLIENT_SECRET); " +
+          "INFISICAL_UM_CLIENT_ID/INFISICAL_UM_CLIENT_SECRET); " +
           "running in env-fallback mode. Tunable knobs read process.env. See INFISICAL.md."
       );
       return;
@@ -622,6 +617,20 @@ export class AppSettingsService {
   }
 
   /** On-demand refresh ("Reload settings" admin action, SIGHUP). */
+  installInfisicalClient(candidate: InfisicalSettings): void {
+    this.client?.stop();
+    this.client = candidate;
+    this.infisicalMode = true;
+    this.initPromise = Promise.resolve();
+  }
+
+  disableInfisicalConnection(): void {
+    this.client?.stop();
+    this.client = null;
+    this.infisicalMode = false;
+    this.initPromise = Promise.resolve();
+  }
+
   async refresh(): Promise<void> {
     if (this.infisicalMode && this.client) {
       await this.client.refresh();

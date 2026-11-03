@@ -155,6 +155,10 @@ async function stubApi(page: Page): Promise<void> {
       await json(route, { notifications: { emailConfigured: false, minSeverity: 'warning' } });
       return;
     }
+    if (req.url().includes('/api/settings/infisical')) {
+      await json(route, { connections: [] });
+      return;
+    }
     // Anything unmapped passes through to the test server (fresh throwaway
     // SQLite), so pages never hang on an un-stubbed endpoint.
     await route.continue();

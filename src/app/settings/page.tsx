@@ -22,6 +22,7 @@ export type BillingMode = "actual" | "estimated" | "manual";
 type SettingsTab = "connections" | "services" | "projects" | "notifications";
 import NotificationsSettingsPanel from "@/components/NotificationsSettingsPanel";
 import WorkspaceCopyCard from "@/components/WorkspaceCopyCard";
+import InfisicalSettingsPanel from "@/components/InfisicalSettingsPanel";
 
 export interface ProviderPlan {
   billingMode: BillingMode;
@@ -578,6 +579,7 @@ function SettingsPageContent() {
       <section id={`settings-panel-${activeTab}`} aria-label={`${activeTab} settings`}>
         {activeTab === "connections" ? (
           <div className="space-y-6">
+            <InfisicalSettingsPanel />
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-800 dark:bg-blue-900/30">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
                 How Data Gets Here
