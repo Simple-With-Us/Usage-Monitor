@@ -61,12 +61,19 @@ historical versions before a migration journal or either link changes.  That
 bootstrap donor is not activated; both historical Git versions remain
 the versions requested by the existing links and the rollback command.
 
+Historical SHA candidates must themselves track every required entry point;
+donor staging does not add missing entry points to the donor.  If both legacy
+versions predate those entry points, an incompatible latest release can leave
+no automatic donor, requiring a verified pin to another compatible approved
+commit that includes them.
+
 If none is compatible, migration fails explicitly and preserves both links.  An
 operator can select a known compatible historical donor with
 `--migration-donor-sha <full-40-character-sha>` alongside `--rollback` or `--sha`.  The
 pinned donor still requires approved ancestry and complete compatibility
 validation; an invalid pin fails without silently selecting another donor.  Compatibility
-imports are never skipped to force a rollback.
+imports are never skipped to force a rollback.  The reported failure reason
+describes only the last candidate attempted, not every rejected candidate.
 
 All rebuilt trees must pass dependency identity and cross-version import
 validation before the migration journal or either link is published.  An
@@ -82,7 +89,9 @@ Published canonical and compatibility releases are retained automatically.  An
 injector already awaiting Infisical may still need its original absolute
 collector path after `current` changes.  Automatic cleanup removes only
 abandoned staging directories; deleting a published release requires separately
-proving that no running collector or injector can still use it.
+proving that no running collector or injector can still use it.  This includes
+an unreferenced compatibility tree published while preparing a donor candidate
+that subsequently fails validation of the other historical version.
 
 A measured fixture snapshot used 9,369,413–9,507,511 bytes (about 9.4–9.5 MB)
 per published tree.  A forward update that publishes one canonical and one
