@@ -57,6 +57,49 @@ try {
   const source = join(root, "source");
   const runtime = join(root, "runtime");
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const updaterText = readFileSync(join(repoRoot, "scripts/update-local-collector-runtime.mjs"), "utf8");
+  const definition = (start, end) => {
+    const begin = updaterText.indexOf(start);
+    const finish = updaterText.indexOf(end, begin + start.length);
+    assert(begin >= 0 && finish > begin, "production lock definition is available to the fixture");
+    return updaterText.slice(begin, finish);
+  };
+  const lockProgram = `const { execFileSync } = require('node:child_process');
+const { readFileSync, lstatSync, mkdirSync, readdirSync, rmSync } = require('node:fs');
+const { join } = require('node:path'); const { createHash, randomUUID } = require('node:crypto');
+Object.defineProperty(process, 'platform', { value: 'darwin' });
+${definition("function fail(", "function parseArgs(")}
+${definition("function run(", "function repositoryUrl(")}
+${definition("function stat(", "function releaseFromLink(")}
+${definition("function processIdentity(", "function main(")}
+`;
+  const shortLockRoot = join(root, "short-darwin-lock");
+  mkdirSync(shortLockRoot);
+  const shortLock = spawnSync(process.execPath, ["-", "update-local-collector-runtime.mjs", "--rollback"], {
+    argv0: "node", encoding: "utf8", input: `${lockProgram}
+const home = ${JSON.stringify(shortLockRoot)};
+const assert = (ok, message) => { if (!ok) throw new Error(message); };
+const lock = join(home, '.update.lock'); mkdirSync(lock);
+const live = join(lock, process.ppid + '-' + processIdentity(process.ppid) + '-' + randomUUID()); mkdirSync(live);
+let activeRejected = false;
+try { acquireLock(home); } catch (error) { activeRejected = error.message === 'Another collector runtime update is active'; }
+assert(activeRejected && readdirSync(lock).length === 1, 'short argv preserves a live owner'); rmSync(live, { recursive: true });
+const release = acquireLock(home);
+const own = readdirSync(lock)[0]; const nonce = own.slice(-36);
+assert(process.title.startsWith(nonce), 'the full UUID survives short-argv truncation');
+const firstIdentity = processIdentity(process.pid); process.title = randomUUID() + ' um-collector-updater';
+assert(processIdentity(process.pid) !== firstIdentity, 'same PID and birth time with a different full nonce has a different identity');
+release(); mkdirSync(join(lock, own));
+const releaseNext = acquireLock(home);
+assert(readdirSync(lock).length === 1 && readdirSync(lock)[0] !== own, 'a same-start stale nonce owner is reclaimed');
+releaseNext(); assert(readdirSync(lock).length === 0, 'verified owner cleanup preserves lock state');
+console.log('ok short-darwin-lock');
+` });
+  assert(shortLock.status === 0 && shortLock.stdout.includes("ok short-darwin-lock"), `production Darwin lock functions preserve nonce and PID-reuse safety under short argv: ${shortLock.stderr}`);
+  const tinyLockRoot = join(root, "undersized-darwin-lock");
+  mkdirSync(tinyLockRoot);
+  const tinyLock = spawnSync(process.execPath, ["-"], { argv0: "n", encoding: "utf8", input: `${lockProgram}\nacquireLock(${JSON.stringify(tinyLockRoot)});` });
+  assert(tinyLock.status !== 0 && tinyLock.stderr.includes("Cannot verify updater process nonce") && readdirSync(join(tinyLockRoot, ".update.lock")).length === 0, "an argv buffer too small for the complete UUID fails closed before publishing an owner");
   mkdirSync(source, { recursive: true });
   cpSync(join(repoRoot, "scripts"), join(source, "scripts"), { recursive: true });
   cpSync(join(repoRoot, "package.json"), join(source, "package.json"));
