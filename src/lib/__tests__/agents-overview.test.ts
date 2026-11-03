@@ -44,6 +44,7 @@ type UsageGroupByRow = Pick<
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
   service?: string | null;
+  confidence?: string;
   _sum?: { quantity?: number | null; costUsd?: number | null };
 };
 
@@ -56,6 +57,7 @@ type RollupGroupByRow = Pick<
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
   service?: string | null;
+  confidence?: string;
   _sum?: { totalQuantity?: number | null; totalCostUsd?: number | null };
 };
 
@@ -159,6 +161,37 @@ describe("agents-overview", () => {
     expect(serializedFilters).toContain("zcode");
     expect(result.platforms.find((platform) => platform.id === "kimi-code")?.totalTokens).toBe(11);
     expect(result.platforms.find((platform) => platform.id === "zcode")?.totalTokens).toBe(17);
+  });
+
+  it("keeps estimated Kimi rows visible while reporting partial lower-bound accuracy", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) !== "usage") return [];
+      return usageGroupByRows([
+        {
+          sourceApp: "kimi-code",
+          provider: "moonshot",
+          keyRef: "kimi-k2",
+          label: "token:input",
+          confidence: "estimated",
+          _sum: { quantity: 11 },
+        },
+      ]);
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const kimi = result.platforms.find((platform) => platform.id === "kimi-code");
+    expect(kimi).toMatchObject({
+      telemetryAccuracy: "partial",
+      telemetryAccuracyLabel: "partial report",
+      usageIsReliable: true,
+      totalTokens: 11,
+    });
+    expect(kimi?.telemetryAccuracyNote).toContain("lower bound");
+    expect(result.summary.totalTokens).toBe(11);
+    expect(result.summary.telemetryIncomplete).toBe(true);
+    expect(result.summary.telemetryIncompleteNote).toContain("lower bound");
+    expect(result.summary.telemetryIncompleteNote).not.toContain("omit Kimi Code");
   });
 
   afterEach(() => {

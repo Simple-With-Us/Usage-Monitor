@@ -376,6 +376,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       service?: string | null;
       keyRef: string | null;
       label?: string | null;
+      confidence?: string;
       _sum: { totalQuantity?: number | null; totalCostUsd?: number | null };
     }>
   );
@@ -396,7 +397,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   ] = await Promise.all([
     getLatestMacHealth().catch(() => null),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef", "label"],
+      by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
       where: {
         OR: eventWhereOr,
         metricType: "usage",
@@ -415,7 +416,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { costUsd: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef", "label"],
+      by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
       where: {
         OR: eventWhereOr,
         metricType: "usage",
@@ -435,7 +436,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     }),
     queryRollups
       ? prisma.externalUsageEventDailyRollup.groupBy({
-          by: ["sourceApp", "provider", "keyRef", "label"],
+          by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
           where: {
             OR: eventWhereOr,
             metricType: "usage",
@@ -569,6 +570,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   const tokensByPlatformAndModel = new Map<string, Map<string, AgentTokenBreakdown>>();
   const reportedCostByPlatform = new Map<string, number>();
+  const partialTokenPlatforms = new Set<string>();
 
   for (const row of costGroups) {
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
@@ -595,6 +597,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       provider: g.provider,
       keyRef: g.keyRef,
       label: g.label,
+      confidence: g.confidence,
       quantity: g._sum.quantity,
     })),
     ...rollupTokenGroups.map((g) => ({
@@ -602,6 +605,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       provider: g.provider,
       keyRef: g.keyRef,
       label: g.label,
+      confidence: g.confidence,
       quantity: g._sum.totalQuantity,
     })),
   ];
@@ -610,6 +614,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     if (!isReliableTokenSourceApp(group.sourceApp)) continue;
     if (skipOverlappingSeatEvent(group.sourceApp)) continue;
     const app = platformIdForSourceApp(group.sourceApp);
+    if (app === "kimi-code" && group.confidence === "estimated") {
+      partialTokenPlatforms.add(app);
+    }
     const model = group.keyRef || "unknown-model";
     const qty = Math.max(0, group.quantity || 0);
     grandTotalTokens += qty;
@@ -811,6 +818,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       tokenTelemetryKind,
       totalTokens: platformTotalTokens,
       isRunningOnMac: Boolean(isRunning),
+      isPartial: partialTokenPlatforms.has(appKey),
       unavailableReason: meta.unavailableReason,
     });
 
@@ -852,7 +860,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       cacheCreationTokens: accuracy.usageIsReliable ? platformCacheCreation : 0,
       apiEquivalentCostUsd: Number(displayApiCost.toFixed(2)),
       apiEquivalentCostComplete:
-        accuracy.usageIsReliable && platformApiCostComplete,
+        accuracy.usageIsReliable &&
+        accuracy.accuracy !== "partial" &&
+        platformApiCostComplete,
       tokenDerivedCostUsd: Number(
         (accuracy.usageIsReliable ? platformApiCost : 0).toFixed(2),
       ),
@@ -878,11 +888,13 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   const totalNetSavings = Math.max(0, totalApiEquivalentCost - totalSubscriptionCost);
   const savingsMultiplier = totalSubscriptionCost > 0 ? totalApiEquivalentCost / totalSubscriptionCost : 1;
   const unreliablePlatforms = platforms.filter((p) => !p.usageIsReliable);
+  const partialPlatforms = platforms.filter((p) => p.telemetryAccuracy === "partial");
   const unpricedModelCount = modelDistribution.filter(
     (model) => !model.apiEquivalentCostKnown,
   ).length;
   const telemetryIncompleteNote = telemetryIncompleteNoteFor(
     unreliablePlatforms.map((p) => p.name),
+    partialPlatforms.map((p) => p.name),
   );
 
   // 5-hour rolling burn numbers
@@ -897,6 +909,12 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     if (skipOverlappingSeatEvent(g.sourceApp)) continue;
     const qty = Math.max(0, g._sum.quantity || 0);
     tokens5h += qty;
+    if (
+      platformIdForSourceApp(g.sourceApp) === "kimi-code" &&
+      g.confidence === "estimated"
+    ) {
+      derivedCost5hComplete = false;
+    }
     const model = g.keyRef || "";
     const label = g.label?.toLowerCase() || "";
     if (label.includes("inputunsplit") && qty > 0) derivedCost5hComplete = false;
@@ -988,13 +1006,15 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       totalTokens: grandTotalTokens,
       totalApiEquivalentCostUsd: Number(totalApiEquivalentCost.toFixed(2)),
       apiEquivalentCostComplete:
-        unpricedModelCount === 0 && unreliablePlatforms.length === 0,
+        unpricedModelCount === 0 &&
+        unreliablePlatforms.length === 0 &&
+        partialPlatforms.length === 0,
       unpricedModelCount,
       totalSubscriptionCostUsd: Number(totalSubscriptionCost.toFixed(2)),
       totalNetSavingsUsd: Number(totalNetSavings.toFixed(2)),
       savingsMultiplier: Number(savingsMultiplier.toFixed(1)),
       topModel,
-      telemetryIncomplete: unreliablePlatforms.length > 0,
+      telemetryIncomplete: unreliablePlatforms.length > 0 || partialPlatforms.length > 0,
       telemetryIncompleteNote,
       unreliablePlatformIds: unreliablePlatforms.map((p) => p.id),
     },
@@ -1002,7 +1022,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       tokens5h,
       costEstimate5hUsd: Number(costEstimate5hUsd.toFixed(2)),
       costEstimateComplete:
-        derivedCost5hComplete && unreliablePlatforms.length === 0,
+        derivedCost5hComplete &&
+        unreliablePlatforms.length === 0 &&
+        partialPlatforms.length === 0,
       burnRateTokensPerHour: Math.round(burnRateTokensPerHour),
       burnRateUsdPerHour: Number(burnRateUsdPerHour.toFixed(2)),
     },
