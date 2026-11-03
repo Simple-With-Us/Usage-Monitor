@@ -112,6 +112,10 @@ export async function collectKimiEvents({
     if (text === null) continue;
     const identity = kimiWireIdentity(sessionsRoot, filePath);
     const workDir = identity.sessionId ? workDirBySession.get(identity.sessionId) : undefined;
+    if (!identity.sessionId || !workDir) {
+      scanStatus.complete = false;
+      continue;
+    }
     events.push(
       ...filterEventsSince(
         parseKimiUsageJsonl(text, {

@@ -96,6 +96,7 @@ describe("Kimi exact usage telemetry", () => {
       "token:cacheCreation",
     ]);
     expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
+    expect(events.every((event) => event.confidence === "estimated")).toBe(true);
   });
 
   it("marks the split incomplete when cache-creation usage is absent", () => {
@@ -109,6 +110,7 @@ describe("Kimi exact usage telemetry", () => {
       "token:cacheRead",
     ]);
     expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
+    expect(events.every((event) => event.confidence === "estimated")).toBe(true);
   });
 
   it("keeps event ids stable when unrelated lines are inserted before a record", () => {
@@ -169,6 +171,33 @@ describe("Kimi exact usage telemetry", () => {
     const events = await collectKimiEvents({ home, since: new Date(0), scanStatus: recovered });
     expect(events).toHaveLength(4);
     expect(events.every((event) => event.project === "Usage-Monitor")).toBe(true);
+    expect(recovered.complete).toBe(true);
+  });
+
+  it("defers rows whose session is absent from the readable index and restores attribution on replay", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "another-session", workDir: "/Code/Other" })}\n`,
+    );
+
+    const incomplete = { complete: true };
+    expect(await collectKimiEvents({ home, since: new Date(0), scanStatus: incomplete })).toEqual([]);
+    expect(incomplete.complete).toBe(false);
+
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Users/jay/.botfleet/workspaces/demo" })}\n`,
+    );
+    const recovered = { complete: true };
+    const events = await collectKimiEvents({ home, since: new Date(0), scanStatus: recovered });
+    expect(events).toHaveLength(4);
+    expect(events.every((event) => event.project === "demo")).toBe(true);
+    expect(events.every((event) => event.metadata["agent.launcher"] === "botfleet")).toBe(true);
     expect(recovered.complete).toBe(true);
   });
 });
