@@ -24,6 +24,11 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function categoricalErrorType(value) {
+  const candidate = nonEmptyString(value);
+  return candidate && /^[a-z][a-z0-9_.-]{0,79}$/i.test(candidate) ? candidate : undefined;
+}
+
 function numericMetadata(key, value) {
   if (value === null || value === undefined || value === "") return {};
   const number = Number(value);
@@ -58,7 +63,7 @@ export function parseKimiUsageJsonl(
       cacheRead: tokenCount(usage.inputCacheRead),
       cacheCreation: tokenCount(usage.inputCacheCreation),
     };
-    const tokenBreakdownComplete = Object.hasOwn(usage, "inputCacheRead");
+    const tokenBreakdownComplete = Object.hasOwn(usage, "inputCacheRead") && Object.hasOwn(usage, "inputCacheCreation");
     if (!Object.values(breakdown).some(Boolean)) continue;
     const resolvedAgentId = nonEmptyString(row.agentId) ?? nonEmptyString(agentId);
     const parsed = tokenEventsFromBreakdown({
@@ -127,7 +132,7 @@ export function zcodeProviderName(providerId) {
   ) {
     return "zcode";
   }
-  if (raw === "google") return "google-ai";
+  if (raw === "google") return "google-antigravity";
   if (raw === "kimi" || raw === "kimi-code" || raw === "moonshotai") return "moonshot";
   return raw || "zcode";
 }
@@ -189,9 +194,7 @@ export function parseZcodeModelUsageRows(rows) {
         ...(nonEmptyString(row.agent) ? { agent: row.agent.trim() } : {}),
         ...(nonEmptyString(row.mode) ? { mode: row.mode.trim() } : {}),
         ...(nonEmptyString(row.variant) ? { variant: row.variant.trim() } : {}),
-        ...(nonEmptyString(row.finish_reason) ? { finishReason: row.finish_reason.trim().slice(0, 80) } : {}),
-        ...(nonEmptyString(row.error_type) ? { errorType: row.error_type.trim().slice(0, 80) } : {}),
-        ...(nonEmptyString(row.error_code) ? { errorCode: row.error_code.trim().slice(0, 80) } : {}),
+        ...(categoricalErrorType(row.error_type) ? { errorType: categoricalErrorType(row.error_type) } : {}),
         ...numericMetadata("durationMs", row.duration_ms),
         ...numericMetadata("timeToFirstTokenMs", row.time_to_first_token_ms),
         ...numericMetadata("toolCallCount", row.tool_call_count),

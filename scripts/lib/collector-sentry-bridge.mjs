@@ -20,6 +20,7 @@ const runFile = promisify(execFile);
 const AckCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const OtlpCount = z.union([AckCount, z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number).pipe(AckCount)]);
 const HubAckSchema = z.strictObject({ ok: z.literal(true), received: AckCount, written: AckCount, ignored: AckCount });
+export const DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT = 3200;
 function otlpAckSchema(logs) {
   const camel = logs ? "rejectedLogRecords" : "rejectedSpans";
   const snake = logs ? "rejected_log_records" : "rejected_spans";
@@ -176,7 +177,7 @@ async function persistCollectorSentry(events, identity, config) {
 }
 
 /** At-least-once delivery; receipts survive collector checkpoints and restarts. */
-export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = Number.MAX_SAFE_INTEGER, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32, prioritizeUnnarrowed = false } = {}) {
+export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32, prioritizeUnnarrowed = false } = {}) {
   if (!Number.isSafeInteger(requestLimit) || requestLimit < 1 || requestLimit > 1000) throw new Error("Outbox request limit must be between 1 and 1000");
   const db = await openOutbox(root);
   const owner = randomUUID();

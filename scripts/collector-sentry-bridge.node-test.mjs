@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, enqueueCollectorSentryTelemetry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
+import { DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, enqueueCollectorSentryTelemetry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
 import { tokenEventsFromBreakdown, parseClaudeSessionJsonl, postUsageBatches } from "./lib/session-token-collectors.mjs";
 import { buildLogsEnvelope, buildTracesEnvelope, traceAndSpanIds } from "./telemetry-hub/sentry-sender.mjs";
 import { normalizeOtlpLogs, normalizeOtlpTraces } from "./telemetry-hub/internal-event.mjs";
@@ -86,8 +86,9 @@ test("claim honors narrowed rows beyond the pending head", () => fixture(async (
   assert.equal(result.pending, true);
 }));
 
-test("default drain is bounded by time and requests instead of a 1000-event ceiling", () => fixture(async (config) => {
-  const events = Array.from({ length: 1001 }, (_, index) =>
+test("default drain uses an explicit 3200-event ceiling while retaining the time and request caps", () => fixture(async (config) => {
+  assert.equal(DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, 3200);
+  const events = Array.from({ length: DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT + 1 }, (_, index) =>
     timedTokens({ collectorCallId: `large-run-${index}`, extraId: `large-run-${index}` }),
   ).flat();
   const root = await enqueueCollectorSentry(events, identity, config);
@@ -98,8 +99,8 @@ test("default drain is bounded by time and requests instead of a 1000-event ceil
       return accepted();
     },
   });
-  assert.deepEqual(result, { delivered: 1001, quarantined: 0, pending: false });
-  assert.ok(requests > 0 && requests <= 32);
+  assert.deepEqual(result, { delivered: DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, quarantined: 0, pending: true });
+  assert.equal(requests, 32);
 }));
 
 test("authoritative unmeasured calls become logs while serialization and IDs remain unchanged", () => {

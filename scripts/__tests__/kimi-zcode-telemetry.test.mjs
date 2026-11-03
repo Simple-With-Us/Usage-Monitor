@@ -98,6 +98,19 @@ describe("Kimi exact usage telemetry", () => {
     expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
   });
 
+  it("marks the split incomplete when cache-creation usage is absent", () => {
+    const row = kimiTurn({
+      usage: { inputOther: 10, output: 5, inputCacheRead: 20 },
+    });
+    const events = parseKimiUsageJsonl(JSON.stringify(row), { sessionKey: "s" });
+    expect(events.map((event) => event.label)).toEqual([
+      "token:input",
+      "token:output",
+      "token:cacheRead",
+    ]);
+    expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
+  });
+
   it("keeps event ids stable when unrelated lines are inserted before a record", () => {
     const record = JSON.stringify(kimiTurn());
     const before = parseKimiUsageJsonl(record, { sessionKey: "s" });
@@ -217,7 +230,7 @@ describe("ZCode exact usage telemetry", () => {
     expect(zcodeProviderName("bigmodel-coding-plan")).toBe("zcode");
     expect(zcodeProviderName("glm-5")).toBe("zcode");
     expect(zcodeProviderName("anthropic")).toBe("anthropic");
-    expect(zcodeProviderName("google")).toBe("google-ai");
+    expect(zcodeProviderName("google")).toBe("google-antigravity");
   });
 
   it("emits terminal request rows and keeps reasoning inside output", () => {
@@ -263,6 +276,7 @@ describe("ZCode exact usage telemetry", () => {
       duration_ms: 1000,
       time_to_first_token_ms: 125,
       error_type: "provider_error",
+      finish_reason: "PRIVATE_FINISH_REASON",
       error_code: "PRIVATE_ERROR_CODE",
       input_tokens: 10,
       output_tokens: 2,
@@ -283,7 +297,24 @@ describe("ZCode exact usage telemetry", () => {
       { key: "error.type", value: { stringValue: "provider_error" } },
       { key: "gen_ai.usage.reasoning_count", value: { stringValue: "1" } },
     ]));
+    expect(events.every((event) => !Object.hasOwn(event.metadata, "finishReason"))).toBe(true);
+    expect(events.every((event) => !Object.hasOwn(event.metadata, "errorCode"))).toBe(true);
     expect(JSON.stringify(span)).not.toContain("PRIVATE_ERROR_CODE");
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_FINISH_REASON");
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_ERROR_CODE");
+    const unsafeType = parseZcodeModelUsageRows([{
+      id: "request-unsafe-error-type",
+      session_id: "session-1",
+      provider_id: "z.ai",
+      model_id: "glm-5",
+      status: "error",
+      started_at: 1_779_256_800_000,
+      input_tokens: 1,
+      output_tokens: 1,
+      error_type: "provider error: PRIVATE MESSAGE",
+    }]);
+    expect(unsafeType.every((event) => !Object.hasOwn(event.metadata, "errorType"))).toBe(true);
+    expect(JSON.stringify(unsafeType)).not.toContain("PRIVATE MESSAGE");
   });
 
   it("reads the documented model_usage schema through a read-only join", async () => {
