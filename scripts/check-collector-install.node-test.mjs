@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, linkSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, linkSync, mkdtempSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,19 +36,27 @@ function fixture(check, { temporaryRoot = tmpdir() } = {}) {
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-function snapshot(path) {
+function snapshot(path, afterDirectoryOpen) {
   try { return { link: readlinkSync(path) }; }
   catch (error) {
     if (error.code === "ENOENT") return null;
     if (error.code !== "EINVAL") throw error;
   }
-  const info = lstatSync(path);
-  if (info.isDirectory()) return Object.fromEntries(readdirSync(path).sort().map(name => [name, snapshot(join(path, name))]));
-  if (!info.isFile()) return { special: true };
+  let directory;
+  try { directory = opendirSync(path); }
+  catch (error) { if (error.code !== "ENOTDIR") throw error; }
+  if (directory) {
+    try {
+      afterDirectoryOpen?.(directory);
+      const names = [];
+      for (let entry; (entry = directory.readSync()) !== null;) names.push(entry.name);
+      return Object.fromEntries(names.sort().map(name => [name, snapshot(join(path, name))]));
+    } finally { directory.closeSync(); }
+  }
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = fstatSync(fd);
-    assert.equal(opened.isFile(), true);
+    if (!opened.isFile()) return { special: true };
     return { bytes: readFileSync(fd, "utf8"), mode: opened.mode };
   } finally { closeSync(fd); }
 }
@@ -334,4 +342,26 @@ test("snapshot records link metadata without opening its target", () => fixture(
   assert.deepEqual(snapshot(alias), { link: fifo });
   rmSync(fifo);
   assert.deepEqual(snapshot(alias), { link: fifo });
+}));
+
+test("snapshot enumerates the opened directory when its pathname is replaced", () => fixture(({ root }) => {
+  const path = join(root, "snapshot-directory"); mkdirSync(path);
+  const replacement = join(root, "replacement-directory"); mkdirSync(replacement);
+  writeFileSync(join(replacement, "replacement-only"), "not part of the opened directory\n");
+  let handle;
+  assert.deepEqual(snapshot(path, directory => {
+    handle = directory;
+    renameSync(path, join(root, "original-directory"));
+    renameSync(replacement, path);
+  }), {});
+  assert.throws(() => handle.readSync(), { code: "ERR_DIR_CLOSED" });
+}));
+
+test("snapshot closes an opened directory when enumeration setup fails", () => fixture(({ root }) => {
+  let handle;
+  assert.throws(() => snapshot(root, directory => {
+    handle = directory;
+    throw new Error("synthetic snapshot setup failure");
+  }), /synthetic snapshot setup failure/);
+  assert.throws(() => handle.readSync(), { code: "ERR_DIR_CLOSED" });
 }));
