@@ -14,6 +14,7 @@ import { projectHubTelemetry, telemetryIdentifier } from "../telemetry-hub/metad
 export const COLLECTOR_CALL_ID = Symbol.for("usage-monitor.collector-call-id");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const tokenTypes = new Set(["input", "output", "cacheRead", "cacheCreation"]);
+const measuredDuration = (value) => Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 const runFile = promisify(execFile);
 const AckCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const OtlpCount = z.union([AckCount, z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number).pipe(AckCount)]);
@@ -58,7 +59,7 @@ export function collectorSentryConfig(env = process.env, producerId) {
   return { destination: "sentry", endpoint, publicKey, stateRoot: env.COLLECTOR_SENTRY_STATE_DIR || join(homedir(), ".cache", "usage-monitor", "sentry-outbox") };
 }
 
-/** Known calls become spans; other token rows remain explicit observations. */
+/** Measured calls become spans; unmeasured calls and token observations remain logs. */
 export function collectorSentryEvents(events, { producerId, producerInstanceId = hostname() }) {
   const grouped = new Map();
   const seen = new Set();
@@ -78,7 +79,7 @@ export function collectorSentryEvents(events, { producerId, producerInstanceId =
     const reasoning = event.metadata?.reasoningTokens;
     if (type === "output" && Number.isFinite(reasoning) && reasoning >= 0 && reasoning <= Number.MAX_SAFE_INTEGER) row.tokens.reasoning = (row.tokens.reasoning ?? 0) + reasoning;
     const duration = event.metadata?.durationMs;
-    if (Number.isFinite(duration) && duration >= 0) {
+    if (measuredDuration(duration)) {
       row.durationMs = duration;
       const completed = Date.parse(event.occurredAt);
       if (callId && Number.isFinite(completed) && Number.isFinite(completed - duration)) row.ts = new Date(completed - duration).toISOString();
@@ -86,7 +87,10 @@ export function collectorSentryEvents(events, { producerId, producerInstanceId =
     grouped.set(id, row);
   }
   // Content is projected before it is ever written to disk.
-  return [...grouped.values()].map((event) => scrubInternalEvent(projectHubTelemetry(event))).filter(Boolean);
+  return [...grouped.values()].map((event) => {
+    if (event.kind === "span" && !measuredDuration(event.durationMs)) event.kind = "log";
+    return scrubInternalEvent(projectHubTelemetry(event));
+  }).filter(Boolean);
 }
 
 function processAlive(pid) {
@@ -187,12 +191,14 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
       return typeof value === "string" && value.split(",").every((part) => telemetryIdentifier(part));
     });
     const nativeTurn = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "botfleet.turn");
-    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" ? "span" : "log", name: nativeTurn ? "botfleet.turn" : event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
+    const knownCall = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "chat");
+    // Legacy pending spans keep their durable payload and identity; unknown timing travels as a log.
+    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" && measuredDuration(event.durationMs) ? "span" : "log", name: nativeTurn ? "botfleet.turn" : knownCall || event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
     if (nativeTurn) {
       if (safe.kind === "span") safe.status = { code: event.status?.code === 2 ? 2 : 1 };
-      else safe.severityNumber = event.severityNumber === 17 ? 17 : 9;
+      else safe.severityNumber = event.severityNumber === 17 || event.status?.code === 2 ? 17 : 9;
     }
-    if (Number.isFinite(event.durationMs) && event.durationMs >= 0) safe.durationMs = event.durationMs;
+    if (measuredDuration(event.durationMs)) safe.durationMs = event.durationMs;
     return safe;
   };
 

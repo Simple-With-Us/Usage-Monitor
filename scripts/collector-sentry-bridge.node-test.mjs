@@ -4,12 +4,19 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
+import { collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, enqueueCollectorSentryTelemetry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
 import { tokenEventsFromBreakdown, parseClaudeSessionJsonl, postUsageBatches } from "./lib/session-token-collectors.mjs";
+import { buildLogsEnvelope, buildTracesEnvelope, traceAndSpanIds } from "./telemetry-hub/sentry-sender.mjs";
+import { normalizeOtlpLogs, normalizeOtlpTraces } from "./telemetry-hub/internal-event.mjs";
+import { projectHubTelemetry } from "./telemetry-hub/metadata-projection.mjs";
+import { scrubInternalEvent } from "./telemetry-hub/allowlist.mjs";
 
 const identity = { producerId: "claude-code", producerInstanceId: "test-host" };
 function tokens(extra = {}) {
   return tokenEventsFromBreakdown({ producerId: "claude-code", provider: "anthropic", service: "claude-code", sessionKey: "private/session", occurredAtIso: "2026-10-30T12:00:00Z", model: "claude-test", breakdown: { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 }, extraId: "message", ...extra });
+}
+function timedTokens(extra = {}) {
+  return tokens({ ...extra, extraMetadata: { durationMs: 250, ...extra.extraMetadata } });
 }
 async function fixture(fn) {
   const stateRoot = await mkdtemp(join(tmpdir(), "collector-sentry-"));
@@ -39,7 +46,7 @@ test("maintenance rejects missing outboxes without creating files", () => fixtur
 }));
 
 test("poison isolation bounds requests while healthy rows remain pending and eventually deliver", () => fixture(async (config) => {
-  const events = Array.from({ length: 16 }, (_, i) => tokens({ collectorCallId: `call-${i}`, extraId: `call-${i}`, model: i === 15 ? "good-model" : "bad-model" })).flat();
+  const events = Array.from({ length: 16 }, (_, i) => timedTokens({ collectorCallId: `call-${i}`, extraId: `call-${i}`, model: i === 15 ? "good-model" : "bad-model" })).flat();
   const root = await enqueueCollectorSentry(events, identity, config);
   let delivered = 0;
   let quarantined = 0;
@@ -63,7 +70,7 @@ test("poison isolation bounds requests while healthy rows remain pending and eve
 }));
 
 test("claim honors narrowed rows beyond the pending head", () => fixture(async (config) => {
-  const events = [0, 1, 2].flatMap((i) => tokens({ collectorCallId: `window-${i}`, extraId: `window-${i}` }));
+  const events = [0, 1, 2].flatMap((i) => timedTokens({ collectorCallId: `window-${i}`, extraId: `window-${i}` }));
   const root = await enqueueCollectorSentry(events, identity, config);
   const db = new DatabaseSync(join(root, "outbox.sqlite"));
   db.exec("UPDATE events SET retry_batch_size=1 WHERE rowid=(SELECT rowid FROM events ORDER BY rowid LIMIT 1 OFFSET 1)");
@@ -79,13 +86,14 @@ test("claim honors narrowed rows beyond the pending head", () => fixture(async (
   assert.equal(result.pending, true);
 }));
 
-test("only authoritative source calls become spans; serialization and IDs remain unchanged", () => {
+test("authoritative unmeasured calls become logs while serialization and IDs remain unchanged", () => {
   const plain = tokens();
   const known = tokens({ collectorCallId: "message-id", extraMetadata: { prompt: "PRIVATE_CONTENT", response: "PRIVATE_CONTENT", sessionId: "PRIVATE_CONTENT" } });
   assert.equal(collectorSentryEvents(plain, identity).length, 4);
   assert.ok(collectorSentryEvents(plain, identity).every((row) => row.kind === "log"));
   const [span] = collectorSentryEvents([...known, ...known], identity);
-  assert.equal(span.kind, "span");
+  assert.equal(span.kind, "log");
+  assert.equal(span.name, "chat");
   assert.equal(collectorSentryEvents(known, identity).length, 1);
   assert.equal(span.attributes.find((attr) => attr.key === "gen_ai.usage.input_tokens").value.intValue, "10");
   assert.ok(!JSON.stringify(span).includes("PRIVATE_CONTENT"));
@@ -103,9 +111,117 @@ test("Claude content-block fragmentation produces one call with complete split i
   const events = parseClaudeSessionJsonl([row, row, row].map(JSON.stringify).join("\n"), { sessionKey: "private" });
   const output = collectorSentryEvents(events, identity);
   assert.equal(output.length, 1);
-  assert.equal(output[0].kind, "span");
+  assert.equal(output[0].kind, "log");
+  assert.equal(output[0].name, "chat");
   assert.equal(output[0].attributes.find((a) => a.key === "gen_ai.usage.input_tokens").value.intValue, "20");
 });
+
+test("unmeasured calls survive the full hub and Sentry log round trip without duration fabrication", () => {
+  const source = tokens({ collectorCallId: "unknown-duration", extraMetadata: { prompt: "PRIVATE_CONTENT", response: "PRIVATE_CONTENT", sessionId: "PRIVATE_CONTENT" } });
+  const [call] = collectorSentryEvents(source, identity);
+  assert.equal(call.kind, "log");
+  assert.equal(call.name, "chat");
+  assert.ok(!Object.hasOwn(call, "durationMs"));
+  const firstEnvelope = buildLogsEnvelope([call]);
+  const normalized = normalizeOtlpLogs(firstEnvelope, { sourceId: "fixture-source", platform: "claude-code" }).events;
+  assert.equal(normalized.length, 1);
+  const forwarded = normalized.map((event) => scrubInternalEvent(projectHubTelemetry(event)));
+  const finalEnvelope = buildLogsEnvelope(forwarded);
+  for (const envelope of [firstEnvelope, finalEnvelope]) {
+    const record = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
+    assert.equal(record.attributes.find((attr) => attr.key === "gen_ai.operation.name").value.stringValue, "chat");
+    assert.ok(!record.attributes.some((attr) => ["duration_ms", "durationMs"].includes(attr.key)));
+    assert.ok(!Object.hasOwn(record, "startTimeUnixNano"));
+    assert.ok(!Object.hasOwn(record, "endTimeUnixNano"));
+    assert.ok(!JSON.stringify(envelope).includes("PRIVATE_CONTENT"));
+    assert.ok(!JSON.stringify(envelope).includes("private/session"));
+  }
+  const record = firstEnvelope.resourceLogs[0].scopeLogs[0].logRecords[0];
+  assert.deepEqual({ traceId: record.traceId, spanId: record.spanId }, traceAndSpanIds(call.eventId));
+  assert.deepEqual(collectorSentryEvents(source, identity), [call]);
+  assert.ok(!Object.hasOwn(forwarded[0], "durationMs"));
+  for (const durationMs of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    const [invalid] = collectorSentryEvents(tokens({ collectorCallId: "invalid-timing", extraMetadata: { durationMs } }), identity);
+    assert.equal(invalid.kind, "log");
+    assert.ok(!Object.hasOwn(invalid, "durationMs"));
+    assert.ok(!invalid.attributes.some((attr) => attr.key === "duration_ms"));
+  }
+});
+
+test("measured zero duration stays a span and retains its source identity", () => {
+  const unknown = collectorSentryEvents(tokens({ collectorCallId: "same-call" }), identity)[0];
+  const zero = collectorSentryEvents(timedTokens({ collectorCallId: "same-call", extraMetadata: { durationMs: 0 } }), identity)[0];
+  assert.equal(zero.kind, "span");
+  assert.equal(zero.durationMs, 0);
+  assert.equal(zero.eventId, unknown.eventId);
+  const envelope = buildTracesEnvelope([zero]);
+  const normalized = normalizeOtlpTraces(envelope, { sourceId: "fixture-source", platform: "claude-code" }).events;
+  assert.equal(normalized[0].durationMs, 0);
+  const forwarded = scrubInternalEvent(projectHubTelemetry(normalized[0]));
+  assert.equal(forwarded.kind, "span");
+  assert.equal(forwarded.attributes.find((attr) => attr.key === "duration_ms").value.stringValue, "0");
+  const fragments = tokens({ collectorCallId: "later-timing" });
+  fragments.at(-1).metadata.durationMs = 0;
+  assert.equal(collectorSentryEvents(fragments, identity)[0].kind, "span");
+});
+
+test("legacy pending unmeasured spans drain as logs without rewriting payloads or accepting span ACKs", () => fixture(async (config) => {
+  const events = tokens({ collectorCallId: "legacy-call" });
+  const [current] = collectorSentryEvents(events, identity);
+  const root = await enqueueCollectorSentry(events, identity, config);
+  const path = join(root, "outbox.sqlite");
+  const db = new DatabaseSync(path);
+  const legacy = { ...current, kind: "span", status: { code: 1 } };
+  delete legacy.body;
+  delete legacy.severityNumber;
+  legacy.attributes.push({ key: "gen_ai.input.messages", value: { stringValue: "PRIVATE_CONTENT" } });
+  const payload = JSON.stringify(legacy);
+  db.prepare("UPDATE events SET payload=? WHERE id=?").run(payload, current.eventId);
+  db.close();
+  let sentRecord;
+  const send = async (url, init) => {
+    assert.ok(url.endsWith("/v1/logs"));
+    const envelope = JSON.parse(init.body);
+    sentRecord = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
+    assert.ok(!JSON.stringify(envelope).includes("PRIVATE_CONTENT"));
+    assert.ok(!sentRecord.attributes.some((attr) => attr.key === "duration_ms"));
+    assert.equal(sentRecord.attributes.find((attr) => attr.key === "gen_ai.operation.name").value.stringValue, "chat");
+    assert.deepEqual({ traceId: sentRecord.traceId, spanId: sentRecord.spanId }, traceAndSpanIds(current.eventId));
+    return Response.json({ partialSuccess: { rejectedSpans: 0 } });
+  };
+  const rejectedAck = await drainCollectorSentry(root, config, { fetchImpl: send });
+  assert.deepEqual(rejectedAck, { delivered: 0, quarantined: 0, pending: true });
+  const pending = new DatabaseSync(path);
+  assert.equal(pending.prepare("SELECT payload FROM events WHERE id=?").get(current.eventId).payload, payload);
+  pending.close();
+  const acceptedLog = await drainCollectorSentry(root, config, { fetchImpl: async (url, init) => {
+    await send(url, init);
+    return Response.json({ partialSuccess: { rejectedLogRecords: 0 } });
+  } });
+  assert.deepEqual(acceptedLog, { delivered: 1, quarantined: 0, pending: false });
+  const checked = new DatabaseSync(path);
+  const row = checked.prepare("SELECT id,payload,state FROM events").get();
+  assert.deepEqual({ ...row }, { id: current.eventId, payload, state: "sent" });
+  checked.close();
+  await enqueueCollectorSentry(events, identity, config);
+  const replay = await drainCollectorSentry(root, config, { fetchImpl: async () => { assert.fail("A sent receipt must suppress replay"); } });
+  assert.equal(replay.delivered, 0);
+}));
+
+test("unmeasured native spans retain their error status when delivered as logs", () => fixture(async (config) => {
+  const root = await enqueueCollectorSentryTelemetry([{ eventId: "b".repeat(64), ts: "2026-10-30T12:00:00Z", kind: "span", platform: "botfleet", operation: "botfleet.turn", status: "error", promptText: "PRIVATE_CONTENT" }], identity, config);
+  const result = await drainCollectorSentry(root, config, { fetchImpl: async (url, init) => {
+    assert.ok(url.endsWith("/v1/logs"));
+    const envelope = JSON.parse(init.body);
+    const [event] = normalizeOtlpLogs(envelope).events;
+    assert.equal(event.operation, "botfleet.turn");
+    assert.equal(event.status, "error");
+    assert.equal(event.durationMs, undefined);
+    assert.ok(!JSON.stringify(envelope).includes("PRIVATE_CONTENT"));
+    return accepted();
+  } });
+  assert.equal(result.delivered, 1);
+}));
 
 test("distinct output fragments accumulate reasoning once per deduped event", () => {
   const first = tokens({ collectorCallId: "fragmented-call", extraId: "fragment-one", extraMetadata: { reasoningTokens: 2 } });
@@ -128,7 +244,7 @@ test("outbox retries after restart and sent receipts suppress collector replay",
 }));
 
 test("partial rejection isolates a durable quarantine and malformed responses retain pending rows", () => fixture(async (config) => {
-  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  const root = await enqueueCollectorSentry(timedTokens({ collectorCallId: "call" }), identity, config);
   assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response('{"partialSuccess":{"rejectedSpans":"1"}}') })).quarantined, 1);
   await enqueueCollectorSentry(tokens({ collectorCallId: "second", extraId: "second" }), identity, config);
   assert.equal((await drainCollectorSentry(root, config, { fetchImpl: async () => new Response("invalid-json") })).pending, true);
@@ -136,7 +252,7 @@ test("partial rejection isolates a durable quarantine and malformed responses re
 }));
 
 test("malformed OTLP ACK fields remain pending without quarantining or acknowledging", () => fixture(async (config) => {
-  const root = await enqueueCollectorSentry(tokens({ collectorCallId: "call" }), identity, config);
+  const root = await enqueueCollectorSentry(timedTokens({ collectorCallId: "call" }), identity, config);
   for (const body of [null, [], { partialSuccess: { rejectedSpans: -1 } }, { partialSuccess: { rejectedSpans: 2 } }, { partialSuccess: { rejectedSpans: true } }, { partialSuccess: { rejectedSpans: "not-a-count" } }, { partialSuccess: { rejectedSpans: "9007199254740992" } }, { partialSuccess: { rejectedLogRecords: 1 } }]) {
     const result = await drainCollectorSentry(root, config, { fetchImpl: async () => new Response(JSON.stringify(body)) });
     assert.equal(result.delivered, 0);
@@ -161,7 +277,7 @@ test("hub ACK schema rejects invalid counters and incomplete counts without quar
 
 test("coherent partial hub ACKs durably narrow and isolate only the ignored row", () => fixture(async (base) => {
   const config = { ...base, destination: "hub", token: "test-only-bearer-00000000000000000000" };
-  const root = await enqueueCollectorSentry([0, 1, 2].flatMap((i) => tokens({ collectorCallId: `partial-hub-${i}`, extraId: `partial-hub-${i}`, model: i === 1 ? "bad-model" : "good-model" })), identity, config);
+  const root = await enqueueCollectorSentry([0, 1, 2].flatMap((i) => timedTokens({ collectorCallId: `partial-hub-${i}`, extraId: `partial-hub-${i}`, model: i === 1 ? "bad-model" : "good-model" })), identity, config);
   let delivered = 0;
   let quarantined = 0;
   for (let invocation = 0; invocation < 20 && (delivered < 2 || quarantined < 1); invocation += 1) {
