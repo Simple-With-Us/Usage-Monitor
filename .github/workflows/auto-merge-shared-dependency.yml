@@ -3,16 +3,17 @@ name: Auto-merge congress-trading-shared PRs
 # Same elevated-identity rule as .github/workflows/auto-merge-prs.yml: arming
 # auto-merge with GITHUB_TOKEN makes github-actions[bot] the merging identity,
 # and GitHub's recursion guard then suppresses every post-merge workflow on
-# main (CI, CodeQL, Security, effort sync, iOS ship). Without GH_PAT /
+# main (CI, CodeQL, Security, effort sync, iOS ship).  Without GH_PAT /
 # SHEPHERD_TOKEN this workflow is a logged no-op; land the PR with the owner's
 # own gh credentials instead (`gh pr merge <n> --squash --auto`).
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, ready_for_review]
-  # Re-evaluate the approval gate when the reviewer submits or a review is dismissed.
-  pull_request_review:
-    types: [submitted, dismissed]
+  # Privileged arming runs only from the trusted default-branch workflow definition.
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited, converted_to_draft, ready_for_review, auto_merge_enabled]
+  workflow_run:
+    workflows: [Auto-merge review signal]
+    types: [completed]
 
 permissions:
   contents: read
@@ -22,30 +23,99 @@ jobs:
   auto-merge:
     runs-on: ubuntu-latest
     if: >
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success')
     steps:
-      - name: Check if PR updates congress-trading-shared
-        id: check
+      - name: Read live shared-PR merge eligibility
+        id: live
         env:
-          TITLE: ${{ github.event.pull_request.title }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        shell: bash
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REVIEW_PULL_REQUESTS: ${{ toJson(github.event.workflow_run.pull_requests) }}
         run: |
-          IS_SHARED=false
-          if [[ "$HEAD_REF" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]]; then
-            IS_SHARED=true
-          elif [[ "$TITLE" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
-            IS_SHARED=true
+          set -euo pipefail
+          {
+            echo "armable=0"
+            echo "disarm=1"
+            echo "head_sha="
+            echo "pr_number="
+          } >> "$GITHUB_OUTPUT"
+          PR_NUMBER="$EVENT_PR_NUMBER"
+          if [ -z "$PR_NUMBER" ]; then
+            if [[ ! "$REVIEW_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Review signal did not provide a valid head SHA."
+              exit 1
+            fi
+            if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! jq -e 'type == "array"' <<< "$REVIEW_PULL_REQUESTS" >/dev/null; then
+              echo "::error::Review signal PR metadata was missing or invalid."
+              exit 1
+            fi
+            metadata_count=$(jq -r 'length' <<< "$REVIEW_PULL_REQUESTS")
+            if [ "$metadata_count" -gt 0 ]; then
+              candidates=$(jq -c --argjson repo_id "$REPO_ID" --arg sha "$REVIEW_HEAD_SHA" '[.[] | select((.number | type == "number") and .number > 0 and .base.repo.id == $repo_id and .head.repo.id == $repo_id and .head.sha == $sha)]' <<< "$REVIEW_PULL_REQUESTS")
+            else
+              pull_pages=$(gh api --paginate --slurp -H "Accept: application/vnd.github+json" "repos/$REPO/pulls?state=open&per_page=100")
+              candidates=$(jq -c --arg repo "$REPO" --arg sha "$REVIEW_HEAD_SHA" '[.[][] | select(.state == "open" and .base.repo.full_name == $repo and .head.repo.full_name == $repo and .head.sha == $sha)]' <<< "$pull_pages")
+            fi
+            if [ "$(jq -r 'length' <<< "$candidates")" != "1" ]; then
+              echo "::error::Review signal did not resolve to exactly one open same-repository PR."
+              exit 1
+            fi
+            PR_NUMBER=$(jq -r '.[0].number' <<< "$candidates")
           fi
-          echo "is_shared=$IS_SHARED" >> "$GITHUB_OUTPUT"
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::PR number was missing or invalid."
+            exit 1
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          if ! live=$(gh api "repos/$REPO/pulls/$PR_NUMBER"); then
+            echo "::warning::Live PR lookup failed; any armed auto-merge will be disabled."
+            exit 0
+          fi
+          if ! jq -e '(.number | type == "number") and (.base.repo.full_name | type == "string") and (.state | type == "string") and (.draft | type == "boolean") and (.title | type == "string") and (.labels | type == "array") and all(.labels[]?; .name | type == "string") and (.head.repo.full_name | type == "string") and (.head.sha | type == "string") and (.head.ref | type == "string") and has("auto_merge") and (.auto_merge == null or (.auto_merge | type == "object"))' <<< "$live" >/dev/null; then
+            echo "::warning::Live PR response was incomplete; any armed auto-merge will be disabled."
+            exit 0
+          fi
+          state=$(jq -r '.state // empty' <<< "$live")
+          draft=$(jq -r '.draft' <<< "$live")
+          number=$(jq -r '.number' <<< "$live")
+          base_repo=$(jq -r '.base.repo.full_name' <<< "$live")
+          head_repo=$(jq -r '.head.repo.full_name // empty' <<< "$live")
+          head_sha=$(jq -r '.head.sha // empty' <<< "$live")
+          if [ "$number" != "$PR_NUMBER" ] || [ "$base_repo" != "$REPO" ] || [ "$state" != "open" ] || [ "$draft" != "false" ] || [ "$head_repo" != "$REPO" ] || [ -z "$head_sha" ]; then
+            exit 0
+          fi
+          if jq -e '[.labels[]?.name | ascii_downcase] | any(. == "do-not-merge" or . == "do-not-automerge" or . == "do-not-auto-merge")' <<< "$live" >/dev/null; then
+            exit 0
+          fi
+          title=$(jq -r '.title | ascii_downcase' <<< "$live")
+          case "$title" in
+            *do-not-merge*|*do\ not\ merge*|*do-not-automerge*|*do\ not\ automerge*|*do-not-auto-merge*|*do\ not\ auto-merge*|*do\ not\ auto\ merge*) exit 0 ;;
+          esac
+          echo "disarm=0" >> "$GITHUB_OUTPUT"
+          head_ref=$(jq -r '.head.ref | ascii_downcase' <<< "$live")
+          if [[ ! "$head_ref" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]] &&
+             [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
+            exit 0
+          fi
+          {
+            echo "armable=1"
+            echo "head_sha=$head_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check for an elevated (non-GITHUB_TOKEN) merge identity
         id: identity
-        if: steps.check.outputs.is_shared == 'true'
+        if: steps.live.outputs.armable == '1'
         env:
           HAS_ELEVATED_TOKEN: ${{ (secrets.GH_PAT != '' || secrets.SHEPHERD_TOKEN != '') && '1' || '0' }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_URL: https://github.com/${{ github.repository }}/pull/${{ steps.live.outputs.pr_number }}
         run: |
           set -uo pipefail
           if [ "$HAS_ELEVATED_TOKEN" = "1" ]; then
@@ -58,16 +128,16 @@ jobs:
 
       # Arm only while the fleet reviewer's latest review on the PR's CURRENT head
       # commit is APPROVED (a skipped check, a COMMENTED review, a stale approval or a
-      # lookup failure all leave auto-merge unarmed).  Same rule as the fleet's reusable
+      # lookup failure all leave auto-merge unarmed).  Same rule as the fleet's reusable
       # armer in AI-Fleet-Coordinator.
       - name: Require a current-head approval from the fleet reviewer
         id: approval
-        if: steps.identity.outputs.arm == '1'
+        if: steps.live.outputs.armable == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ steps.live.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.live.outputs.head_sha }}
         run: |
           set -uo pipefail
           echo "ok=0" >> "$GITHUB_OUTPUT"
@@ -75,30 +145,101 @@ jobs:
             echo "::notice::Review lookup failed; not arming auto-merge."
             exit 0
           fi
-          latest=$(printf '%s\n' "$reviews" | awk -F'\t' -v sha="$HEAD_SHA" '$1=="kody-ai[bot]" && $2==sha && ($3=="APPROVED"||$3=="CHANGES_REQUESTED"||$3=="DISMISSED") {s=$3} END{print s}')
+          latest=$(printf '%s\n' "$reviews" | awk -F'\t' -v sha="$HEAD_SHA" '$1=="kody-ai[bot]" && $2==sha {s=$3} END{print s}')
           if [ "$latest" = "APPROVED" ]; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::No current-head Kody approval (latest: ${latest:-none}); not arming auto-merge."
           fi
 
-      # A push after an approval leaves a previously armed merge in place, so when
-      # this workflow is the armer (a merge identity exists) and the current head has
-      # no approval, cancel any armed merge.  Cancelling uses only the repository
-      # token; it never arms.
-      - name: Disarm when the current head is not approved
-        if: steps.identity.outputs.arm == '1' && steps.approval.outputs.ok != '1'
+      - name: Disarm a held, draft, unreadable, or unapproved PR
+        if: steps.live.outputs.disarm == '1' || (steps.live.outputs.armable == '1' && steps.approval.outputs.ok != '1')
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.live.outputs.pr_number }}
+          PR_URL: https://github.com/${{ github.repository }}/pull/${{ steps.live.outputs.pr_number }}
         run: |
-          gh pr merge --disable-auto "$PR_URL" || echo "::notice::No armed merge to cancel, or cancel not allowed."
+          set -euo pipefail
+          live=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          jq -e --arg repo "$REPO" --argjson number "$PR_NUMBER" 'type == "object" and (.number == $number) and (.base.repo.full_name == $repo) and has("auto_merge") and (.auto_merge == null or (.auto_merge | type == "object"))' <<< "$live" >/dev/null
+          if jq -e '.auto_merge == null' <<< "$live" >/dev/null; then
+            echo "::notice::No armed auto-merge to cancel."
+            exit 0
+          fi
+          gh pr merge --disable-auto "$PR_URL"
+          after=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          jq -e --arg repo "$REPO" --argjson number "$PR_NUMBER" 'type == "object" and (.number == $number) and (.base.repo.full_name == $repo) and has("auto_merge") and .auto_merge == null' <<< "$after" >/dev/null || {
+            echo "::error::Auto-merge remained armed after cancellation."
+            exit 1
+          }
 
       - name: Enable auto-merge
-        if: steps.identity.outputs.arm == '1' && steps.approval.outputs.ok == '1'
+        if: steps.live.outputs.armable == '1' && steps.identity.outputs.arm == '1' && steps.approval.outputs.ok == '1'
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          MERGE_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
+          REPO_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.live.outputs.pr_number }}
+          PR_URL: https://github.com/${{ github.repository }}/pull/${{ steps.live.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.live.outputs.head_sha }}
         run: |
+          set -euo pipefail
+          live_is_globally_armable() {
+            local live="$1" title
+            jq -e --arg repo "$REPO" --argjson number "$PR_NUMBER" '(.number == $number) and (.base.repo.full_name == $repo) and (.state | type == "string") and (.draft | type == "boolean") and (.title | type == "string") and (.labels | type == "array") and all(.labels[]?; .name | type == "string") and (.head.repo.full_name | type == "string") and (.head.sha | type == "string") and (.head.ref | type == "string") and has("auto_merge") and (.auto_merge == null or (.auto_merge | type == "object"))' <<< "$live" >/dev/null || return 1
+            [ "$(jq -r '.state // empty' <<< "$live")" = "open" ] || return 1
+            [ "$(jq -r '.draft' <<< "$live")" = "false" ] || return 1
+            [ "$(jq -r '.head.repo.full_name // empty' <<< "$live")" = "$REPO" ] || return 1
+            [ "$(jq -r '.head.sha // empty' <<< "$live")" = "$EXPECTED_HEAD" ] || return 1
+            ! jq -e '[.labels[]?.name | ascii_downcase] | any(. == "do-not-merge" or . == "do-not-automerge" or . == "do-not-auto-merge")' <<< "$live" >/dev/null || return 1
+            title=$(jq -r '.title | ascii_downcase' <<< "$live")
+            case "$title" in
+              *do-not-merge*|*do\ not\ merge*|*do-not-automerge*|*do\ not\ automerge*|*do-not-auto-merge*|*do\ not\ auto-merge*|*do\ not\ auto\ merge*) return 1 ;;
+            esac
+            return 0
+          }
+          live_is_shared() {
+            local live="$1" title head_ref
+            title=$(jq -r '.title | ascii_downcase' <<< "$live")
+            head_ref=$(jq -r '.head.ref | ascii_downcase' <<< "$live")
+            if [[ ! "$head_ref" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]] &&
+               [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
+              return 1
+            fi
+            return 0
+          }
+          disable_auto_merge() {
+            local current after
+            current=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER")
+            jq -e --arg repo "$REPO" --argjson number "$PR_NUMBER" 'type == "object" and (.number == $number) and (.base.repo.full_name == $repo) and has("auto_merge") and (.auto_merge == null or (.auto_merge | type == "object"))' <<< "$current" >/dev/null
+            if jq -e '.auto_merge == null' <<< "$current" >/dev/null; then
+              return 0
+            fi
+            GH_TOKEN="$REPO_TOKEN" gh pr merge --disable-auto "$PR_URL"
+            after=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER")
+            jq -e --arg repo "$REPO" --argjson number "$PR_NUMBER" 'type == "object" and (.number == $number) and (.base.repo.full_name == $repo) and has("auto_merge") and .auto_merge == null' <<< "$after" >/dev/null
+          }
+          if ! live=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER") || ! live_is_globally_armable "$live"; then
+            echo "::warning::Live PR state changed before auto-merge; refusing to arm."
+            disable_auto_merge
+            exit 0
+          fi
+          if ! live_is_shared "$live"; then
+            echo "::notice::PR no longer matches the shared-dependency armer; leaving merge state to the general workflow."
+            exit 0
+          fi
           echo "Enabling auto-merge for $PR_URL"
-          gh pr merge --auto --squash --delete-branch "$PR_URL" || echo "Auto-merge already set or failed."
+          if ! GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto --squash --delete-branch --match-head-commit "$EXPECTED_HEAD" "$PR_URL"; then
+            echo "squash auto-merge failed; trying merge commit"
+            if ! live=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/$REPO/pulls/$PR_NUMBER") || ! live_is_globally_armable "$live"; then
+              echo "::warning::Live PR state changed before merge fallback; refusing to arm."
+              disable_auto_merge
+              exit 0
+            fi
+            if ! live_is_shared "$live"; then
+              echo "::notice::PR no longer matches the shared-dependency armer; leaving merge state to the general workflow."
+              exit 0
+            fi
+            GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto --merge --delete-branch --match-head-commit "$EXPECTED_HEAD" "$PR_URL"
+          fi
