@@ -1,4 +1,4 @@
-FROM node:24.22.1-bookworm-slim
+FROM node:24.22.2-bookworm-slim
 ARG INFISICAL_CLI_VERSION=0.43.114
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
