@@ -254,6 +254,72 @@ syncBuiltinESMExports();\n`);
     console.log(JSON.stringify({ fixture: "fsck-count-bound", action, count, limit }));
   }
 
+  const memoryRuntime = join(root, "streamed-dependency-digest");
+  const memoryHook = join(root, "streamed-dependency-digest.mjs");
+  const memoryStats = join(root, "streamed-dependency-digest.json");
+  writeFileSync(memoryHook, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const home = ${JSON.stringify(memoryRuntime)};
+const originalRename = fs.renameSync;
+fs.renameSync = (source, target) => {
+  if (target.startsWith(home + '/releases/') && target.endsWith('/node_modules/zod')) {
+    const padding = source + '/fixture-padding';
+    fs.mkdirSync(padding);
+    const bytes = Buffer.alloc(256 * 1024, 97);
+    for (let index = 0; index < 64; index++) fs.writeFileSync(padding + '/' + index + '.bin', bytes);
+  }
+  return originalRename(source, target);
+};
+const originalOpen = fs.openSync, originalRead = fs.readSync, originalClose = fs.closeSync, originalDirectory = fs.readdirSync;
+const owned = new Set();
+let shared, reused = true, maxBuffer = 0, totalBytes = 0;
+fs.readdirSync = (path, ...args) => {
+  if (typeof path === 'string' && path.startsWith(home + '/releases/') && path.endsWith('/node_modules')) shared = undefined;
+  return originalDirectory(path, ...args);
+};
+fs.openSync = (path, flags, ...args) => {
+  const fd = originalOpen(path, flags, ...args);
+  if (typeof path === 'string' && path.startsWith(home + '/releases/') && path.includes('/node_modules/zod/') && typeof flags === 'number' && (flags & fs.constants.O_NOFOLLOW) && (flags & fs.constants.O_NONBLOCK)) owned.add(fd);
+  return fd;
+};
+fs.readSync = (fd, buffer, ...args) => {
+  const count = originalRead(fd, buffer, ...args);
+  if (owned.has(fd)) {
+    reused = reused && (shared === undefined || shared === buffer);
+    shared = buffer;
+    maxBuffer = Math.max(maxBuffer, buffer.length);
+    totalBytes += count;
+  }
+  return count;
+};
+fs.closeSync = (fd) => { owned.delete(fd); return originalClose(fd); };
+process.on('exit', () => fs.writeFileSync(${JSON.stringify(memoryStats)}, JSON.stringify({ reused, maxBuffer, totalBytes, openFiles: owned.size })));
+syncBuiltinESMExports();\n`);
+  const memoryResult = spawnSync(process.execPath, ["--import", memoryHook, updater, "--sha", thirdSha, "--runtime-root", memoryRuntime], { env, encoding: "utf8" });
+  assert(memoryResult.status === 0, `streamed dependency fixture activates: ${memoryResult.stderr}`);
+  const streamStats = JSON.parse(readFileSync(memoryStats, "utf8"));
+  assert(streamStats.reused && streamStats.maxBuffer > 0 && streamStats.maxBuffer <= 64 * 1024 && streamStats.totalBytes >= 16 * 1024 * 1024 && streamStats.openFiles === 0, "dependency digests reuse one bounded buffer per pass and close every verified descriptor for a padded tree");
+  const memoryRelease = readlinkSync(join(memoryRuntime, "current"));
+  const referenceEntries = [];
+  function referenceWalk(name) {
+    const path = join(memoryRuntime, memoryRelease, name);
+    const info = lstatSync(path);
+    referenceEntries.push({ name, directory: info.isDirectory(), executable: Boolean(info.mode & 0o100), bytes: info.isDirectory() ? Buffer.alloc(0) : readFileSync(path) });
+    if (info.isDirectory()) for (const entry of readdirSync(path)) referenceWalk(`${name}/${entry}`);
+  }
+  referenceWalk("node_modules/zod");
+  const referenceHash = createHash("sha256");
+  function referenceField(value) {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(bytes.length));
+    referenceHash.update(size).update(bytes);
+  }
+  for (const value of ["usage-monitor-runtime-release-v1", "canonical", thirdSha, String(referenceEntries.length)]) referenceField(value);
+  for (const entry of referenceEntries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+    for (const value of [entry.name, entry.directory ? "directory" : "file", entry.executable ? "100755" : "100644", entry.bytes]) referenceField(value);
+  }
+  assert(memoryRelease === `releases/release-${thirdSha}-${referenceHash.digest("hex")}`, "streamed dependency bytes preserve the previous buffered content-identity format exactly");
+
   const lateCorruptionRuntime = join(root, "late-git-object-corruption");
   cpSync(runtime, lateCorruptionRuntime, { recursive: true, verbatimSymlinks: true });
   const lateCorruptionRelease = join(lateCorruptionRuntime, thirdRelease);
@@ -323,6 +389,48 @@ cp.execFileSync = (command, args, ...rest) => {
       preserved();
     }
   }
+
+  writeFileSync(join(source, "scripts", "collector-injector.mjs"), `${secondInjector.toString()}\nimport './lib/collector-overlay-only.mjs';\n`);
+  git(source, ["add", "scripts/collector-injector.mjs"]);
+  git(source, ["commit", "-m", "latest donor incompatible with legacy source"]);
+  const incompatibleLatestSha = git(source, ["rev-parse", "HEAD"]);
+  const historicalHome = join(root, "historical-rollback-donor");
+  const historicalPreserved = legacyLinksFixture(historicalHome, true);
+  const historicalRollback = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", historicalHome], { env, encoding: "utf8" });
+  assert(historicalRollback.status === 0 && git(join(historicalHome, "current"), ["rev-parse", "HEAD"]) === firstSha && git(join(historicalHome, "previous"), ["rev-parse", "HEAD"]) === secondSha, "rollback uses a compatible approved historical donor when latest is incompatible");
+  assert(git(join(historicalHome, "current"), ["rev-parse", "HEAD"]) !== incompatibleLatestSha, "bootstrap donor never becomes the rollback target");
+  historicalPreserved();
+
+  git(source, ["checkout", "-b", "legacy-donor-history", firstSha]);
+  writeFileSync(join(source, "scripts", "copilot-usage-collector.mjs"), `${readFileSync(join(source, "scripts", "copilot-usage-collector.mjs"), "utf8")}\n// second pre-injector historical version\n`);
+  git(source, ["add", "scripts/copilot-usage-collector.mjs"]);
+  git(source, ["commit", "-m", "second pre-injector historical version"]);
+  const otherLegacySha = git(source, ["rev-parse", "HEAD"]);
+  git(source, ["checkout", "main"]);
+  git(source, ["merge", "--no-ff", "legacy-donor-history", "-m", "approve historical donor branch"]);
+  const pinnedHome = join(root, "pinned-rollback-donor");
+  const pinnedPreserved = legacyLinksFixture(pinnedHome);
+  const otherLegacyPath = join(pinnedHome, "releases", otherLegacySha);
+  execFileSync("git", ["clone", "--quiet", source, otherLegacyPath]);
+  git(otherLegacyPath, ["checkout", "--quiet", "--detach", otherLegacySha]);
+  symlinkSync(join(pinnedHome, "releases", firstSha, "node_modules"), join(otherLegacyPath, "node_modules"));
+  rmSync(join(pinnedHome, "current"));
+  rmSync(join(pinnedHome, "previous"));
+  symlinkSync(`releases/${firstSha}`, join(pinnedHome, "current"));
+  symlinkSync(`releases/${otherLegacySha}`, join(pinnedHome, "previous"));
+  const noDonor = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", pinnedHome], { env, encoding: "utf8" });
+  assert(noDonor.status !== 0 && noDonor.stderr.includes("No compatible approved migration donor"), "incompatible automatic donors fail explicitly");
+  assert(readlinkSync(join(pinnedHome, "current")) === `releases/${firstSha}` && readlinkSync(join(pinnedHome, "previous")) === `releases/${otherLegacySha}` && !existsSync(join(pinnedHome, ".transition.json")), "all failed donor candidates preserve links and journal state");
+  const pinned = spawnSync(process.execPath, [updater, "--rollback", "--migration-donor-sha", secondSha, "--runtime-root", pinnedHome], { env, encoding: "utf8" });
+  assert(pinned.status === 0 && git(join(pinnedHome, "current"), ["rev-parse", "HEAD"]) === otherLegacySha && git(join(pinnedHome, "previous"), ["rev-parse", "HEAD"]) === firstSha, "an explicit approved compatible donor migrates two pre-injector versions without activating itself");
+  pinnedPreserved();
+  assert(lstatSync(join(otherLegacyPath, "node_modules")).isSymbolicLink(), "pinned migration leaves the other legacy dependency link untouched");
+  const unapprovedPinHome = join(root, "unapproved-migration-donor");
+  const unapprovedPreserved = legacyLinksFixture(unapprovedPinHome, true);
+  const unapprovedPin = spawnSync(process.execPath, [updater, "--rollback", "--migration-donor-sha", "f".repeat(40), "--runtime-root", unapprovedPinHome], { env, encoding: "utf8" });
+  assert(unapprovedPin.status !== 0 && unapprovedPin.stderr.includes("not an ancestor") && readlinkSync(join(unapprovedPinHome, "current")) === `releases/${secondSha}` && readlinkSync(join(unapprovedPinHome, "previous")) === `releases/${firstSha}`, "an unapproved explicit pin fails without falling back or changing either version");
+  unapprovedPreserved();
+  git(source, ["reset", "--hard", thirdSha]);
 
   for (const attack of ["modified-tracked-source", "unapproved-commit", "incompatible-donor"]) {
     const home = join(root, `legacy-migration-${attack}`);

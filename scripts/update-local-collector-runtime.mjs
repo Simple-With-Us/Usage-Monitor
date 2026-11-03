@@ -58,17 +58,20 @@ function fail(message) {
 
 function parseArgs(argv) {
   let sha = null;
+  let donorSha = null;
   let rollback = false;
   let runtimeRoot = DEFAULT_RUNTIME_ROOT;
   for (let index = 2; index < argv.length; index += 1) {
     if (argv[index] === "--sha" && argv[index + 1]) sha = argv[++index];
+    else if (argv[index] === "--migration-donor-sha" && argv[index + 1]) donorSha = argv[++index];
     else if (argv[index] === "--runtime-root" && argv[index + 1]) runtimeRoot = argv[++index];
     else if (argv[index] === "--rollback") rollback = true;
     else fail(`Unknown argument: ${argv[index]}`);
   }
   if (rollback && sha) fail("Use either --rollback or --sha, not both");
   if (!rollback && !/^[a-f0-9]{40}$/.test(sha || "")) fail("--sha requires a full 40-character commit SHA");
-  return { rollback, runtimeRoot: resolve(runtimeRoot), sha };
+  if (donorSha !== null && !/^[a-f0-9]{40}$/.test(donorSha)) fail("--migration-donor-sha requires a full 40-character commit SHA");
+  return { rollback, runtimeRoot: resolve(runtimeRoot), sha, donorSha };
 }
 
 function run(command, args, options = {}) {
@@ -130,22 +133,24 @@ function releaseByName(runtimeRoot, rel, { allowLegacy = false } = {}) {
   return { path: target, name: rel, sha, legacy };
 }
 
-function readRuntimeDependency(path, expected) {
+function hashRuntimeDependency(path, expected, digest, buffer) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = fstatSync(fd);
     if (!opened.isFile() || opened.uid !== process.getuid() || opened.uid !== expected.uid || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.mode !== expected.mode || opened.size !== expected.size) fail("Runtime dependency changed before reading");
     if (!Number.isSafeInteger(opened.size) || opened.size < 0 || opened.size > MAX_RUNTIME_DEPENDENCY_BYTES) fail("Runtime dependency exceeds the bounded file size");
-    const bytes = Buffer.alloc(opened.size);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(opened.size));
+    digest.update(size);
     let offset = 0;
-    while (offset < bytes.length) {
-      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+    while (offset < opened.size) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, opened.size - offset), offset);
       if (!count) fail("Runtime dependency changed while reading");
+      digest.update(buffer.subarray(0, count));
       offset += count;
     }
     const after = fstatSync(fd);
     if (after.size !== opened.size || after.mode !== opened.mode || after.uid !== opened.uid || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) fail("Runtime dependency changed while reading");
-    return bytes;
   } finally { closeSync(fd); }
 }
 
@@ -181,7 +186,7 @@ function releaseDigest(releasePath, sha, compatibility = false) {
     const path = join(releasePath, name);
     const info = lstatSync(path);
     if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) fail("Invalid compatibility runtime dependency");
-    overlays.set(name, { bytes: info.isDirectory() ? Buffer.alloc(0) : readRuntimeDependency(path, info), executable: Boolean(info.mode & 0o100), directory: info.isDirectory() });
+    overlays.set(name, { path, info, executable: Boolean(info.mode & 0o100), directory: info.isDirectory() });
     if (info.isDirectory()) for (const child of readdirSync(path)) dependency(`${name}/${child}`);
   }
   dependency("node_modules/zod");
@@ -196,8 +201,12 @@ function releaseDigest(releasePath, sha, compatibility = false) {
   field(compatibility ? "compatibility" : "canonical");
   field(sha);
   field(String(overlays.size));
+  const dependencyBuffer = Buffer.alloc(64 * 1024);
   for (const [name, overlay] of [...overlays].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
-    field(name); field(overlay.directory ? "directory" : "file"); field(overlay.executable ? "100755" : "100644"); field(overlay.bytes);
+    field(name); field(overlay.directory ? "directory" : "file"); field(overlay.executable ? "100755" : "100644");
+    if (overlay.directory) field(Buffer.alloc(0));
+    else if (overlay.info) hashRuntimeDependency(overlay.path, overlay.info, digest, dependencyBuffer);
+    else field(overlay.bytes);
   }
   return digest.digest("hex");
 }
@@ -454,12 +463,29 @@ function migrateLegacyLinks(runtimeRoot, args) {
   const previous = releaseFromLink(runtimeRoot, "previous", { legacyMigrationSource: true });
   if (!current?.legacy && !previous?.legacy) return;
   if (!current) fail("Cannot migrate legacy previous without an active current release");
-  const donor = !current.legacy ? current : previous && !previous.legacy ? previous : stageRelease(runtimeRoot, args.rollback ? null : args.sha);
-  validateRelease(donor.path, donor.sha, { rollback: true });
-  const migratedCurrent = current.legacy ? preparePreviousRelease(current.path, current.sha, donor.path) : current;
-  const migratedPrevious = previous?.legacy ? preparePreviousRelease(previous.path, previous.sha, donor.path) : previous;
+  const candidates = args.donorSha ? [{ sha: args.donorSha }] : [
+    ...[current, previous].filter((release) => release && !release.legacy).map((release) => ({ release })),
+    ...(args.rollback ? [...new Set([current.sha, previous?.sha].filter(Boolean))].map((sha) => ({ sha })) : []),
+    { sha: args.rollback ? null : args.sha },
+  ];
+  let selected;
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      const donor = candidate.release ?? stageRelease(runtimeRoot, candidate.sha);
+      if (candidate.release) verifyOriginAncestry(runtimeRoot, donor.sha);
+      validateRelease(donor.path, donor.sha, { rollback: true });
+      const migratedCurrent = current.legacy ? preparePreviousRelease(current.path, current.sha, donor.path) : current;
+      const migratedPrevious = previous?.legacy ? preparePreviousRelease(previous.path, previous.sha, donor.path) : previous;
+      selected = { migratedCurrent, migratedPrevious };
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!selected) fail(`No compatible approved migration donor is available; use --migration-donor-sha to pin one after verification; reason: ${lastError?.message || "No donor candidates"}`);
   // Migration changes identities only; the requested forward/rollback action runs afterward.
-  writeTransition(runtimeRoot, migratedCurrent, migratedPrevious, "migration");
+  writeTransition(runtimeRoot, selected.migratedCurrent, selected.migratedPrevious, "migration");
   completeTransition(runtimeRoot, readTransition(runtimeRoot));
 }
 
