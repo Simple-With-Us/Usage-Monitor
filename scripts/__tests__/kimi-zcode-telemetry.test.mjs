@@ -750,24 +750,41 @@ describe("Kimi exact usage telemetry", () => {
     expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
   });
 
-  it("ignores unexpected wire layouts without poisoning pending state", async () => {
+  it("blocks checkpoint advancement for future wire layouts and replays them after canonicalization", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
     const home = join(tempRoot, ".kimi-code");
-    const invalid = join(home, "sessions", "workspace", "session-a", "wire.jsonl");
-    const extraDepth = join(home, "sessions", "archive", "workspace", "session-b", "agents", "main", "wire.jsonl");
-    const valid = join(home, "sessions", "workspace", "session-b", "agents", "main", "wire.jsonl");
-    await mkdir(join(invalid, ".."), { recursive: true });
-    await mkdir(join(extraDepth, ".."), { recursive: true });
-    await mkdir(join(valid, ".."), { recursive: true });
-    await writeFile(invalid, `${JSON.stringify(kimiTurn())}\n`);
-    await writeFile(extraDepth, `${JSON.stringify(kimiTurn())}\n`);
-    await writeFile(valid, `${JSON.stringify(kimiTurn())}\n`);
+    const futureLayout = join(home, "sessions", "workspace", "session-a", "wire.jsonl");
+    const canonicalLayout = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(futureLayout, ".."), { recursive: true });
+    await writeFile(futureLayout, `${JSON.stringify(kimiTurn())}\n`);
     const status = { complete: true };
-    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: status });
-    expect(status.complete).toBe(true);
-    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-b", workDir: "/Code/App" })}\n`);
-    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
-    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) })).toHaveLength(4);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: status })).toEqual([]);
+    expect(status.complete).toBe(false);
+    expect(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: status.complete })).toBe(false);
+
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: status,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toEqual([]);
+
+    await mkdir(join(canonicalLayout, ".."), { recursive: true });
+    await rename(futureLayout, canonicalLayout);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const replayStatus = { complete: true };
+    const replay = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(0),
+      scanStatus: replayStatus,
+    });
+    expect(replay).toHaveLength(4);
+    expect(replay.every((event) => event.project === "App")).toBe(true);
+    expect(replayStatus.complete).toBe(true);
   });
 
   it("retains a marker and blocks the checkpoint when a parent changes after open", async () => {

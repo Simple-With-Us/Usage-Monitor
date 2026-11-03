@@ -246,7 +246,10 @@ export async function collectKimiEvents({
   const discoveredFiles = new Set();
   for (const file of files) {
     const relativeFile = relative(sessionsRoot, file).replaceAll("\\", "/");
-    if (!isCanonicalPendingFile(relativeFile)) continue;
+    if (!isCanonicalPendingFile(relativeFile)) {
+      scanStatus.complete = false;
+      continue;
+    }
     discoveredFiles.add(file);
     const isPendingFile = pending.has(relativeFile);
     const fresh = await fileMayContainEventsSince(file, since, {
