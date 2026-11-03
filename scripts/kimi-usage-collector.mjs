@@ -157,6 +157,18 @@ export async function writeKimiPendingMarker(stateRoot, file, since) {
   return name;
 }
 
+async function deferPendingSession(stateRoot, file, since, known, dryRun) {
+  // A resolver may acknowledge every generation observed by this scan.  A
+  // fresh generation protects rows deferred while that resolver is running.
+  let markerNames = new Set(known?.markerNames);
+  if (!dryRun) {
+    const newMarker = await writeKimiPendingMarker(stateRoot, file, since);
+    await acknowledgeKimiEvents(stateRoot, { resolvedPendingMarkers: new Map([[file, markerNames]]) });
+    markerNames = new Set([newMarker]);
+  }
+  return { since, markerNames };
+}
+
 async function readKimiWire(file, sessionsRoot, onReadError, afterOpen) {
   let handle;
   try {
@@ -260,8 +272,9 @@ export async function collectKimiEvents({
     discoveredFiles.add(file);
     const identity = resolveWireIdentity(sessionsRoot, file);
     const isPendingFile = pending.has(relativeFile);
-    // Unknown layouts still need a durable boundary, even when their mtime is
-    // older than the checkpoint.  Read them to detect incomplete trailing JSON.
+    if (!identity.sessionId && isPendingFile) continue;
+    // First-seen unknown layouts need a durable boundary even when their mtime
+    // predates the checkpoint.  Existing markers preserve the whole source.
     const fresh = !identity.sessionId || await fileMayContainEventsSince(file, since, {
       onStatError: (error) => {
         if (!(isPendingFile && error?.code === "ENOENT")) scanStatus.complete = false;
@@ -285,7 +298,11 @@ export async function collectKimiEvents({
     }
     if (!discoveredFiles.has(file)) continue;
     const identity = resolveWireIdentity(sessionsRoot, file);
-    if (!identity.sessionId || !projectNameFromDirectory(workDirBySession?.get(identity.sessionId))) continue;
+    if (!identity.sessionId) {
+      pending.set(relativeFile, await deferPendingSession(stateRoot, relativeFile, pendingEntry.since, pendingEntry, dryRun));
+      continue;
+    }
+    if (!projectNameFromDirectory(workDirBySession?.get(identity.sessionId))) continue;
     const freshEntry = filesToRead.get(file);
     let replaySince = pendingEntry.since;
     if (freshEntry && Date.parse(freshEntry.since) < Date.parse(replaySince)) {
@@ -319,15 +336,7 @@ export async function collectKimiEvents({
         : known && Date.parse(known.since) < Date.parse(replaySinceIso)
           ? known.since
           : replaySinceIso;
-      // A resolver may acknowledge every generation observed by this scan.  A
-      // fresh generation protects rows deferred while that resolver is running.
-      let markerNames = new Set(known?.markerNames);
-      if (!dryRun) {
-        const newMarker = await writeKimiPendingMarker(stateRoot, file, deferredSince);
-        await acknowledgeKimiEvents(stateRoot, { resolvedPendingMarkers: new Map([[file, markerNames]]) });
-        markerNames = new Set([newMarker]);
-      }
-      pending.set(file, { since: deferredSince, markerNames });
+      pending.set(file, await deferPendingSession(stateRoot, file, deferredSince, known, dryRun));
       continue;
     }
     events.push(

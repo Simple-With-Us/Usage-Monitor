@@ -836,6 +836,46 @@ describe("Kimi exact usage telemetry", () => {
     }
   });
 
+  it("does not reopen pending unknown sources until recognition replays every old and appended row", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const first = JSON.stringify(kimiTurn());
+    const second = JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }));
+    await writeFile(wire, `${first}\n`);
+    const since = new Date(kimiTurn().time + 60_000);
+    let opens = 0;
+    const options = { home, stateRoot: kimiStateRoot(), since, afterWireOpen: () => { opens += 1; } };
+    const firstStatus = { complete: true };
+    expect(await collectKimiEvents({ ...options, scanStatus: firstStatus })).toEqual([]);
+    expect(opens).toBe(1);
+    expect(firstStatus.complete).toBe(true);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").since).toBe(new Date(0).toISOString());
+    expect(await collectKimiEvents(options)).toEqual([]);
+    expect(opens).toBe(1);
+    await writeFile(wire, `${first}\n${second}\n`);
+    expect(await collectKimiEvents(options)).toEqual([]);
+    expect(opens).toBe(1);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").markerNames.size).toBe(1);
+
+    await utimes(wire, new Date(0), new Date(0));
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const replayStatus = { complete: true };
+    const replay = await collectKimiEvents({
+      ...options,
+      scanStatus: replayStatus,
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    });
+    expect(opens).toBe(2);
+    expect(replay).toHaveLength(8);
+    expect(new Set(replay.map((event) => event.occurredAt)).size).toBe(2);
+    expect(replay.every((event) => event.project === "App")).toBe(true);
+    expect(replayStatus.complete).toBe(true);
+    await acknowledgeKimiEvents(kimiStateRoot(), replayStatus);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+  });
+
   it("blocks checkpoint advancement if a session directory disappears during traversal", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
     const home = join(tempRoot, ".kimi-code");
