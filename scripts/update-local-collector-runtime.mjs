@@ -5,14 +5,19 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  constants,
+  closeSync,
   existsSync,
   cpSync,
   copyFileSync,
   lstatSync,
+  fstatSync,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readlinkSync,
   readFileSync,
+  readSync,
   realpathSync,
   readdirSync,
   renameSync,
@@ -45,6 +50,7 @@ const REQUIRED_SCRIPTS = [
 ];
 const NEW_SCRIPTS = new Set(["collector-injector.mjs", "muse-code-usage-collector.mjs", "lib/infisical-service-token.mjs"]);
 const SOURCE_ZOD = resolve(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", "zod");
+const MAX_RUNTIME_DEPENDENCY_BYTES = 8 * 1024 * 1024;
 
 function fail(message) {
   throw new Error(message);
@@ -124,6 +130,25 @@ function releaseByName(runtimeRoot, rel, { legacyCurrent = false } = {}) {
   return { path: target, name: rel, sha, legacy };
 }
 
+function readRuntimeDependency(path, expected) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.uid !== process.getuid() || opened.uid !== expected.uid || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.mode !== expected.mode || opened.size !== expected.size) fail("Runtime dependency changed before reading");
+    if (!Number.isSafeInteger(opened.size) || opened.size < 0 || opened.size > MAX_RUNTIME_DEPENDENCY_BYTES) fail("Runtime dependency exceeds the bounded file size");
+    const bytes = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (!count) fail("Runtime dependency changed while reading");
+      offset += count;
+    }
+    const after = fstatSync(fd);
+    if (after.size !== opened.size || after.mode !== opened.mode || after.uid !== opened.uid || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) fail("Runtime dependency changed while reading");
+    return bytes;
+  } finally { closeSync(fd); }
+}
+
 function releaseDigest(releasePath, sha, compatibility = false) {
   const tracked = new Set(run("git", ["-C", releasePath, "ls-tree", "-rz", "--name-only", sha, "--", "scripts"], { capture: true }).split("\0").filter(Boolean));
   const expected = new Set((compatibility ? [...NEW_SCRIPTS] : []).map((name) => `scripts/${name}`).filter((name) => !tracked.has(name)));
@@ -156,7 +181,7 @@ function releaseDigest(releasePath, sha, compatibility = false) {
     const path = join(releasePath, name);
     const info = lstatSync(path);
     if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) fail("Invalid compatibility runtime dependency");
-    overlays.set(name, { bytes: info.isDirectory() ? Buffer.alloc(0) : readFileSync(path), executable: Boolean(info.mode & 0o100), directory: info.isDirectory() });
+    overlays.set(name, { bytes: info.isDirectory() ? Buffer.alloc(0) : readRuntimeDependency(path, info), executable: Boolean(info.mode & 0o100), directory: info.isDirectory() });
     if (info.isDirectory()) for (const child of readdirSync(path)) dependency(`${name}/${child}`);
   }
   dependency("node_modules/zod");

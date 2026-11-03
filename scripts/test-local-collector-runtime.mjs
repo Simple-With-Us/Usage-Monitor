@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
@@ -226,7 +226,7 @@ fs.renameSync = (source, target) => {
   assert(!refreshedOverlay.equals(secondInjector), "changed overlay file is refreshed after rollback");
   assert(readFileSync(join(runtime, "previous", "scripts", "lib", "infisical-service-token.mjs")).equals(firstTrackedCompatibility), "tracked compatibility file stays unchanged after overlay refresh");
   truthfulReceipt(runtime);
-  const dependencyTampers = ["dependency-content", "dependency-addition", "dependency-removal", "dependency-mode", "dependency-directory", "dependency-symlink"];
+  const dependencyTampers = ["dependency-content", "dependency-addition", "dependency-removal", "dependency-mode", "dependency-directory", "dependency-symlink", "dependency-oversize"];
   function alterDependency(home, target, tamper) {
     const directory = join(home, target, "node_modules", "zod");
     const entry = join(directory, "index.js");
@@ -236,6 +236,7 @@ fs.renameSync = (source, target) => {
     if (tamper === "dependency-mode") chmodSync(entry, (lstatSync(entry).mode & 0o777) ^ 0o100);
     if (tamper === "dependency-directory") mkdirSync(join(directory, "unexpected-directory"));
     if (tamper === "dependency-symlink") { renameSync(entry, `${entry}.original`); symlinkSync(`${entry}.original`, entry); }
+    if (tamper === "dependency-oversize") truncateSync(entry, 8 * 1024 * 1024 + 1);
   }
   for (const tamper of ["content", "owner-executable", "missing", "addition", "empty-directory", ...dependencyTampers, "digest-name", "legacy-name"]) {
     const changedRuntime = join(root, `overlay-${tamper}`);
@@ -256,6 +257,7 @@ fs.renameSync = (source, target) => {
     }
     const rejected = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", changedRuntime], { env, encoding: "utf8" });
     assert(rejected.status !== 0, `rollback rejects ${tamper} in compatibility identity`);
+    if (tamper === "dependency-oversize") assert(rejected.stderr.includes("bounded file size"), "oversized compatibility dependency is rejected before reading");
     assert(readlinkSync(join(changedRuntime, "current")) === thirdRelease, "compatibility rejection never changes current");
     if (tamper === "content") {
       const target = readlinkSync(join(changedRuntime, "previous")).slice("releases/".length);
@@ -281,8 +283,38 @@ fs.renameSync = (source, target) => {
     if (["digest-name", "sha-only-journal"].includes(tamper)) writeFileSync(join(changedRuntime, ".transition.json"), JSON.stringify({ version: 1, kind: "rollback", current: tamper === "sha-only-journal" ? firstSha : target.slice("releases/".length), previous: readlinkSync(join(changedRuntime, "previous")).slice("releases/".length) }));
     const rejected = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", changedRuntime], { env, encoding: "utf8" });
     assert(rejected.status !== 0 && readlinkSync(join(changedRuntime, "current")) === target, `canonical release/recovery rejects ${tamper} before pointer changes`);
+    if (tamper === "dependency-oversize") assert(rejected.stderr.includes("bounded file size"), "oversized canonical dependency is rejected before reading");
     assert(!existsSync(legacyMarker), "no rollback or journal path executes the unbound legacy dependency");
   }
+  const raceRuntime = join(root, "dependency-file-race");
+  cpSync(runtime, raceRuntime, { recursive: true, verbatimSymlinks: true });
+  const raceTarget = join(raceRuntime, readlinkSync(join(raceRuntime, "previous")), "node_modules", "zod", "index.js");
+  const raceExternal = join(root, "dependency-race-external.mjs");
+  const raceSwapped = join(root, "dependency-race-swapped");
+  const raceRead = join(root, "dependency-race-unsafe-read");
+  const raceHook = join(root, "dependency-race-hook.mjs");
+  writeFileSync(raceExternal, "throw new Error('external race target must not be read');\n");
+  writeFileSync(raceHook, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const target = ${JSON.stringify(raceTarget)};
+const originalStat = fs.lstatSync;
+const originalRead = fs.readFileSync;
+fs.lstatSync = (path, ...args) => {
+  const info = originalStat(path, ...args);
+  if (path === target && !fs.existsSync(${JSON.stringify(raceSwapped)})) {
+    fs.renameSync(target, target + '.original');
+    fs.symlinkSync(${JSON.stringify(raceExternal)}, target);
+    fs.writeFileSync(${JSON.stringify(raceSwapped)}, 'swapped');
+  }
+  return info;
+};
+fs.readFileSync = (path, ...args) => {
+  if (path === target) fs.writeFileSync(${JSON.stringify(raceRead)}, 'unsafe pathname read');
+  return originalRead(path, ...args);
+}; syncBuiltinESMExports();\n`);
+  const raced = spawnSync(process.execPath, ["--import", raceHook, updater, "--rollback", "--runtime-root", raceRuntime], { env, encoding: "utf8" });
+  assert(raced.status !== 0 && raced.stderr.includes("ELOOP") && existsSync(raceSwapped), "dependency symlink replacement after lstat is rejected by the descriptor open");
+  assert(!existsSync(raceRead) && readlinkSync(join(raceRuntime, "current")) === thirdRelease, "dependency race never reads the pathname target or changes current");
+
   for (const boundary of ["journal", "current", "previous", "receipt", "journal-removal"]) {
     const crashRuntime = join(root, `rollback-crash-${boundary}`);
     cpSync(runtime, crashRuntime, { recursive: true, verbatimSymlinks: true });
