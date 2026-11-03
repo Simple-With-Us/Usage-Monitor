@@ -24,6 +24,12 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function numericMetadata(key, value) {
+  if (value === null || value === undefined || value === "") return {};
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? { [key]: number } : {};
+}
+
 /** Kimi's `usage.record` turn rows are request deltas.  Session-scope rows are
  * cumulative and must not be emitted beside the turn rows. */
 export function parseKimiUsageJsonl(
@@ -178,13 +184,27 @@ export function parseZcodeModelUsageRows(rows) {
         ...(providerId ? { providerId } : {}),
         ...(nonEmptyString(row.project_id) ? { sourceProjectId: row.project_id.trim() } : {}),
         ...(nonEmptyString(row.query_source) ? { querySource: row.query_source.trim() } : {}),
+        ...numericMetadata("attemptIndex", row.attempt_index),
         ...(nonEmptyString(row.task_type) ? { taskType: row.task_type.trim() } : {}),
         ...(nonEmptyString(row.agent) ? { agent: row.agent.trim() } : {}),
         ...(nonEmptyString(row.mode) ? { mode: row.mode.trim() } : {}),
-        ...(Number.isFinite(Number(row.duration_ms)) ? { durationMs: Number(row.duration_ms) } : {}),
-        ...(Number.isFinite(Number(row.time_to_first_token_ms))
-          ? { timeToFirstTokenMs: Number(row.time_to_first_token_ms) }
+        ...(nonEmptyString(row.variant) ? { variant: row.variant.trim() } : {}),
+        ...(nonEmptyString(row.finish_reason) ? { finishReason: row.finish_reason.trim().slice(0, 80) } : {}),
+        ...(nonEmptyString(row.error_type) ? { errorType: row.error_type.trim().slice(0, 80) } : {}),
+        ...(nonEmptyString(row.error_code) ? { errorCode: row.error_code.trim().slice(0, 80) } : {}),
+        ...numericMetadata("durationMs", row.duration_ms),
+        ...numericMetadata("timeToFirstTokenMs", row.time_to_first_token_ms),
+        ...numericMetadata("toolCallCount", row.tool_call_count),
+        ...numericMetadata("retryCount", row.retry_count),
+        ...(row.retryable === 1 || row.retryable === true ? { retryable: true } : {}),
+        ...(row.cancelled_by_user === 1 || row.cancelled_by_user === true
+          ? { cancelledByUser: true }
           : {}),
+        ...(row.context_exceeded === 1 || row.context_exceeded === true
+          ? { contextExceeded: true }
+          : {}),
+        ...numericMetadata("providerTotalTokens", row.provider_total_tokens),
+        ...numericMetadata("computedTotalTokens", row.computed_total_tokens),
         ...(!cacheBreakdownValid ? { cacheBreakdownValid: false } : {}),
       },
     });

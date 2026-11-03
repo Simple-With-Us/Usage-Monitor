@@ -93,12 +93,12 @@ describe("GET /api/quota-windows", () => {
     expect(mocks.findRecentAlerts).toHaveBeenCalledOnce();
   });
 
-  it("returns empty expected Kimi and Z.ai provider groups by default", async () => {
+  it("returns empty expected Kimi and ZCode provider groups by default", async () => {
     process.env.USAGE_READ_TOKEN = READ_TOKEN;
     const response = await GET(request({ authorization: `Bearer ${READ_TOKEN}` }));
     expect(response.status).toBe(200);
     const body = await response.json();
-    for (const [provider, providerLabel] of [["moonshot", "Moonshot AI"], ["zcode", "Z.ai"]]) {
+    for (const [provider, providerLabel] of [["moonshot", "Kimi"], ["zcode", "ZCode"]]) {
       const group = body.providerGroups.find((entry: { provider: string }) => entry.provider === provider);
       expect(group).toMatchObject({ providerLabel, expected: true, windows: [] });
     }

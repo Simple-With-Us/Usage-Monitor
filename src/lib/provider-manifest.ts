@@ -101,16 +101,15 @@ export const DEFAULT_PROVIDER_MANIFEST: ProviderManifest = {
     },
     {
       key: "moonshot",
-      label: "Moonshot AI",
+      label: "Kimi",
       sortOrder: 55,
       iconHint: "moonshot",
       aliases: ["kimi", "kimi-code", "kimi-code-cli", "moonshot-kimi"],
       expected: true,
-      terms: { defaultWindowLabel: "5h" },
     },
     {
       key: "zcode",
-      label: "Z.ai",
+      label: "ZCode",
       sortOrder: 57,
       iconHint: "zai",
       aliases: [
@@ -127,7 +126,6 @@ export const DEFAULT_PROVIDER_MANIFEST: ProviderManifest = {
         "glm-code",
       ],
       expected: true,
-      terms: { defaultWindowLabel: "5h" },
     },
     {
       key: "grok-bot",

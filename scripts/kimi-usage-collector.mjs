@@ -21,6 +21,7 @@ import {
 import { filterEventsSince, postUsageBatches } from "./lib/session-token-collectors.mjs";
 import {
   canAdvanceCollectorCheckpoint,
+  configureCollectorSentryToken,
   expandHome,
   fileMayContainEventsSince,
   isBotFleetSessionPath,
@@ -62,11 +63,12 @@ export function kimiWireIdentity(sessionsRoot, filePath) {
   };
 }
 
-async function readSessionIndex(home) {
+async function readSessionIndex(home, { onReadError } = {}) {
   try {
     return parseKimiSessionIndexJsonl(await readFile(join(home, "session_index.jsonl"), "utf8"));
-  } catch {
-    return new Map();
+  } catch (error) {
+    onReadError?.(error);
+    return null;
   }
 }
 
@@ -78,7 +80,15 @@ export async function collectKimiEvents({
 } = {}) {
   const sessionsRoot = join(home, "sessions");
   if (!existsSync(sessionsRoot)) return [];
-  const workDirBySession = await readSessionIndex(home);
+  const workDirBySession = await readSessionIndex(home, {
+    onReadError: () => {
+      scanStatus.complete = false;
+    },
+  });
+  // Project and BotFleet attribution are not part of the event identity.  If
+  // we sent now, a later replay with the recovered index would dedupe before
+  // those fields could be restored, so defer the durable source rows instead.
+  if (!workDirBySession) return [];
   const files = await walkFiles(sessionsRoot, {
     name: "wire.jsonl",
     onTraversalError: () => {
@@ -125,9 +135,11 @@ async function main() {
     fail(error instanceof Error ? error.message : String(error));
   }
   const home = defaultKimiCodeHome();
+  configureCollectorSentryToken(["KIMI_CODE_TELEMETRY_HUB_TOKEN"]);
   const sourceAvailable = existsSync(join(home, "sessions"));
   const scanStatus = { complete: true };
   const events = await collectKimiEvents({ home, since: args.since, scanStatus });
+  if (!scanStatus.complete) log("WARNING: source scan incomplete; checkpoint unchanged");
   log(
     `parsed ${events.length} event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`,
   );

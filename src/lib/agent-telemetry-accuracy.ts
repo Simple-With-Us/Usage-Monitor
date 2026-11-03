@@ -79,7 +79,7 @@ export function resolveTelemetryAccuracy(
             ? `${name} token counts and billed cost come from the vendor Admin API.`
             : tokenTelemetryKind === "local_database"
               ? `${name} exact token counts come from a local usage database.  They are not a vendor invoice.`
-              : `${name} token counts come from local session logs.  They are estimates, not a vendor invoice.`,
+              : `${name} token counts come from local session logs.  They are source-reported analytics, not a vendor invoice.`,
     };
   }
 

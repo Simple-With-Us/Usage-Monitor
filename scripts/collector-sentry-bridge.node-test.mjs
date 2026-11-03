@@ -86,6 +86,22 @@ test("claim honors narrowed rows beyond the pending head", () => fixture(async (
   assert.equal(result.pending, true);
 }));
 
+test("default drain is bounded by time and requests instead of a 1000-event ceiling", () => fixture(async (config) => {
+  const events = Array.from({ length: 1001 }, (_, index) =>
+    timedTokens({ collectorCallId: `large-run-${index}`, extraId: `large-run-${index}` }),
+  ).flat();
+  const root = await enqueueCollectorSentry(events, identity, config);
+  let requests = 0;
+  const result = await drainCollectorSentry(root, config, {
+    fetchImpl: async () => {
+      requests += 1;
+      return accepted();
+    },
+  });
+  assert.deepEqual(result, { delivered: 1001, quarantined: 0, pending: false });
+  assert.ok(requests > 0 && requests <= 32);
+}));
+
 test("authoritative unmeasured calls become logs while serialization and IDs remain unchanged", () => {
   const plain = tokens();
   const known = tokens({ collectorCallId: "message-id", extraMetadata: { prompt: "PRIVATE_CONTENT", response: "PRIVATE_CONTENT", sessionId: "PRIVATE_CONTENT" } });
@@ -233,6 +249,30 @@ test("unmeasured native spans retain their error status when delivered as logs",
     assert.equal(event.status, "error");
     assert.equal(event.durationMs, undefined);
     assert.ok(!JSON.stringify(envelope).includes("PRIVATE_CONTENT"));
+    return accepted();
+  } });
+  assert.equal(result.delivered, 1);
+}));
+
+test("measured collector calls retain error status and timing on the Sentry trace wire", () => fixture(async (config) => {
+  const events = timedTokens({
+    collectorCallId: "error-call",
+    extraId: "error-call",
+    extraMetadata: {
+      status: "error",
+      errorType: "provider_error",
+      timeToFirstTokenMs: 125,
+    },
+  });
+  const root = await enqueueCollectorSentry(events, identity, config);
+  const result = await drainCollectorSentry(root, config, { fetchImpl: async (url, init) => {
+    assert.ok(url.endsWith("/v1/traces"));
+    const envelope = JSON.parse(init.body);
+    const span = envelope.resourceSpans[0].scopeSpans[0].spans[0];
+    assert.deepEqual(span.status, { code: 2 });
+    const attributes = new Map(span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]));
+    assert.equal(attributes.get("ttft_ms"), "125");
+    assert.equal(attributes.get("error.type"), "provider_error");
     return accepted();
   } });
   assert.equal(result.delivered, 1);

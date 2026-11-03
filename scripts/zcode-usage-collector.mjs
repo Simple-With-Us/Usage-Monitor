@@ -18,6 +18,7 @@ import {
 import { filterEventsSince, postUsageBatches } from "./lib/session-token-collectors.mjs";
 import {
   canAdvanceCollectorCheckpoint,
+  configureCollectorSentryToken,
   expandHome,
   recordCollectorSuccess,
   resolveCollectorArgs,
@@ -54,11 +55,14 @@ export async function readZcodeModelUsageRows(dbPath, since) {
     return db
       .prepare(
         `SELECT
-          u.id, u.session_id, u.query_source, u.provider_id, u.model_id,
-          u.agent, u.mode, u.task_type, u.status, u.started_at,
-          u.completed_at, u.duration_ms, u.time_to_first_token_ms,
+          u.id, u.attempt_index, u.session_id, u.query_source, u.provider_id, u.model_id,
+          u.variant, u.agent, u.mode, u.task_type, u.status, u.started_at,
+          u.completed_at, u.duration_ms, u.time_to_first_token_ms, u.finish_reason,
+          u.tool_call_count, u.retry_count, u.retryable, u.cancelled_by_user,
+          u.context_exceeded, u.error_type, u.error_code,
           u.input_tokens, u.output_tokens, u.reasoning_tokens,
           u.cache_creation_input_tokens, u.cache_read_input_tokens,
+          u.provider_total_tokens, u.computed_total_tokens,
           s.project_id, s.directory
         FROM model_usage u
         LEFT JOIN session s ON s.id = u.session_id
@@ -96,9 +100,11 @@ async function main() {
     fail(error instanceof Error ? error.message : String(error));
   }
   const dbPath = defaultZcodeDbPath();
+  configureCollectorSentryToken(["ZCODE_TELEMETRY_HUB_TOKEN"]);
   const sourceAvailable = existsSync(dbPath);
   const scanStatus = { complete: true };
   const events = await collectZcodeEvents({ dbPath, since: args.since, scanStatus });
+  if (!scanStatus.complete) log("WARNING: database scan incomplete; checkpoint unchanged");
   log(
     `parsed ${events.length} event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`,
   );

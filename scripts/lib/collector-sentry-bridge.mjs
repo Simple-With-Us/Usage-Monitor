@@ -86,6 +86,12 @@ export function collectorSentryEvents(events, { producerId, producerInstanceId =
       row.durationMs = duration;
       if (callId) row.ts = new Date(start).toISOString();
     }
+    const ttft = event.metadata?.timeToFirstTokenMs;
+    if (measuredDuration(ttft)) row.ttftMs = ttft;
+    const status = event.metadata?.status;
+    if (status === "error" || status === "cancelled") row.status = "error";
+    const errorType = event.metadata?.errorType;
+    if (status === "error" && typeof errorType === "string") row.errorType = errorType;
     grouped.set(id, row);
   }
   // Content is projected before it is ever written to disk.
@@ -170,7 +176,7 @@ async function persistCollectorSentry(events, identity, config) {
 }
 
 /** At-least-once delivery; receipts survive collector checkpoints and restarts. */
-export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = 1000, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32, prioritizeUnnarrowed = false } = {}) {
+export async function drainCollectorSentry(root, config, { fetchImpl = globalThis.fetch, limit = Number.MAX_SAFE_INTEGER, isAlive = processAlive, birthOf = processBirth, budgetMs = 5000, requestLimit = 32, prioritizeUnnarrowed = false } = {}) {
   if (!Number.isSafeInteger(requestLimit) || requestLimit < 1 || requestLimit > 1000) throw new Error("Outbox request limit must be between 1 and 1000");
   const db = await openOutbox(root);
   const owner = randomUUID();
@@ -198,7 +204,7 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
     const knownCall = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "chat");
     // Legacy pending spans keep their durable payload and identity; unknown timing travels as a log.
     const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" && hasTiming ? "span" : "log", name: nativeTurn ? "botfleet.turn" : knownCall || event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
-    if (nativeTurn) {
+    if (nativeTurn || knownCall) {
       if (safe.kind === "span") safe.status = { code: event.status?.code === 2 ? 2 : 1 };
       else safe.severityNumber = event.severityNumber === 17 || event.status?.code === 2 ? 17 : 9;
     }
