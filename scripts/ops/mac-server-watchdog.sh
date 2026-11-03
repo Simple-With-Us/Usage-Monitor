@@ -174,7 +174,7 @@ LITESTREAM_STATUS="$(check_process "litestream" "true")"
 # wrong when the runtime is OrbStack).
 ORBSTACK_STATUS="$(check_process "(OrbStack|orbstack)" "true")"
 DOCKER_STATUS="$(check_process "Docker" "true")"
-OPERATOR_STATUS="$(check_process "operator" "false")"
+OPERATOR_STATUS="$(check_process "operator-live" "false")"
 
 # Coding agent live execution checks
 check_agent() {
