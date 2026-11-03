@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const disabledSources = vi.hoisted(() => new Set<string>());
 
 // The probe reaches upstream only through `requestJson`, which wraps this
 // module's `fetchJson`.  Mocking it here keeps the suite entirely offline.
@@ -8,7 +9,9 @@ vi.mock("@/lib/adapters/helpers", () => ({
 vi.mock("@/lib/infisical-connections", async (original) => ({
   ...await original<typeof import("@/lib/infisical-connections")>(),
   loadInfisicalConnection: vi.fn(async () => null),
+  isInfisicalConnectionDisabled: (source: string) => disabledSources.has(source),
   resolveInfisicalConnection: vi.fn(async (source: import("../infisical-connections").InfisicalSource) => {
+    if (disabledSources.has(source)) return null;
     const connections = await original<typeof import("@/lib/infisical-connections")>();
     return connections.infisicalConnectionFromEnv(source);
   }),
@@ -75,8 +78,10 @@ const infisical = SECRETS_PROBES.find((entry) => entry.id === "infisical")!;
 describe("platform-status secrets probes", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    disabledSources.clear();
     for (const name of INFISICAL_ENV_VARS) vi.stubEnv(name, "");
     for (const source of ["ST", "CT", "SHARED", "UM"]) vi.stubEnv(`INFISICAL_${source}_PROJECT_ID`, `mock-${source.toLowerCase()}-project-id`);
+    for (const source of ["ST", "CT", "SHARED", "UM"]) for (const suffix of ["READ_TOKEN", "WRITE_TOKEN"]) vi.stubEnv(`INFISICAL_${source}_${suffix}`, "");
     fetchJsonMock.mockReset();
     fetchJsonMock.mockImplementation(async () => {
       throw new Error("unexpected upstream call");
@@ -109,6 +114,34 @@ describe("platform-status secrets probes", () => {
   it("ignores a half-configured identity for the purpose of being configured", () => {
     vi.stubEnv("INFISICAL_ST_CLIENT_ID", "st-client-id");
     expect(infisical.isConfigured()).toBe(false);
+  });
+  it.each(["UM", "CT"])("reports intentionally disabled %s ambient MI pairs, partial pairs and tokens as unconfigured", async (source) => {
+    disabledSources.add(source.toLowerCase());
+    vi.stubEnv(`INFISICAL_${source}_CLIENT_ID`, "disabled-client");
+    vi.stubEnv(`INFISICAL_${source}_CLIENT_SECRET`, CLIENT_SECRET);
+    for (const [secret, token] of [[CLIENT_SECRET, ""], ["", ""], ["", "st.disabled-read"]]) {
+      vi.stubEnv(`INFISICAL_${source}_CLIENT_SECRET`, secret);
+      vi.stubEnv(`INFISICAL_${source}_READ_TOKEN`, token);
+      expect(infisical.isConfigured()).toBe(false);
+      expect(await infisical.probe()).toEqual({ state: "unconfigured", headline: null, metrics: [] });
+    }
+    expect(fetchJsonMock).not.toHaveBeenCalled();
+  });
+  it("keeps genuine incomplete credentials degraded while excluding a disabled sibling", async () => {
+    disabledSources.add("ct");
+    vi.stubEnv("INFISICAL_CT_CLIENT_ID", "disabled-half");
+    vi.stubEnv("INFISICAL_UM_CLIENT_ID", "real-incomplete-half");
+    expect(await infisical.probe()).toMatchObject({ state: "degraded", error: "incomplete_credentials" });
+    expect(fetchJsonMock).not.toHaveBeenCalled();
+  });
+  it("does not count a disabled partial sibling against a healthy connection", async () => {
+    disabledSources.add("ct"); vi.stubEnv("INFISICAL_CT_CLIENT_ID", "disabled-half");
+    vi.stubEnv("INFISICAL_UM_CLIENT_ID", "um-client-id"); vi.stubEnv("INFISICAL_UM_CLIENT_SECRET", CLIENT_SECRET);
+    fetchJsonMock.mockImplementation(async (url: string) => url.includes("/login") ? response(200, { accessToken: ACCESS_TOKEN }) : response(200, secretList(4)));
+    const result = await infisical.probe();
+    expect(result.state).toBe("healthy"); expect(result.error).toBeUndefined();
+    expect(result.metrics.some((entry) => entry.label === "Incomplete Identities")).toBe(false);
+    expect(fetchJsonMock).toHaveBeenCalledTimes(2);
   });
 
   it("reports healthy with the visible secret count for each authenticated scope", async () => {

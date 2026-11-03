@@ -15,7 +15,7 @@
  */
 
 import { resolveProdInfisicalEnvironment } from "../../infisical-environment";
-import { resolveInfisicalConnection, hasStoredInfisicalConnections, type InfisicalConnection } from "../../infisical-connections";
+import { resolveInfisicalConnection, hasStoredInfisicalConnections, isInfisicalConnectionDisabled, type InfisicalConnection, type InfisicalSource } from "../../infisical-connections";
 import { authorizeInfisical, InfisicalAuthError } from "../../infisical-auth";
 import {
   asArray,
@@ -28,6 +28,7 @@ import {
   upstreamFailure,
 } from "../probe-helpers";
 import type { PlatformMetric, PlatformProbe, PlatformProbeResult } from "../types";
+import { unconfiguredResult } from "../types";
 
 /** Same default host `infisical-provider-sync` uses. */
 const DEFAULT_BASE_URL = "https://app.infisical.com";
@@ -37,6 +38,7 @@ const DEFAULT_SECRET_PATH = "/";
 
 
 interface ScopeDefinition {
+  source: InfisicalSource;
   /** Project display name, used verbatim as the metric label. */
   label: string;
   clientIdEnv: string;
@@ -53,6 +55,7 @@ interface ScopeDefinition {
  */
 const SCOPES: readonly ScopeDefinition[] = [
   {
+    source: "st",
     label: "SocraticTrade.com",
     clientIdEnv: "INFISICAL_ST_CLIENT_ID",
     clientSecretEnv: "INFISICAL_ST_CLIENT_SECRET",
@@ -61,6 +64,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_ST_PROJECT_ID || "",
   },
   {
+    source: "ct",
     label: "Congress.Trade",
     clientIdEnv: "INFISICAL_CT_CLIENT_ID",
     clientSecretEnv: "INFISICAL_CT_CLIENT_SECRET",
@@ -69,6 +73,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_CT_PROJECT_ID || "",
   },
   {
+    source: "shared",
     label: "Shared",
     clientIdEnv: "INFISICAL_SHARED_CLIENT_ID",
     clientSecretEnv: "INFISICAL_SHARED_CLIENT_SECRET",
@@ -77,6 +82,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_SHARED_PROJECT_ID || "",
   },
   {
+    source: "um",
     label: "Usage-Monitor",
     clientIdEnv: "INFISICAL_UM_CLIENT_ID",
     clientSecretEnv: "INFISICAL_UM_CLIENT_SECRET",
@@ -107,10 +113,10 @@ async function resolveScopes(): Promise<ResolvedScopes> {
   let incomplete = 0;
 
   for (const scope of SCOPES) {
-    const source = scope.label === "SocraticTrade.com" ? "st" : scope.label === "Congress.Trade" ? "ct" : scope.label === "Shared" ? "shared" : "um";
     let connection: InfisicalConnection | null;
-    try { connection = await resolveInfisicalConnection(source); }
+    try { connection = await resolveInfisicalConnection(scope.source); }
     catch { incomplete += 1; continue; }
+    if (isInfisicalConnectionDisabled(scope.source)) continue;
     const clientId = connection?.clientId ?? envValue(scope.clientIdEnv);
     const clientSecret = connection?.clientSecret ?? envValue(scope.clientSecretEnv);
     if (connection && (clientId && clientSecret || connection.mode === "service-tokens")) {
@@ -216,10 +222,12 @@ async function readScope(
 }
 
 function isConfigured(): boolean {
-  return hasStoredInfisicalConnections() || SCOPES.some((scope) => Boolean(envValue(scope.clientIdEnv) && envValue(scope.clientSecretEnv) || envValue(`${scope.clientIdEnv.replace(/_CLIENT_ID$/, "")}_READ_TOKEN`)));
+  return hasStoredInfisicalConnections() || SCOPES.some((scope) => !isInfisicalConnectionDisabled(scope.source) && Boolean(envValue(scope.clientIdEnv) && envValue(scope.clientSecretEnv) || envValue(`${scope.clientIdEnv.replace(/_CLIENT_ID$/, "")}_READ_TOKEN`)));
 }
 
 async function probe(): Promise<PlatformProbeResult> {
+  const { ready, incomplete } = await resolveScopes();
+  if (ready.length === 0 && incomplete === 0) return unconfiguredResult();
   const baseUrl = allowedBaseUrl();
   if (!baseUrl) {
     return {
@@ -231,7 +239,6 @@ async function probe(): Promise<PlatformProbeResult> {
     };
   }
 
-  const { ready, incomplete } = await resolveScopes();
   if (ready.length === 0) {
     return {
       state: "degraded",
@@ -375,8 +382,7 @@ export const SECRETS_PROBES: readonly PlatformProbe[] = [
     id: "infisical",
     name: "Infisical",
     category: "secrets",
-    // The automation pair alone enables every scope; the per-project
-    // INFISICAL_<SCOPE>_CLIENT_ID / _CLIENT_SECRET pairs override it.
+    // Saved or explicit project credentials enable each independent scope.
     requiredEnv: [],
     consoleUrl: "https://app.infisical.com",
     isConfigured,
