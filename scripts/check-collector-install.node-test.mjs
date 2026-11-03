@@ -334,17 +334,16 @@ test("the CLI emits verified configuration through an aliased checkout", () => f
   assert.equal(result.stdout, `${baseline} ^4.6.6 1\n`);
 }));
 
-test("a missing argv path during import returns a controlled failure without rejecting the module", () => fixture(({ root, source }) => {
+for (const exitCode of [0, 17]) test(`a missing argv path during import preserves host exit code ${exitCode}`, () => fixture(({ root, source }) => {
   const helper = pathToFileURL(join(source, "scripts", "check-collector-install.mjs")).href;
   const missing = join(root, "missing-entrypoint");
-  const code = `process.argv[1] = ${JSON.stringify(missing)}; const imported = await import(${JSON.stringify(helper)}); console.log(typeof imported.checkCollectorInstall);`;
+  const code = `process.argv[1] = ${JSON.stringify(missing)}; process.exitCode = ${exitCode}; const imported = await import(${JSON.stringify(helper)}); console.log(typeof imported.checkCollectorInstall);`;
   const result = spawnSync(process.execPath, ["--input-type=module", "--eval", code], { encoding: "utf8", timeout: 15000 });
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, "function\n", "guard failure is handled without an uncaught module evaluation error");
-  assert.match(result.stderr, /^\[collector-install-preflight\] ENOENT:/);
-  assert.doesNotMatch(result.stderr, /\n\s+at |uncaughtException/);
+  assert.equal(result.status, exitCode);
+  assert.equal(result.stdout, "function\n", "import resolves exports without invoking the CLI body");
+  assert.equal(result.stderr, "");
 }));
 
 test("a direct CLI with a missing source checkout fails with only a controlled diagnostic", () => fixture(({ root, source }) => {
