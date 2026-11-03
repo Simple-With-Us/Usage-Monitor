@@ -44,9 +44,11 @@ export async function PUT(request: NextRequest) {
       connection = mergeConnectionCredentials(input, effective);
     }
     // Verify every declared route against token metadata, without a write probe.
+    let identityToken: string | undefined;
     for (const permission of ["read", "write"] as const) {
       for (const path of permission === "read" ? connection.readPaths : connection.writePaths) {
-        const token = await authorizeInfisical(connection, path, permission);
+        const token = identityToken ?? await authorizeInfisical(connection, path, permission);
+        if (connection.mode === "machine-identity") identityToken = token;
         if (permission === "read") {
           const list = await infisicalJson(`${infisicalSecretApi(connection)}?${infisicalSecretParams(connection, path)}`, { headers: { authorization: `Bearer ${token}` } });
           if (!Array.isArray(list.secrets)) return failure();

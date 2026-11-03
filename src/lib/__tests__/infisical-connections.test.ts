@@ -418,4 +418,40 @@ describe("Admin connection API", () => {
     const response = await PUT(request("PUT", c));
     expect(response.status).toBe(400); expect(await response.text()).not.toContain("must-not-leak"); expect(database.size).toBe(0);
   });
+  it("continues verifying service-token metadata for every declared route", async () => {
+    const c = connection(); c.readPaths.push("/other"); c.writePaths.push("/write-other");
+    c.tokens[0].paths.push("/other"); c.tokens[1].paths.push("/write-other");
+    const mock = mockFetch(c); vi.stubGlobal("fetch", mock.fetchImpl);
+
+    const response = await PUT(request("PUT", c));
+
+    expect(response.status).toBe(200);
+    expect(mock.calls.filter(({ url }) => url === "/api/v2/service-token")).toHaveLength(4);
+    expect(mock.calls.filter(({ url }) => url === "/api/v3/secrets/raw")).toHaveLength(2);
+  });
+  it("uses one machine-identity login per verification pass while keeping reads per folder", async () => {
+    const c: InfisicalConnection = { ...connection(), mode: "machine-identity", tokens: [], clientId: "dedicated", clientSecret: "hidden", readPaths: ["/read", "/other"], writePaths: ["/write", "/write-other"] };
+    const calls: { path: string; method: string }[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({ path: url.pathname, method: init?.method ?? "GET" });
+      if (url.pathname.endsWith("/login")) return json({ accessToken: "machine-access" });
+      if (url.pathname === "/api/v4/secrets") return json({ secrets: [] });
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const first = await PUT(request("PUT", c));
+    expect(first.status).toBe(200);
+    expect(calls.filter(({ path }) => path.endsWith("/login"))).toHaveLength(1);
+    expect(calls.filter(({ path }) => path === "/api/v4/secrets")).toHaveLength(2);
+    expect(calls.filter(({ path }) => path === "/api/v4/secrets").every(({ method }) => method === "GET")).toBe(true);
+    expect(await first.json()).toMatchObject({ connection: { writePermissionsVerified: false } });
+
+    calls.length = 0;
+    const second = await PUT(request("PUT", c));
+    expect(second.status).toBe(200);
+    expect(calls.filter(({ path }) => path.endsWith("/login"))).toHaveLength(1);
+    expect(calls.filter(({ path }) => path === "/api/v4/secrets")).toHaveLength(2);
+  });
 });
