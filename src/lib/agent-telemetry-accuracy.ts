@@ -1,14 +1,15 @@
 /**
  * Honesty rules for coding-agent usage numbers.
  *
- * A missing feed must never render as "little to no usage."  Zero tokens
+ * A missing feed must never render as "little to no usage."  Zero tokens
  * with no trustworthy telemetry is "not reported," not a confirmed idle
- * seat.  Two spaces between sentences in every note a human reads.
+ * seat.  Human-readable notes use the owner-required sentence gap.
  */
 
 export type TokenTelemetryKind =
   | "otlp"
   | "session_jsonl"
+  | "local_database"
   | "billing_api"
   | "character_estimate"
   | "none";
@@ -33,7 +34,12 @@ export interface TelemetryAccuracyResult {
 export function isReliableTokenTelemetryKind(
   kind: TokenTelemetryKind,
 ): boolean {
-  return kind === "otlp" || kind === "session_jsonl" || kind === "billing_api";
+  return (
+    kind === "otlp" ||
+    kind === "session_jsonl" ||
+    kind === "local_database" ||
+    kind === "billing_api"
+  );
 }
 
 export function resolveTelemetryAccuracy(
@@ -57,7 +63,7 @@ export function resolveTelemetryAccuracy(
       label: "not reported",
       note:
         unavailableReason ??
-        `${name} does not report token usage.  This is not zero usage.`,
+        `${name} does not report token usage.  This is not zero usage.`,
     };
   }
 
@@ -71,7 +77,9 @@ export function resolveTelemetryAccuracy(
           ? `${name} token counts come from the live OTLP stream.`
           : tokenTelemetryKind === "billing_api"
             ? `${name} token counts and billed cost come from the vendor Admin API.`
-            : `${name} token counts come from local session logs.  They are estimates, not a vendor invoice.`,
+            : tokenTelemetryKind === "local_database"
+              ? `${name} exact token counts come from a local usage database.  They are not a vendor invoice.`
+              : `${name} token counts come from local session logs.  They are source-reported analytics, not a vendor invoice.`,
     };
   }
 
@@ -80,7 +88,7 @@ export function resolveTelemetryAccuracy(
       accuracy: "unavailable",
       usageIsReliable: false,
       label: "not reported",
-      note: `${name} is running on the Mac but no token events arrived in this window.  This is not confirmed as zero usage.`,
+      note: `${name} is running on the Mac but no token events arrived in this window.  This is not confirmed as zero usage.`,
     };
   }
 
@@ -97,7 +105,7 @@ export function resolveTelemetryAccuracy(
     accuracy: "none_in_window",
     usageIsReliable: false,
     label: "not reported",
-    note: `No session events for ${name} in this window.  This is not a confirmed zero.`,
+    note: `No session events for ${name} in this window.  This is not a confirmed zero.`,
   };
 }
 

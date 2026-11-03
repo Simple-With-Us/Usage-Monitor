@@ -86,21 +86,40 @@ Fixes now in place:
 * `com.jays.mac-server-watchdog` still runs from the checkout; it is a host
   heartbeat, not a collector, and is not covered by the installer.
 
-## Harness feeds: DSH, opencode, fx (UM-1594)
+## Harness feeds: DSH, opencode, fx, Kimi, ZCode (UM-1594, UM-1649)
 
-Three LaunchAgents feed the harnesses that have no vendor billing API.  Create
+Five LaunchAgents feed the harnesses that have no complete vendor billing API.  Create
 each from its template (`scripts/com.jays.<name>-usage-collector.plist.example`),
-replacing `/ABSOLUTE/PATH/TO/HOME` with `$HOME`, then `launchctl bootstrap`:
+replacing every absolute-path placeholder with the installed node, detached collector
+runtime, and home paths, and replacing the hub-host placeholder with the approved
+telemetry hub endpoint, then `launchctl bootstrap`:
 
 | Label | Source | Producer |
 |---|---|---|
 | `com.jays.deepseek-usage-collector` | `~/.dsh/sessions` and `~/.clutch/dsh/sessions` (`session.jsonl.zstd` and `session.v3.jsonl.zstd`) | `deepseek-dsh` |
 | `com.jays.opencode-usage-collector` | `~/.local/share/opencode/opencode.db`, opened read-only | `opencode` |
 | `com.jays.fx-usage-collector` | `~/.fx/usage.jsonl` | `fx` |
+| `com.jays.kimi-usage-collector` | `$KIMI_CODE_HOME/sessions/**/agents/*/wire.jsonl` (`~/.kimi-code` by default) | `kimi-code` |
+| `com.jays.zcode-usage-collector` | `$ZCODE_DATA_BASE_DIR/.zcode/cli/db/db.sqlite` (`~` by default), opened read-only | `zcode` |
 
-All three run on `/opt/homebrew/opt/node@24/bin/node` (opencode needs
+All five run on `/opt/homebrew/opt/node@24/bin/node` (opencode and ZCode need
 `node:sqlite`) and use `USAGE_INGEST_TOKEN` until scoped tokens for `opencode`
-and `fx` are added to `USAGE_INGEST_PRODUCER_TOKENS`.  The DSH agent sets
+and `fx` are added to `USAGE_INGEST_PRODUCER_TOKENS`.  Kimi and ZCode resolve
+`KIMI_CODE_INGEST_TOKEN` and `ZCODE_INGEST_TOKEN` first, then the unscoped
+fallback.  Their Sentry bridge resolves `KIMI_CODE_TELEMETRY_HUB_TOKEN` and
+`ZCODE_TELEMETRY_HUB_TOKEN` from process environment or `fleet-secrets`; the
+plist contains no bearer value.  Provision each producer in the receiver maps
+before bootstrap, and verify both an ingest ACK and a hub ACK before calling it
+live.  Infisical is optional for the collector: a host environment can supply
+the same scoped names, while an Infisical-backed host must use its approved
+read-only service-token route rather than the retired shared Automation
+identity.  The DSH agent sets
 `USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1`, because BotFleet already reports
-its own workspaces.  A first run backfills 180 days and then keeps a watermark
+its own workspaces.  A first run backfills the source's retained history and then keeps a watermark
 in `~/.cache/usage-monitor/collector-state/`.
+
+Kimi emits only durable `usage.record` rows whose `usageScope` is `turn`;
+session-scope or omitted-scope totals are cumulative and are not added again.  ZCode
+emits terminal `model_usage` rows, including failed or cancelled requests that
+still reported usage.  ZCode retains only 30 days of these rows, so a broken
+collector must be repaired before that source history expires.

@@ -26,6 +26,22 @@ export function resolveCollectorToken(
   return null;
 }
 
+/** Load one producer-scoped hub bearer into this collector process only.  The
+ * source value remains in fleet-secrets/Infisical and never enters a plist. */
+export function configureCollectorSentryToken(
+  tokenEnvVarNames,
+  { env = process.env, fleetSecretsGet: lookup = fleetSecretsGet } = {},
+) {
+  if (env.COLLECTOR_SENTRY_ENABLED !== "1") return false;
+  if (!env.COLLECTOR_TELEMETRY_HUB_ENDPOINT?.trim()) return false;
+  if (env.COLLECTOR_TELEMETRY_HUB_TOKEN?.trim()) return true;
+  if (env.COLLECTOR_TELEMETRY_HUB_TOKENS_JSON?.trim()) return true;
+  const token = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
+  if (!token) return false;
+  env.COLLECTOR_TELEMETRY_HUB_TOKEN = token;
+  return true;
+}
+
 /** Default lookback when LaunchAgents omit --days/--since.  UTC month-start
  *  dropped June–August Codex sessions on 1 September (owner 2026-09-03). */
 export const DEFAULT_COLLECTOR_LOOKBACK_DAYS = 180;

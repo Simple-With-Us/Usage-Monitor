@@ -67,7 +67,7 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
   "service.version",
 ]);
 
-const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "xai", "meta", "groq", "together_ai", "openrouter"]);
+const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "moonshot", "zcode", "xai", "meta", "groq", "together_ai", "openrouter"]);
 export function knownAiVendor(value) {
   return typeof value === "string" && AI_VENDORS.has(value.toLowerCase()) ? value.toLowerCase() : undefined;
 }

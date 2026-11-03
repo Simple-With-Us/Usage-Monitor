@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, enqueueCollectorSentryTelemetry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
+import { DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, collectorSentryConfig, collectorSentryEvents, enqueueCollectorSentry, enqueueCollectorSentryTelemetry, drainCollectorSentry, pruneCollectorSentryReceipts, retryCollectorSentryQuarantine } from "./lib/collector-sentry-bridge.mjs";
 import { tokenEventsFromBreakdown, parseClaudeSessionJsonl, postUsageBatches } from "./lib/session-token-collectors.mjs";
 import { buildLogsEnvelope, buildTracesEnvelope, traceAndSpanIds } from "./telemetry-hub/sentry-sender.mjs";
 import { normalizeOtlpLogs, normalizeOtlpTraces } from "./telemetry-hub/internal-event.mjs";
@@ -84,6 +84,23 @@ test("claim honors narrowed rows beyond the pending head", () => fixture(async (
   assert.equal(batchLength, 1);
   assert.equal(result.delivered, 1);
   assert.equal(result.pending, true);
+}));
+
+test("default drain uses an explicit 3200-event ceiling while retaining the time and request caps", () => fixture(async (config) => {
+  assert.equal(DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, 3200);
+  const events = Array.from({ length: DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT + 1 }, (_, index) =>
+    timedTokens({ collectorCallId: `large-run-${index}`, extraId: `large-run-${index}` }),
+  ).flat();
+  const root = await enqueueCollectorSentry(events, identity, config);
+  let requests = 0;
+  const result = await drainCollectorSentry(root, config, {
+    fetchImpl: async () => {
+      requests += 1;
+      return accepted();
+    },
+  });
+  assert.deepEqual(result, { delivered: DEFAULT_COLLECTOR_SENTRY_EVENT_LIMIT, quarantined: 0, pending: true });
+  assert.equal(requests, 32);
 }));
 
 test("authoritative unmeasured calls become logs while serialization and IDs remain unchanged", () => {
@@ -233,6 +250,30 @@ test("unmeasured native spans retain their error status when delivered as logs",
     assert.equal(event.status, "error");
     assert.equal(event.durationMs, undefined);
     assert.ok(!JSON.stringify(envelope).includes("PRIVATE_CONTENT"));
+    return accepted();
+  } });
+  assert.equal(result.delivered, 1);
+}));
+
+test("measured collector calls retain error status and timing on the Sentry trace wire", () => fixture(async (config) => {
+  const events = timedTokens({
+    collectorCallId: "error-call",
+    extraId: "error-call",
+    extraMetadata: {
+      status: "error",
+      errorType: "provider_error",
+      timeToFirstTokenMs: 125,
+    },
+  });
+  const root = await enqueueCollectorSentry(events, identity, config);
+  const result = await drainCollectorSentry(root, config, { fetchImpl: async (url, init) => {
+    assert.ok(url.endsWith("/v1/traces"));
+    const envelope = JSON.parse(init.body);
+    const span = envelope.resourceSpans[0].scopeSpans[0].spans[0];
+    assert.deepEqual(span.status, { code: 2 });
+    const attributes = new Map(span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]));
+    assert.equal(attributes.get("ttft_ms"), "125");
+    assert.equal(attributes.get("error.type"), "provider_error");
     return accepted();
   } });
   assert.equal(result.delivered, 1);

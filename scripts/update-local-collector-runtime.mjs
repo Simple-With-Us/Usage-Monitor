@@ -28,8 +28,10 @@ const REQUIRED_SCRIPTS = [
   "deepseek-usage-collector.mjs",
   "fx-usage-collector.mjs",
   "grok-usage-collector.mjs",
+  "kimi-usage-collector.mjs",
   "minimax-usage-collector.mjs",
   "opencode-usage-collector.mjs",
+  "zcode-usage-collector.mjs",
 ];
 
 function fail(message) {
