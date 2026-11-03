@@ -153,7 +153,11 @@ describe("transferMuseCodeAccessToken", () => {
     const result = await transferMuseCodeAccessToken({
       env: WRITE_ENV, fetchImpl, execFileImpl: keychainMock(), platform: "darwin",
     });
-    expect(secretRequests(fetchImpl).map(([, request]) => request.method)).toEqual(["PATCH", "POST"]);
+    const requests = secretRequests(fetchImpl);
+    expect(requests.map(([, request]) => request.method)).toEqual(["PATCH", "POST"]);
+    expect(requests[0][1].signal).not.toBe(requests[1][1].signal);
+    expect(requests[0][1].signal.aborted).toBe(false);
+    expect(requests[1][1].signal.aborted).toBe(false);
     expect(result.writeStatus).toBe(201);
   });
 

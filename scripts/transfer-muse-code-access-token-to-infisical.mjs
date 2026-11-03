@@ -130,27 +130,30 @@ async function readMuseAccessToken({ execFileImpl, platform }) {
 
 async function writeSecret(config, accessToken, fetchImpl) {
   const url = new URL(`/api/v4/secrets/${SECRET_NAME}`, config.base);
-  const request = {
-    headers: {
-      authorization: `Bearer ${config.writeToken}`,
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({
-      projectId: config.projectId,
-      environment: config.environment,
-      secretPath: config.secretPath,
-      secretValue: accessToken,
-      type: "shared",
-    }),
+  const headers = {
+    authorization: `Bearer ${config.writeToken}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  const body = JSON.stringify({
+    projectId: config.projectId,
+    environment: config.environment,
+    secretPath: config.secretPath,
+    secretValue: accessToken,
+    type: "shared",
+  });
+  const send = (method) => fetchImpl(url, {
+    method,
+    headers,
+    body,
     redirect: "error",
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
-  };
+  });
   let response;
   try {
-    response = await fetchImpl(url, { ...request, method: "PATCH" });
+    response = await send("PATCH");
     if (response.status === 404) {
-      response = await fetchImpl(url, { ...request, method: "POST" });
+      response = await send("POST");
     }
   } catch {
     throw transferError("secret-write-request-failed");
