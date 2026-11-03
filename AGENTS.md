@@ -131,6 +131,18 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   collection route the dashboard-session middleware excludes for GET (see "Subscriptions" below);
   `POST /api/subscriptions` and both `PUT`/`DELETE /api/subscriptions/:id` stay
   session-cookie-only.
+- `GET /api/muse-code-burn?window=90` — dashboard session cookie OR Bearer
+  `USAGE_READ_TOKEN` (same dual-auth + middleware exclusion as
+  `/api/agent-model-mix`). Sums the token events the CodeCaps app posts as
+  producer `muse-code` (metricType `usage`, `unit = "token"`,
+  `producerKeyRef` = modelId, quantity = per-session segment deltas) over a
+  trailing window in minutes (default 90, 1–240): total tokens, burn rate
+  per hour, per-model split, contributor tokens/share (contributor =
+  modelId ending in `-contributor`), and `allContributor`. Logic in
+  `src/lib/muse-code-burn.ts`; the payload contract is pinned by
+  `src/lib/__tests__/muse-code-ingest-contract.test.ts`. This route exists
+  because `/api/llm-burn` takes whole hours only, folds per-model groups
+  out of its report, and is dashboard-session only.
 - `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Monitor Local: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
 - `POST /api/providers/refresh-stale` — dashboard session.  Re-fetches pollable providers whose usage snapshot or external billing confirmation is older than one hour.  Manual/push providers are skipped.
 - `GET /api/export/daily-rollups` — dashboard session cookie OR the same
