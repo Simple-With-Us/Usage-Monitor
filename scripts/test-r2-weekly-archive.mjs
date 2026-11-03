@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 
-import { awsUriEncode, signS3Request } from "./lib/s3-sigv4.mjs";
+import { awsUriEncode, signS3Request, s3Request } from "./lib/s3-sigv4.mjs";
 import {
   archiveKeyFor,
   archiveKeyTimeMs,
@@ -264,6 +264,45 @@ await test("classifyFailure never lets remote error text reach the status file",
   }
 });
 
+await test("S3 transport failures retain operation and bounded nested cause codes", async () => {
+  for (const [method, reason] of [["PUT", "upload_failed"], ["GET", "download_failed"], ["DELETE", "prune_failed"]]) {
+    let calls = 0;
+    await assert.rejects(s3Request({
+      method,
+      creds: { endpoint: "https://fixture.invalid", accessKeyId: "fixture", secretAccessKey: "fixture" },
+      bucket: "fixture",
+      fetchImpl: async () => {
+        calls++;
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("private socket detail"), { code: "ECONNRESET" }) });
+      },
+    }), (error) => {
+      assert.equal(error.message, `S3 ${method} transport failed (ECONNRESET)`);
+      assert.equal(classifyFailure(error), reason);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1, "diagnostics must not retry the request");
+  }
+});
+
+await test("S3 transport diagnostics exclude arbitrary messages, codes and credentials", async () => {
+  const privateDetail = "private-secret https://private.invalid/?token=private-secret";
+  const hostile = Object.assign(new Error(privateDetail), { code: privateDetail });
+  hostile.cause = hostile;
+  await assert.rejects(s3Request({
+    method: "PUT",
+    creds: { endpoint: "https://fixture.invalid", accessKeyId: "private-key", secretAccessKey: "private-secret" },
+    bucket: "private-bucket",
+    key: "private-object",
+    fetchImpl: async () => { throw hostile; },
+  }), (error) => {
+    assert.equal(error.message, "S3 PUT transport failed (unknown)");
+    assert.doesNotMatch(error.stack, /private-|token=/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
 // --------------------------------------------------------------- config ----
 
 await test("resolveArchiveConfig refuses to fall back to the B2 litestream keys", () => {
@@ -479,6 +518,37 @@ await test("runArchive applies the 14-day cap even when --keep would retain more
     assert.ok(s3.store.has(result.key), "fresh upload retained");
     assert.ok(s3.store.has(lastWeek), "7-day-old copy retained");
     assert.ok(!s3.store.has(stale), "20-day-old copy pruned by the 14-day cap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("an upload transport rejection reports its phase and never verifies or prunes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const dbPath = join(dir, "prod.db");
+    makeDatabase(dbPath);
+    const s3 = makeS3Stub();
+    const oldKey = archiveKeyFor("weekly/", new Date(Date.now() - 20 * DAY_MS));
+    s3.store.set(oldKey, Buffer.from("old-archive"));
+    const methods = [];
+    await assert.rejects(runArchive({
+      env: baseEnv(dir, dbPath),
+      argv: [],
+      fetchImpl: async (url, init) => {
+        methods.push(init.method);
+        if (init.method === "PUT") {
+          throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+        }
+        return s3.fetchImpl(url, init);
+      },
+    }), (error) => {
+      assert.equal(error.message, "S3 PUT transport failed (UND_ERR_HEADERS_TIMEOUT)");
+      assert.equal(classifyFailure(error), "upload_failed");
+      return true;
+    });
+    assert.deepEqual(methods, ["PUT"]);
+    assert.deepEqual([...s3.store.keys()], [oldKey]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
