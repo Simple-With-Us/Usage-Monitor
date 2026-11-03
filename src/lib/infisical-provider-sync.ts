@@ -102,6 +102,7 @@ interface SourceDefinition {
 }
 
 interface SourceConfig extends SourceDefinition {
+  configurationError?: string;
   connection?: InfisicalConnection;
   clientId?: string;
   clientSecret?: string;
@@ -690,6 +691,7 @@ async function configuredSources(): Promise<SourceConfig[]> {
     "INFISICAL_ENV"
   );
   return Promise.all(SOURCE_DEFINITIONS.map(async (definition) => {
+    try {
     const connection = await resolveInfisicalConnection(definition.source);
     return {
     ...definition,
@@ -699,7 +701,11 @@ async function configuredSources(): Promise<SourceConfig[]> {
     projectId: connection?.projectId ?? cleanEnv(definition.projectIdEnv) ?? definition.defaultProjectId,
     environment,
     secretPath: connection?.secretPath ?? cleanEnv(definition.pathEnv) ?? DEFAULT_SECRET_PATH,
-  }; }));
+  };
+    } catch {
+      return { ...definition, projectId: definition.defaultProjectId, environment, secretPath: DEFAULT_SECRET_PATH, configurationError: "source_configuration_unreadable" };
+    }
+  }));
 }
 
 function emptyResult(
@@ -1129,6 +1135,11 @@ async function readSource(
   source: SourceConfig,
   names: readonly string[]
 ): Promise<SourceRead> {
+  if (source.configurationError) return {
+    source: source.source, authenticated: false, values: new Map(), missing: new Set(),
+    errors: new Map(names.map((name) => [name, source.configurationError!])), allSecretNames: new Set(),
+    result: { source: source.source, configured: true, status: "error", available: 0, missing: 0, failed: names.length, errorCode: source.configurationError },
+  };
   const hasId = Boolean(source.clientId);
   const hasSecret = Boolean(source.clientSecret);
   const serviceTokens = source.connection?.mode === "service-tokens";
@@ -1526,6 +1537,8 @@ export async function bootstrapStGeminiCredentialToInfisical(): Promise<StGemini
   };
   if (cleanEnv(ST_GEMINI_BOOTSTRAP_FLAG) !== "true") return disabled;
 
+  let createAttempted = false;
+  try {
   const source = await fixedStBootstrapSource();
   if ((!source.clientId || !source.clientSecret) && source.connection?.mode !== "service-tokens") {
     return auditStGeminiBootstrap({
@@ -1536,8 +1549,6 @@ export async function bootstrapStGeminiCredentialToInfisical(): Promise<StGemini
     });
   }
 
-  let createAttempted = false;
-  try {
     const initialProvider = await loadStGeminiBootstrapProvider();
     const initial = validateStGeminiBootstrapProvider(initialProvider);
     if (!initial.material) {
@@ -2605,9 +2616,9 @@ async function syncRootOnce(
 
   const sources = await configuredSources();
   result.configured = sources.some(
-    (source) => Boolean(source.clientId && source.clientSecret || source.connection?.mode === "service-tokens")
+    (source) => Boolean(source.configurationError || source.clientId && source.clientSecret || source.connection?.mode === "service-tokens")
   );
-  if (!sources.some((source) => source.clientId || source.clientSecret || source.connection?.mode === "service-tokens")) {
+  if (!sources.some((source) => source.configurationError || source.clientId || source.clientSecret || source.connection?.mode === "service-tokens")) {
     return result;
   }
 
@@ -2679,7 +2690,15 @@ async function syncOnce(
   const root = await syncRootOnce(options);
   if (!stPrimaryEnabled) return root;
 
-  const source = await fixedStPrimarySource();
+  let source: SourceConfig;
+  try { source = await fixedStPrimarySource(); }
+  catch {
+    root.enabled = true; root.configured = true; root.failed += 2;
+    const failure: InfisicalCredentialSyncSourceResult = { source: "st-primary", configured: true, status: "error", available: 0, missing: 0, failed: 2, errorCode: "source_configuration_unreadable" };
+    const index = root.sources.findIndex((item) => item.source === "st-primary");
+    if (index >= 0) root.sources[index] = failure; else root.sources.push(failure);
+    return root;
+  }
   const configured = Boolean(source.clientId && source.clientSecret || source.connection?.mode === "service-tokens");
   const sourceIndex = root.sources.findIndex((item) => item.source === "st-primary");
   const setSource = (value: InfisicalCredentialSyncSourceResult) => {

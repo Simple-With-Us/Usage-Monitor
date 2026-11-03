@@ -1082,6 +1082,23 @@ describe("Infisical provider credential sync", () => {
     });
   });
 
+  it("isolates an unreadable saved source while other project credentials still sync", async () => {
+    configureSources("st", "ct");
+    await prisma.appSetting.create({ data: { key: "infisical.connection.v1.st", value: "invalid-encrypted-row" } });
+    const capture = installInfisicalMock({ ct: { GEMINI_API_KEY: "ct-still-available" } });
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "st")).toMatchObject({ status: "error", errorCode: "source_configuration_unreadable" });
+    expect(capture.secretReads.some((read) => read.source === "ct" && read.name === "GEMINI_API_KEY")).toBe(true);
+    expect((await prisma.provider.findMany()).some((provider) => provider.apiKey && decrypt(provider.apiKey) === "ct-still-available")).toBe(true);
+  });
+  it("keeps fixed bootstrap configuration failures nonfatal and reports bridge failure separately", async () => {
+    process.env.INFISICAL_ST_GEMINI_BOOTSTRAP_ENABLED = "true";
+    process.env.INFISICAL_ST_PRIMARY_SYNC_ENABLED = "true";
+    await prisma.appSetting.createMany({ data: ["st", "st-primary"].map((source) => ({ key: `infisical.connection.v1.${source}`, value: "invalid-encrypted-row" })) });
+    await expect(bootstrapStGeminiCredentialToInfisical()).resolves.toMatchObject({ enabled: true, status: "error", attempted: false });
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "st-primary")).toMatchObject({ status: "error", errorCode: "source_configuration_unreadable" });
+  });
   it("syncs a metadata-verified service-token source without machine-identity fallback and retains the key on scope mismatch", async () => {
     configureSources("ct");
     delete process.env.INFISICAL_CT_CLIENT_ID;
@@ -1093,6 +1110,10 @@ describe("Infisical provider credential sync", () => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
       calls.push(url.pathname);
       if (url.pathname === "/api/v2/service-token") return jsonResponse({ workspace: wrongProject ? "another-project" : SOURCE_ENV.ct.projectId, permissions: ["read"], scopes: [{ environment: "prod", secretPath: SOURCE_ENV.ct.secretPath }], expiresAt: null });
+      if (url.pathname.startsWith("/api/v3/secrets/raw")) {
+        expect(Object.fromEntries(url.searchParams)).toMatchObject({ workspaceId: SOURCE_ENV.ct.projectId, environment: "prod", secretPath: SOURCE_ENV.ct.secretPath, expandSecretReferences: "false", recursive: "false", include_imports: "false" });
+        expect(url.searchParams.has("includeImports")).toBe(false);
+      }
       if (url.pathname === "/api/v3/secrets/raw") return jsonResponse({ secrets: [{ secretKey: "OPENROUTER_API_KEY" }] });
       if (url.pathname === "/api/v3/secrets/raw/OPENROUTER_API_KEY") return jsonResponse({ secret: { secretKey: "OPENROUTER_API_KEY", type: "shared", secretValue: "ct-scoped-key" } });
       return jsonResponse({}, 404);

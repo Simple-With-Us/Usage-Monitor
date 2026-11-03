@@ -2,6 +2,8 @@ import "server-only";
 import { z } from "zod";
 import { decryptJson, encryptJson } from "./crypto";
 import { prisma } from "./prisma";
+import { createHash } from "node:crypto";
+import { resolveUmInfisicalEnv } from "../../scripts/lib/infisical-app-auth-env.mjs";
 
 export const InfisicalSourceSchema = z.enum(["st", "ct", "shared", "um", "st-primary"]);
 export type InfisicalSource = z.infer<typeof InfisicalSourceSchema>;
@@ -48,20 +50,25 @@ const disabledSources = new Set<InfisicalSource>();
 export const hasStoredInfisicalConnections = () => knownStoredSources.size > 0;
 export const isInfisicalConnectionDisabled = (source: InfisicalSource) => disabledSources.has(source);
 
-export async function loadInfisicalConnection(source: InfisicalSource): Promise<InfisicalConnection | null> {
+const revision = (row: { key: string; value: string | null } | null) => row ? createHash("sha256").update(JSON.stringify([row.key, row.value])).digest("hex") : null;
+export async function loadInfisicalConnectionSnapshot(source: InfisicalSource) {
   const row = await prisma.appSetting.findUnique({ where: { key: key(source) } });
-  if (!row?.value) { knownStoredSources.delete(source); disabledSources.delete(source); return null; }
+  const rowRevision = revision(row);
+  if (!row?.value) { knownStoredSources.delete(source); disabledSources.delete(source); return { connection: null, revision: rowRevision }; }
   const stored = decryptJson(row.value);
-  if (stored.disabled === true && stored.source === source) { disabledSources.add(source); knownStoredSources.delete(source); return null; }
+  if (stored.disabled === true && stored.source === source) { disabledSources.add(source); knownStoredSources.delete(source); return { connection: null, revision: rowRevision }; }
   disabledSources.delete(source);
   knownStoredSources.add(source);
   try {
     const connection = InfisicalConnectionSchema.parse(stored);
     if (connection.source !== source) throw new Error();
-    return connection;
+    return { connection, revision: rowRevision };
   } catch {
     throw new Error("infisical_connection_unreadable");
   }
+}
+export async function loadInfisicalConnection(source: InfisicalSource): Promise<InfisicalConnection | null> {
+  return (await loadInfisicalConnectionSnapshot(source)).connection;
 }
 
 export function connectionMetadata(connection: InfisicalConnection) {
@@ -95,14 +102,12 @@ export function mergeConnectionCredentials(input: InfisicalConnection, previous:
   return InfisicalConnectionSchema.parse(merged);
 }
 
-export async function saveInfisicalConnection(connection: InfisicalConnection, expected?: InfisicalConnection | null) {
+export async function saveInfisicalConnection(connection: InfisicalConnection, expectedRevision?: string | null) {
   const value = encryptJson(connection);
   await prisma.$transaction(async (transaction) => {
-    if (expected !== undefined) {
+    if (expectedRevision !== undefined) {
       const row = await transaction.appSetting.findUnique({ where: { key: key(connection.source) } });
-      const payload = row?.value ? decryptJson(row.value) : null;
-      const current = payload?.disabled === true ? null : payload ? InfisicalConnectionSchema.parse(payload) : null;
-      if (JSON.stringify(current) !== JSON.stringify(expected)) throw new Error("concurrent_infisical_connection_edit");
+      if (revision(row) !== expectedRevision) throw new Error("concurrent_infisical_connection_edit");
     }
     const otherRows = await transaction.appSetting.findMany({ where: { key: { startsWith: "infisical.connection.v1." } } });
     const tokens = new Set(connection.tokens.map((token) => token.token).filter(Boolean));
@@ -130,17 +135,18 @@ export async function deleteInfisicalConnection(source: InfisicalSource) {
 
 /** Explicit project credentials only; the fleet Automation identity is never borrowed. */
 export function infisicalConnectionFromEnv(source: InfisicalSource, env: NodeJS.ProcessEnv = process.env): InfisicalConnection | null {
+  const um = resolveUmInfisicalEnv(env);
   const prefix = `INFISICAL_${source.toUpperCase().replaceAll("-", "_")}`;
-  const projectId = env[`${prefix}_PROJECT_ID`]?.trim() || (source === "st-primary" ? env.INFISICAL_ST_PROJECT_ID?.trim() : source === "um" ? env.INFISICAL_PROJECT_ID?.trim() || env.INFISICAL_APP_PROJECT_ID?.trim() : undefined);
-  const secretPath = source === "st-primary" ? "/usage-monitor/st-primary/v1" : env[`${prefix}_SECRET_PATH`]?.trim() || "/";
-  const readToken = env[`${prefix}_READ_TOKEN`]?.trim();
+  const projectId = source === "um" ? um.projectId : env[`${prefix}_PROJECT_ID`]?.trim() || (source === "st-primary" ? env.INFISICAL_ST_PROJECT_ID?.trim() : undefined);
+  const secretPath = source === "st-primary" ? "/usage-monitor/st-primary/v1" : source === "um" ? um.secretPath : env[`${prefix}_SECRET_PATH`]?.trim() || "/";
+  const readToken = source === "um" ? um.serviceToken : env[`${prefix}_READ_TOKEN`]?.trim();
   const writeToken = env[`${prefix}_WRITE_TOKEN`]?.trim();
-  const splitPaths = (value: string | undefined) => value?.split(",").map((path) => path.trim()).filter(Boolean) ?? [secretPath];
+  const splitPaths = (value: string | undefined) => value?.trim() ? value.split(",").map((path) => path.trim()).filter(Boolean) : [secretPath];
   const readPaths = splitPaths(env[`${prefix}_READ_PATHS`]);
   const writePaths = writeToken ? splitPaths(env[`${prefix}_WRITE_PATHS`]) : [];
   const ownPair = Boolean(env[`${prefix}_CLIENT_ID`]?.trim() || env[`${prefix}_CLIENT_SECRET`]?.trim());
-  const clientId = ownPair ? env[`${prefix}_CLIENT_ID`]?.trim() : source === "um" ? env.INFISICAL_CLIENT_ID?.trim() : undefined;
-  const clientSecret = ownPair ? env[`${prefix}_CLIENT_SECRET`]?.trim() : source === "um" ? env.INFISICAL_CLIENT_SECRET?.trim() : undefined;
+  const clientId = source === "um" ? um.clientId : ownPair ? env[`${prefix}_CLIENT_ID`]?.trim() : undefined;
+  const clientSecret = source === "um" ? um.clientSecret : ownPair ? env[`${prefix}_CLIENT_SECRET`]?.trim() : undefined;
   if (!readToken && !writeToken && !clientId && !clientSecret) return null;
   if (!projectId && !readToken && !writeToken && (!clientId || !clientSecret)) return null;
   if (!projectId) throw new Error("infisical_project_required");

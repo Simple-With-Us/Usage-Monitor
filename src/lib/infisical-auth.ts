@@ -85,5 +85,6 @@ export async function authorizeInfisical(connection: InfisicalConnection, secret
 
 export function infisicalSecretApi(connection: InfisicalConnection) { return connection.mode === "service-tokens" ? "/api/v3/secrets/raw" : "/api/v4/secrets"; }
 export function infisicalSecretParams(connection: InfisicalConnection, path: string, values = false) {
-  return new URLSearchParams({ [connection.mode === "service-tokens" ? "workspaceId" : "projectId"]: connection.projectId, environment: "prod", secretPath: path, viewSecretValue: String(values), expandSecretReferences: "false", recursive: "false", includeImports: "false", includePersonalOverrides: "false" });
+  const legacy = connection.mode === "service-tokens";
+  return new URLSearchParams({ [legacy ? "workspaceId" : "projectId"]: connection.projectId, environment: "prod", secretPath: path, viewSecretValue: String(values), expandSecretReferences: "false", recursive: "false", [legacy ? "include_imports" : "includeImports"]: "false", includePersonalOverrides: "false" });
 }

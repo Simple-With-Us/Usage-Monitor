@@ -8,7 +8,7 @@ vi.mock("@/lib/prisma", () => { const appSetting = {
   deleteMany: vi.fn(async ({ where }: { where: { key: string } }) => { database.delete(where.key); }),
 }; return { prisma: { appSetting, $transaction: (fn: (client: { appSetting: typeof appSetting }) => unknown) => fn({ appSetting }) } }; });
 vi.mock("@/lib/ingest-admission", () => ({ withInternalUsageWriteAdmission: (fn: () => unknown) => fn() }));
-import { connectionMetadata, InfisicalConnectionSchema, infisicalConnectionFromEnv, loadInfisicalConnection, mergeConnectionCredentials, saveInfisicalConnection, resolveInfisicalConnection, type InfisicalConnection } from "../infisical-connections";
+import { connectionMetadata, InfisicalConnectionSchema, infisicalConnectionFromEnv, loadInfisicalConnection, loadInfisicalConnectionSnapshot, mergeConnectionCredentials, saveInfisicalConnection, resolveInfisicalConnection, type InfisicalConnection } from "../infisical-connections";
 import { authorizeInfisical, infisicalOrigin, requireInfisicalSecretIdentity } from "../infisical-auth";
 import { createRoutedInfisicalSettings } from "../infisical-settings-client";
 import { AppSettingsService } from "../app-settings";
@@ -40,7 +40,12 @@ function mockFetch(config = connection()) {
   });
   return { fetchImpl: fetchImpl as typeof fetch, calls };
 }
-beforeEach(() => { database.clear(); vi.stubEnv("ENCRYPTION_KEY", "57".repeat(32)); vi.stubEnv("SESSION_SECRET", "test-session-secret-value-32-chars!!"); });
+beforeEach(() => {
+  database.clear();
+  for (const prefix of ["ST", "CT", "SHARED", "UM", "ST_PRIMARY"]) for (const suffix of ["CLIENT_ID", "CLIENT_SECRET", "PROJECT_ID", "SECRET_PATH", "READ_TOKEN", "WRITE_TOKEN", "READ_PATHS", "WRITE_PATHS"]) vi.stubEnv(`INFISICAL_${prefix}_${suffix}`, "");
+  for (const name of ["INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET", "INFISICAL_TOKEN", "INFISICAL_PROJECT_ID", "INFISICAL_APP_PROJECT_ID", "INFISICAL_PATH"]) vi.stubEnv(name, "");
+  vi.stubEnv("ENCRYPTION_KEY", "57".repeat(32)); vi.stubEnv("SESSION_SECRET", "test-session-secret-value-32-chars!!");
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("Infisical scope routing", () => {
@@ -111,9 +116,10 @@ describe("Encrypted connection persistence", () => {
   });
   it("rejects a concurrent edit rather than overwriting verified replacement credentials", async () => {
     const previous = connection(); await saveInfisicalConnection(previous);
+    const snapshot = await loadInfisicalConnectionSnapshot("ct");
     const newer = structuredClone(previous); newer.tokens[0].token = "st.replacement";
     await saveInfisicalConnection(newer);
-    await expect(saveInfisicalConnection(previous, previous)).rejects.toThrow("concurrent_infisical_connection_edit");
+    await expect(saveInfisicalConnection(previous, snapshot.revision)).rejects.toThrow("concurrent_infisical_connection_edit");
     expect((await loadInfisicalConnection("ct"))?.tokens[0].token).toBe("st.replacement");
   });
   it("caps unique tokens across project aliases and deduplicates reuse", async () => {
@@ -187,10 +193,73 @@ describe("Routed runtime settings", () => {
     await service.init();
     expect(service.isInfisicalMode).toBe(false); expect(mock.calls).toEqual([]);
   });
+  it.each(["network", "expired"])("keeps deploy-env reads available after saved connection %s failure and rejects ephemeral writes", async (kind) => {
+    const c = { ...connection(), source: "um" as const }; await saveInfisicalConnection(c);
+    vi.stubEnv("ADAPTER_HTTP_TIMEOUT_MS", "30000");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mock = mockFetch(c);
+    vi.stubGlobal("fetch", kind === "network" ? vi.fn(async () => { throw new Error("failure containing st.test-read"); }) : vi.fn(async () => json({ workspace: c.projectId, permissions: ["read"], scopes: [{ environment: "prod", secretPath: "/read" }], expiresAt: "2020-01-01T00:00:00Z" })));
+    const service = new AppSettingsService();
+    await expect(initializeInfisicalRuntimeSettings(service)).resolves.toBeUndefined();
+    expect(service.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("30000");
+    expect(service.areInfisicalWritesBlocked).toBe(true);
+    await expect(service.set("ADAPTER_HTTP_TIMEOUT_MS", "20000")).rejects.toThrow("save rejected");
+    expect(process.env.ADAPTER_HTTP_TIMEOUT_MS).toBe("30000");
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("st.test-read");
+    vi.stubGlobal("fetch", mock.fetchImpl);
+    await configureInfisicalRuntimeSettings(service, c, async () => {}, { refreshIntervalMs: 0 });
+    expect(service.isInfisicalMode).toBe(true); expect(service.areInfisicalWritesBlocked).toBe(false);
+    service.stop(); warning.mockRestore();
+  });
+  it("keeps verify-and-save strict when candidate initialization fails", async () => {
+    const c = { ...connection(), source: "um" as const }; const service = new AppSettingsService();
+    vi.stubGlobal("fetch", mockFetch(c).fetchImpl);
+    await configureInfisicalRuntimeSettings(service, c, async () => {}, { refreshIntervalMs: 0 });
+    const persist = vi.fn(async () => {});
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("upstream unavailable"); }));
+    await expect(configureInfisicalRuntimeSettings(service, c, persist, { refreshIntervalMs: 0 })).rejects.toThrow("network_error");
+    expect(persist).not.toHaveBeenCalled(); expect(service.isInfisicalMode).toBe(true); expect(service.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000");
+    service.stop();
+  });
+  it("normalizes the explicit generic service-token and path aliases into verified live UM settings", async () => {
+    vi.stubEnv("INFISICAL_TOKEN", "st.generic-read"); vi.stubEnv("INFISICAL_UM_WRITE_TOKEN", "st.generic-write");
+    vi.stubEnv("INFISICAL_PROJECT_ID", "project-test"); vi.stubEnv("INFISICAL_PATH", "/read");
+    vi.stubEnv("ADAPTER_HTTP_TIMEOUT_MS", "30000");
+    const c = infisicalConnectionFromEnv("um")!;
+    expect(c.secretPath).toBe("/read"); const mock = mockFetch(c); vi.stubGlobal("fetch", mock.fetchImpl);
+    const service = new AppSettingsService(); await initializeInfisicalRuntimeSettings(service);
+    expect(service.isInfisicalMode).toBe(true);
+    await service.set("ADAPTER_HTTP_TIMEOUT_MS", "20000");
+    expect(mock.calls.find((call) => call.method === "PATCH")?.token).toBe("st.generic-write");
+    expect(process.env.ADAPTER_HTTP_TIMEOUT_MS).toBe("30000"); service.stop();
+  });
+  it("never reports ephemeral save success for an unscoped bootstrap access token", async () => {
+    vi.stubEnv("INFISICAL_TOKEN", "fake-access-token");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const service = new AppSettingsService(); await initializeInfisicalRuntimeSettings(service);
+    await expect(service.set("ADAPTER_HTTP_TIMEOUT_MS", "20000")).rejects.toThrow("save rejected");
+    expect(service.isInfisicalMode).toBe(false); warning.mockRestore();
+  });
 });
 
 const request = (method: string, body?: unknown, authenticated = true) => new NextRequest("https://usage.example.test/api/settings/infisical", { method, headers: { ...(authenticated ? { cookie: `${SESSION_COOKIE_NAME}=${createSessionToken()}` } : {}), "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 describe("Admin connection API", () => {
+  it("does not let an earlier verification overwrite a later durable disable", async () => {
+    const c = { ...connection(), source: "um" as const };
+    let release!: () => void; let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const atVerification = new Promise<void>((resolve) => { entered = resolve; });
+    const mock = mockFetch(c); let held = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!held && String(input).includes("/api/v2/service-token")) { held = true; entered(); await gate; }
+      return mock.fetchImpl(input, init);
+    }));
+    const pending = PUT(request("PUT", c)); await atVerification;
+    expect((await DELETE(request("DELETE", { source: "um" }))).status).toBe(200);
+    release(); expect((await pending).status).toBe(400);
+    expect(await resolveInfisicalConnection("um")).toBeNull();
+    const { appSettings } = await import("../app-settings"); expect(appSettings.isInfisicalMode).toBe(false);
+  });
   it("shows effective environment connection metadata without returning credentials", async () => {
     vi.stubEnv("INFISICAL_CT_PROJECT_ID", "project-test"); vi.stubEnv("INFISICAL_CT_CLIENT_ID", "ambient-id"); vi.stubEnv("INFISICAL_CT_CLIENT_SECRET", "ambient-secret");
     const response = await GET(request("GET")); const body = await response.text();

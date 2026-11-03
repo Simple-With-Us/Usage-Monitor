@@ -12,9 +12,19 @@ export async function configureInfisicalRuntimeSettings(service: AppSettingsServ
 }
 
 export async function initializeInfisicalRuntimeSettings(service: AppSettingsService) {
-  const stored = process.env.DATABASE_URL ? await loadInfisicalConnection("um") : null;
-  if (isInfisicalConnectionDisabled("um")) { service.disableInfisicalConnection(); return; }
-  const connection = stored ?? (process.env.INFISICAL_UM_READ_TOKEN ? infisicalConnectionFromEnv("um") : null);
-  if (connection) await configureInfisicalRuntimeSettings(service, connection, async () => {});
-  else await service.init();
+  try {
+    const stored = process.env.DATABASE_URL ? await loadInfisicalConnection("um") : null;
+    if (isInfisicalConnectionDisabled("um")) { service.disableInfisicalConnection(); return; }
+    const connection = stored ?? infisicalConnectionFromEnv("um");
+    if (connection) await configureInfisicalRuntimeSettings(service, connection, async () => {});
+    else {
+      if (process.env.INFISICAL_TOKEN?.trim() || process.env.INFISICAL_UM_READ_TOKEN?.trim()) throw new Error("unverifiable_runtime_token");
+      await service.init();
+    }
+  } catch {
+    // Keep deploy-time values available during a manager outage without
+    // silently accepting ephemeral writes or trying another identity.
+    service.disableInfisicalConnection();
+    console.warn("[app-settings] Infisical initialization failed; using deploy-time environment reads and rejecting settings writes until the connection is verified");
+  }
 }

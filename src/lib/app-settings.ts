@@ -59,6 +59,7 @@
 
 import {
   createInfisicalSettings,
+  InfisicalWriteError,
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
 import { resolveProdInfisicalEnvironment } from "./infisical-environment";
@@ -380,6 +381,7 @@ export interface AppSettingMeta {
 export class AppSettingsService {
   private client: InfisicalSettings | null = null;
   private infisicalMode = false;
+  private infisicalWritesBlocked = false;
   private initPromise: Promise<void> | null = null;
   private proxy: NodeJS.ProcessEnv | null = null;
 
@@ -605,6 +607,7 @@ export class AppSettingsService {
       throw new Error(`"${key}" is not a writable app setting (see INFISICAL.md)`);
     }
     const normalized = normalizeForWrite(def, value);
+    if (this.infisicalWritesBlocked) throw new InfisicalWriteError(key, "connection unavailable or disabled; save rejected");
     // Write under the canonical def key (from the allowlisted def object),
     // never the raw caller-supplied string, so the property name written is
     // always one of the known setting keys.
@@ -621,6 +624,7 @@ export class AppSettingsService {
     this.client?.stop();
     this.client = candidate;
     this.infisicalMode = true;
+    this.infisicalWritesBlocked = false;
     this.initPromise = Promise.resolve();
   }
 
@@ -628,8 +632,11 @@ export class AppSettingsService {
     this.client?.stop();
     this.client = null;
     this.infisicalMode = false;
+    this.infisicalWritesBlocked = true;
     this.initPromise = Promise.resolve();
   }
+
+  get areInfisicalWritesBlocked(): boolean { return this.infisicalWritesBlocked; }
 
   async refresh(): Promise<void> {
     if (this.infisicalMode && this.client) {
@@ -683,6 +690,7 @@ export class AppSettingsService {
     this.stop();
     this.client = null;
     this.infisicalMode = false;
+    this.infisicalWritesBlocked = false;
     this.initPromise = null;
     this.proxy = null;
   }

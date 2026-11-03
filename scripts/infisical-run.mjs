@@ -9,6 +9,8 @@
 //        node scripts/infisical-run.mjs --check
 
 import { spawn, spawnSync } from "node:child_process";
+import { resolveUmInfisicalEnv } from "./lib/infisical-app-auth-env.mjs";
+import { verifyServiceToken } from "./lib/infisical-service-token.mjs";
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
@@ -41,17 +43,21 @@ if (requestedEnv && requestedEnv !== "prod") {
   process.exit(2);
 }
 const envName = "prod";
-if (process.env.INFISICAL_BASE_URL) {
+const configuredBaseUrl = process.env.INFISICAL_BASE_URL || process.env.INFISICAL_API_URL;
+let verifiedOrigin;
+if (configuredBaseUrl) {
   try {
-    const url = new URL(process.env.INFISICAL_BASE_URL);
-    if (url.protocol !== "https:" || !["app.infisical.com", "us.infisical.com", "eu.infisical.com"].includes(url.hostname) || url.username || url.password || url.port || url.search || url.hash || !["", "/"].includes(url.pathname)) throw new Error();
+    const url = new URL(configuredBaseUrl);
+    if (url.protocol !== "https:" || !["app.infisical.com", "us.infisical.com", "eu.infisical.com"].includes(url.hostname) || url.username || url.password || url.port || url.search || url.hash || !["", "/", "/api"].includes(url.pathname)) throw new Error();
+    verifiedOrigin = url.origin;
   } catch { console.error("[infisical] Refusing an unsupported Infisical base URL."); process.exit(2); }
 }
-const secretsPath = process.env.INFISICAL_PATH || "/";
-const projectId =
-  process.env.INFISICAL_PROJECT_ID ||
-  process.env.INFISICAL_UM_PROJECT_ID ||
-  process.env.INFISICAL_APP_PROJECT_ID;
+const explicitAuth = resolveUmInfisicalEnv(process.env);
+const secretsPath = explicitAuth.secretPath;
+const projectId = explicitAuth.projectId;
+if (!/^\/(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)?$/.test(secretsPath) || secretsPath.split("/").some((part) => part === "." || part === "..")) {
+  console.error("[infisical] Refusing a non-exact secret folder."); process.exit(2);
+}
 
 if (!projectId) {
   console.error(
@@ -60,10 +66,9 @@ if (!projectId) {
   process.exit(2);
 }
 
-const genericPair = Boolean(process.env.INFISICAL_CLIENT_ID || process.env.INFISICAL_CLIENT_SECRET);
-const clientId = genericPair ? process.env.INFISICAL_CLIENT_ID : process.env.INFISICAL_UM_CLIENT_ID;
-const clientSecret = genericPair ? process.env.INFISICAL_CLIENT_SECRET : process.env.INFISICAL_UM_CLIENT_SECRET;
-let token = process.env.INFISICAL_UM_READ_TOKEN || process.env.INFISICAL_TOKEN;
+const clientId = explicitAuth.clientId;
+const clientSecret = explicitAuth.clientSecret;
+let token = explicitAuth.token;
 
 if (Boolean(clientId) !== Boolean(clientSecret)) {
   console.error(
@@ -105,19 +110,7 @@ if (token.startsWith("st.")) {
   // A service token can return its own folder for arbitrary path queries.
   // Verify its own project/environment/folder/permission metadata instead.
   try {
-    const base = new URL(process.env.INFISICAL_BASE_URL || "https://app.infisical.com");
-    if (base.protocol !== "https:" || !["app.infisical.com", "us.infisical.com", "eu.infisical.com"].includes(base.hostname) || base.username || base.password || base.port || base.search || base.hash || !["", "/"].includes(base.pathname)) throw new Error();
-    const response = await fetch(`${base.origin}/api/v2/service-token`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) });
-    if (!response.ok || Number(response.headers.get("content-length")) > 128 * 1024) throw new Error();
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error();
-    let bytes = 0;
-    const chunks = [];
-    try {
-      while (true) { const item = await reader.read(); if (item.done) break; bytes += item.value.length; if (bytes > 128 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(item.value); }
-    } finally { reader.releaseLock(); }
-    const metadata = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (metadata.workspace !== projectId || !Array.isArray(metadata.permissions) || metadata.permissions.length !== 1 || metadata.permissions[0] !== "read" || !Array.isArray(metadata.scopes) || metadata.scopes.length !== 1 || metadata.scopes[0].environment !== "prod" || metadata.scopes[0].secretPath !== secretsPath || metadata.expiresAt != null && (!Number.isFinite(Date.parse(metadata.expiresAt)) || Date.parse(metadata.expiresAt) <= Date.now())) throw new Error();
+    await verifyServiceToken({ token, projectId, paths: [secretsPath], permissions: ["read"], baseUrl: verifiedOrigin });
   } catch {
     console.error("[infisical] Service token metadata does not verify the exact app read scope.");
     process.exit(2);
@@ -127,6 +120,10 @@ if (token.startsWith("st.")) {
 const runEnv = {
   ...process.env,
   INFISICAL_TOKEN: token,
+  ...(token.startsWith("st.") ? { INFISICAL_UM_READ_TOKEN: token } : {}),
+  INFISICAL_UM_PROJECT_ID: projectId,
+  INFISICAL_UM_SECRET_PATH: secretsPath,
+  ...(verifiedOrigin ? { INFISICAL_BASE_URL: verifiedOrigin } : {}),
   SECRETS_SOURCE: "infisical",
 };
 

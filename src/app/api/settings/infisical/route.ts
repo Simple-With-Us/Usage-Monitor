@@ -3,7 +3,7 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { appSettings } from "@/lib/app-settings";
 import { configureInfisicalRuntimeSettings } from "@/lib/infisical-runtime-settings";
 import { authorizeInfisical, infisicalJson, infisicalSecretApi, infisicalSecretParams } from "@/lib/infisical-auth";
-import { connectionMetadata, deleteInfisicalConnection, InfisicalConnectionSchema, InfisicalSourceSchema, isInfisicalConnectionDisabled, loadInfisicalConnection, resolveInfisicalConnection, mergeConnectionCredentials, saveInfisicalConnection } from "@/lib/infisical-connections";
+import { connectionMetadata, deleteInfisicalConnection, InfisicalConnectionSchema, InfisicalSourceSchema, isInfisicalConnectionDisabled, loadInfisicalConnectionSnapshot, resolveInfisicalConnection, mergeConnectionCredentials, saveInfisicalConnection } from "@/lib/infisical-connections";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 
 export const runtime = "nodejs";
@@ -26,7 +26,8 @@ export async function PUT(request: NextRequest) {
     const raw = await request.text();
     if (Buffer.byteLength(raw) > 24 * 1024) return failure();
     const input = InfisicalConnectionSchema.parse(JSON.parse(raw));
-    const previous = await loadInfisicalConnection(input.source);
+    const snapshot = await loadInfisicalConnectionSnapshot(input.source);
+    const previous = snapshot.connection;
     const effective = previous ?? await resolveInfisicalConnection(input.source);
     const connection = mergeConnectionCredentials(input, effective);
     // Verify every declared route against token metadata, without a write probe.
@@ -39,7 +40,7 @@ export async function PUT(request: NextRequest) {
         }
       }
     }
-    const persist = () => withInternalUsageWriteAdmission(() => saveInfisicalConnection(connection, previous));
+    const persist = () => withInternalUsageWriteAdmission(() => saveInfisicalConnection(connection, snapshot.revision));
     if (connection.source === "um") await configureInfisicalRuntimeSettings(appSettings, connection, persist);
     else await persist();
     return NextResponse.json({ connection: connectionMetadata(connection) });
