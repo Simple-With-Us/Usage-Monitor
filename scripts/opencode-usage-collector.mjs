@@ -35,11 +35,12 @@ import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 //   OPENCODE_INGEST_TOKEN or USAGE_INGEST_TOKEN
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
 //   OPENCODE_DB (default ~/.local/share/opencode/opencode.db)
+//   OPENCODE_ADDITIONAL_DBS_JSON (optional JSON array of up to eight explicit absolute database paths)
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -88,6 +89,24 @@ export function defaultOpencodeDbPath(env = process.env) {
   if (env.OPENCODE_DB) return expandHome(env.OPENCODE_DB);
   const dataHome = env.XDG_DATA_HOME || join(homedir(), ".local", "share");
   return join(expandHome(dataHome), "opencode", "opencode.db");
+}
+
+/** Additional profiles supplement the ordinary source without discovering new stores. */
+export function opencodeDbPaths(env = process.env) {
+  const primary = resolve(defaultOpencodeDbPath(env));
+  if (!env.OPENCODE_ADDITIONAL_DBS_JSON) return [primary];
+  let additional;
+  try {
+    additional = JSON.parse(env.OPENCODE_ADDITIONAL_DBS_JSON);
+  } catch {
+    throw new Error("OPENCODE_ADDITIONAL_DBS_JSON must be a bounded array of absolute database paths");
+  }
+  if (!Array.isArray(additional) || additional.length > 8 || additional.some((path) =>
+    typeof path !== "string" || !path || path.length > 4096 || path.includes("\0") || !isAbsolute(expandHome(path))
+  )) {
+    throw new Error("OPENCODE_ADDITIONAL_DBS_JSON must be a bounded array of absolute database paths");
+  }
+  return [primary, ...additional.map(expandHome)];
 }
 
 /**
@@ -199,9 +218,9 @@ export async function collectOpencodeEvents({
       frozenProjectNames,
     );
     // Sessions BotFleet launched (their directory is a BotFleet workspace).
-    // Their token rows are tagged, so the monitor drops them only where a
-    // stored BotFleet turn names the same session, or left out entirely when
-    // USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1.
+    // Their token rows are tagged for exact receiver-verified billed-call
+    // coverage; session identity or approximate timing alone proves no overlap.
+    // The explicit USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1 switch excludes them.
     const botFleetSessionIds = new Set(
       (telemetry.sessions ?? [])
         .filter((session) => typeof session?.directory === "string" && session.directory)
@@ -263,6 +282,53 @@ export async function collectOpencodeEvents({
   }
 }
 
+/** Read explicitly configured profiles with shared frozen names and unchanged event identities. */
+export async function collectOpencodeDatabases({
+  dbPaths = opencodeDbPaths(),
+  scanStatus,
+  frozenProjectNames = new Map(),
+  onWarning,
+  ...options
+} = {}) {
+  if (!Array.isArray(dbPaths) || dbPaths.length < 1 || dbPaths.length > 9 || dbPaths.some((path) =>
+    typeof path !== "string" || !path || path.length > 4096 || path.includes("\0") || !isAbsolute(path)
+  )) throw new Error("OpenCode database selection must contain one to nine absolute paths");
+  const databases = new Set();
+  const events = new Map();
+  let collisionReported = false;
+  for (const [index, dbPath] of dbPaths.entries()) {
+    let identity;
+    try {
+      const info = statSync(dbPath, { bigint: true });
+      if (!info.isFile()) throw new Error("Not a database file");
+      identity = `${info.dev}:${info.ino}`;
+    } catch {
+      if (scanStatus) scanStatus.complete = false;
+      onWarning?.(`OpenCode database ${index + 1} is unavailable; checkpoint retained`);
+      continue;
+    }
+    if (databases.has(identity)) continue;
+    databases.add(identity);
+    const sourceStatus = { complete: true };
+    const sourceEvents = await collectOpencodeEvents({ ...options, dbPath, scanStatus: sourceStatus, frozenProjectNames, onWarning });
+    if (!sourceStatus.complete) {
+      if (scanStatus) scanStatus.complete = false;
+      onWarning?.(`OpenCode database ${index + 1} could not be read completely; checkpoint retained`);
+    }
+    for (const event of sourceEvents) {
+      const previous = events.get(event.eventId);
+      if (!previous) events.set(event.eventId, event);
+      else if (JSON.stringify(previous) !== JSON.stringify(event)) {
+        // The ordinary source retains precedence for a replay identity already sent.
+        if (scanStatus) scanStatus.complete = false;
+        if (!collisionReported) onWarning?.("OpenCode profiles disagree on an event identity; checkpoint retained");
+        collisionReported = true;
+      }
+    }
+  }
+  return [...events.values()];
+}
+
 /** Bucket the window's events by kind for the run log. */
 export function countEventKinds(events) {
   const counts = { token: 0, cost: 0, context: 0, session: 0, lifecycle: 0 };
@@ -302,8 +368,10 @@ export function sampleEventPerKind(events) {
 async function main() {
   const passStartedAt = new Date();
   let args;
+  let dbPaths;
   try {
     args = await resolveCollectorArgs(process.argv, PRODUCER_ID, { now: passStartedAt });
+    dbPaths = opencodeDbPaths();
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
@@ -321,7 +389,8 @@ async function main() {
   // the rows the failed pass had already stored.
   const projectNamesPath = opencodeProjectNamesPath(PRODUCER_ID);
   const frozenProjectNames = await readFrozenProjectNames(projectNamesPath);
-  const events = await collectOpencodeEvents({
+  const events = await collectOpencodeDatabases({
+    dbPaths,
     since: args.since,
     scanStatus,
     sessionIdCutoffMs,
