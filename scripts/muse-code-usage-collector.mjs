@@ -282,7 +282,7 @@ async function main() {
     if (result.reason === "access-token-missing") {
       log("skipped (MUSE_CODE_ACCESS_TOKEN is unavailable from the configured secret source)");
     } else if (result.reason === "access-token-rejected") {
-      log("skipped (Meta rejected MUSE_CODE_ACCESS_TOKEN; update the scoped Infisical secret)");
+      log("skipped (Meta rejected MUSE_CODE_ACCESS_TOKEN; update the configured scoped secret)");
     } else {
       log(result.events.length === 0 ? "skipped (inactive subscription or no quota windows)" : "skipped");
     }
