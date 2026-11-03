@@ -1,15 +1,52 @@
 #!/usr/bin/env node
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const CHILD_TIMEOUT_MS = 60_000;
+
+function childOptions(options = {}) {
+  const timeout = options.timeout ?? CHILD_TIMEOUT_MS;
+  assert(Number.isSafeInteger(timeout) && timeout > 0, "Fixture children require a positive bounded timeout");
+  return { ...options, timeout, killSignal: "SIGKILL" };
+}
+
+function childLabel(command, args) {
+  const runtimeIndex = args.indexOf("--runtime-root");
+  return `${basename(command)}${runtimeIndex >= 0 ? ` (${basename(args[runtimeIndex + 1])})` : ""}`;
+}
+
+function spawnSync(command, args, options = {}) {
+  const bounded = childOptions(options);
+  const result = rawSpawnSync(command, args, bounded);
+  // A timeout has status null, which must never satisfy a tamper-rejection assertion.
+  if (result.error?.code === "ETIMEDOUT") throw new Error(`Fixture child timed out after ${bounded.timeout}ms: ${childLabel(command, args)}`, { cause: result.error });
+  if (result.error) throw result.error;
+  if (result.signal) throw new Error(`Fixture child terminated by ${result.signal}: ${childLabel(command, args)}`);
+  return result;
+}
+
+function execFileSync(command, args, options = {}) {
+  const bounded = childOptions(options);
+  try { return rawExecFileSync(command, args, bounded); }
+  catch (error) {
+    if (error.code === "ETIMEDOUT") throw new Error(`Fixture child timed out after ${bounded.timeout}ms: ${childLabel(command, args)}`, { cause: error });
+    throw error;
+  }
+}
+
+let timeoutRejected = false;
+try { spawnSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeout: 50 }); }
+catch (error) { timeoutRejected = error.cause?.code === "ETIMEDOUT" && error.message.startsWith("Fixture child timed out"); }
+assert(timeoutRejected, "a stalled child fails the fixture instead of passing an expected rejection");
 
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
