@@ -22,7 +22,7 @@ const HOLD_TITLES = [
   "Do Not Auto Merge: waiting",
 ];
 const HEAD_SHA = "a".repeat(40);
-const REVIEW_SIGNAL_SHA = "c".repeat(40);
+const REVIEW_MERGE_SHA = "c".repeat(40);
 const REPO = "Simple-With-Us/Usage-Monitor";
 const REPO_ID = 1284098482;
 
@@ -55,17 +55,27 @@ if [ "\${GH_TOKEN:-}" = "repo-token" ]; then token_kind=repo; fi
 if [ "\${GH_TOKEN:-}" = "merge-token" ]; then token_kind=merge; fi
 printf 'token=%s %s\n' "$token_kind" "$*" >> "$STUB_CALLS"
 if [ "\${1:-}" = "api" ]; then
+  if [[ "$*" == *"/reviews?per_page=100"* ]]; then
+    count=0
+    if [ -f "$STUB_REVIEW_COUNT" ]; then count=$(cat "$STUB_REVIEW_COUNT"); fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$STUB_REVIEW_COUNT"
+    line=$(sed -n "\${count}p" "$STUB_REVIEW_RESPONSES")
+    if [ -z "$line" ] || [ "$line" = "__FAIL__" ]; then exit 1; fi
+    if [[ "$*" == *"--slurp"* ]]; then
+      printf '%s\n' "$line" | jq -c '[.]'
+    else
+      printf '%s\n' "$line" | jq -r '.[] | [.user.login, .commit_id, .state] | @tsv'
+    fi
+    exit 0
+  fi
   count=0
   if [ -f "$STUB_API_COUNT" ]; then count=$(cat "$STUB_API_COUNT"); fi
   count=$((count + 1))
   printf '%s\n' "$count" > "$STUB_API_COUNT"
   line=$(sed -n "\${count}p" "$STUB_PR_RESPONSES")
   if [ -z "$line" ] || [ "$line" = "__FAIL__" ]; then exit 1; fi
-  if [[ "$*" == *"/reviews?per_page=100"* ]]; then
-    printf '%s\n' "$line" | jq -r '.[] | [.user.login, .commit_id, .state] | @tsv'
-  else
-    printf '%s\n' "$line"
-  fi
+  printf '%s\n' "$line"
   exit 0
 fi
 if [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "merge" ] && [ "\${3:-}" = "--disable-auto" ]; then
@@ -135,12 +145,16 @@ function workflowRunPullRequest(overrides: Record<string, unknown> = {}) {
   };
   return {
     base: { ref: "main", repo: repository, sha: "b".repeat(40) },
-    head: { ref: "codex/feature", repo: repository, sha: REVIEW_SIGNAL_SHA },
+    head: { ref: "codex/feature", repo: repository, sha: HEAD_SHA },
     id: 5139873620,
     number: 1876,
     url: `https://api.github.com/repos/${REPO}/pulls/1876`,
     ...overrides,
   };
+}
+
+function review(state: string, login = "kody-ai[bot]", commitId = HEAD_SHA) {
+  return { user: { login }, commit_id: commitId, state };
 }
 
 async function runBlock(
@@ -152,6 +166,8 @@ async function runBlock(
     mergeFailures?: number;
     reviewHeadSha?: string;
     reviewPullRequests?: unknown;
+    reviewPullRequestsJson?: string;
+    reviewResponses?: Array<unknown | "__FAIL__">;
     repoId?: string;
   } = {},
 ) {
@@ -163,8 +179,11 @@ async function runBlock(
   const summary = join(root, "summary");
   const calls = join(root, "calls");
   const apiCount = join(root, "api-count");
+  const reviewCount = join(root, "review-count");
   const mergeCount = join(root, "merge-count");
   const responseFile = join(root, "responses");
+  const reviewResponseFile = join(root, "review-responses");
+  const reviewResponses = options.reviewResponses ?? [[review("APPROVED")], [review("APPROVED")]];
   await mkdir(bin);
   await Promise.all([
     writeFile(gh, GH_STUB),
@@ -172,6 +191,7 @@ async function runBlock(
     writeFile(summary, ""),
     writeFile(calls, ""),
     writeFile(responseFile, `${responses.map((value) => value === "__FAIL__" ? value : JSON.stringify(value)).join("\n")}\n`),
+    writeFile(reviewResponseFile, `${reviewResponses.map((value) => value === "__FAIL__" ? value : JSON.stringify(value)).join("\n")}\n`),
   ]);
   await chmod(gh, 0o755);
   const result = spawnSync("bash", ["-c", script], {
@@ -188,15 +208,17 @@ async function runBlock(
       PR_NUMBER: "1876",
       EVENT_PR_NUMBER: options.eventPrNumber ?? "1876",
       REVIEW_HEAD_SHA: options.reviewHeadSha ?? "",
-      REVIEW_PULL_REQUESTS: JSON.stringify(options.reviewPullRequests ?? []),
+      REVIEW_PULL_REQUESTS: options.reviewPullRequestsJson ?? JSON.stringify(options.reviewPullRequests === undefined ? [] : options.reviewPullRequests),
       REPO_ID: options.repoId ?? String(REPO_ID),
       PR_URL: "https://github.com/Simple-With-Us/Usage-Monitor/pull/1876",
       EXPECTED_HEAD: HEAD_SHA,
       HEAD_SHA,
       STUB_CALLS: calls,
       STUB_API_COUNT: apiCount,
+      STUB_REVIEW_COUNT: reviewCount,
       STUB_MERGE_COUNT: mergeCount,
       STUB_PR_RESPONSES: responseFile,
+      STUB_REVIEW_RESPONSES: reviewResponseFile,
       STUB_DISABLE_FAIL: options.disableFails ? "1" : "0",
       STUB_MERGE_FAILURES: String(options.mergeFailures ?? 0),
     },
@@ -247,7 +269,8 @@ describe("auto-merge hold guards", () => {
     const disarmStep = job.steps.find((step) => step.name.startsWith("Disarm a held"));
     const enableStep = job.steps.find((step) => step.name.startsWith("Enable auto-merge"));
     expect(liveStep?.run).toContain('gh api "repos/$REPO/pulls/$PR_NUMBER"');
-    expect(liveStep?.run).toContain('repos/$REPO/pulls?state=open&per_page=100');
+    expect(source).not.toContain("github.event.workflow_run.head_sha");
+    expect(liveStep?.run).not.toContain('repos/$REPO/pulls?state=open&per_page=100');
     expect(liveStep?.run).toContain('REVIEW_PULL_REQUESTS');
     expect(liveStep?.run).toContain('echo "pr_number=$PR_NUMBER"');
     expect(identityStep?.if).toBe("steps.live.outputs.armable == '1'");
@@ -262,6 +285,8 @@ describe("auto-merge hold guards", () => {
     const enable = extractRunBlock(source, workflow.includes("shared") ? "Enable auto-merge" : "Enable auto-merge (squash + delete branch)");
     expect(enable.match(/--match-head-commit \"\$EXPECTED_HEAD\"/g)).toHaveLength(2);
     expect(enable).toContain('GH_TOKEN="$REPO_TOKEN" gh api');
+    expect(enable).toContain('GH_TOKEN="$REPO_TOKEN" gh api --paginate --slurp');
+    expect(enable.match(/if ! kody_approval_current;/g)).toHaveLength(2);
     expect(enable).toContain('GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto');
   });
 
@@ -308,12 +333,12 @@ describe("auto-merge hold guards", () => {
     expect(malformed.output).toMatchObject({ armable: "0", disarm: "1" });
   });
 
-  it.each(WORKFLOWS)("resolves a review signal to one live same-repository PR in %s", async (workflow) => {
+  it.each(WORKFLOWS)("resolves review metadata independently of the workflow merge-ref SHA in %s", async (workflow) => {
     const source = await readFile(workflow, "utf8");
     const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
     const resolved = await runBlock(initial, [pullRequest()], {
       eventPrNumber: "",
-      reviewHeadSha: REVIEW_SIGNAL_SHA,
+      reviewHeadSha: REVIEW_MERGE_SHA,
       reviewPullRequests: [workflowRunPullRequest()],
     });
     expect(resolved.status).toBe(0);
@@ -323,85 +348,91 @@ describe("auto-merge hold guards", () => {
       head_sha: HEAD_SHA,
       pr_number: "1876",
     });
-    expect(resolved.calls).not.toContain("?state=open");
+    expect(REVIEW_MERGE_SHA).not.toBe(HEAD_SHA);
+    expect(resolved.calls.trim()).toBe(`token=repo api repos/${REPO}/pulls/1876`);
+  });
 
-    const second = workflowRunPullRequest({ id: 5139873621, number: 1877 });
-    const ambiguousMetadata = await runBlock(initial, [], {
-      eventPrNumber: "",
-      reviewHeadSha: REVIEW_SIGNAL_SHA,
-      reviewPullRequests: [workflowRunPullRequest(), second],
-    });
-    expect(ambiguousMetadata.status).not.toBe(0);
+  it.each(WORKFLOWS)("rejects missing, malformed, ambiguous, or foreign review metadata in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const invalidMetadata = [
+      [], null, {}, "not-an-array", [null], ["not-a-PR"], [{}],
+      [workflowRunPullRequest(), workflowRunPullRequest({ number: 1877 })],
+      [workflowRunPullRequest(), {}],
+      ...[undefined, null, "1876", 0, -1, 1876.5, 9007199254740992].map((number) => [workflowRunPullRequest({ number })]),
+      ...[undefined, null, "not-a-sha", "a".repeat(39), "a".repeat(41), "g".repeat(40), 42].map((sha) => [workflowRunPullRequest({
+        head: { repo: { id: REPO_ID }, sha },
+      })]),
+      ...["base", "head"].flatMap((side) => [undefined, null, 42, String(REPO_ID)].map((id) => [workflowRunPullRequest({
+        [side]: { repo: { id }, sha: HEAD_SHA },
+      })])),
+    ];
+    for (const metadata of invalidMetadata) {
+      const rejected = await runBlock(initial, [], {
+        eventPrNumber: "",
+        reviewHeadSha: REVIEW_MERGE_SHA,
+        reviewPullRequests: metadata,
+      });
+      expect(rejected.status, JSON.stringify(metadata)).not.toBe(0);
+      expect(rejected.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+      expect(rejected.calls).toBe("");
+    }
+    for (const reviewPullRequestsJson of ["", "{", "[invalid]"]) {
+      const rejected = await runBlock(initial, [], { eventPrNumber: "", reviewPullRequestsJson });
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.calls).toBe("");
+    }
+    for (const repoId of ["", "0", "invalid", "42"]) {
+      const rejected = await runBlock(initial, [], {
+        eventPrNumber: "", repoId, reviewPullRequests: [workflowRunPullRequest()],
+      });
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.calls).toBe("");
+    }
+  });
 
-    const wrongRepository = workflowRunPullRequest({
-      head: { ref: "fork", repo: { id: 42 }, sha: REVIEW_SIGNAL_SHA },
+  it.each(WORKFLOWS)("disarms a review signal when its metadata head is stale in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const armed = pullRequest({
+      head: { repo: { full_name: REPO }, sha: REVIEW_MERGE_SHA, ref: "dependabot/shared-package" },
+      auto_merge: { enabled_by: { login: "owner" } },
     });
-    const noMetadataCandidate = await runBlock(initial, [], {
+    const stale = await runBlock(initial, [armed], {
       eventPrNumber: "",
-      reviewHeadSha: REVIEW_SIGNAL_SHA,
-      reviewPullRequests: [wrongRepository],
-    });
-    expect(noMetadataCandidate.status).not.toBe(0);
-
-    const associated = pullRequest({
-      head: { repo: { full_name: REPO }, sha: REVIEW_SIGNAL_SHA, ref: "codex/feature" },
-    });
-    const fallback = await runBlock(initial, [[[associated]], pullRequest()], {
-      eventPrNumber: "",
-      reviewHeadSha: REVIEW_SIGNAL_SHA,
-      reviewPullRequests: [],
-    });
-    expect(fallback.status).toBe(0);
-    expect(fallback.output.pr_number).toBe("1876");
-    expect(fallback.calls).toContain(`repos/${REPO}/pulls?state=open&per_page=100`);
-
-    const fallbackAmbiguous = await runBlock(initial, [[[associated, pullRequest({
-      number: 1877,
-      head: { repo: { full_name: REPO }, sha: REVIEW_SIGNAL_SHA, ref: "codex/feature" },
-    })]]], {
-      eventPrNumber: "",
-      reviewHeadSha: REVIEW_SIGNAL_SHA,
-      reviewPullRequests: [],
-    });
-    expect(fallbackAmbiguous.status).not.toBe(0);
-
-    const invalidSha = await runBlock(initial, [], {
-      eventPrNumber: "",
-      reviewHeadSha: "not-a-sha",
+      reviewHeadSha: REVIEW_MERGE_SHA,
       reviewPullRequests: [workflowRunPullRequest()],
     });
-    expect(invalidSha.status).not.toBe(0);
-    expect(invalidSha.calls).toBe("");
+    expect(stale.status).toBe(0);
+    expect(stale.output).toMatchObject({ armable: "0", disarm: "1", head_sha: "", pr_number: "1876" });
+    const disarm = extractRunBlock(source, "Disarm a held, draft, unreadable, or unapproved PR");
+    const canceled = await runBlock(disarm, [armed, pullRequest()]);
+    expect(canceled.status).toBe(0);
+    expect(canceled.calls).toContain("token=repo pr merge --disable-auto");
   });
 
   it.each(WORKFLOWS)("requires Kody's latest current-head review state to be APPROVED in %s", async (workflow) => {
     const source = await readFile(workflow, "utf8");
     const approval = extractRunBlock(source, "Require a current-head approval from the fleet reviewer");
-    const review = (state: string, login = "kody-ai[bot]", commitId = HEAD_SHA) => ({
-      user: { login },
-      commit_id: commitId,
-      state,
-    });
-
-    const commentedAfterApproval = await runBlock(approval, [[
+    const commentedAfterApproval = await runBlock(approval, [], { reviewResponses: [[
       review("APPROVED"),
       review("COMMENTED"),
-    ]]);
+    ]] });
     expect(commentedAfterApproval.status).toBe(0);
     expect(commentedAfterApproval.output.ok).toBe("0");
 
-    const approvedLast = await runBlock(approval, [[
+    const approvedLast = await runBlock(approval, [], { reviewResponses: [[
       review("COMMENTED"),
       review("APPROVED"),
-    ]]);
+    ]] });
     expect(approvedLast.status).toBe(0);
     expect(approvedLast.output.ok).toBe("1");
 
-    const unrelatedComment = await runBlock(approval, [[
+    const unrelatedComment = await runBlock(approval, [], { reviewResponses: [[
       review("APPROVED"),
       review("COMMENTED", "human-reviewer"),
       review("APPROVED", "kody-ai[bot]", "d".repeat(40)),
-    ]]);
+    ]] });
     expect(unrelatedComment.status).toBe(0);
     expect(unrelatedComment.output.ok).toBe("1");
     expect(unrelatedComment.calls).toContain("--paginate");
@@ -446,6 +477,7 @@ describe("auto-merge hold guards", () => {
     const healthy = await runBlock(enable, [pullRequest()]);
     expect(healthy.status).toBe(0);
     expect(healthy.calls).toContain(`token=merge pr merge --auto --squash --delete-branch --match-head-commit ${HEAD_SHA}`);
+    expect(healthy.calls).toContain(`token=repo api --paginate --slurp repos/${REPO}/pulls/1876/reviews?per_page=100`);
 
     const armedHeld = pullRequest({ title: "Do-Not-Merge: waiting", auto_merge: { enabled_by: { login: "owner" } } });
     const held = await runBlock(enable, [armedHeld, armedHeld, pullRequest({ title: "Do-Not-Merge: waiting" })]);
@@ -496,6 +528,7 @@ describe("auto-merge hold guards", () => {
     const mergeCalls = fallback.calls.split("\n").filter((line) => line.includes("pr merge --auto"));
     expect(mergeCalls).toHaveLength(2);
     expect(mergeCalls.every((line) => line.includes(`--match-head-commit ${HEAD_SHA}`))).toBe(true);
+    expect(fallback.calls.split("\n").filter((line) => line.includes("/reviews?per_page=100"))).toHaveLength(2);
 
     const fallbackHeld = await runBlock(
       enable,
@@ -505,5 +538,48 @@ describe("auto-merge hold guards", () => {
     expect(fallbackHeld.status).toBe(0);
     expect(fallbackHeld.calls.split("\n").filter((line) => line.includes("pr merge --auto"))).toHaveLength(1);
     expect(fallbackHeld.calls).toContain("token=repo pr merge --disable-auto");
+  });
+
+  it.each(WORKFLOWS)("rechecks current Kody approval before the first arm and merge fallback in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const enable = extractRunBlock(source, workflow.includes("shared") ? "Enable auto-merge" : "Enable auto-merge (squash + delete branch)");
+    const armed = pullRequest({ auto_merge: { enabled_by: { login: "owner" } } });
+    const unavailableApprovals = [
+      "__FAIL__", [], {},
+      [review("APPROVED"), review("DISMISSED")],
+      [review("APPROVED"), review("CHANGES_REQUESTED")],
+      [review("APPROVED"), review("COMMENTED")],
+      [review("APPROVED", "human-reviewer")],
+      [review("APPROVED", "kody-ai[bot]", "d".repeat(40))],
+      [review("APPROVED"), { user: { login: "kody-ai[bot]" } }],
+    ];
+    for (const reviews of unavailableApprovals) {
+      const beforeFirstArm = await runBlock(enable, [armed, armed, pullRequest()], {
+        reviewResponses: [reviews],
+      });
+      expect(beforeFirstArm.status, JSON.stringify(reviews)).toBe(0);
+      expect(beforeFirstArm.calls).not.toContain("pr merge --auto");
+      expect(beforeFirstArm.calls).toContain("token=repo pr merge --disable-auto");
+
+      const beforeFallback = await runBlock(enable, [armed, armed, armed, pullRequest()], {
+        mergeFailures: 1,
+        reviewResponses: [[review("APPROVED")], reviews],
+      });
+      expect(beforeFallback.status, JSON.stringify(reviews)).toBe(0);
+      expect(beforeFallback.calls.split("\n").filter((line) => line.includes("pr merge --auto"))).toHaveLength(1);
+      expect(beforeFallback.calls).not.toContain("pr merge --auto --merge");
+      expect(beforeFallback.calls).toContain("token=repo pr merge --disable-auto");
+    }
+    const failedCancellation = await runBlock(enable, [armed, armed], {
+      disableFails: true,
+      reviewResponses: [[review("DISMISSED")]],
+    });
+    expect(failedCancellation.status).not.toBe(0);
+    expect(failedCancellation.calls).not.toContain("pr merge --auto");
+    const stillArmed = await runBlock(enable, [armed, armed, armed], {
+      reviewResponses: [[review("DISMISSED")]],
+    });
+    expect(stillArmed.status).not.toBe(0);
+    expect(stillArmed.calls).not.toContain("pr merge --auto");
   });
 });
