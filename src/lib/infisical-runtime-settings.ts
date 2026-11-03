@@ -1,6 +1,6 @@
 import "server-only";
 import type { AppSettingsService } from "./app-settings";
-import { loadInfisicalConnection, infisicalConnectionFromEnv, isInfisicalConnectionDisabled, type InfisicalConnection } from "./infisical-connections";
+import { loadInfisicalConnection, infisicalConnectionFromEnv, isInfisicalConnectionDisabled, InfisicalSourceSchema, type InfisicalConnection } from "./infisical-connections";
 import { createRoutedInfisicalSettings } from "./infisical-settings-client";
 
 /** Keep DB access and credential storage out of the browser-safe settings facade. */
@@ -13,6 +13,10 @@ export async function configureInfisicalRuntimeSettings(service: AppSettingsServ
 
 export async function initializeInfisicalRuntimeSettings(service: AppSettingsService) {
   try {
+    if (process.env.DATABASE_URL) {
+      const states = await Promise.allSettled(InfisicalSourceSchema.options.filter((source) => source !== "um").map(loadInfisicalConnection));
+      if (states.some((state) => state.status === "rejected")) console.warn("[app-settings] Some saved Infisical source configurations are unreadable; independent sources remain available");
+    }
     const stored = process.env.DATABASE_URL ? await loadInfisicalConnection("um") : null;
     if (isInfisicalConnectionDisabled("um")) { service.disableInfisicalConnection(); return; }
     const connection = stored ?? infisicalConnectionFromEnv("um");

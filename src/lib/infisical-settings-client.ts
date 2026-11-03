@@ -10,8 +10,10 @@ export function createRoutedInfisicalSettings(connection: InfisicalConnection, o
   async function refresh() {
     const next = new Map<string, string>();
     const paths = new Map<string, string>();
+    let identityToken: string | undefined;
     for (const path of connection.readPaths) {
-      const token = await authorizeInfisical(connection, path, "read", options);
+      const token = identityToken ?? await authorizeInfisical(connection, path, "read", options);
+      if (connection.mode === "machine-identity") identityToken = token;
       const body = await infisicalJson(`${infisicalSecretApi(connection)}?${infisicalSecretParams(connection, path, true)}`, { headers: { authorization: `Bearer ${token}` } }, options);
       if (!Array.isArray(body.secrets)) throw new InfisicalAuthError("invalid_response");
       for (const record of body.secrets) {

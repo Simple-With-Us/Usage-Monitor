@@ -14,6 +14,8 @@ import { createRoutedInfisicalSettings } from "../infisical-settings-client";
 import { AppSettingsService } from "../app-settings";
 import { configureInfisicalRuntimeSettings, initializeInfisicalRuntimeSettings } from "../infisical-runtime-settings";
 import { createSessionToken, SESSION_COOKIE_NAME } from "../auth";
+import { encryptJson } from "../crypto";
+import { hasStoredInfisicalConnections, isInfisicalConnectionDisabled, InfisicalSourceSchema } from "../infisical-connections";
 import { GET, PUT, DELETE } from "@/app/api/settings/infisical/route";
 
 function connection(): InfisicalConnection {
@@ -140,6 +142,40 @@ describe("Encrypted connection persistence", () => {
 });
 
 describe("Routed runtime settings", () => {
+  it("hydrates saved non-UM connection and disable state at startup before a probe can short-circuit", async () => {
+    await Promise.all(InfisicalSourceSchema.options.map(loadInfisicalConnection));
+    expect(hasStoredInfisicalConnections()).toBe(false);
+    const c = { ...connection(), source: "ct" as const };
+    database.set("infisical.connection.v1.ct", encryptJson(c));
+    database.set("infisical.connection.v1.st", encryptJson({ source: "st", disabled: true }));
+    vi.stubEnv("DATABASE_URL", "file:test.db");
+    const service = new AppSettingsService();
+    await initializeInfisicalRuntimeSettings(service);
+    expect(hasStoredInfisicalConnections()).toBe(true);
+    expect(isInfisicalConnectionDisabled("st")).toBe(true);
+    service.stop();
+  });
+  it("logs in once per machine-identity refresh while keeping folder queries separate", async () => {
+    const c = { ...connection(), mode: "machine-identity" as const, tokens: [], clientId: "custom", clientSecret: "secret", readPaths: ["/read", "/other"] };
+    let logins = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/login")) { logins++; return json({ accessToken: "fake-access" }); }
+      return json({ secrets: [{ secretKey: url.searchParams.get("secretPath") === "/read" ? "FIRST" : "SECOND", secretValue: "fake-value" }] });
+    });
+    const client = createRoutedInfisicalSettings(c, { fetchImpl, refreshIntervalMs: 0 });
+    await client.init(); expect(logins).toBe(1); expect(client.has("FIRST") && client.has("SECOND")).toBe(true);
+    await client.refresh(); expect(logins).toBe(2); client.stop();
+  });
+  it("rejects malformed external values before replacing last-known-good settings", async () => {
+    const c = connection(); const mock = mockFetch(c);
+    const client = createRoutedInfisicalSettings(c, { ...mock, refreshIntervalMs: 0 });
+    await client.init();
+    const original = vi.mocked(mock.fetchImpl).getMockImplementation()!;
+    vi.mocked(mock.fetchImpl).mockImplementation(async (input, init) => String(input).includes("/api/v2/service-token") ? original(input, init) : json({ secrets: [{ secretKey: "ADAPTER_HTTP_TIMEOUT_MS", secretValue: { malformed: "secret-canary" } }] }));
+    await expect(client.refresh()).rejects.toThrow("invalid_response");
+    expect(client.get("ADAPTER_HTTP_TIMEOUT_MS")).toBe("10000"); client.stop();
+  });
   it("keeps a read-only cache unchanged after a rejected write", async () => {
     const c = connection(); const mock = mockFetch(c);
     const client = createRoutedInfisicalSettings(c, { ...mock, refreshIntervalMs: 0 });
@@ -244,6 +280,13 @@ describe("Routed runtime settings", () => {
 
 const request = (method: string, body?: unknown, authenticated = true) => new NextRequest("https://usage.example.test/api/settings/infisical", { method, headers: { ...(authenticated ? { cookie: `${SESSION_COOKIE_NAME}=${createSessionToken()}` } : {}), "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 describe("Admin connection API", () => {
+  it.each([null, [], { secrets: [null] }, { secrets: [{ secretKey: 42 }] }])("rejects malformed secret-list responses before persisting a verified connection: %j", async (payload) => {
+    const c = connection(); const mock = mockFetch(c);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => String(input).includes("/api/v2/service-token") ? mock.fetchImpl(input, init) : json(payload)));
+    const response = await PUT(request("PUT", c));
+    expect(response.status).toBe(400); expect(database.size).toBe(0);
+    expect(await response.text()).not.toContain("st.test-read");
+  });
   it("does not let an earlier verification overwrite a later durable disable", async () => {
     const c = { ...connection(), source: "um" as const };
     let release!: () => void; let entered!: () => void;

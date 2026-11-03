@@ -1184,9 +1184,11 @@ async function readSource(
   const scopeNames = new Set<string>();
   const scopes: Array<{ source: SourceConfig; token: string; names: Set<string> }> = [];
   try {
+    let identityToken: string | undefined;
     for (const path of source.connection?.readPaths ?? [source.secretPath]) {
       const scoped = { ...source, secretPath: path };
-      const token = await login(baseUrl, scoped);
+      const token = identityToken ?? await login(baseUrl, scoped);
+      if (!serviceTokens) identityToken = token;
       const listed = await preflightSourceScope(baseUrl, scoped, token);
       for (const name of listed) {
         if (scopeNames.has(name) && names.includes(name)) throw new InfisicalSyncError("ambiguous_secret_folder");

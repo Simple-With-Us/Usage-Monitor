@@ -1,5 +1,27 @@
 import "server-only";
+import { z } from "zod";
 import type { InfisicalConnection } from "./infisical-connections";
+
+const InfisicalObjectSchema = z.record(z.string(), z.unknown());
+const InfisicalSecretSchema = z.object({
+  secretKey: z.string().min(1).max(512), secretValue: z.string().max(64 * 1024).optional(),
+  workspace: z.string().optional(), environment: z.string().optional(), secretPath: z.string().optional(), type: z.string().optional(),
+}).passthrough();
+const InfisicalSecretListSchema = z.object({ secrets: z.array(InfisicalSecretSchema).max(2000) }).passthrough();
+const InfisicalValueListSchema = z.object({ secrets: z.array(InfisicalSecretSchema.extend({ secretValue: z.string().max(64 * 1024) })).max(2000) }).passthrough();
+const InfisicalLoginSchema = z.object({ accessToken: z.string().min(1).max(8192) }).passthrough();
+const InfisicalTokenMetadataSchema = z.object({
+  workspace: z.string().min(1), permissions: z.array(z.enum(["read", "write"])).max(2),
+  scopes: z.array(z.object({ environment: z.string(), secretPath: z.string() })).max(20), expiresAt: z.string().nullable().optional(),
+}).passthrough();
+
+function responseSchema(path: string, init: RequestInit, origin: string) {
+  const url = new URL(path, origin);
+  if (url.pathname === "/api/v1/auth/universal-auth/login") return InfisicalLoginSchema;
+  if (url.pathname === "/api/v2/service-token") return InfisicalTokenMetadataSchema;
+  if ((!init.method || init.method === "GET") && ["/api/v3/secrets/raw", "/api/v4/secrets"].includes(url.pathname)) return url.searchParams.get("viewSecretValue") === "true" ? InfisicalValueListSchema : InfisicalSecretListSchema;
+  return InfisicalObjectSchema;
+}
 
 export class InfisicalAuthError extends Error {
   constructor(readonly code: string) { super(code); this.name = "InfisicalAuthError"; }
@@ -48,8 +70,9 @@ export async function infisicalJson(path: string, init: RequestInit = {}, option
       chunks.push(item.value);
     }
     const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
-    return value as Record<string, unknown>;
+    const parsed = responseSchema(path, init, origin).safeParse(value);
+    if (!parsed.success) throw new InfisicalAuthError("invalid_response");
+    return parsed.data;
   } catch (error) { if (error instanceof InfisicalAuthError) throw error; throw new InfisicalAuthError("invalid_response"); }
   finally { reader.releaseLock(); }
 }

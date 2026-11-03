@@ -1153,6 +1153,7 @@ describe("Infisical provider credential sync", () => {
     const result = await syncProviderCredentialsFromInfisical();
     expect(result.sources.find((source) => source.source === "ct")).toMatchObject({ status: "synced", available: 2, failed: 0 });
     expect(capture.scopeReads.map((read) => read.secretPath)).toEqual([SOURCE_ENV.ct.secretPath, "/extra"]);
+    expect(capture.loginSources).toEqual(["ct"]);
     expect(capture.secretReads.find((read) => read.name === "OPENROUTER_API_KEY")?.secretPath).toBe("/extra");
     expect(capture.secretReads.find((read) => read.name === "GEMINI_API_KEY")?.secretPath).toBe(SOURCE_ENV.ct.secretPath);
     expect((await prisma.provider.findMany()).map((provider) => provider.name).sort()).toEqual(["google-ai", "openrouter"]);

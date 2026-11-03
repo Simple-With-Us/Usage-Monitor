@@ -55,6 +55,7 @@ export async function loadInfisicalConnectionSnapshot(source: InfisicalSource) {
   const row = await prisma.appSetting.findUnique({ where: { key: key(source) } });
   const rowRevision = revision(row);
   if (!row?.value) { knownStoredSources.delete(source); disabledSources.delete(source); return { connection: null, revision: rowRevision }; }
+  knownStoredSources.add(source);
   const stored = decryptJson(row.value);
   if (stored.disabled === true && stored.source === source) { disabledSources.add(source); knownStoredSources.delete(source); return { connection: null, revision: rowRevision }; }
   disabledSources.delete(source);
