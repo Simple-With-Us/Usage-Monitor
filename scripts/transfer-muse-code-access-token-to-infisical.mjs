@@ -12,6 +12,8 @@ const SERVICE_NAME = "ai.meta.dev.credentials";
 const SERVICE_ACCOUNT = "meta";
 const SECRET_NAME = "MUSE_CODE_ACCESS_TOKEN";
 const API_TIMEOUT_MS = 20_000;
+const KEYCHAIN_TIMEOUT_MS = 180_000;
+const MAX_ACCESS_TOKEN_LENGTH = 16_384;
 
 function transferError(code, status = null) {
   return Object.assign(new Error(code), { code, status });
@@ -78,8 +80,9 @@ function metadataMatches(metadata, { projectId, environment, secretPath, permiss
     metadata &&
     metadata.workspace === projectId &&
     Array.isArray(metadata.permissions) &&
-    metadata.permissions.length === 1 &&
-    metadata.permissions[0] === permission &&
+    (permission === "write"
+      ? ["write", "read,write"].includes([...metadata.permissions].sort().join(","))
+      : metadata.permissions.length === 1 && metadata.permissions[0] === "read") &&
     Array.isArray(metadata.scopes) &&
     metadata.scopes.length === 1 &&
     metadata.scopes[0]?.environment === environment &&
@@ -104,7 +107,7 @@ async function readMuseAccessToken({ execFileImpl, platform }) {
     result = await execFileImpl(
       "/usr/bin/security",
       ["find-generic-password", "-s", SERVICE_NAME, "-a", SERVICE_ACCOUNT, "-w"],
-      { encoding: "utf8", timeout: 30_000, maxBuffer: 1_048_576 },
+      { encoding: "utf8", timeout: KEYCHAIN_TIMEOUT_MS, maxBuffer: 1_048_576 },
     );
   } catch {
     throw transferError("keychain-read-failed");
@@ -115,34 +118,40 @@ async function readMuseAccessToken({ execFileImpl, platform }) {
   } catch {
     throw transferError("keychain-payload-invalid");
   }
-  const accessToken = credential && typeof credential.access_token === "string"
-    ? credential.access_token.trim()
-    : "";
-  if (!accessToken) throw transferError("keychain-access-token-missing");
+  const rawAccessToken = credential?.access_token;
+  if (typeof rawAccessToken !== "string" || !rawAccessToken.trim()) {
+    throw transferError("keychain-access-token-missing");
+  }
+  if (/[\r\n]/.test(rawAccessToken)) throw transferError("keychain-access-token-invalid");
+  const accessToken = rawAccessToken.trim();
+  if (accessToken.length > MAX_ACCESS_TOKEN_LENGTH) throw transferError("keychain-access-token-too-long");
   return accessToken;
 }
 
 async function writeSecret(config, accessToken, fetchImpl) {
   const url = new URL(`/api/v4/secrets/${SECRET_NAME}`, config.base);
+  const request = {
+    headers: {
+      authorization: `Bearer ${config.writeToken}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      projectId: config.projectId,
+      environment: config.environment,
+      secretPath: config.secretPath,
+      secretValue: accessToken,
+      type: "shared",
+    }),
+    redirect: "error",
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  };
   let response;
   try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${config.writeToken}`,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({
-        projectId: config.projectId,
-        environment: config.environment,
-        secretPath: config.secretPath,
-        secretValue: accessToken,
-        type: "shared",
-      }),
-      redirect: "error",
-      signal: AbortSignal.timeout(API_TIMEOUT_MS),
-    });
+    response = await fetchImpl(url, { ...request, method: "PATCH" });
+    if (response.status === 404) {
+      response = await fetchImpl(url, { ...request, method: "POST" });
+    }
   } catch {
     throw transferError("secret-write-request-failed");
   }
