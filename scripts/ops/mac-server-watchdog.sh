@@ -174,7 +174,7 @@ LITESTREAM_STATUS="$(check_process "litestream" "true")"
 # wrong when the runtime is OrbStack).
 ORBSTACK_STATUS="$(check_process "(OrbStack|orbstack)" "true")"
 DOCKER_STATUS="$(check_process "Docker" "true")"
-AGENT_SYNC_STATUS="$(check_process "agent-sync" "false")"
+OPERATOR_STATUS="$(check_process "operator" "false")"
 
 # Coding agent live execution checks
 check_agent() {
@@ -226,7 +226,7 @@ PAYLOAD="$(jq -n \
   --arg litestream "$LITESTREAM_STATUS" \
   --arg orbstack "$ORBSTACK_STATUS" \
   --arg docker "$DOCKER_STATUS" \
-  --arg agentSync "$AGENT_SYNC_STATUS" \
+  --arg operator "$OPERATOR_STATUS" \
   --arg claudeAgent "$CLAUDE_STATUS" \
   --arg cursorAgent "$CURSOR_STATUS" \
   --arg grokAgent "$GROK_STATUS" \
@@ -251,7 +251,7 @@ PAYLOAD="$(jq -n \
       litestream: $litestream,
       orbstack: $orbstack,
       docker: $docker,
-      "agent-sync": $agentSync
+      "operator": $operator
     },
     agentProcesses: {
       "claude-code": $claudeAgent,
