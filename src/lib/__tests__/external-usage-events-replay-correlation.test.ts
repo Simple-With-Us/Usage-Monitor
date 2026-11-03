@@ -72,6 +72,17 @@ describe("ExternalUsageEvent replay that adds correlation metadata", () => {
     await expect(persistExternalUsageEvents([{ ...base, metadata: meta({ "call.id": "call-2" }) }])).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
   });
 
+  it("dedupes a newly added workspace hint without accepting changes to an existing hint", async () => {
+    await persistExternalUsageEvents([{ ...base, metadata: meta() }]);
+    const hinted = { ...base, metadata: meta({ "workspace.botfleetHint": "configured-root" }) };
+    expect((await persistExternalUsageEvents([hinted])).persisted).toBe(0);
+    expect(await prisma.externalUsageEvent.count()).toBe(1);
+    await expect(persistExternalUsageEvents([{ ...hinted, quantity: 1 }])).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
+    await prisma.externalUsageEvent.deleteMany();
+    await persistExternalUsageEvents([hinted]);
+    await expect(persistExternalUsageEvents([{ ...base, metadata: meta({ "workspace.botfleetHint": "changed" }) }])).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
+  });
+
   it("still collides when both sides carry a different session id", async () => {
     await persistExternalUsageEvents([{ ...base, metadata: meta({ "session.id": "sess-1" }) }]);
     await expect(

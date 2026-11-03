@@ -17,7 +17,7 @@ import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 //   CODEX_HOME (default ~/.codex)
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -32,6 +32,8 @@ import {
 } from "./lib/codex-observed-plan.mjs";
 import {
   BOTFLEET_LAUNCHER_METADATA,
+  botFleetWorkspaceRoots,
+  codexSessionCwd,
   codexSessionId,
   codexSessionKeyFor,
   botFleetChildExclusionEnabled,
@@ -67,6 +69,7 @@ export async function collectCodexEvents({
   codexHome = expandHome(process.env.CODEX_HOME || join(homedir(), ".codex")),
   since,
   scanStatus,
+  env = process.env,
 } = {}) {
   const markIncomplete = () => {
     if (scanStatus) scanStatus.complete = false;
@@ -80,7 +83,12 @@ export async function collectCodexEvents({
       const text = await readIfFresh(file, { onReadError: markIncomplete });
       if (!text) continue;
       const botFleetChild = isBotFleetManagedCodexSession(text);
-      if (botFleetChild && botFleetChildExclusionEnabled()) continue;
+      if (botFleetChild && botFleetChildExclusionEnabled(env)) continue;
+      // Workspace membership is a non-authoritative hint, never evidence of
+      // launch provenance or duplicate billing, and never expands exclusion.
+      const cwd = codexSessionCwd(text);
+      const configuredBotFleetWorkspace = cwd && botFleetWorkspaceRoots(env)
+        .some((root) => resolve(cwd).startsWith(`${resolve(root)}/`));
       const parsed = parseCodexJsonl(text, {
         sessionKey: codexSessionKeyFor(codexHome, file),
       });
@@ -88,6 +96,7 @@ export async function collectCodexEvents({
         ...withCorrelationMetadata(filterEventsSince(parsed, since), {
           "session.id": codexSessionId(text),
           ...(botFleetChild ? BOTFLEET_LAUNCHER_METADATA : {}),
+          ...(configuredBotFleetWorkspace ? { "workspace.botfleetHint": "configured-root" } : {}),
         })
       );
     }
