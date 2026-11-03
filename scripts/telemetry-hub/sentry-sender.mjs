@@ -27,18 +27,55 @@ import { NULL_LOGGER } from "./internal-event.mjs";
 import { eventIdOf } from "./journal.mjs";
 
 /**
- * The shape of the answer of Sentry to a rejected batch.
- *
- * Only the error code is read out of it.  The rest of the body can quote
- * the event that was rejected, so nothing else of it is used.
+ * Success ACKs are byte-bounded and retain only typed rejection counts.
+ * Response messages, rejection bodies and headers are never persisted.
  */
-const SENTRY_ERROR_SCHEMA = z.looseObject({
-  //  A `code` that is not a string must not cost the `detail` fallback,
-  //  so both are taken as unknown here and the first string is chosen
-  //  below.  The rest of the body is never read.
-  error: z.looseObject({ code: z.unknown().optional() }).optional(),
-  detail: z.unknown().optional(),
-});
+const AckCount = z.union([z.number(), z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number)]).pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER));
+export const MAX_SENTRY_ACK_BYTES = 64 * 1024;
+
+async function readSuccessAck(response, logs, submitted) {
+  let text = "";
+  let reader;
+  try {
+    if (response.body === undefined) return { responseClass: "unreadable_ack" };
+    if (response.body) {
+      if (typeof response.body.getReader !== "function") return { responseClass: "unreadable_ack" };
+      reader = response.body.getReader();
+      const chunks = [];
+      let bytes = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        bytes += next.value.byteLength;
+        if (bytes > MAX_SENTRY_ACK_BYTES) {
+          await reader.cancel().catch(() => {});
+          return { responseClass: "oversized_ack" };
+        }
+        chunks.push(next.value);
+      }
+      text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+    }
+  } catch { return { responseClass: "unreadable_ack" }; }
+  finally { reader?.releaseLock(); }
+  const contentType = response.headers?.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  const jsonType = !contentType || contentType === "application/json" || /^application\/[a-z0-9.+-]+\+json$/.test(contentType);
+  const emptyProtobuf = !text.trim() && ["application/x-protobuf", "application/protobuf"].includes(contentType);
+  if (!jsonType && !emptyProtobuf) return { responseClass: "unexpected_content_type" };
+  if (!text.trim()) return { accepted: true };
+  const camel = logs ? "rejectedLogRecords" : "rejectedSpans";
+  const snake = logs ? "rejected_log_records" : "rejected_spans";
+  const schema = z.strictObject({
+    partialSuccess: z.strictObject({ [camel]: AckCount.optional(), errorMessage: z.string().optional() }).optional(),
+    partial_success: z.strictObject({ [snake]: AckCount.optional(), error_message: z.string().optional() }).optional(),
+  }).refine((ack) => !(ack.partialSuccess && ack.partial_success));
+  let result;
+  try { result = schema.safeParse(JSON.parse(text)); } catch { return { responseClass: "malformed_ack" }; }
+  if (!result.success) return { responseClass: "malformed_ack" };
+  const partial = result.data.partialSuccess ?? result.data.partial_success;
+  const rejected = partial?.[camel] ?? partial?.[snake] ?? 0;
+  if (rejected > submitted) return { responseClass: "malformed_ack" };
+  return rejected > 0 ? { responseClass: "partial_success", rejectedCount: rejected } : { accepted: true };
+}
 
 /** The Sentry OTLP envelopes.  Sentry does not support OTLP metrics. */
 export const SENTRY_TRACES_PATH = "/v1/traces";
@@ -229,8 +266,18 @@ export function createSentrySender({
   const destination = "sentry";
   const root = endpoint ? endpoint.replace(/\/+$/, "") : "";
   let inFlight = false;
+  // A missing intent is not reconciliation proof after a state error or hold.
+  // Keep this instance latched; recovery requires a reconciled fresh instance.
+  let blocked = false;
+  let holdWarningSent = false;
 
-  async function post(path, envelope) {
+  function warnHeld({ responseClass, heldEvents = 0, rejectedCount } = {}) {
+    if (holdWarningSent) return;
+    holdWarningSent = true;
+    logger.warn("sentry delivery is held", { destination, responseClass: responseClass ?? "unresolved_intent", heldEvents, ...(rejectedCount === undefined ? {} : { rejectedCount }) });
+  }
+
+  async function post(path, envelope, submitted) {
     const json = JSON.stringify(envelope);
     const body = gzipSync(Buffer.from(json, "utf8"));
     let response;
@@ -250,29 +297,19 @@ export function createSentrySender({
       return { outcome: "retry", status: 0, errorName: error?.name ?? "Error" };
     }
     const outcome = classifyStatus(response.status);
-    if (outcome === "ok") return { outcome, status: response.status };
-    let code = "";
-    try {
-      const text = await response.text();
-      //  The body of a rejected batch is checked before it is read, and
-      //  only the error code is kept.  The body of a Sentry answer can
-      //  quote the event, so nothing else of it is used.
-      const parsed = SENTRY_ERROR_SCHEMA.safeParse(JSON.parse(text));
-      if (parsed.success) {
-        const raw = parsed.data.error?.code ?? parsed.data.detail;
-        const candidate = typeof raw === "string" ? raw : "";
-        code = candidate.slice(0, 64);
-      }
-    } catch {
-      code = "";
+    if (outcome === "ok") {
+      const ack = await readSuccessAck(response, path === SENTRY_LOGS_PATH, submitted);
+      return ack.accepted ? { outcome, status: response.status } : { outcome: "held", status: response.status, ...ack };
     }
-    return { outcome, status: response.status, code };
+    // Rejection bodies can echo producer content; only the HTTP class is needed.
+    await response.body?.cancel?.().catch(() => {});
+    return { outcome, status: response.status };
   }
 
-  async function postWithRetry(path, envelope) {
+  async function postWithRetry(path, envelope, submitted) {
     let last = { outcome: "retry", status: 0 };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      last = await post(path, envelope);
+      last = await post(path, envelope, submitted);
       if (last.outcome !== "retry") return last;
       if (attempt < MAX_ATTEMPTS && retryDelayMs > 0) {
         await sleep(retryDelayMs * 2 ** (attempt - 1));
@@ -293,8 +330,23 @@ export function createSentrySender({
     const quarantined = [];
 
     const attempt = async (subset) => {
-      const envelope = build(subset);
-      const result = await postWithRetry(path, envelope);
+      let intent;
+      let result;
+      try {
+        intent = await journal.prepareSentryRequest(path === SENTRY_LOGS_PATH ? "logs" : "traces", subset);
+        result = await postWithRetry(path, build(intent.events), subset.length);
+        if (result.outcome === "held") {
+          blocked = true;
+          warnHeld({ responseClass: result.responseClass, heldEvents: subset.length, rejectedCount: result.rejectedCount });
+          await journal.holdSentryRequest(intent.batchDigest, { responseClass: result.responseClass, rejectedCount: result.rejectedCount, httpStatus: result.status });
+          return { ...result, heldEvents: subset.length };
+        }
+        if (result.outcome === "ok") await journal.markSentBatch(destination, intent.eventIds);
+        await journal.clearSentryRequest(intent.batchDigest);
+      } catch (error) {
+        blocked = true;
+        throw error;
+      }
       if (result.outcome === "ok") {
         delivered.push(...subset);
         return { outcome: "ok" };
@@ -305,7 +357,7 @@ export function createSentrySender({
       if (subset.length === 1) {
         quarantined.push(subset[0]);
         await journal.quarantine(destination, subset[0], {
-          reason: result.code ? `sentry rejected the event: ${result.code}` : "sentry rejected the event",
+          reason: "sentry rejected the event",
           status: result.status,
         });
         logger.warn("quarantined an event", {
@@ -344,6 +396,13 @@ export function createSentrySender({
   }
 
   async function runOnceGuarded() {
+    let request;
+    try { request = await journal.readSentryRequest(); }
+    catch { blocked = true; warnHeld({ responseClass: "invalid_request_state" }); }
+    if (blocked || request) {
+      warnHeld({ responseClass: request?.responseClass, heldEvents: request?.events.length, rejectedCount: request?.rejectedCount });
+      return { ok: false, retry: false, held: true, delivered: 0, quarantined: 0, ...(request ? { heldEvents: request.events.length, responseClass: request.responseClass ?? "unresolved_intent", ...(request.rejectedCount === undefined ? {} : { rejectedCount: request.rejectedCount }) } : {}) };
+    }
     const batch = await journal.readBatch(destination, readLimit);
     if (batch.events.length === 0) {
       return { ok: true, delivered: 0, quarantined: 0, empty: true };
@@ -398,14 +457,14 @@ export function createSentrySender({
           status: outcome.status,
           outcome: outcome.outcome,
         });
-        return { ok: false, retry: outcome.outcome === "retry", delivered: 0, quarantined: 0 };
+        return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredIds.length + outcome.delivered.length, quarantined: quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
       }
       const ids = [...outcome.delivered, ...outcome.quarantined]
         .map((event) => event.eventId)
         .filter((id) => typeof id === "string" && id);
       quarantined += outcome.quarantined.length;
       await journal.markSentBatch(destination, ids);
-      deliveredIds.push(...ids);
+      deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
     }
 
     const logChunks = chunkBySize(logs, buildLogsEnvelope, {
@@ -427,21 +486,21 @@ export function createSentrySender({
           status: outcome.status,
           outcome: outcome.outcome,
         });
-        return { ok: false, retry: outcome.outcome === "retry", delivered: 0, quarantined: 0 };
+        return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredIds.length + outcome.delivered.length, quarantined: quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
       }
       const ids = [...outcome.delivered, ...outcome.quarantined]
         .map((event) => event.eventId)
         .filter((id) => typeof id === "string" && id);
       quarantined += outcome.quarantined.length;
       await journal.markSentBatch(destination, ids);
-      deliveredIds.push(...ids);
+      deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
     }
 
     await journal.setOffset(destination, batch.endOffset);
     return {
       ok: true,
       delivered: deliveredIds.length,
-      quarantined: quarantined.length,
+      quarantined,
     };
   }
 

@@ -35,12 +35,14 @@
 // runtime shape guard belongs.
 
 import { constants as fsConstants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, link, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 
 import { NULL_LOGGER } from "./internal-event.mjs";
+import { rebuildLogBody, scalarFromAnyValue, scrubOtlpAttributes } from "./allowlist.mjs";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -56,6 +58,47 @@ const READ_CHUNK_BYTES = 256 * 1024;
 
 /** The file that records where the journal file starts in the stream. */
 const BASE_FILE = "journal.base.json";
+const SENTRY_REQUEST_FILE = "sentry-request.json";
+export const MAX_SENTRY_REQUEST_BYTES = 2 * 1024 * 1024;
+const SentryResponseClass = z.enum(["partial_success", "malformed_ack", "oversized_ack", "unreadable_ack", "unexpected_content_type"]);
+const SentryWireEventSchema = z.strictObject({
+  eventId: z.string().min(1).max(256), ts: z.string().max(64), kind: z.enum(["span", "log"]),
+  name: z.string().max(160), attributes: z.array(z.unknown()).max(64),
+  durationMs: z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  body: z.strictObject({ stringValue: z.string() }).optional(),
+  severityNumber: z.union([z.literal(9), z.literal(17)]).optional(),
+  status: z.strictObject({ code: z.union([z.literal(1), z.literal(2)]) }).optional(),
+});
+const SentryRequestSchema = z.strictObject({
+  version: z.literal(1), destination: z.literal("sentry"), signal: z.enum(["logs", "traces"]),
+  batchDigest: z.string().regex(/^[a-f0-9]{64}$/), phase: z.enum(["prepared", "held"]),
+  eventIds: z.array(z.string().min(1).max(256)).min(1).max(1000),
+  events: z.array(SentryWireEventSchema).min(1).max(1000),
+  responseClass: SentryResponseClass.optional(), rejectedCount: z.number().int().nonnegative().max(1000).optional(),
+  httpStatus: z.number().int().min(200).max(299).optional(),
+});
+
+function sentryRequestEvents(events, signal) {
+  if (!Array.isArray(events) || !events.length || events.length > (signal === "logs" ? 100 : 1000)) throw new Error("Invalid Sentry request size");
+  return events.map((event) => {
+    const eventId = eventIdOf(event);
+    if (!eventId || !Number.isFinite(Date.parse(event.ts))) throw new Error("Invalid Sentry request identity");
+    const attributes = scrubOtlpAttributes(event.attributes);
+    const operation = attributes.find((a) => a.key === "gen_ai.operation.name");
+    const name = operation ? scalarFromAnyValue(operation.value) : signal === "logs" ? "log" : "chat";
+    const safe = { eventId, ts: event.ts, kind: signal === "logs" ? "log" : "span", name: typeof name === "string" ? name.slice(0, 160) : "chat", attributes };
+    if (Number.isFinite(event.durationMs) && event.durationMs >= 0 && event.durationMs <= Number.MAX_SAFE_INTEGER) safe.durationMs = event.durationMs;
+    if (signal === "logs") {
+      safe.body = { stringValue: rebuildLogBody(attributes) };
+      safe.severityNumber = event.severityNumber === 17 ? 17 : 9;
+    } else safe.status = { code: event.status?.code === 2 ? 2 : 1 };
+    return SentryWireEventSchema.parse(safe);
+  });
+}
+
+function sentryBatchDigest(signal, events) {
+  return createHash("sha256").update(JSON.stringify({ signal, events })).digest("hex");
+}
 
 /** The persisted read offset of one destination. */
 const OffsetStateSchema = z.object({
@@ -211,12 +254,7 @@ export class Journal {
   }
 
   async writeBaseFile(state) {
-    const target = join(this.stateDir, BASE_FILE);
-    const temporary = this.tempPath(target);
-    const body = `${JSON.stringify(state)}\n`;
-    await writeFile(temporary, body, { mode: FILE_MODE });
-    await rename(temporary, target);
-    await chmod(target, FILE_MODE);
+    await this.writeStateFile(BASE_FILE, state);
   }
 
   /** Load the persisted offsets and sent sets for the known destinations. */
@@ -302,8 +340,8 @@ export class Journal {
     const key = normalizeDestination(destination);
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Offset must be a non-negative integer");
     await this.stateMutex(async () => {
-      this.offsets.set(key, offset);
       await this.writeStateFile(`${key}.offset.json`, { offset });
+      this.offsets.set(key, offset);
     });
     await this.maybeCompact();
   }
@@ -320,11 +358,12 @@ export class Journal {
     const key = normalizeDestination(destination);
     if (typeof eventId !== "string" || !eventId) return;
     await this.stateMutex(async () => {
-      const set = this.sentSet(key);
+      const set = new Set(this.sentSet(key));
       if (set.has(eventId)) return;
       set.add(eventId);
       this.trimSentSet(set);
       await this.writeStateFile(`${key}.sent.json`, { eventIds: [...set] });
+      this.sentSets.set(key, set);
     });
   }
 
@@ -332,7 +371,7 @@ export class Journal {
   async markSentBatch(destination, eventIds) {
     const key = normalizeDestination(destination);
     await this.stateMutex(async () => {
-      const set = this.sentSet(key);
+      const set = new Set(this.sentSet(key));
       let changed = false;
       for (const eventId of eventIds) {
         if (typeof eventId !== "string" || !eventId || set.has(eventId)) continue;
@@ -342,6 +381,7 @@ export class Journal {
       this.trimSentSet(set);
       if (changed) {
         await this.writeStateFile(`${key}.sent.json`, { eventIds: [...set] });
+        this.sentSets.set(key, set);
       }
     });
   }
@@ -368,20 +408,86 @@ export class Journal {
    * The temporary path is unique per write, so two concurrent writes can
    * never truncate the same temporary file, and the rename that publishes
    * the file is atomic.
+   * Sent receipts must survive a crash before intent removal is durable;
+   * offset/base durability also protects compaction's absolute positions.
    */
-  async writeStateFile(fileName, payload) {
+  async writeStateFile(fileName, payload, { exclusive = false } = {}) {
     const target = join(this.stateDir, fileName);
     const temporary = this.tempPath(target);
     const body = `${JSON.stringify(payload)}\n`;
-    await writeFile(temporary, body, { mode: FILE_MODE });
-    await rename(temporary, target);
-    await chmod(target, FILE_MODE);
+    try {
+      const file = await open(temporary, "wx", FILE_MODE);
+      try {
+        await file.writeFile(body);
+        await this.syncStateFile(file);
+      } finally { await file.close(); }
+      if (exclusive) await link(temporary, target);
+      else await rename(temporary, target);
+      await chmod(target, FILE_MODE);
+      await this.syncStateDirectory();
+    } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+  }
+
+  async syncStateFile(file) { await file.sync(); }
+
+  async syncStateDirectory() {
+    const directory = await open(this.stateDir, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
+
+  /** An unresolved pre-POST intent is a channel hold, including after a restart. */
+  async readSentryRequest() {
+    let file;
+    try { file = await open(join(this.stateDir, SENTRY_REQUEST_FILE), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
+    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    let bytes;
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry request state");
+      bytes = await file.readFile("utf8");
+    } finally { await file.close(); }
+    const request = SentryRequestSchema.parse(JSON.parse(bytes));
+    const events = sentryRequestEvents(request.events, request.signal);
+    if (JSON.stringify(events) !== JSON.stringify(request.events) || sentryBatchDigest(request.signal, events) !== request.batchDigest || JSON.stringify(events.map((e) => e.eventId)) !== JSON.stringify(request.eventIds) || new Set(request.eventIds).size !== events.length || (request.rejectedCount ?? 0) > events.length) throw new Error("Invalid Sentry request state");
+    return request;
+  }
+
+  async prepareSentryRequest(signal, events) {
+    if (!["logs", "traces"].includes(signal)) throw new Error("Invalid Sentry signal");
+    return this.stateMutex(async () => {
+      if (await this.readSentryRequest()) throw new Error("Unresolved Sentry request retained");
+      const safe = sentryRequestEvents(events, signal);
+      const request = SentryRequestSchema.parse({ version: 1, destination: "sentry", signal, phase: "prepared", batchDigest: sentryBatchDigest(signal, safe), events: safe, eventIds: safe.map((e) => e.eventId) });
+      if (new Set(request.eventIds).size !== safe.length || Buffer.byteLength(JSON.stringify(request)) > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry request bounds");
+      await this.writeStateFile(SENTRY_REQUEST_FILE, request, { exclusive: true });
+      return request;
+    });
+  }
+
+  async holdSentryRequest(batchDigest, { responseClass, rejectedCount, httpStatus }) {
+    return this.stateMutex(async () => {
+      const request = await this.readSentryRequest();
+      if (!request || request.batchDigest !== batchDigest) throw new Error("Sentry request identity changed");
+      const held = SentryRequestSchema.parse({ ...request, phase: "held", responseClass, httpStatus, ...(rejectedCount === undefined ? {} : { rejectedCount }) });
+      if ((rejectedCount ?? 0) > request.events.length || Buffer.byteLength(JSON.stringify(held)) > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry hold bounds");
+      await this.writeStateFile(SENTRY_REQUEST_FILE, held);
+      return held;
+    });
+  }
+
+  async clearSentryRequest(batchDigest) {
+    return this.stateMutex(async () => {
+      const request = await this.readSentryRequest();
+      if (!request || request.phase !== "prepared" || request.batchDigest !== batchDigest) throw new Error("Unresolved Sentry request preserved");
+      await unlink(join(this.stateDir, SENTRY_REQUEST_FILE));
+      await this.syncStateDirectory();
+    });
   }
 
   /** A temporary path that no other write can collide with. */
   tempPath(target) {
     this.writeCounter += 1;
-    return `${target}.${process.pid}.${this.writeCounter}.tmp`;
+    return `${target}.${process.pid}.${this.writeCounter}.${randomUUID()}.tmp`;
   }
 
   /**
