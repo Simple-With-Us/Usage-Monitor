@@ -105,7 +105,7 @@ function directory(path) {
   if (!info?.isDirectory() || info.isSymbolicLink()) fail(`Invalid runtime directory: ${path}`);
 }
 
-function releaseFromLink(runtimeRoot, name) {
+function releaseFromLink(runtimeRoot, name, { legacyMigrationSource = false } = {}) {
   const linkPath = join(runtimeRoot, name);
   const info = stat(linkPath);
   if (!info) return null;
@@ -113,12 +113,12 @@ function releaseFromLink(runtimeRoot, name) {
   const target = resolve(dirname(linkPath), readlinkSync(linkPath));
   const releasesRoot = join(runtimeRoot, "releases");
   const rel = relative(releasesRoot, target);
-  return releaseByName(runtimeRoot, rel, { legacyCurrent: name === "current" });
+  return releaseByName(runtimeRoot, rel, { allowLegacy: name === "current" || legacyMigrationSource });
 }
 
-function releaseByName(runtimeRoot, rel, { legacyCurrent = false } = {}) {
+function releaseByName(runtimeRoot, rel, { allowLegacy = false } = {}) {
   const identity = typeof rel === "string" && /^(release|compat)-([a-f0-9]{40})-([a-f0-9]{64})$/.exec(rel);
-  const legacy = legacyCurrent && typeof rel === "string" && /^[a-f0-9]{40}$/.test(rel);
+  const legacy = allowLegacy && typeof rel === "string" && /^[a-f0-9]{40}$/.test(rel);
   if (!identity && !legacy) fail("Invalid runtime release target");
   const target = join(runtimeRoot, "releases", rel);
   directory(target);
@@ -209,7 +209,7 @@ function readTransition(runtimeRoot) {
   if (!stat(path)) return null;
   if (!stat(path).isFile() || stat(path).isSymbolicLink()) fail("Invalid runtime transition journal");
   const data = JSON.parse(readFileSync(path, "utf8"));
-  if (data?.version !== 1 || !["forward", "rollback"].includes(data.kind)) fail("Invalid runtime transition journal");
+  if (data?.version !== 1 || !["forward", "rollback", "migration"].includes(data.kind)) fail("Invalid runtime transition journal");
   return {
     kind: data.kind,
     current: releaseByName(runtimeRoot, data.current),
@@ -217,18 +217,18 @@ function readTransition(runtimeRoot) {
   };
 }
 
-function writeTransition(runtimeRoot, target, previous, rollback) {
+function writeTransition(runtimeRoot, target, previous, kind) {
   const path = transitionPath(runtimeRoot);
   const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ version: 1, kind: rollback ? "rollback" : "forward", current: target.name, previous: previous?.name ?? null })}\n`, { mode: 0o600 });
+  writeFileSync(temp, `${JSON.stringify({ version: 1, kind, current: target.name, previous: previous?.name ?? null })}\n`, { mode: 0o600 });
   renameSync(temp, path);
 }
 
 function completeTransition(runtimeRoot, transition) {
-  validateRelease(transition.current.path, transition.current.sha, { rollback: transition.kind === "rollback" });
+  validateRelease(transition.current.path, transition.current.sha, { rollback: transition.kind !== "forward" });
   if (transition.kind === "forward") verifyOriginAncestry(runtimeRoot, transition.current.sha);
   if (transition.previous) validateRelease(transition.previous.path, transition.previous.sha, { rollback: true });
-  if (transition.kind === "forward" && transition.previous) replaceSymlink(join(runtimeRoot, "previous"), join("releases", transition.previous.name));
+  if (transition.kind !== "rollback" && transition.previous) replaceSymlink(join(runtimeRoot, "previous"), join("releases", transition.previous.name));
   replaceSymlink(join(runtimeRoot, "current"), join("releases", transition.current.name));
   if (transition.kind === "rollback" && transition.previous) replaceSymlink(join(runtimeRoot, "previous"), join("releases", transition.previous.name));
   writeReceipt(runtimeRoot);
@@ -333,20 +333,23 @@ function preparePreviousRelease(previousPath, previousSha, newPath) {
   if (!lstatSync(scripts).isDirectory() || lstatSync(scripts).isSymbolicLink()) fail("Invalid compatibility overlay directory");
   const temp = mkdtempSync(join(dirname(previousPath), ".compat-stage-"));
   try {
-    cpSync(previousPath, temp, { recursive: true, verbatimSymlinks: true });
-    const modules = join(previousPath, "node_modules");
-    if (existsSync(modules) && (!lstatSync(modules).isDirectory() || lstatSync(modules).isSymbolicLink())) fail("Invalid runtime dependency directory");
-    if (/^[a-f0-9]{40}$/.test(relative(dirname(previousPath), previousPath))) rmSync(join(temp, "node_modules"), { recursive: true, force: true });
+    if (/^[a-f0-9]{40}$/.test(relative(dirname(previousPath), previousPath))) {
+      // Rebuild tracked source; never traverse or copy an unbound dependency tree.
+      validateTrackedScripts(previousPath, previousSha);
+      checkoutApprovedSource(temp, previousSha);
+    } else {
+      cpSync(previousPath, temp, { recursive: true, verbatimSymlinks: true });
+    }
     validateRelease(temp, previousSha, { rollback: true, legacy: true, installDependencies: true });
     for (const script of NEW_SCRIPTS) {
-      const target = join(scripts, script);
+      const target = join(temp, "scripts", script);
       const parent = dirname(target);
       if (!lstatSync(parent).isDirectory() || lstatSync(parent).isSymbolicLink()) fail("Invalid compatibility overlay directory");
       let targetStat = null;
       try { targetStat = lstatSync(target); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
       if (targetStat && (!targetStat.isFile() || targetStat.isSymbolicLink())) fail("Invalid compatibility overlay entry");
-      const tracked = run("git", ["-C", previousPath, "ls-tree", "-z", previousSha, "--", `scripts/${script}`], { capture: true });
+      const tracked = run("git", ["-C", temp, "ls-tree", "-z", previousSha, "--", `scripts/${script}`], { capture: true });
       if (tracked.length > 0) continue;
       copyFileSync(join(newPath, "scripts", script), join(temp, "scripts", script));
     }
@@ -360,22 +363,30 @@ function preparePreviousRelease(previousPath, previousSha, newPath) {
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }
 
-function stageRelease(runtimeRoot, sha) {
-  const releasesRoot = join(runtimeRoot, "releases");
-  const stage = join(releasesRoot, `.staging-${sha}-${process.pid}`);
-  rmSync(stage, { recursive: true, force: true });
-  mkdirSync(stage, { recursive: true });
+function checkoutApprovedSource(path, sha = null) {
+  run("git", ["-C", path, "init", "--quiet", "--template="]);
+  run("git", ["-C", path, "remote", "add", "origin", repositoryUrl()]);
+  run("git", ["-C", path, "fetch", "--quiet", "--filter=blob:none", "origin", "main"]);
+  if (sha === null) sha = run("git", ["-C", path, "rev-parse", "FETCH_HEAD"], { capture: true }).trim();
   try {
-    run("git", ["-C", stage, "init", "--quiet", "--template="]);
-    run("git", ["-C", stage, "remote", "add", "origin", repositoryUrl()]);
-    run("git", ["-C", stage, "fetch", "--quiet", "--filter=blob:none", "origin", "main"]);
-    try {
-      run("git", ["-C", stage, "cat-file", "-e", `${sha}^{commit}`], { capture: true });
-      run("git", ["-C", stage, "merge-base", "--is-ancestor", sha, "FETCH_HEAD"], { capture: true });
-    } catch {
-      fail("Requested SHA is not an ancestor of current origin/main");
-    }
-    run("git", ["-C", stage, "checkout", "--quiet", "--detach", sha]);
+    run("git", ["-C", path, "cat-file", "-e", `${sha}^{commit}`], { capture: true });
+    run("git", ["-C", path, "merge-base", "--is-ancestor", sha, "FETCH_HEAD"], { capture: true });
+  } catch {
+    fail("Requested SHA is not an ancestor of current origin/main");
+  }
+  run("git", ["-C", path, "checkout", "--quiet", "--detach", sha]);
+  return sha;
+}
+
+function stageRelease(runtimeRoot, sha = null) {
+  const releasesRoot = join(runtimeRoot, "releases");
+  const stage = sha === null ? mkdtempSync(join(releasesRoot, ".migration-stage-")) : join(releasesRoot, `.staging-${sha}-${process.pid}`);
+  if (sha !== null) {
+    rmSync(stage, { recursive: true, force: true });
+    mkdirSync(stage, { recursive: true });
+  }
+  try {
+    sha = checkoutApprovedSource(stage, sha);
     validateRelease(stage, sha, { installDependencies: true });
     const name = `release-${sha}-${releaseDigest(stage, sha)}`;
     const releasePath = join(releasesRoot, name);
@@ -406,7 +417,7 @@ function pruneReleases(runtimeRoot) {
   const pending = readTransition(runtimeRoot);
   if (pending) { referenced.add(pending.current.name); referenced.add(pending.previous?.name); }
   const candidates = readdirSync(releasesRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^(?:\.(?:compat|ancestry)-stage-[A-Za-z0-9]+|\.staging-[a-f0-9]{40}-[0-9]+)$/.test(entry.name))
+    .filter((entry) => entry.isDirectory() && /^(?:\.(?:compat|ancestry|migration)-stage-[A-Za-z0-9]+|\.staging-[a-f0-9]{40}-[0-9]+)$/.test(entry.name))
     .map((entry) => entry.name)
     .filter((sha) => !referenced.has(sha))
     .sort((a, b) => lstatSync(join(releasesRoot, b)).mtimeMs - lstatSync(join(releasesRoot, a)).mtimeMs);
@@ -420,13 +431,27 @@ function activate(runtimeRoot, target, { rollback = false } = {}) {
   validateRelease(target.path, target.sha, { rollback });
   if (current && current.name !== target.name) {
     const previous = rollback ? current : preparePreviousRelease(current.path, current.sha, target.path);
-    writeTransition(runtimeRoot, target, previous, rollback);
+    writeTransition(runtimeRoot, target, previous, rollback ? "rollback" : "forward");
   } else {
-    writeTransition(runtimeRoot, target, releaseFromLink(runtimeRoot, "previous"), rollback);
+    writeTransition(runtimeRoot, target, releaseFromLink(runtimeRoot, "previous"), rollback ? "rollback" : "forward");
   }
   completeTransition(runtimeRoot, readTransition(runtimeRoot));
   pruneReleases(runtimeRoot);
   return { currentSha: target.sha, previousSha: releaseFromLink(runtimeRoot, "previous")?.sha ?? null };
+}
+
+function migrateLegacyLinks(runtimeRoot, args) {
+  const current = releaseFromLink(runtimeRoot, "current");
+  const previous = releaseFromLink(runtimeRoot, "previous", { legacyMigrationSource: true });
+  if (!current?.legacy && !previous?.legacy) return;
+  if (!current) fail("Cannot migrate legacy previous without an active current release");
+  const donor = !current.legacy ? current : previous && !previous.legacy ? previous : stageRelease(runtimeRoot, args.rollback ? null : args.sha);
+  validateRelease(donor.path, donor.sha, { rollback: true });
+  const migratedCurrent = current.legacy ? preparePreviousRelease(current.path, current.sha, donor.path) : current;
+  const migratedPrevious = previous?.legacy ? preparePreviousRelease(previous.path, previous.sha, donor.path) : previous;
+  // Migration changes identities only; the requested forward/rollback action runs afterward.
+  writeTransition(runtimeRoot, migratedCurrent, migratedPrevious, "migration");
+  completeTransition(runtimeRoot, readTransition(runtimeRoot));
 }
 
 function processIdentity(pid) {
@@ -502,6 +527,7 @@ function main() {
   try {
     const pending = readTransition(args.runtimeRoot);
     if (pending) completeTransition(args.runtimeRoot, pending);
+    migrateLegacyLinks(args.runtimeRoot, args);
     writeReceipt(args.runtimeRoot);
     const target = args.rollback ? releaseFromLink(args.runtimeRoot, "previous") : stageRelease(args.runtimeRoot, args.sha);
     if (!target) fail("No previous collector runtime is available for rollback");

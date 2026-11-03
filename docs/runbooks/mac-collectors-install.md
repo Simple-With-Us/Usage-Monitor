@@ -45,12 +45,27 @@ lookups atomic or prevent the same owner from modifying a release after
 validation; the runtime tree and its ancestors must remain trusted and published
 releases must remain unchanged while collectors can use them.
 
-A legacy SHA-only directory is accepted only as the existing `current`
-migration source.  Its tracked scripts are verified against Git, and a separate
-content-addressed tree receives a fresh dependency copy without importing or
-changing the legacy dependency.  SHA-only paths are rejected as rollback or
-journal targets; the original legacy directory remains available to in-flight
-processes.
+Existing SHA-only `current` and `previous` links are accepted only as migration
+inputs under the updater lock.  Each legacy tree's tracked scripts are checked,
+then rebuilt in a fresh checkout whose exact commit must be an ancestor of the
+approved origin's current `main`.  Unbound legacy dependencies and untracked
+files are never copied or imported; each rebuilt tree receives a clean copy of
+the invoking updater's Zod dependency and only the missing compatibility entry
+points from a verified bound release.  The donor is an already-bound current or
+previous release when available, otherwise the requested approved forward
+release, or a separately verified `origin/main` release for rollback bootstrap.
+That bootstrap donor is not activated; both historical Git versions remain
+the versions requested by the existing links and the rollback command.
+
+All rebuilt trees must pass dependency identity and cross-version import
+validation before the migration journal or either link is published.  An
+unapproved legacy commit, modified tracked file, unavailable clean donor, or
+incompatible overlay fails without changing the original links.  A migration
+journal names only bound compatibility identities and first preserves the
+logical current/previous pair; recovery completes that identity migration
+before applying the requested update or rollback.  SHA-only journal targets
+remain rejected.  The original legacy directories and their dependency data
+remain untouched and available to in-flight processes.
 
 Published canonical and compatibility releases are retained automatically.  An
 injector already awaiting Infisical may still need its original absolute

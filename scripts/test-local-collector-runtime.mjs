@@ -226,6 +226,137 @@ fs.renameSync = (source, target) => {
   assert(!refreshedOverlay.equals(secondInjector), "changed overlay file is refreshed after rollback");
   assert(readFileSync(join(runtime, "previous", "scripts", "lib", "infisical-service-token.mjs")).equals(firstTrackedCompatibility), "tracked compatibility file stays unchanged after overlay refresh");
   truthfulReceipt(runtime);
+
+  function legacyLinksFixture(home, bothLegacy = false) {
+    cpSync(runtime, home, { recursive: true, verbatimSymlinks: true });
+    rmSync(join(home, "previous"));
+    symlinkSync(`releases/${firstSha}`, join(home, "previous"));
+    const fifo = join(home, "releases", firstSha, "node_modules", "zod", "hostile.fifo");
+    execFileSync("mkfifo", [fifo]);
+    if (bothLegacy) {
+      const current = join(home, "releases", secondSha);
+      execFileSync("git", ["clone", "--quiet", source, current]);
+      git(current, ["checkout", "--quiet", "--detach", secondSha]);
+      const hostileModules = join(root, `${home.split("/").pop()}-unbound-modules`);
+      mkdirSync(join(hostileModules, "zod"), { recursive: true });
+      writeFileSync(join(hostileModules, "zod", "package.json"), '{"type":"module"}\n');
+      writeFileSync(join(hostileModules, "zod", "index.js"), legacyBytes);
+      symlinkSync(hostileModules, join(current, "node_modules"));
+      rmSync(join(home, "current"));
+      symlinkSync(`releases/${secondSha}`, join(home, "current"));
+    }
+    return () => {
+      assert(!existsSync(legacyMarker), "legacy-link migration never executes unbound dependencies");
+      assert(readFileSync(join(home, "releases", firstSha, "node_modules", "zod", "index.js"), "utf8") === legacyBytes, "legacy previous dependency bytes remain unchanged");
+      assert(lstatSync(fifo).isFIFO(), "legacy previous special files are preserved without traversal");
+      if (bothLegacy) assert(lstatSync(join(home, "releases", secondSha, "node_modules")).isSymbolicLink(), "legacy current dependency symlink remains untouched");
+    };
+  }
+
+  for (const action of ["activation", "rollback", "two-legacy-rollback"]) {
+    const home = join(root, `legacy-links-${action}`);
+    const preserved = legacyLinksFixture(home, action === "two-legacy-rollback");
+    const args = action === "activation" ? ["--sha", thirdSha] : ["--rollback"];
+    const migrated = spawnSync(process.execPath, [updater, ...args, "--runtime-root", home], { env, encoding: "utf8" });
+    assert(migrated.status === 0, `existing bare-SHA previous migrates before ${action}: ${migrated.stderr}`);
+    const expectedCurrent = action === "activation" ? thirdSha : firstSha;
+    const expectedPrevious = action === "two-legacy-rollback" ? secondSha : action === "activation" ? firstSha : thirdSha;
+    assert(git(join(home, "current"), ["rev-parse", "HEAD"]) === expectedCurrent && git(join(home, "previous"), ["rev-parse", "HEAD"]) === expectedPrevious, "migration preserves the requested update or rollback direction");
+    assert(!/^[a-f0-9]{40}$/.test(readlinkSync(join(home, "current")).slice("releases/".length)) && !/^[a-f0-9]{40}$/.test(readlinkSync(join(home, "previous")).slice("releases/".length)), "both published links use bound identities after migration");
+    runnable(home, "current");
+    runnable(home, "previous");
+    truthfulReceipt(home);
+    preserved();
+    if (action !== "activation") {
+      const reverse = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", home], { env, encoding: "utf8" });
+      assert(reverse.status === 0 && git(join(home, "current"), ["rev-parse", "HEAD"]) === expectedPrevious && git(join(home, "previous"), ["rev-parse", "HEAD"]) === expectedCurrent, "another rollback reverses the migrated pair without activating the donor");
+      preserved();
+    }
+  }
+
+  for (const attack of ["modified-tracked-source", "unapproved-commit", "incompatible-donor"]) {
+    const home = join(root, `legacy-migration-${attack}`);
+    const preserved = legacyLinksFixture(home, attack === "incompatible-donor");
+    const previous = join(home, "previous");
+    let requested = thirdSha;
+    if (attack === "modified-tracked-source") writeFileSync(join(previous, "scripts", "lib", "infisical-service-token.mjs"), "throw new Error('changed tracked source');\n");
+    if (attack === "unapproved-commit") {
+      git(previous, ["config", "user.name", "Collector Test"]);
+      git(previous, ["config", "user.email", "collector-test@example.invalid"]);
+      git(previous, ["commit", "--allow-empty", "-m", "unapproved legacy commit"]);
+      const rogueSha = git(previous, ["rev-parse", "HEAD"]);
+      renameSync(join(home, "releases", firstSha), join(home, "releases", rogueSha));
+      rmSync(previous);
+      symlinkSync(`releases/${rogueSha}`, previous);
+    }
+    if (attack === "incompatible-donor") {
+      writeFileSync(join(source, "scripts", "collector-injector.mjs"), `${secondInjector.toString()}\nimport './lib/collector-overlay-only.mjs';\n`);
+      git(source, ["add", "scripts/collector-injector.mjs"]);
+      git(source, ["commit", "-m", "incompatible migration donor"]);
+      requested = git(source, ["rev-parse", "HEAD"]);
+    }
+    const currentBefore = readlinkSync(join(home, "current"));
+    const previousBefore = readlinkSync(previous);
+    const refused = spawnSync(process.execPath, [updater, "--sha", requested, "--runtime-root", home], { env, encoding: "utf8" });
+    assert(refused.status !== 0 && !existsSync(join(home, ".transition.json")), `legacy migration rejects ${attack} before journaling`);
+    assert(readlinkSync(join(home, "current")) === currentBefore && readlinkSync(previous) === previousBefore && !existsSync(legacyMarker), "failed migration preserves both original links without executing legacy code");
+    if (attack === "modified-tracked-source") assert(refused.stderr.includes("modified tracked scripts"), "modified legacy tracked source is identified");
+    if (attack === "unapproved-commit") assert(refused.stderr.includes("not an ancestor"), "unapproved legacy commit cannot become a trusted compatibility tree");
+    if (attack === "incompatible-donor") {
+      assert(refused.stderr.includes("collector-overlay-only.mjs"), "cross-version donor import failure is identified");
+      preserved();
+      git(source, ["reset", "--hard", thirdSha]);
+    }
+  }
+
+  for (const boundary of ["dependency", "compatibility", "overlay", "journal", "previous", "current", "receipt", "journal-removal"]) {
+    const home = join(root, `legacy-migration-crash-${boundary}`);
+    const preserved = legacyLinksFixture(home, true);
+    const hook = join(root, `legacy-migration-crash-${boundary}.mjs`);
+    writeFileSync(hook, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const home = ${JSON.stringify(home)};
+const boundary = ${JSON.stringify(boundary)};
+const originalRename = fs.renameSync;
+fs.renameSync = (source, target) => {
+  const result = originalRename(source, target);
+  if ((boundary === 'dependency' && target.startsWith(home + '/releases/') && target.endsWith('/node_modules/zod')) ||
+      (boundary === 'compatibility' && target.startsWith(home + '/releases/compat-')) ||
+      (boundary === 'journal' && target === home + '/.transition.json') ||
+      (boundary === 'previous' && target === home + '/previous') ||
+      (boundary === 'current' && target === home + '/current') ||
+      (boundary === 'receipt' && target === home + '/runtime-state.json')) process.exit(86);
+  return result;
+};
+const originalCopy = fs.copyFileSync;
+fs.copyFileSync = (source, target, ...args) => {
+  const result = originalCopy(source, target, ...args);
+  if (boundary === 'overlay' && target.startsWith(home + '/releases/.compat-stage-') && target.endsWith('/scripts/collector-injector.mjs')) process.exit(86);
+  return result;
+};
+const originalRemove = fs.rmSync;
+fs.rmSync = (path, ...args) => {
+  const result = originalRemove(path, ...args);
+  if (boundary === 'journal-removal' && path === home + '/.transition.json') process.exit(86);
+  return result;
+}; syncBuiltinESMExports();\n`);
+    const crashed = spawnSync(process.execPath, ["--import", hook, updater, "--rollback", "--runtime-root", home], { env, encoding: "utf8" });
+    assert(crashed.status === 86, `legacy migration exits at the ${boundary} boundary`);
+    assert(git(join(home, "current"), ["rev-parse", "HEAD"]) === secondSha && git(join(home, "previous"), ["rev-parse", "HEAD"]) === firstSha, "interrupted identity migration never reverses the logical release pair");
+    preserved();
+    if (existsSync(join(home, ".transition.json"))) {
+      const journal = JSON.parse(readFileSync(join(home, ".transition.json"), "utf8"));
+      assert(journal.kind === "migration" && /^compat-[a-f0-9]{40}-[a-f0-9]{64}$/.test(journal.current) && /^compat-[a-f0-9]{40}-[a-f0-9]{64}$/.test(journal.previous), "migration journal contains only bound compatibility identities");
+    }
+    const recovered = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", home], { env, encoding: "utf8" });
+    assert(recovered.status === 0 && git(join(home, "current"), ["rev-parse", "HEAD"]) === firstSha && git(join(home, "previous"), ["rev-parse", "HEAD"]) === secondSha, `recovery completes migration then applies one rollback after ${boundary}`);
+    runnable(home, "current");
+    runnable(home, "previous");
+    truthfulReceipt(home);
+    preserved();
+    assert(!existsSync(join(home, ".transition.json")) && readdirSync(join(home, ".update.lock")).length === 0, "migration recovery clears journal and dead-owner locks");
+    assert(!readdirSync(join(home, "releases")).some((name) => name.startsWith(".")), "migration recovery prunes abandoned clean-source and compatibility stages");
+  }
+
   const dependencyTampers = ["dependency-content", "dependency-addition", "dependency-removal", "dependency-mode", "dependency-directory", "dependency-symlink", "dependency-oversize"];
   function alterDependency(home, target, tamper) {
     const directory = join(home, target, "node_modules", "zod");
@@ -266,7 +397,7 @@ fs.renameSync = (source, target) => {
       assert(recovery.status !== 0 && readlinkSync(join(changedRuntime, "current")) === thirdRelease, "journal recovery also rejects a changed compatibility overlay before pointer publication");
     }
   }
-  for (const tamper of [...dependencyTampers, "digest-name", "sha-only-previous", "sha-only-journal"]) {
+  for (const tamper of [...dependencyTampers, "digest-name", "sha-only-journal"]) {
     const changedRuntime = join(root, `canonical-${tamper}`);
     cpSync(runtime, changedRuntime, { recursive: true, verbatimSymlinks: true });
     let target = thirdRelease;
@@ -276,9 +407,6 @@ fs.renameSync = (source, target) => {
       renameSync(join(changedRuntime, target), join(changedRuntime, next));
       rmSync(join(changedRuntime, "current")); symlinkSync(next, join(changedRuntime, "current"));
       target = next;
-    }
-    if (tamper === "sha-only-previous") {
-      rmSync(join(changedRuntime, "previous")); symlinkSync(`releases/${firstSha}`, join(changedRuntime, "previous"));
     }
     if (["digest-name", "sha-only-journal"].includes(tamper)) writeFileSync(join(changedRuntime, ".transition.json"), JSON.stringify({ version: 1, kind: "rollback", current: tamper === "sha-only-journal" ? firstSha : target.slice("releases/".length), previous: readlinkSync(join(changedRuntime, "previous")).slice("releases/".length) }));
     const rejected = spawnSync(process.execPath, [updater, "--rollback", "--runtime-root", changedRuntime], { env, encoding: "utf8" });
