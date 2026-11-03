@@ -7,7 +7,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
-import { mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -92,7 +92,8 @@ export async function readPendingSessions(stateRoot, { readMarker = readFile } =
     // Fail this pass rather than interpreting a partial snapshot as complete.
     const entry = JSON.parse(await readMarker(markerPath, "utf8"));
     if (
-      entry?.version !== 1 ||
+      ![1, 2].includes(entry?.version) ||
+      (entry.version === 2 && !/^[0-9a-f]{64}$/.test(entry.sourceFingerprint)) ||
       !isSafePendingFile(entry?.file) ||
       typeof entry?.since !== "string" ||
       Number.isNaN(Date.parse(entry.since)) ||
@@ -105,10 +106,22 @@ export async function readPendingSessions(stateRoot, { readMarker = readFile } =
     if (dirent.name !== expectedName) throw new Error("Kimi pending-session marker name does not match its content");
     const known = pending.get(entry.file);
     if (!known) {
-      pending.set(entry.file, { since: entry.since, markerNames: new Set([dirent.name]) });
+      pending.set(entry.file, {
+        since: entry.since,
+        markerNames: new Set([dirent.name]),
+        boundaryMarkerName: dirent.name,
+        sourceFingerprint: entry.version === 2 ? entry.sourceFingerprint : undefined,
+      });
     } else {
       known.markerNames.add(dirent.name);
-      if (Date.parse(entry.since) < Date.parse(known.since)) known.since = entry.since;
+      if (
+        Date.parse(entry.since) < Date.parse(known.since) ||
+        (entry.since === known.since && dirent.name < known.boundaryMarkerName)
+      ) {
+        known.since = entry.since;
+        known.boundaryMarkerName = dirent.name;
+      }
+      if (entry.version !== 2 || known.sourceFingerprint !== entry.sourceFingerprint) known.sourceFingerprint = undefined;
     }
   }
   return pending;
@@ -140,7 +153,7 @@ function isSafePendingFile(file) {
   return parts.at(-1) === "wire.jsonl";
 }
 
-export async function writeKimiPendingMarker(stateRoot, file, since) {
+export async function writeKimiPendingMarker(stateRoot, file, since, sourceFingerprint) {
   if (!isSafePendingFile(file)) throw new Error("Kimi pending-session marker has an invalid source path");
   const directory = `${collectorStatePath(PRODUCER_ID, stateRoot, "pending")}.d`;
   await mkdir(directory, { recursive: true });
@@ -150,23 +163,60 @@ export async function writeKimiPendingMarker(stateRoot, file, since) {
   const tempPath = join(directory, `.${name}.${process.pid}.${randomUUID()}.tmp`);
   await writeFile(
     tempPath,
-    `${JSON.stringify({ version: 1, file, since, generation })}\n`,
+    `${JSON.stringify({ version: sourceFingerprint ? 2 : 1, file, since, generation, sourceFingerprint })}\n`,
     { flag: "wx", mode: 0o600 },
   );
   await rename(tempPath, path);
   return name;
 }
 
-async function deferPendingSession(stateRoot, file, since, known, dryRun) {
-  // A resolver may acknowledge every generation observed by this scan.  A
-  // fresh generation protects rows deferred while that resolver is running.
-  let markerNames = new Set(known?.markerNames);
-  if (!dryRun) {
-    const newMarker = await writeKimiPendingMarker(stateRoot, file, since);
-    await acknowledgeKimiEvents(stateRoot, { resolvedPendingMarkers: new Map([[file, markerNames]]) });
-    markerNames = new Set([newMarker]);
+function kimiSourceFingerprint(sourceStat) {
+  if (!sourceStat.isFile()) throw new Error("Kimi wire is not a regular file");
+  return createHash("sha256")
+    .update([sourceStat.dev, sourceStat.ino, sourceStat.size, sourceStat.mtimeNs, sourceStat.ctimeNs].join("\0"))
+    .digest("hex");
+}
+
+export async function deferPendingSession(stateRoot, file, since, known, sourceFingerprint, {
+  dryRun, scanStatus, writePendingMarker, acknowledgePendingMarkers,
+}) {
+  if (dryRun) return known ?? { since, markerNames: new Set() };
+  if (
+    known?.markerNames.size && known.sourceFingerprint === sourceFingerprint &&
+    Date.parse(known.since) <= Date.parse(since)
+  ) {
+    if (known.markerNames.size === 1) return known;
+    // Compact duplicate durable generations without writing another one.
+    const redundant = new Set(known.markerNames);
+    redundant.delete(known.boundaryMarkerName);
+    try {
+      await acknowledgePendingMarkers(stateRoot, { resolvedPendingMarkers: new Map([[file, redundant]]) });
+      return { ...known, markerNames: new Set([known.boundaryMarkerName]) };
+    } catch {
+      scanStatus.complete = false;
+      return known;
+    }
   }
-  return { since, markerNames };
+  // A resolver may acknowledge the observed generations.  Only changed sources
+  // need a fresh generation to protect rows that resolver has not read.
+  const markerNames = new Set(known?.markerNames);
+  let newMarker;
+  try {
+    newMarker = await writePendingMarker(stateRoot, file, since, sourceFingerprint);
+    await acknowledgePendingMarkers(stateRoot, { resolvedPendingMarkers: new Map([[file, markerNames]]) });
+    return { since, markerNames: new Set([newMarker]), boundaryMarkerName: newMarker, sourceFingerprint };
+  } catch {
+    scanStatus.complete = false;
+    if (!newMarker) return known ?? { since, markerNames };
+    markerNames.add(newMarker);
+    return {
+      ...known,
+      since: known?.since ?? since,
+      markerNames,
+      boundaryMarkerName: known?.boundaryMarkerName ?? newMarker,
+      sourceFingerprint: !known || known.sourceFingerprint === sourceFingerprint ? sourceFingerprint : undefined,
+    };
+  }
 }
 
 async function readKimiWire(file, sessionsRoot, onReadError, afterOpen) {
@@ -175,7 +225,7 @@ async function readKimiWire(file, sessionsRoot, onReadError, afterOpen) {
     const [realRoot, realFile] = await Promise.all([realpath(sessionsRoot), realpath(file)]);
     if (realFile !== resolve(realRoot, relative(sessionsRoot, file))) throw new Error("Kimi wire path is not canonical");
     handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (!opened.isFile()) throw new Error("Kimi wire is not a regular file");
     await afterOpen?.(file);
     const text = await handle.readFile("utf8");
@@ -183,16 +233,17 @@ async function readKimiWire(file, sessionsRoot, onReadError, afterOpen) {
     let currentFile;
     let currentStat;
     try {
-      [currentRoot, currentFile, currentStat] = await Promise.all([realpath(sessionsRoot), realpath(file), stat(file)]);
+      [currentRoot, currentFile, currentStat] = await Promise.all([realpath(sessionsRoot), realpath(file), stat(file, { bigint: true })]);
     } catch {
       throw new Error("Kimi wire path changed while reading");
     }
     if (
       currentRoot !== realRoot || currentFile !== realFile ||
       currentFile !== resolve(currentRoot, relative(sessionsRoot, file)) ||
-      !currentStat.isFile() || currentStat.dev !== opened.dev || currentStat.ino !== opened.ino
+      !currentStat.isFile() || currentStat.dev !== opened.dev || currentStat.ino !== opened.ino ||
+      currentStat.size !== opened.size || currentStat.mtimeNs !== opened.mtimeNs || currentStat.ctimeNs !== opened.ctimeNs
     ) throw new Error("Kimi wire path changed while reading");
-    return text;
+    return { text, sourceFingerprint: kimiSourceFingerprint(currentStat) };
   } catch (error) {
     onReadError(error);
     return null;
@@ -241,11 +292,14 @@ export async function collectKimiEvents({
   afterWireOpen,
   resolveWireIdentity = kimiWireIdentity,
   readSessionDirectory,
+  writePendingMarker = writeKimiPendingMarker,
+  acknowledgePendingMarkers = acknowledgeKimiEvents,
 } = {}) {
   const normalizedHome = resolve(home);
   const sessionsRoot = join(normalizedHome, "sessions");
   if (!existsSync(sessionsRoot)) return [];
   const pending = await readPendingSessions(stateRoot);
+  const markerOptions = { dryRun, scanStatus, writePendingMarker, acknowledgePendingMarkers };
   const workDirBySession = await readSessionIndex(normalizedHome, {
     onReadError: () => {},
   });
@@ -298,19 +352,31 @@ export async function collectKimiEvents({
     }
     if (!discoveredFiles.has(file)) continue;
     const identity = resolveWireIdentity(sessionsRoot, file);
-    if (!identity.sessionId) {
-      pending.set(relativeFile, await deferPendingSession(stateRoot, relativeFile, pendingEntry.since, pendingEntry, dryRun));
+    const requestedSince = since?.toISOString?.() ?? EARLIEST_REPLAY_SINCE;
+    const replaySince = Date.parse(requestedSince) < Date.parse(pendingEntry.since)
+      ? requestedSince : pendingEntry.since;
+    if (!identity.sessionId || !projectNameFromDirectory(workDirBySession?.get(identity.sessionId))) {
+      try {
+        const fingerprint = kimiSourceFingerprint(await lstat(file, { bigint: true }));
+        pending.set(relativeFile, await deferPendingSession(
+          stateRoot, relativeFile, replaySince, pendingEntry, fingerprint, markerOptions,
+        ));
+      } catch (error) {
+        if (error?.code === "ENOENT" && Date.parse(replaySince) < Date.parse(pendingEntry.since)) {
+          pending.set(relativeFile, await deferPendingSession(
+            stateRoot, relativeFile, replaySince, pendingEntry, undefined, markerOptions,
+          ));
+        } else if (error?.code !== "ENOENT") {
+          scanStatus.complete = false;
+        }
+      }
+      filesToRead.delete(file);
       continue;
     }
-    if (!projectNameFromDirectory(workDirBySession?.get(identity.sessionId))) continue;
-    const freshEntry = filesToRead.get(file);
-    let replaySince = pendingEntry.since;
-    if (freshEntry && Date.parse(freshEntry.since) < Date.parse(replaySince)) {
-      replaySince = freshEntry.since;
-      if (!dryRun) {
-        pendingEntry.markerNames.add(await writeKimiPendingMarker(stateRoot, relativeFile, replaySince));
-      }
-      pendingEntry.since = replaySince;
+    if (Date.parse(replaySince) < Date.parse(pendingEntry.since)) {
+      pending.set(relativeFile, await deferPendingSession(
+        stateRoot, relativeFile, replaySince, pendingEntry, pendingEntry.sourceFingerprint, markerOptions,
+      ));
     }
     filesToRead.set(file, { since: replaySince, hasPendingMarker: true });
   }
@@ -318,10 +384,11 @@ export async function collectKimiEvents({
   const resolvedPendingFiles = new Set();
   for (const [filePath, fileEntry] of filesToRead) {
     const replaySinceIso = fileEntry.since;
-    const text = await readKimiWire(filePath, sessionsRoot, (error) => {
+    const source = await readKimiWire(filePath, sessionsRoot, (error) => {
       if (!(fileEntry.hasPendingMarker && (error?.code === "ENOENT" || error?.code === "ELOOP"))) scanStatus.complete = false;
     }, afterWireOpen);
-    if (text === null) continue;
+    if (source === null) continue;
+    const { text, sourceFingerprint } = source;
     const identity = resolveWireIdentity(sessionsRoot, filePath);
     const workDir = identity.sessionId ? workDirBySession?.get(identity.sessionId) : undefined;
     const project = projectNameFromDirectory(workDir);
@@ -336,7 +403,9 @@ export async function collectKimiEvents({
         : known && Date.parse(known.since) < Date.parse(replaySinceIso)
           ? known.since
           : replaySinceIso;
-      pending.set(file, await deferPendingSession(stateRoot, file, deferredSince, known, dryRun));
+      pending.set(file, await deferPendingSession(
+        stateRoot, file, deferredSince, known, sourceFingerprint, markerOptions,
+      ));
       continue;
     }
     events.push(
@@ -355,13 +424,9 @@ export async function collectKimiEvents({
       // Its timestamp is unknowable until the JSON is complete, so retain the
       // whole source rather than filtering a later completion at today's
       // checkpoint boundary.
-      if (!dryRun) {
-        const known = pending.get(relativeFile);
-        const markerNames = new Set(known?.markerNames);
-        const marker = await writeKimiPendingMarker(stateRoot, relativeFile, EARLIEST_REPLAY_SINCE);
-        await acknowledgeKimiEvents(stateRoot, { resolvedPendingMarkers: new Map([[relativeFile, markerNames]]) });
-        pending.set(relativeFile, { since: EARLIEST_REPLAY_SINCE, markerNames: new Set([marker]) });
-      }
+      pending.set(relativeFile, await deferPendingSession(
+        stateRoot, relativeFile, EARLIEST_REPLAY_SINCE, pending.get(relativeFile), sourceFingerprint, markerOptions,
+      ));
     } else if (pending.has(relativeFile)) {
       resolvedPendingFiles.add(relativeFile);
     }
