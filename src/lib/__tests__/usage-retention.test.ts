@@ -277,7 +277,13 @@ describe("usage-retention wrapper", () => {
     );
     expect(prismaMock.externalUsageEvent.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { occurredAt: { lt: new Date("2026-04-05T12:00:00.000Z") } },
+        where: {
+          occurredAt: { lt: new Date("2026-04-05T12:00:00.000Z") },
+          // Owner-recorded expenses are a permanent ledger and are excluded
+          // from prune selection (see retention-integration.test.ts for the
+          // end-to-end proof that an old owner expense survives).
+          sourceApp: { not: "owner-recorded-expense" },
+        },
       })
     );
     expect(prismaMock.usageSnapshotDailyRollup.upsert).toHaveBeenCalledTimes(1);
