@@ -266,6 +266,8 @@ export function createSentrySender({
   const destination = "sentry";
   const root = endpoint ? endpoint.replace(/\/+$/, "") : "";
   let inFlight = false;
+  // A missing intent is not reconciliation proof after a state error or hold.
+  // Keep this instance latched; recovery requires a reconciled fresh instance.
   let blocked = false;
   let holdWarningSent = false;
 

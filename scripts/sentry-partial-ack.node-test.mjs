@@ -178,6 +178,25 @@ test("invalid or oversized 2xx acknowledgements become typed holds without retri
   });
 });
 
+test("external intent removal does not unlatch a sender after an ambiguous partial ACK", async (t) => {
+  const f = await fixture(t);
+  let requests = 0;
+  const sender = f.sender(f.journal, async () => {
+    requests++;
+    return Response.json({ partialSuccess: { rejectedLogRecords: 1 } });
+  });
+  assert.equal((await sender.runOnce()).held, true);
+  const preserved = await readFile(holdPath(f.dir));
+  await writeFile(join(f.dir, "preserved-intent.json"), preserved, { mode: 0o600 });
+  await rm(holdPath(f.dir));
+  assert.equal(await f.journal.readSentryRequest(), null);
+  assert.equal((await sender.runOnce()).held, true);
+  assert.equal(requests, 1);
+  assert.equal(f.journal.getOffset("sentry"), 0);
+  assert.equal(f.journal.isSent("sentry", id(1)), false);
+  assert.deepEqual(await readFile(join(f.dir, "preserved-intent.json")), preserved);
+});
+
 test("pre-POST fsync failure sends nothing and never advances offset or sent state", async (t) => {
   const f = await fixture(t);
   f.journal.failFileSync = true;

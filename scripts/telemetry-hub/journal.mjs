@@ -408,6 +408,8 @@ export class Journal {
    * The temporary path is unique per write, so two concurrent writes can
    * never truncate the same temporary file, and the rename that publishes
    * the file is atomic.
+   * Sent receipts must survive a crash before intent removal is durable;
+   * offset/base durability also protects compaction's absolute positions.
    */
   async writeStateFile(fileName, payload, { exclusive = false } = {}) {
     const target = join(this.stateDir, fileName);
