@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { runInNewContext } from "node:vm";
 
 import { load } from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
@@ -162,6 +163,7 @@ async function runBlock(
   responses: Array<unknown | "__FAIL__">,
   options: {
     disableFails?: boolean;
+    hasElevatedToken?: boolean;
     eventPrNumber?: string;
     mergeFailures?: number;
     reviewHeadSha?: string;
@@ -204,6 +206,7 @@ async function runBlock(
       GH_TOKEN: "repo-token",
       REPO_TOKEN: "repo-token",
       MERGE_TOKEN: "merge-token",
+      HAS_ELEVATED_TOKEN: options.hasElevatedToken ? "1" : "0",
       REPO,
       PR_NUMBER: "1876",
       EVENT_PR_NUMBER: options.eventPrNumber ?? "1876",
@@ -276,6 +279,7 @@ describe("auto-merge hold guards", () => {
     expect(identityStep?.if).toBe("steps.live.outputs.armable == '1'");
     expect(approvalStep?.if).toBe("steps.live.outputs.armable == '1'");
     expect(disarmStep?.if).toContain("steps.live.outputs.disarm == '1'");
+    expect(disarmStep?.if).toContain("steps.identity.outputs.arm == '1'");
     expect(disarmStep?.if).toContain("steps.approval.outputs.ok != '1'");
     expect(enableStep?.if).toContain("steps.live.outputs.armable == '1'");
     expect(enableStep?.if).toContain("steps.identity.outputs.arm == '1'");
@@ -376,11 +380,13 @@ describe("auto-merge hold guards", () => {
       expect(rejected.status, JSON.stringify(metadata)).not.toBe(0);
       expect(rejected.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
       expect(rejected.calls).toBe("");
+      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
     }
     for (const reviewPullRequestsJson of ["", "{", "[invalid]"]) {
       const rejected = await runBlock(initial, [], { eventPrNumber: "", reviewPullRequestsJson });
       expect(rejected.status).not.toBe(0);
       expect(rejected.calls).toBe("");
+      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
     }
     for (const repoId of ["", "0", "invalid", "42"]) {
       const rejected = await runBlock(initial, [], {
@@ -388,6 +394,7 @@ describe("auto-merge hold guards", () => {
       });
       expect(rejected.status).not.toBe(0);
       expect(rejected.calls).toBe("");
+      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
     }
   });
 
@@ -444,6 +451,49 @@ describe("auto-merge hold guards", () => {
     const unrelated = await runBlock(initial, [pullRequest({ title: "Ordinary change", head: { repo: { full_name: REPO }, sha: HEAD_SHA, ref: "codex/ordinary" } })]);
     expect(unrelated.status).toBe(0);
     expect(unrelated.output).toMatchObject({ armable: "0", disarm: "0" });
+  });
+
+  it.each(WORKFLOWS)("preserves manual arming without an elevated token while always disarming holds and drafts in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const parsed = load(source) as WorkflowDocument;
+    const condition = parsed.jobs["auto-merge"].steps.find((step) => step.name.startsWith("Disarm a held"))?.if;
+    expect(condition).toBeDefined();
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const identity = extractRunBlock(source, "Check for an elevated (non-GITHUB_TOKEN) merge identity");
+    const approval = extractRunBlock(source, "Require a current-head approval from the fleet reviewer");
+    const healthy = await runBlock(initial, [pullRequest()]);
+    const unapproved = await runBlock(approval, [], { reviewResponses: [[review("COMMENTED")]] });
+    expect(healthy.status).toBe(0);
+    expect(unapproved.status).toBe(0);
+    expect(unapproved.output.ok).toBe("0");
+    const held = await runBlock(initial, [pullRequest({ title: "Do-Not-Merge: waiting" })]);
+    const drafted = await runBlock(initial, [pullRequest({ draft: true })]);
+    expect(held.status).toBe(0);
+    expect(drafted.status).toBe(0);
+
+    for (const hasElevatedToken of [false, true]) {
+      const token = await runBlock(identity, [], { hasElevatedToken });
+      expect(token.status).toBe(0);
+      expect(token.output.arm).toBe(hasElevatedToken ? "1" : "0");
+      const shouldDisarm = (live: Record<string, string>, ok: string) => runInNewContext(condition!, {
+        steps: {
+          live: { outputs: live },
+          identity: { outputs: token.output },
+          approval: { outputs: { ok } },
+        },
+      });
+      expect(shouldDisarm(healthy.output, unapproved.output.ok)).toBe(hasElevatedToken);
+      expect(shouldDisarm(healthy.output, "1")).toBe(false);
+      expect(shouldDisarm(held.output, "1")).toBe(true);
+      expect(shouldDisarm(drafted.output, "1")).toBe(true);
+    }
+    expect(runInNewContext(condition!, {
+      steps: {
+        live: { outputs: held.output },
+        identity: { outputs: {} },
+        approval: { outputs: {} },
+      },
+    })).toBe(true);
   });
 
   it.each(WORKFLOWS)("verifies cancellation instead of hiding failures in %s", async (workflow) => {

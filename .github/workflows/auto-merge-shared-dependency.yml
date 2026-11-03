@@ -58,7 +58,7 @@ jobs:
                 (.head.repo.id | type == "number" and . == $repo_id) and
                 (.head.sha | type == "string" and test("^[0-9a-fA-F]{40}$")))
               ' <<< "$REVIEW_PULL_REQUESTS" >/dev/null; then
-              echo "::error::Review signal PR metadata was missing or invalid."
+              echo "::error::Review signal PR metadata was missing or invalid; no PR could be identified safely and cancellation was not attempted."
               exit 1
             fi
             PR_NUMBER=$(jq -r '.[0].number' <<< "$REVIEW_PULL_REQUESTS")
@@ -151,7 +151,9 @@ jobs:
           fi
 
       - name: Disarm a held, draft, unreadable, or unapproved PR
-        if: steps.live.outputs.disarm == '1' || (steps.live.outputs.armable == '1' && steps.approval.outputs.ok != '1')
+        # Token presence limits this workflow's unapproved-head cancellation; it does not identify who armed the PR.
+        # Holds and drafts still disarm regardless of the elevated token or arming actor.
+        if: steps.live.outputs.disarm == '1' || (steps.live.outputs.armable == '1' && steps.identity.outputs.arm == '1' && steps.approval.outputs.ok != '1')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
