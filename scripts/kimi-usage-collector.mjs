@@ -209,11 +209,14 @@ export async function deferPendingSession(stateRoot, file, since, known, sourceF
     scanStatus.complete = false;
     if (!newMarker) return known ?? { since, markerNames };
     markerNames.add(newMarker);
+    const newMarkerIsBoundary = !known?.boundaryMarkerName ||
+      Date.parse(since) < Date.parse(known.since) ||
+      (since === known.since && newMarker < known.boundaryMarkerName);
     return {
       ...known,
-      since: known?.since ?? since,
+      since: newMarkerIsBoundary ? since : known.since,
       markerNames,
-      boundaryMarkerName: known?.boundaryMarkerName ?? newMarker,
+      boundaryMarkerName: newMarkerIsBoundary ? newMarker : known.boundaryMarkerName,
       sourceFingerprint: !known || known.sourceFingerprint === sourceFingerprint ? sourceFingerprint : undefined,
     };
   }

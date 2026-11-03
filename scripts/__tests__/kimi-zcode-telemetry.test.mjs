@@ -1064,9 +1064,92 @@ describe("Kimi exact usage telemetry", () => {
         dryRun: false, scanStatus: inMemoryStatus,
         writePendingMarker: async () => "earlier-generation.json", acknowledgePendingMarkers: failMutation,
       });
-      expect(sameSource.boundaryMarkerName).toBe(before.boundaryMarkerName);
+      expect(sameSource.since).toBe(new Date(-1).toISOString());
+      expect(sameSource.boundaryMarkerName).toBe("earlier-generation.json");
       expect(sameSource.sourceFingerprint).toBe(before.sourceFingerprint);
       expect(sameSource.markerNames).toEqual(new Set([...before.markerNames, "earlier-generation.json"]));
+
+      const compacted = await deferPendingSession(kimiStateRoot(), "future/wire.jsonl", sameSource.since, sameSource, sameSource.sourceFingerprint, {
+        dryRun: false, scanStatus: inMemoryStatus,
+        writePendingMarker: async () => { throw new Error("unchanged source must not write"); },
+        acknowledgePendingMarkers: async (_stateRoot, compactStatus) => {
+          expect(compactStatus.resolvedPendingMarkers.get("future/wire.jsonl"))
+            .toEqual(new Set([...before.markerNames]));
+        },
+      });
+      expect(compacted.since).toBe(sameSource.since);
+      expect(compacted.boundaryMarkerName).toBe("earlier-generation.json");
+      expect(compacted.markerNames).toEqual(new Set(["earlier-generation.json"]));
+    }
+  });
+
+  it("keeps the deterministic earliest boundary when marker acknowledgement fails", async () => {
+    const fingerprint = "b".repeat(64);
+    const nextFingerprint = "c".repeat(64);
+    const earlier = "2026-01-01T00:00:00.000Z";
+    const later = "2026-01-02T00:00:00.000Z";
+    const known = {
+      since: earlier,
+      markerNames: new Set(["m-marker.json"]),
+      boundaryMarkerName: "m-marker.json",
+      sourceFingerprint: fingerprint,
+    };
+    const cases = [
+      {
+        label: "first marker",
+        known: undefined,
+        since: later,
+        marker: "only-marker.json",
+        expectedSince: later,
+        expectedBoundary: "only-marker.json",
+        expectedFingerprint: nextFingerprint,
+      },
+      {
+        label: "newer boundary",
+        known,
+        since: later,
+        marker: "a-newer-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "m-marker.json",
+        expectedFingerprint: undefined,
+      },
+      {
+        label: "equal boundary with smaller name",
+        known,
+        since: earlier,
+        marker: "a-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "a-marker.json",
+        expectedFingerprint: undefined,
+      },
+      {
+        label: "equal boundary with larger name",
+        known,
+        since: earlier,
+        marker: "z-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "m-marker.json",
+        expectedFingerprint: undefined,
+      },
+    ];
+    for (const testCase of cases) {
+      const scanStatus = { complete: true };
+      const retained = await deferPendingSession(
+        "unused-state-root", "future/wire.jsonl", testCase.since, testCase.known, nextFingerprint,
+        {
+          dryRun: false,
+          scanStatus,
+          writePendingMarker: async () => testCase.marker,
+          acknowledgePendingMarkers: async () => { throw new Error("injected acknowledgement failure"); },
+        },
+      );
+      expect(scanStatus.complete, testCase.label).toBe(false);
+      expect(retained.since, testCase.label).toBe(testCase.expectedSince);
+      expect(retained.boundaryMarkerName, testCase.label).toBe(testCase.expectedBoundary);
+      expect(retained.markerNames, testCase.label).toEqual(
+        new Set([...(testCase.known?.markerNames ?? []), testCase.marker]),
+      );
+      expect(retained.sourceFingerprint, testCase.label).toBe(testCase.expectedFingerprint);
     }
   });
 
