@@ -291,23 +291,37 @@ public contract.
 ]
 ```
 
-## Boundary: `GET /api/usage-events` is not public
+## Boundary: `GET /api/usage-events` dual-auth (changed 2026-11-02)
 
-`GET /api/usage-events` (summary mode and `?raw=1` per-event mode) is
-**dashboard-session-only by design**. It is deliberately absent from the
-middleware's public-path list, so every request without a valid dashboard
-session cookie gets a `401` from the middleware before the route runs — the
-`USAGE_READ_TOKEN` accepted by `/api/budget-status` and `/api/subscriptions`
-does **not** work here, in any header form.
+`GET /api/usage-events` (summary mode and `?raw=1` per-event mode)
+authenticates like `/api/budget-status` and `/api/export/daily-rollups`:
+**either** a dashboard session cookie, **or** a read token as
 
-Rationale: `budget-status` (aggregates) and the daily-rollups export are the
-intended external read paths. Raw per-event telemetry (idempotency keys,
-per-request cost rows, verification status) stays behind the interactive
-dashboard session.
+```
+Authorization: <redacted>
+# or
+x-usage-read-token: <redacted>
+# legacy header-name alias, still accepted:
+x-usage-ingest-token: <redacted>
+```
 
-Operational consequence, stated so nobody rediscovers it mid-incident:
-**headless debugging goes through a session cookie or does not happen.**
-Obtain a session via the dashboard login and replay its cookie; do not add a
-bearer/token surface to this route, and do not add it to the middleware
-public-path list. Anyone who believes this boundary should change must change
-this contract first, not the code.
+In production `USAGE_READ_TOKEN` is required (no silent ingest-token
+fallback); outside production it falls back to `USAGE_INGEST_TOKEN`. The
+route is listed in the middleware's public paths so the session gate does
+not `401` bearer requests before the route's own check
+(`hasValidDashboardSession` OR `isUsageReadAuthorized`) runs; requests with
+neither credential get a `401` from the route itself.
+
+History and rationale: this route was dashboard-session-only by design
+until 2026-11-02 — raw per-event telemetry (idempotency keys, per-request
+cost rows, verification status) stayed behind the interactive dashboard
+session, and `budget-status` (aggregates) plus the daily-rollups export
+were the intended external read paths. The boundary changed because the
+owner-expense restore poster is a sanctioned headless consumer: it
+snapshots existing events via `GET /api/usage-events?raw=1` with
+`USAGE_READ_TOKEN` to dedupe before posting, and the session gate made
+that read structurally impossible — the same failure mode previously fixed
+for `/api/export/daily-rollups`. The read token is read-only and already
+trusted with budget aggregates and the full daily-rollups export; raw
+event reads now sit in the same trust class. This section is the contract
+change the previous boundary text required before the code could move.
