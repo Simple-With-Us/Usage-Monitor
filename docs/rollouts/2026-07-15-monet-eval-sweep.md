@@ -1,6 +1,6 @@
 # 2026-07-15 — MONET pickup of CLAUDE cap handoff: eval sweep + landing batch
 
-**Seat:** MONET (owner-directed pickup; handoff note `/Users/jay/apps/HANDOFF-usage-monitor-eval-CLAUDE-to-MONET.md`, claim transfer ts 1784139104.063869 → MONET claim + landing plan posted to #agent-sync with objection window, expired clean.)
+**Seat:** MONET (owner-directed pickup; handoff note `/Users/jay/apps/HANDOFF-usage-monitor-eval-CLAUDE-to-MONET.md`, claim transfer ts 1784139104.063869 → MONET claim + landing plan posted to #ag***-s**c with objection window, expired clean.)
 
 ## What the audit found (25-agent read-only workflow, wf_1c715807-1c5)
 

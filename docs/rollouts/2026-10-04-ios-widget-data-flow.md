@@ -5,8 +5,8 @@ repo: usage-monitor
 **Branch:** `minimax/ios-widget-data-flow`
 **Worktree:** `~/apps/simplewithus-mm-ios-widget-data-flow` (Mac lane); Cursor Cloud
 agents use `/workspace` on branch `minimax/ios-widget-data-flow`
-**Pre-work claim:** posted in `#agent-sync` beginning with `repo: usage-monitor`
-as required by the team's agent-sync protocol (see `AGENT-SYNC.md`); the
+**Pre-work claim:** posted in `#ag***-s**c` beginning with `repo: usage-monitor`
+as required by the team's ag***-s**c protocol (see `AG***-S**C.md`); the
 private local protocol file path is intentionally not in this public note.
 
 ## Context & Objective
@@ -183,7 +183,7 @@ and the widget still says the same thing afterwards.  That rules out
   string added or audited by this PR (notably the reinstall message in
   `WidgetUnavailableContent.init` and the matching assertion in
   `WidgetPresentationTests`) uses two ASCII spaces between sentences.
-- **`#agent-sync` pre-work claim:** posted at the start of this lane as
+- **`#ag***-s**c` pre-work claim:** posted at the start of this lane as
   `repo: usage-monitor …`; the public rollout references the protocol
-  (`AGENT-SYNC.md`) and the claim field without exposing the private
+  (`AG***-S**C.md`) and the claim field without exposing the private
   local protocol file path.
