@@ -48,13 +48,17 @@ ENV SOURCE_COMMIT=${SOURCE_COMMIT} GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 # Builders without a secret keep the credential-free CI/local build path.
 # Coolify's secret mode passes every build variable as a secret, including
 # public routing and revision values that otherwise arrive as build arguments.
+# Optional file mounts preserve ARG/ENV fallbacks when a secret is absent.
 RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN \
-    --mount=type=secret,id=NEXT_PUBLIC_SENTRY_DSN,env=NEXT_PUBLIC_SENTRY_DSN \
-    --mount=type=secret,id=SENTRY_ORG,env=SENTRY_ORG \
-    --mount=type=secret,id=SENTRY_SELF_PROJECT,env=SENTRY_SELF_PROJECT \
-    --mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT \
-    --mount=type=secret,id=GIT_COMMIT_SHA,env=GIT_COMMIT_SHA \
-    npm run build \
+    --mount=type=secret,id=NEXT_PUBLIC_SENTRY_DSN \
+    --mount=type=secret,id=SENTRY_ORG \
+    --mount=type=secret,id=SENTRY_SELF_PROJECT \
+    --mount=type=secret,id=SOURCE_COMMIT \
+    --mount=type=secret,id=GIT_COMMIT_SHA \
+    for key in NEXT_PUBLIC_SENTRY_DSN SENTRY_ORG SENTRY_SELF_PROJECT SOURCE_COMMIT GIT_COMMIT_SHA; do \
+      if [ -f "/run/secrets/$key" ]; then export "$key=$(cat "/run/secrets/$key")"; fi; \
+    done \
+  && npm run build \
   && FETCH_LITESTREAM_REQUIRED=true bash scripts/fetch-litestream.sh \
   && test -x bin/litestream \
   && ./bin/litestream version

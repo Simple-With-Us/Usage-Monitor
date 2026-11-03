@@ -176,13 +176,37 @@ test('Docker exposes the upload token only as an optional build secret',async()=
  const [builder,runtime]=docker.split(/FROM .* AS runtime/);
  const buildRun=builder.match(/RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN[\s\S]*?npm run build/)?.[0];
  assert.ok(buildRun);
- for(const key of ['SENTRY_AUTH_TOKEN','NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
-   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},env=${key}`),`${key} must reach the build in Coolify secret mode`);
+ assert.ok(buildRun.includes('--mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN'));
+ for(const key of ['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
+   assert.ok(buildRun.includes(`--mount=type=secret,id=${key} \\`),`${key} must reach the build as an optional file`);
+   assert.ok(!buildRun.includes(`env=${key}`),`${key} must preserve build-argument fallbacks when absent`);
  }
  assert.match(builder,/ARG SENTRY_ORG="simple-with-us"/);
  assert.match(builder,/ARG SENTRY_SELF_PROJECT="usage-monitor"/);
  assert.doesNotMatch(docker,/^(?:ARG|ENV)\s+SENTRY_AUTH_TOKEN/m);
  assert.doesNotMatch(runtime,/SENTRY_AUTH_TOKEN/);
+});
+test('Docker public configuration preserves arguments and accepts mounted overrides',async()=>{
+ const {readFileSync,mkdtempSync,writeFileSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const {execFileSync}=await import('node:child_process');
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const exports=docker.match(/for key in NEXT_PUBLIC_SENTRY_DSN[\s\S]*?done/)?.[0].replace(/\\\n/g,'');
+ assert.ok(exports);
+ const keys=['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA'];
+ for(const mounted of [[],keys,[keys[0],keys[3]]]) {
+   const dir=mkdtempSync(join(tmpdir(),'sentry-public-build-'));
+   try {
+     const env={PATH:process.env.PATH};
+     for(const key of keys) {
+       env[key]=`argument-${key}`;
+       if(mounted.includes(key))writeFileSync(join(dir,key),`mounted-${key}`);
+     }
+     const actual=JSON.parse(execFileSync('sh',['-ec',exports.replaceAll('/run/secrets/',`${dir}/`)+`\nexec '${process.execPath}' -e 'console.log(JSON.stringify(process.env))'`],{env,encoding:'utf8'}));
+     for(const key of keys)assert.equal(actual[key],`${mounted.includes(key)?'mounted':'argument'}-${key}`);
+   } finally { rmSync(dir,{recursive:true,force:true}); }
+ }
 });
 
 test('UM attribution refuses incomplete GitHub PR pagination',async()=>{
