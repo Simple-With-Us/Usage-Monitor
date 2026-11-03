@@ -9,6 +9,10 @@ mkdir -p "$TMP/bin"
 
 fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
+NODE_BIN="$(command -v node || true)"
+[ -n "$NODE_BIN" ] || fail "node runtime must be available before PATH isolation"
+ln -s "$NODE_BIN" "$TMP/bin/node"
+
 cat >"$TMP/bin/infisical" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail

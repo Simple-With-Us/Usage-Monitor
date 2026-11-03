@@ -62,6 +62,7 @@ import {
   InfisicalWriteError,
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
+import { resolveUmInfisicalEnv } from "../../scripts/lib/infisical-app-auth-env.mjs";
 import { resolveProdInfisicalEnvironment } from "./infisical-environment";
 
 const DEFAULT_REFRESH_MS = 300_000; // 5 minutes, per the canonical pattern.
@@ -285,13 +286,10 @@ export interface AppSettingsCredentials {
 function resolveCredentials(
   env: NodeJS.ProcessEnv = process.env
 ): AppSettingsCredentials {
-  // Dedicated app credentials only; pairs never borrow fleet credentials.
-  const generic = Boolean(env.INFISICAL_CLIENT_ID?.trim() || env.INFISICAL_CLIENT_SECRET?.trim());
-  const clientId = generic ? env.INFISICAL_CLIENT_ID?.trim() : env.INFISICAL_UM_CLIENT_ID?.trim();
-  const clientSecret = generic ? env.INFISICAL_CLIENT_SECRET?.trim() : env.INFISICAL_UM_CLIENT_SECRET?.trim();
+  const auth = resolveUmInfisicalEnv(env);
   return {
-    clientId: clientId || undefined,
-    clientSecret: clientSecret || undefined,
+    clientId: auth.clientId,
+    clientSecret: auth.clientSecret,
   };
 }
 

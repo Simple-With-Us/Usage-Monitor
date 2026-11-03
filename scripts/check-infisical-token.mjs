@@ -3,7 +3,10 @@ import { resolveUmInfisicalEnv } from "./lib/infisical-app-auth-env.mjs";
 import { verifyServiceToken } from "./lib/infisical-service-token.mjs";
 const permission = process.argv[2];
 const auth = resolveUmInfisicalEnv(process.env);
-const token = process.env.INFISICAL_TOKEN?.trim() || (permission === "write" ? process.env.INFISICAL_UM_WRITE_TOKEN?.trim() : auth.token);
+const clean = (name) => process.env[name]?.trim() || undefined;
+const token = permission === "write"
+  ? clean("INFISICAL_UM_WRITE_TOKEN") || clean("INFISICAL_TOKEN")
+  : auth.token;
 try {
   if (!["read", "write", "config"].includes(permission) || (permission !== "config" && !token) || !auth.projectId || (process.env.INFISICAL_ENV && process.env.INFISICAL_ENV !== "prod")) throw new Error();
   const url = new URL(process.env.INFISICAL_BASE_URL || process.env.INFISICAL_API_URL || "https://app.infisical.com");

@@ -11,6 +11,7 @@ import { assertServiceTokenMetadata, verifyServiceToken } from "./lib/infisical-
 
 const scriptPath =
   process.env.INFISICAL_RUN_SCRIPT || fileURLToPath(new URL("./infisical-run.mjs", import.meta.url));
+const tokenCheckPath = fileURLToPath(new URL("./check-infisical-token.mjs", import.meta.url));
 const timeoutMs = 3000;
 const startupTimeoutMs = 10000;
 
@@ -209,4 +210,50 @@ test("metadata verifier rejects wrong project, folder, excess permission, expiry
   let calls = 0;
   await assert.rejects(verifyServiceToken({ ...expected, token: "st.fake-secret", baseUrl: "https://evil.test", fetchImpl: async () => { calls++; throw new Error("st.fake-secret"); } }), { message: "service_token_verification_failed" });
   assert.equal(calls, 0);
+});
+
+test("child token check prefers scoped UM read and write tokens over a different generic token", async () => {
+  for (const permission of ["read", "write"]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), "infisical-token-check-test-"));
+    try {
+      const observedPath = path.join(root, "observed-token");
+      const loader = path.join(root, "fake-fetch.mjs");
+      await writeFile(loader, `
+import { writeFileSync } from "node:fs";
+globalThis.fetch = async (_url, options = {}) => {
+  const token = new Headers(options.headers).get("authorization")?.replace(/^Bearer /, "") || "";
+  writeFileSync(process.env.FAKE_OBSERVED_TOKEN_FILE, token);
+  const matches = token === process.env.FAKE_EXPECTED_TOKEN;
+  const metadata = {
+    workspace: matches ? "fake-project" : "wrong-project",
+    permissions: [process.env.FAKE_EXPECTED_PERMISSION],
+    scopes: [{ environment: "prod", secretPath: "/" }],
+    expiresAt: null,
+  };
+  return new Response(JSON.stringify(metadata), { status: 200 });
+};
+`);
+
+      const scopedToken = permission === "read" ? "st.fake-um-read-token" : "st.fake-um-write-token";
+      const child = spawn(process.execPath, ["--import", loader, tokenCheckPath, permission], {
+        env: {
+          PATH: process.env.PATH,
+          FAKE_OBSERVED_TOKEN_FILE: observedPath,
+          FAKE_EXPECTED_TOKEN: scopedToken,
+          FAKE_EXPECTED_PERMISSION: permission,
+          INFISICAL_UM_PROJECT_ID: "fake-project",
+          INFISICAL_UM_SECRET_PATH: "/",
+          INFISICAL_UM_READ_TOKEN: "st.fake-um-read-token",
+          INFISICAL_UM_WRITE_TOKEN: "st.fake-um-write-token",
+          INFISICAL_TOKEN: "st.fake-generic-token",
+        },
+        stdio: "ignore",
+      });
+      const result = await waitForExit(child);
+      assert.equal(result.code, 0, `${permission} token metadata must verify`);
+      assert.equal(await readFile(observedPath, "utf8"), scopedToken);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
 });
