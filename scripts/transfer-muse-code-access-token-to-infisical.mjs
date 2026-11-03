@@ -22,8 +22,8 @@ function transferError(code, status = null) {
 function normalizeConfig(env) {
   const baseUrl = env.INFISICAL_BASE_URL || "https://app.infisical.com";
   const projectId = env.INFISICAL_UM_PROJECT_ID || env.INFISICAL_PROJECT_ID || "";
-  const environment = env.INFISICAL_ENVIRONMENT || "";
-  const secretPath = env.INFISICAL_SECRET_PATH || "";
+  const environment = env.INFISICAL_ENVIRONMENT || env.INFISICAL_ENV || "prod";
+  const secretPath = env.INFISICAL_UM_SECRET_PATH || env.INFISICAL_SECRET_PATH || "/";
   const writeToken = env.INFISICAL_UM_WRITE_TOKEN || "";
   const readToken = env.INFISICAL_UM_READ_TOKEN || "";
 
