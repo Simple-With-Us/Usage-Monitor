@@ -285,6 +285,7 @@ export async function collectOpencodeEvents({
 /** Read explicitly configured profiles with shared frozen names and unchanged event identities. */
 export async function collectOpencodeDatabases({
   dbPaths = opencodeDbPaths(),
+  allowMissingPrimary = false,
   scanStatus,
   frozenProjectNames = new Map(),
   onWarning,
@@ -302,9 +303,11 @@ export async function collectOpencodeDatabases({
       const info = statSync(dbPath, { bigint: true });
       if (!info.isFile()) throw new Error("Not a database file");
       identity = `${info.dev}:${info.ino}`;
-    } catch {
-      if (scanStatus) scanStatus.complete = false;
-      onWarning?.(`OpenCode database ${index + 1} is unavailable; checkpoint retained`);
+    } catch (error) {
+      if (!(index === 0 && allowMissingPrimary && error?.code === "ENOENT")) {
+        if (scanStatus) scanStatus.complete = false;
+        onWarning?.(`OpenCode database ${index + 1} is unavailable; checkpoint retained`);
+      }
       continue;
     }
     if (databases.has(identity)) continue;
@@ -391,6 +394,7 @@ async function main() {
   const frozenProjectNames = await readFrozenProjectNames(projectNamesPath);
   const events = await collectOpencodeDatabases({
     dbPaths,
+    allowMissingPrimary: !process.env.OPENCODE_DB,
     since: args.since,
     scanStatus,
     sessionIdCutoffMs,

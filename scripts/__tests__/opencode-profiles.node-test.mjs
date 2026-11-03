@@ -135,6 +135,50 @@ test("missing and unreadable explicit sources retain the checkpoint while other 
   await assert.rejects(() => collectOpencodeDatabases({ dbPaths: Array(10).fill(primary) }), /one to nine/);
 });
 
+test("a missing implicit default is empty while explicit and additional missing databases retain the checkpoint", async (t) => {
+  const root = await harness(t);
+  const missingPrimary = join(root, "default", "opencode.db");
+  const child = join(root, "child.db");
+  fixture(child, { session: "ses_child", message: "msg_child", child: true });
+  const childEvents = await collectOpencodeEvents({ dbPath: child, since: new Date(0) });
+
+  const implicitScan = { complete: true };
+  const implicitEvents = await collectOpencodeDatabases({
+    dbPaths: [missingPrimary, child],
+    allowMissingPrimary: true,
+    since: new Date(0),
+    scanStatus: implicitScan,
+  });
+  assert.deepEqual(implicitEvents, childEvents);
+  assert.equal(implicitScan.complete, true);
+  assert.equal(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: implicitScan.complete }), true);
+
+  const explicitScan = { complete: true };
+  const explicitWarnings = [];
+  const explicitEvents = await collectOpencodeDatabases({
+    dbPaths: [missingPrimary, child],
+    allowMissingPrimary: false,
+    since: new Date(0),
+    scanStatus: explicitScan,
+    onWarning: (message) => explicitWarnings.push(message),
+  });
+  assert.deepEqual(explicitEvents, childEvents);
+  assert.equal(explicitScan.complete, false);
+  assert.equal(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: explicitScan.complete }), false);
+  assert.ok(explicitWarnings.some((message) => message.includes("checkpoint retained")));
+
+  const additionalScan = { complete: true };
+  const additionalEvents = await collectOpencodeDatabases({
+    dbPaths: [child, missingPrimary],
+    allowMissingPrimary: true,
+    since: new Date(0),
+    scanStatus: additionalScan,
+  });
+  assert.deepEqual(additionalEvents, childEvents);
+  assert.equal(additionalScan.complete, false);
+  assert.equal(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: additionalScan.complete }), false);
+});
+
 test("an older profile without v2 session facts keeps its existing token event identities", async (t) => {
   const root = await harness(t);
   const primary = join(root, "primary.db");
