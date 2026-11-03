@@ -14,7 +14,8 @@ export async function register() {
   // See INFISICAL.md and src/lib/app-settings.ts.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { appSettings } = await import("@/lib/app-settings");
-    await appSettings.init();
+    const { initializeInfisicalRuntimeSettings } = await import("@/lib/infisical-runtime-settings");
+    await initializeInfisicalRuntimeSettings(appSettings);
     // On-demand refresh for operators: `kill -HUP <pid>` re-reads Infisical.
     // The background timer (default 5 min) handles the steady state.
     // A rejected refresh must not become an unhandled rejection (Node's
