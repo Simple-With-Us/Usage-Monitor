@@ -132,6 +132,7 @@ test('runtime token without source SHA does not load the upload plugin or fail s
 });
 test('credential-free builds avoid uploads and the plugin when no DSN is set',async()=>{
  assert.equal((await nextBuildConfig({})).calls,0);
+ assert.equal((await nextBuildConfig({SENTRY_AUTH_TOKEN:''})).calls,0);
  const {options}=await nextBuildConfig({NEXT_PUBLIC_SENTRY_DSN:'test-only'});
  assert.equal(options.sourcemaps.disable,true);
  assert.equal(options.authToken,undefined);
@@ -176,9 +177,9 @@ test('Docker exposes the upload token only as an optional build secret',async()=
  const [builder,runtime]=docker.split(/FROM .* AS runtime/);
  const buildRun=builder.match(/RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN[\s\S]*?npm run build/)?.[0];
  assert.ok(buildRun);
- assert.ok(buildRun.includes('--mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN'));
+ assert.ok(buildRun.includes('--mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN,required=false'));
  for(const key of ['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
-   assert.ok(buildRun.includes(`--mount=type=secret,id=${key} \\`),`${key} must reach the build as an optional file`);
+   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},required=false \\`),`${key} must reach the build as an optional file`);
    assert.ok(!buildRun.includes(`env=${key}`),`${key} must preserve build-argument fallbacks when absent`);
  }
  assert.match(builder,/ARG SENTRY_ORG="simple-with-us"/);
@@ -195,16 +196,17 @@ test('Docker public configuration preserves arguments and accepts mounted overri
  const exports=docker.match(/for key in NEXT_PUBLIC_SENTRY_DSN[\s\S]*?done/)?.[0].replace(/\\\n/g,'');
  assert.ok(exports);
  const keys=['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA'];
- for(const mounted of [[],keys,[keys[0],keys[3]]]) {
+ for(const mode of ['absent','complete','partial','empty']) {
+   const mounted=mode==='absent'?[]:mode==='partial'?[keys[0],keys[3]]:keys;
    const dir=mkdtempSync(join(tmpdir(),'sentry-public-build-'));
    try {
      const env={PATH:process.env.PATH};
      for(const key of keys) {
        env[key]=`argument-${key}`;
-       if(mounted.includes(key))writeFileSync(join(dir,key),`mounted-${key}`);
+       if(mounted.includes(key))writeFileSync(join(dir,key),mode==='empty'?'':`mounted-${key}`);
      }
      const actual=JSON.parse(execFileSync('sh',['-ec',exports.replaceAll('/run/secrets/',`${dir}/`)+`\nexec '${process.execPath}' -e 'console.log(JSON.stringify(process.env))'`],{env,encoding:'utf8'}));
-     for(const key of keys)assert.equal(actual[key],`${mounted.includes(key)?'mounted':'argument'}-${key}`);
+     for(const key of keys)assert.equal(actual[key],`${mounted.includes(key)&&mode!=='empty'?'mounted':'argument'}-${key}`);
    } finally { rmSync(dir,{recursive:true,force:true}); }
  }
 });

@@ -100,6 +100,18 @@ defaults to organization `simple-with-us` and project `usage-monitor`; override
 with the `SENTRY_ORG` and `SENTRY_SELF_PROJECT` build arguments only when the
 deployment reporter targets the same destination.  Keep
 `NEXT_PUBLIC_SENTRY_DSN` configured at build time for browser telemetry.
+Coolify's **Docker BuildKit secrets** mode supplies every build variable as a
+secret instead of a build argument.  Enable source-commit availability during
+build and supply the public secret IDs `SOURCE_COMMIT`, `GIT_COMMIT_SHA`,
+`NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ORG`, and `SENTRY_SELF_PROJECT` as applicable.
+The Dockerfile reads non-empty public secret files only; absent or empty files
+preserve its argument/environment defaults.  All mounts are explicitly optional.
+Coolify separately injects the deployed `SOURCE_COMMIT` into the runtime
+environment, which `/api/health` prefers for its revision.  A different builder
+using only a source-commit secret must also inject that SHA at runtime or pass
+the public `SOURCE_COMMIT` build argument to bake it into the runtime image;
+the builder's temporary secret export is not persisted in that image.
+
 With an upload token present, a missing or invalid source SHA fails configuration
 before the plugin loads, preventing a fallback to an automatically inferred release.
 Authenticated release creation or sourcemap upload failures also fail the build
