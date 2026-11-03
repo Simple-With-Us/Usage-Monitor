@@ -66,6 +66,7 @@ try {
   );
   assert(invalid.status !== 0, "unknown SHA rejected");
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  execFileSync(process.execPath, ["--test", join(repoRoot, "scripts/check-collector-install.node-test.mjs")]);
   const installed = join(root, "installed");
   mkdirSync(join(installed, "node_modules"), { recursive: true });
   symlinkSync(join(repoRoot, "node_modules", "zod"), join(installed, "node_modules", "zod"));

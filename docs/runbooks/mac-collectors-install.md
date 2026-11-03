@@ -29,6 +29,47 @@ copy does not update itself.
 
 Check what is live with `cat ~/apps/usage-monitor-collectors/VERSION`.
 
+Before copying, the installer checks that incoming managed scripts and the root
+package manifest match their tracked Git commit.  The manifest must specify an
+explicit stable major-4 npm Zod version or caret/tilde range; that verified value
+is passed to dependency installation.  Existing scripts may be replaced or removed only when they
+already match the incoming version, or their bytes and executable flag match
+the prior `VERSION` commit in the source checkout's verified local history.
+Unknown helpers, changed entries, symlinks, unsupported paths, or unavailable
+baseline history stop the install before copying, dependency installation, or
+receipt changes.  Fresh installations require a verified Git source checkout;
+`VERSION` records its full checked source SHA.  A failed preflight does not
+authorize deleting files, fabricating a baseline, or copying unreviewed installed
+code into a canonical release.
+
+The `VERSION` output is checked for safe regular-file custody even when script
+comparison needs no baseline; an absent receipt remains valid in that case.  Before
+a needed dependency installation, the destination must have no existing
+lockfile, shrinkwrap, local npm configuration, or occupied dependency directory,
+and its package manifest must be absent or the installer's exact minimal
+manifest.  Symlinks, hardlinks, and independently managed package contents are
+preserved by refusing the write.  Existing Zod is left unchanged when dependency
+installation is skipped; this check does not attest its dependency identity.
+
+This is a read-only preflight, not an atomic installation transaction.  Source
+and installed trees must remain unchanged through copying and validation, with
+all independent writers coordinated beforehand.  The flat-copy installer does
+not provide interruption recovery; a later rollout needs a verified backup and
+recovery plan as well as this drift check.
+
+For scoped-token composition, start from approved `main` containing merged
+[#1885](https://github.com/Simple-With-Us/Usage-Monitor/pull/1885), preserving its
+idle outbox drains and tests.  Obtain each independent owner's exact old/new
+entry and helper source, hashes, dependencies, and installed-versus-prepared
+receipts.  Review and merge only the intended credential initialization into
+that canonical source, preserving all later collector behavior; credentials and
+custody-file contents stay outside the source artifact.  Commit approved helper
+source and test the composed imports and idle/retry paths before producing a
+release.  Immediately before an authorized rollout, freeze independent writers
+and verify the installed graph against the agreed hashes again.  Unbound
+installed helper bytes are not automatically admitted into a content-addressed
+release.
+
 ## Why a collector can sit at HTTP 409 for weeks (UM-1469)
 
 Every v2 event is stamped with `metadata._producerInstanceId`, the sending
