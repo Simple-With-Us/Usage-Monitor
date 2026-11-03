@@ -20,7 +20,7 @@ export function resolveCollectorToken(
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
-    const fromFleet = lookup(name)?.trim();
+    const fromFleet = env.COLLECTOR_STRICT_INJECTED_SECRETS === "1" ? null : lookup(name)?.trim();
     if (fromFleet) return fromFleet;
   }
   return null;

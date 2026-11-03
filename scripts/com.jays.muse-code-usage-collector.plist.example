@@ -7,13 +7,11 @@
   weekly window.  The collector receives MUSE_CODE_ACCESS_TOKEN through the
   approved scoped Usage Monitor secret-injection route.  It does not read Meta
   credentials from Keychain.  Do not put secret values in this plist.  When the
-  approved injection route is unavailable, the collector exits successfully
-  without posting an empty batch or clearing prior readings.
+  approved injection route is unavailable, the launcher exits with an error
+  without starting the collector or clearing prior readings.
 
-  This prevention template intentionally contains no secret bootstrap.  A direct
-  installation stops Keychain prompts but does not refresh Muse quota until the
-  approved service-token or explicit app machine-identity entrypoint wraps these
-  ProgramArguments.  Do not substitute a shared or Automation identity.
+  The launcher requires an explicit scoped custody file and auth mode.  Do not
+  substitute a shared or Automation identity.
 
   Replace /ABSOLUTE/PATH/TO/HOME below with the owner's home directory.
 
@@ -27,7 +25,8 @@
 
   Dry run first through the approved secret-injection route (prints numbers,
   window labels and ISO dates only):
-    node scripts/muse-code-usage-collector.mjs --dry-run
+    /ABSOLUTE/PATH/TO/node /ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs \
+      muse-code AUTH_MODE /ABSOLUTE/PATH/TO/CUSTODY.json --dry-run
 
   StartInterval 900 = 15 minutes, matching subscription-quota-collector.
 
@@ -41,7 +40,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/node</string>
-    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/muse-code-usage-collector.mjs</string>
+    <string>/ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs</string>
+    <string>muse-code</string>
+    <string>AUTH_MODE</string>
+    <string>/ABSOLUTE/PATH/TO/CUSTODY.json</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

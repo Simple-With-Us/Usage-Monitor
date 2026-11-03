@@ -29,6 +29,27 @@ copy does not update itself.
 
 Check what is live with `cat ~/apps/usage-monitor-collectors/VERSION`.
 
+The detached updater (`scripts/update-local-collector-runtime.mjs`) publishes
+canonical releases as `release-<git-sha>-<content-sha256>` and compatibility
+releases as `compat-<git-sha>-<content-sha256>`.  Both identities cover the exact
+copied Zod paths, bytes, executable flags, and directory set; compatibility
+identities also cover every untracked overlay path, byte, and executable flag.  The
+updater recomputes these identities before activation, rollback, transition
+recovery, or receipt generation.  Do not edit a published release in place.
+
+A legacy SHA-only directory is accepted only as the existing `current`
+migration source.  Its tracked scripts are verified against Git, and a separate
+content-addressed tree receives a fresh dependency copy without importing or
+changing the legacy dependency.  SHA-only paths are rejected as rollback or
+journal targets; the original legacy directory remains available to in-flight
+processes.
+
+Published canonical and compatibility releases are retained automatically.  An
+injector already awaiting Infisical may still need its original absolute
+collector path after `current` changes.  Automatic cleanup removes only
+abandoned staging directories; deleting a published release requires separately
+proving that no running collector or injector can still use it.
+
 ## Why a collector can sit at HTTP 409 for weeks (UM-1469)
 
 Every v2 event is stamped with `metadata._producerInstanceId`, the sending
@@ -103,20 +124,36 @@ telemetry hub endpoint, then `launchctl bootstrap`:
 | `com.jays.zcode-usage-collector` | `$ZCODE_DATA_BASE_DIR/.zcode/cli/db/db.sqlite` (`~` by default), opened read-only | `zcode` |
 
 All five run on `/opt/homebrew/opt/node@24/bin/node` (opencode and ZCode need
-`node:sqlite`) and use `USAGE_INGEST_TOKEN` until scoped tokens for `opencode`
-and `fx` are added to `USAGE_INGEST_PRODUCER_TOKENS`.  Kimi and ZCode resolve
-`KIMI_CODE_INGEST_TOKEN` and `ZCODE_INGEST_TOKEN` first, then the unscoped
-fallback.  Their Sentry bridge resolves `KIMI_CODE_TELEMETRY_HUB_TOKEN` and
-`ZCODE_TELEMETRY_HUB_TOKEN` from process environment or `fleet-secrets`; the
-plist contains no bearer value.  Provision each producer in the receiver maps
-before bootstrap, and verify both an ingest ACK and a hub ACK before calling it
-live.  Infisical is optional for the collector: a host environment can supply
-the same scoped names, while an Infisical-backed host must use its approved
-read-only service-token route rather than the retired shared Automation
-identity.  The DSH agent sets
+`node:sqlite`).  The Kimi and ZCode templates use the detached runtime's
+`collector-injector.mjs`; the Muse Code template uses the same launcher.  Choose
+`service-token` or `machine-identity` for `AUTH_MODE`, and point the template at
+an absolute owner-owned regular JSON custody file with mode `0600`, never a
+symlink.  For service-token mode the file contains only `{"token":"..."}`; for
+machine-identity mode it contains only `{"clientId":"...","clientSecret":"..."}`.
+Use a dedicated Usage Monitor identity, never shared Automation credentials.
+The service token must have exactly read access to the Usage Monitor project,
+`prod:/telemetry`; the launcher verifies its metadata before fetching.  The
+machine identity must be explicitly provisioned for that same scope; the launcher
+cannot attest that its credentials are app-specific or inspect its grants.  Provision
+the profile's two required values in that folder and the producer in the receiver
+maps before bootstrap.  The launcher does not follow imports or expand references,
+and passes only the profile's credentials to the child.  Verify an ingest ACK and,
+where configured, a hub ACK before calling the feed live.  The DSH agent sets
 `USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1`, because BotFleet already reports
 its own workspaces.  A first run backfills the source's retained history and then keeps a watermark
 in `~/.cache/usage-monitor/collector-state/`.
+
+Required folder keys are `KIMI_CODE_INGEST_TOKEN` and
+`KIMI_CODE_TELEMETRY_HUB_TOKEN` for Kimi; `ZCODE_INGEST_TOKEN` and
+`ZCODE_TELEMETRY_HUB_TOKEN` for ZCode; and `MUSE_CODE_ACCESS_TOKEN` and
+`MUSE_CODE_INGEST_TOKEN` for Muse Code.  The launcher fails before starting a
+collector if any required value is missing or remains a reference.  An inherited
+`INFISICAL_*` variable also fails the launch; remove it from the LaunchAgent
+environment rather than relying on it for authentication.
+If `USAGE_MONITOR_INGEST_URL` is set, it must be exactly
+`https://usage.jays.services/api/ingest/usage`; leaving it unset preserves the
+collector default.  For an interactive dry run append `--dry-run` to the same
+launcher command; `--debug` is the only other supported collector flag.
 
 Kimi emits only durable `usage.record` rows whose `usageScope` is `turn`;
 session-scope or omitted-scope totals are cumulative and are not added again.  ZCode
