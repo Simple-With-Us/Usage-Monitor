@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -37,6 +37,26 @@ async function fixture(t, events = [event(1), event(2), event(3)]) {
   return { dir, journal, reopen, sender };
 }
 const holdPath = (dir) => join(dir, "state", "sentry-request.json");
+
+test("journal startup preserves an orphaned deterministic temporary file after PID and counter reuse", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "sentry-orphan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const state = join(dir, "state");
+  await mkdir(state, { mode: 0o700 });
+  const stale = join(state, `journal.base.json.${process.pid}.1.tmp`);
+  const original = Buffer.from("PRIVATE_LEGACY_ORPHAN_BYTES");
+  await writeFile(stale, original, { mode: 0o600 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const journal = new Journal({ dir });
+    try {
+      await journal.open();
+      assert.equal(journal.base, 0);
+      assert.deepEqual(JSON.parse(await readFile(join(state, "journal.base.json"), "utf8")), { base: 0, nextBase: 0, pendingSize: 0 });
+      assert.deepEqual(await readFile(stale), original);
+      assert.equal((await stat(stale)).mode & 0o777, 0o600);
+    } finally { await journal.close(); }
+  }
+});
 
 test("positive partial ACK holds the entire scrubbed batch without claiming all records rejected", async (t) => {
   const f = await fixture(t);

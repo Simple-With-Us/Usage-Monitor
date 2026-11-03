@@ -35,7 +35,7 @@
 // runtime shape guard belongs.
 
 import { constants as fsConstants } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -485,7 +485,7 @@ export class Journal {
   /** A temporary path that no other write can collide with. */
   tempPath(target) {
     this.writeCounter += 1;
-    return `${target}.${process.pid}.${this.writeCounter}.tmp`;
+    return `${target}.${process.pid}.${this.writeCounter}.${randomUUID()}.tmp`;
   }
 
   /**
