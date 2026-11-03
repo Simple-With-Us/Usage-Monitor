@@ -136,6 +136,30 @@ describe("Encrypted connection persistence", () => {
     vi.stubEnv("INFISICAL_SHARED_READ_TOKEN", "st.environment-third-token");
     await expect(saveInfisicalConnection(connection())).rejects.toThrow("infisical_project_token_limit");
   });
+  it("saves a healthy project alongside a malformed sibling from a provably different project", async () => {
+    database.set("infisical.connection.v1.shared", encryptJson({ ...connection(), source: "shared", projectId: "other-project", readPaths: ["bad/path"], tokens: null }));
+    vi.stubEnv("INFISICAL_ST_PROJECT_ID", "third-project");
+    vi.stubEnv("INFISICAL_ST_READ_TOKEN", "st.bad-env");
+    vi.stubEnv("INFISICAL_ST_READ_PATHS", "bad/path");
+    await expect(saveInfisicalConnection(connection())).resolves.toBeUndefined();
+    expect(await loadInfisicalConnection("ct")).toEqual(connection());
+  });
+  it.each(["stored", "environment"])("counts tokens from malformed same-project %s routes", async (kind) => {
+    if (kind === "stored") database.set("infisical.connection.v1.shared", encryptJson({ ...connection(), source: "shared", secretPath: "bad/path", tokens: [{ token: "st.third-token" }] }));
+    else {
+      vi.stubEnv("INFISICAL_SHARED_PROJECT_ID", "project-test");
+      vi.stubEnv("INFISICAL_SHARED_READ_TOKEN", "st.third-token");
+      vi.stubEnv("INFISICAL_SHARED_READ_PATHS", "bad/path");
+    }
+    await expect(saveInfisicalConnection(connection())).rejects.toThrow("infisical_project_token_limit");
+    expect(database.has("infisical.connection.v1.ct")).toBe(false);
+  });
+  it("fails closed on unknown encrypted token inventory but permits a machine identity save", async () => {
+    database.set("infisical.connection.v1.shared", "corrupt-ciphertext-secret-canary");
+    await expect(saveInfisicalConnection(connection())).rejects.toThrow("infisical_project_token_inventory_unreadable");
+    const mi = { ...connection(), mode: "machine-identity" as const, tokens: [], clientId: "own-id", clientSecret: "own-secret" };
+    await expect(saveInfisicalConnection(mi)).resolves.toBeUndefined();
+  });
   it("marks declared machine-identity write permissions as unverified", () => {
     expect(connectionMetadata({ ...connection(), mode: "machine-identity", tokens: [], clientId: "custom", clientSecret: "secret" })).toMatchObject({ writePermissionsVerified: false });
   });
@@ -280,6 +304,61 @@ describe("Routed runtime settings", () => {
 
 const request = (method: string, body?: unknown, authenticated = true) => new NextRequest("https://usage.example.test/api/settings/infisical", { method, headers: { ...(authenticated ? { cookie: `${SESSION_COOKIE_NAME}=${createSessionToken()}` } : {}), "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 describe("Admin connection API", () => {
+  it("lists healthy connections and sanitized errors for malformed stored and ambient siblings", async () => {
+    database.set("infisical.connection.v1.ct", encryptJson(connection()));
+    database.set("infisical.connection.v1.shared", "corrupt-ciphertext-secret-canary");
+    vi.stubEnv("INFISICAL_ST_PROJECT_ID", "other-project");
+    vi.stubEnv("INFISICAL_ST_READ_TOKEN", "st.env-secret-canary");
+    vi.stubEnv("INFISICAL_ST_READ_PATHS", "bad/path");
+    const response = await GET(request("GET"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.connections).toEqual([connectionMetadata(connection())]);
+    expect(body.sourceErrors).toEqual([{ source: "st", error: "infisical_connection_unreadable" }, { source: "shared", error: "infisical_connection_unreadable" }]);
+    expect(JSON.stringify(body)).not.toContain("secret-canary");
+    expect(JSON.stringify(body)).not.toContain("st.test");
+  });
+  it.each(["ciphertext", "schema", "empty", "environment"])("directly replaces an unreadable %s source with fully specified credentials", async (kind) => {
+    if (kind === "ciphertext") database.set("infisical.connection.v1.ct", "corrupt-ciphertext");
+    if (kind === "schema") database.set("infisical.connection.v1.ct", encryptJson({ ...connection(), tokens: null }));
+    if (kind === "empty") database.set("infisical.connection.v1.ct", "");
+    vi.stubEnv("INFISICAL_CT_PROJECT_ID", "project-test");
+    vi.stubEnv("INFISICAL_CT_READ_TOKEN", "st.ambient-must-not-reuse");
+    vi.stubEnv("INFISICAL_CT_READ_PATHS", kind === "environment" ? "bad/path" : "/read");
+    const mock = mockFetch(); vi.stubGlobal("fetch", mock.fetchImpl);
+    expect((await PUT(request("PUT", connection()))).status).toBe(200);
+    expect(await loadInfisicalConnection("ct")).toEqual(connection());
+    expect(mock.calls.some(({ token }) => token === "st.ambient-must-not-reuse")).toBe(false);
+  });
+  it("refuses blank credential reuse or ambient fallback for an unreadable saved source", async () => {
+    database.set("infisical.connection.v1.ct", "corrupt-ciphertext");
+    vi.stubEnv("INFISICAL_CT_PROJECT_ID", "project-test");
+    vi.stubEnv("INFISICAL_CT_READ_TOKEN", "st.test-read");
+    vi.stubEnv("INFISICAL_CT_READ_PATHS", "/read");
+    vi.stubEnv("INFISICAL_CT_WRITE_TOKEN", "st.test-write");
+    vi.stubEnv("INFISICAL_CT_WRITE_PATHS", "/write");
+    const blank = connection(); blank.tokens.forEach((token) => { token.token = ""; });
+    const mock = mockFetch(); vi.stubGlobal("fetch", mock.fetchImpl);
+    expect((await PUT(request("PUT", blank))).status).toBe(400);
+    expect(mock.calls).toEqual([]);
+    await expect(resolveInfisicalConnection("ct")).rejects.toThrow("infisical_connection_unreadable");
+    expect(database.get("infisical.connection.v1.ct")).toBe("corrupt-ciphertext");
+  });
+  it("retains the raw unreadable revision so a later disable wins over its pending repair", async () => {
+    database.set("infisical.connection.v1.ct", "corrupt-ciphertext");
+    let release!: () => void; let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const atVerification = new Promise<void>((resolve) => { entered = resolve; });
+    const mock = mockFetch(); let held = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!held) { held = true; entered(); await gate; }
+      return mock.fetchImpl(input, init);
+    }));
+    const pending = PUT(request("PUT", connection())); await atVerification;
+    expect((await DELETE(request("DELETE", { source: "ct" }))).status).toBe(200);
+    release(); expect((await pending).status).toBe(400);
+    expect(await resolveInfisicalConnection("ct")).toBeNull();
+  });
   it.each([null, [], { secrets: [null] }, { secrets: [{ secretKey: 42 }] }])("rejects malformed secret-list responses before persisting a verified connection: %j", async (payload) => {
     const c = connection(); const mock = mockFetch(c);
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => String(input).includes("/api/v2/service-token") ? mock.fetchImpl(input, init) : json(payload)));

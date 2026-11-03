@@ -15,8 +15,15 @@ const failure = () => NextResponse.json({ error: "Infisical connection could not
 export async function GET(request: NextRequest) {
   if (!admin(request)) return forbidden();
   try {
-    const connections = await Promise.all(InfisicalSourceSchema.options.map(resolveInfisicalConnection));
-    return NextResponse.json({ connections: connections.filter((value) => value !== null).map(connectionMetadata), disabledSources: InfisicalSourceSchema.options.filter(isInfisicalConnectionDisabled) });
+    const sources = await Promise.all(InfisicalSourceSchema.options.map(async (source) => {
+      try {
+        const connection = await resolveInfisicalConnection(source);
+        return { source, connection: connection ? connectionMetadata(connection) : null, error: null };
+      } catch {
+        return { source, connection: null, error: "infisical_connection_unreadable" };
+      }
+    }));
+    return NextResponse.json({ connections: sources.flatMap(({ connection }) => connection ? [connection] : []), disabledSources: InfisicalSourceSchema.options.filter(isInfisicalConnectionDisabled), sourceErrors: sources.flatMap(({ source, error }) => error ? [{ source, error }] : []) });
   } catch { return failure(); }
 }
 
@@ -27,9 +34,15 @@ export async function PUT(request: NextRequest) {
     if (Buffer.byteLength(raw) > 24 * 1024) return failure();
     const input = InfisicalConnectionSchema.parse(JSON.parse(raw));
     const snapshot = await loadInfisicalConnectionSnapshot(input.source);
-    const previous = snapshot.connection;
-    const effective = previous ?? await resolveInfisicalConnection(input.source);
-    const connection = mergeConnectionCredentials(input, effective);
+    let connection;
+    try {
+      // A complete replacement never needs credentials from an unreadable source.
+      connection = mergeConnectionCredentials(input, null);
+    } catch {
+      if (snapshot.unreadable) return failure();
+      const effective = snapshot.connection ?? await resolveInfisicalConnection(input.source);
+      connection = mergeConnectionCredentials(input, effective);
+    }
     // Verify every declared route against token metadata, without a write probe.
     for (const permission of ["read", "write"] as const) {
       for (const path of permission === "read" ? connection.readPaths : connection.writePaths) {

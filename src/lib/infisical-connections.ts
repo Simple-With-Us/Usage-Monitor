@@ -11,6 +11,7 @@ const pathSchema = z.string().max(256).regex(/^\/(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0
   .refine((path) => !path.split("/").some((part) => part === "." || part === ".."));
 const pathsSchema = z.array(pathSchema).max(20).refine((paths) => new Set(paths).size === paths.length);
 const secret = z.string().max(8192).optional();
+const projectIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const tokenSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]{1,40}$/),
   paths: pathsSchema.min(1),
@@ -20,7 +21,7 @@ const tokenSchema = z.object({
 }).strict();
 export const InfisicalConnectionSchema = z.object({
   source: InfisicalSourceSchema,
-  projectId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  projectId: projectIdSchema,
   mode: z.enum(["machine-identity", "service-tokens"]),
   secretPath: pathSchema,
   readPaths: pathsSchema.min(1),
@@ -54,22 +55,25 @@ const revision = (row: { key: string; value: string | null } | null) => row ? cr
 export async function loadInfisicalConnectionSnapshot(source: InfisicalSource) {
   const row = await prisma.appSetting.findUnique({ where: { key: key(source) } });
   const rowRevision = revision(row);
-  if (!row?.value) { knownStoredSources.delete(source); disabledSources.delete(source); return { connection: null, revision: rowRevision }; }
-  knownStoredSources.add(source);
-  const stored = decryptJson(row.value);
-  if (stored.disabled === true && stored.source === source) { disabledSources.add(source); knownStoredSources.delete(source); return { connection: null, revision: rowRevision }; }
-  disabledSources.delete(source);
+  if (!row) { knownStoredSources.delete(source); disabledSources.delete(source); return { connection: null, revision: rowRevision, unreadable: false }; }
   knownStoredSources.add(source);
   try {
+    if (!row.value) throw new Error();
+    const stored = decryptJson(row.value);
+    if (stored.disabled === true && stored.source === source) { disabledSources.add(source); knownStoredSources.delete(source); return { connection: null, revision: rowRevision, unreadable: false }; }
+    disabledSources.delete(source);
     const connection = InfisicalConnectionSchema.parse(stored);
     if (connection.source !== source) throw new Error();
-    return { connection, revision: rowRevision };
+    return { connection, revision: rowRevision, unreadable: false };
   } catch {
-    throw new Error("infisical_connection_unreadable");
+    disabledSources.delete(source);
+    return { connection: null, revision: rowRevision, unreadable: true };
   }
 }
 export async function loadInfisicalConnection(source: InfisicalSource): Promise<InfisicalConnection | null> {
-  return (await loadInfisicalConnectionSnapshot(source)).connection;
+  const snapshot = await loadInfisicalConnectionSnapshot(source);
+  if (snapshot.unreadable) throw new Error("infisical_connection_unreadable");
+  return snapshot.connection;
 }
 
 export function connectionMetadata(connection: InfisicalConnection) {
@@ -115,11 +119,21 @@ export async function saveInfisicalConnection(connection: InfisicalConnection, e
     for (const source of InfisicalSourceSchema.options) {
       if (source === connection.source) continue;
       const row = otherRows.find((item) => item.key === key(source));
-      const payload = row?.value ? decryptJson(row.value) : null;
-      if (payload?.disabled === true) continue;
-      const other = payload ? InfisicalConnectionSchema.parse(payload) : infisicalConnectionFromEnv(source);
-      if (!other) continue;
-      if (other.projectId === connection.projectId) for (const token of other.tokens) if (token.token) tokens.add(token.token);
+      // Validate credential inventory independently of routing, without losing the cap.
+      if (connection.tokens.length === 0) continue;
+      let payload: Record<string, unknown> | null;
+      try {
+        if (row && !row.value) throw new Error();
+        payload = row ? decryptJson(row.value!) : infisicalConnectionEnvInput(source);
+      }
+      catch { throw new Error("infisical_project_token_inventory_unreadable"); }
+      if (!payload || (payload.disabled === true && payload.source === source)) continue;
+      const project = projectIdSchema.safeParse(payload.projectId);
+      if (!project.success) throw new Error("infisical_project_token_inventory_unreadable");
+      if (project.data !== connection.projectId) continue;
+      const inventory = z.array(z.object({ token: secret })).max(2).safeParse(payload.tokens);
+      if (!inventory.success) throw new Error("infisical_project_token_inventory_unreadable");
+      for (const token of inventory.data) if (token.token) tokens.add(token.token);
     }
     if (tokens.size > 2) throw new Error("infisical_project_token_limit");
     await transaction.appSetting.upsert({ where: { key: key(connection.source) }, create: { key: key(connection.source), value }, update: { value } });
@@ -135,7 +149,7 @@ export async function deleteInfisicalConnection(source: InfisicalSource) {
 }
 
 /** Explicit project credentials only; the fleet Automation identity is never borrowed. */
-export function infisicalConnectionFromEnv(source: InfisicalSource, env: NodeJS.ProcessEnv = process.env): InfisicalConnection | null {
+function infisicalConnectionEnvInput(source: InfisicalSource, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> | null {
   const um = resolveUmInfisicalEnv(env);
   const prefix = `INFISICAL_${source.toUpperCase().replaceAll("-", "_")}`;
   const projectId = source === "um" ? um.projectId : env[`${prefix}_PROJECT_ID`]?.trim() || (source === "st-primary" ? env.INFISICAL_ST_PROJECT_ID?.trim() : undefined);
@@ -150,8 +164,7 @@ export function infisicalConnectionFromEnv(source: InfisicalSource, env: NodeJS.
   const clientSecret = source === "um" ? um.clientSecret : ownPair ? env[`${prefix}_CLIENT_SECRET`]?.trim() : undefined;
   if (!readToken && !writeToken && !clientId && !clientSecret) return null;
   if (!projectId && !readToken && !writeToken && (!clientId || !clientSecret)) return null;
-  if (!projectId) throw new Error("infisical_project_required");
-  return InfisicalConnectionSchema.parse({ source, projectId, secretPath, readPaths,
+  return { source, projectId, secretPath, readPaths,
     writePaths: readToken || writeToken ? writePaths : readPaths,
     mode: readToken || writeToken ? "service-tokens" : "machine-identity",
     clientId: readToken || writeToken ? undefined : clientId,
@@ -160,7 +173,14 @@ export function infisicalConnectionFromEnv(source: InfisicalSource, env: NodeJS.
       ...(readToken ? [{ id: "read", paths: readPaths, permissions: ["read"], token: readToken }] : []),
       ...(writeToken ? [{ id: "write", paths: writePaths, permissions: ["write"], token: writeToken }] : []),
     ],
-  });
+  };
+}
+
+export function infisicalConnectionFromEnv(source: InfisicalSource, env: NodeJS.ProcessEnv = process.env): InfisicalConnection | null {
+  const input = infisicalConnectionEnvInput(source, env);
+  if (!input) return null;
+  if (!input.projectId) throw new Error("infisical_project_required");
+  return InfisicalConnectionSchema.parse(input);
 }
 
 export async function resolveInfisicalConnection(source: InfisicalSource) {

@@ -16,14 +16,15 @@ export default function InfisicalSettingsPanel() {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [disabled, setDisabled] = useState<Source[]>([]);
+  const [unreadable, setUnreadable] = useState<Source[]>([]);
   useEffect(() => {
     let active = true;
     void fetch("/api/settings/infisical").then(async (response) => {
       if (!response.ok) throw new Error();
       const body = await response.json();
       if (!Array.isArray(body.connections)) throw new Error();
-      if (active) { setSaved(body.connections); setDisabled(body.disabledSources ?? []); setForm(body.connections.find((item: Connection) => item.source === "um") ?? empty("um")); setLoaded(true); }
-    }).catch(() => { if (active) setMessage("Could not load Infisical connections"); });
+      if (active) { setSaved(body.connections); setDisabled(body.disabledSources ?? []); setUnreadable((body.sourceErrors ?? []).map((item: { source: Source }) => item.source)); setForm(body.connections.find((item: Connection) => item.source === "um") ?? empty("um")); setLoaded(true); }
+    }).catch(() => { if (active) { setMessage("Could not load Infisical connections; enter all credentials to replace a connection or disable it"); setLoaded(true); } });
     return () => { active = false; };
   }, []);
   const update = (patch: Partial<Connection>) => setForm((current) => ({ ...current, ...patch }));
@@ -38,6 +39,7 @@ export default function InfisicalSettingsPanel() {
       const body = await response.json();
       setSaved((current) => [...current.filter((item) => item.source !== form.source), body.connection]);
       setDisabled((current) => current.filter((source) => source !== form.source));
+      setUnreadable((current) => current.filter((source) => source !== form.source));
       setForm(body.connection); setMessage(body.connection.writePermissionsVerified === false ? "Connection saved; read access verified and machine identity write permissions remain unverified" : "Connection verified and saved");
     } catch { setMessage("Connection could not be verified or saved"); }
     finally { setBusy(false); }
@@ -48,6 +50,7 @@ export default function InfisicalSettingsPanel() {
       const response = await fetch("/api/settings/infisical", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: form.source }) });
       if (!response.ok) throw new Error();
       setSaved((current) => current.filter((item) => item.source !== form.source)); setDisabled((current) => [...current.filter((source) => source !== form.source), form.source]); setForm(empty(form.source));
+      setUnreadable((current) => current.filter((source) => source !== form.source));
       setMessage("Connection disabled; environment credentials will not be used for this project use");
     } catch { setMessage("Connection could not be removed"); }
     finally { setBusy(false); }
@@ -56,6 +59,7 @@ export default function InfisicalSettingsPanel() {
     <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Infisical Connections</h2>
     <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">Choose credentials for each project.  Folders are exact and never include subfolders automatically.</p>
     <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Credentials stay hidden.  Leave a credential blank to keep it when its project and folder permissions are unchanged; Disable Connection prevents environment credentials from taking over.</p>
+    {unreadable.includes(form.source) && <p role="alert" className="mt-2 text-sm text-amber-800 dark:text-amber-200">This connection could not be loaded.  Enter all credentials to replace it, or disable it.</p>}
     {disabled.includes(form.source) && <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">This connection is disabled.  Save new credentials to enable it again.</p>}
     {form.mode === "machine-identity" && form.writePaths.length > 0 && <p className="mt-2 text-sm text-amber-800 dark:text-amber-200">Machine identity write permissions are unverified.  Infisical must authorize each settings write.</p>}
     <fieldset disabled={busy || !loaded} className="mt-4 grid gap-4 sm:grid-cols-2">

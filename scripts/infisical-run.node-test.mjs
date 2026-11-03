@@ -257,3 +257,21 @@ globalThis.fetch = async (_url, options = {}) => {
     }
   }
 });
+
+test("write token checks reject generic reads and opaque tokens without any external call", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "infisical-write-check-test-"));
+  try {
+    const observedPath = path.join(root, "external-call");
+    const loader = path.join(root, "fake-fetch.mjs");
+    await writeFile(loader, `import { writeFileSync } from "node:fs"; globalThis.fetch = async () => { writeFileSync(process.env.FAKE_OBSERVED_TOKEN_FILE, "called"); throw new Error("external call forbidden"); };`);
+    for (const tokens of [
+      { INFISICAL_TOKEN: "st.generic-read-only" },
+      { INFISICAL_TOKEN: "opaque-generic-read-bearer" },
+      { INFISICAL_UM_WRITE_TOKEN: "opaque-write-bearer" },
+    ]) {
+      const child = spawn(process.execPath, ["--import", loader, tokenCheckPath, "write"], { env: { PATH: process.env.PATH, INFISICAL_UM_PROJECT_ID: "fake-project", FAKE_OBSERVED_TOKEN_FILE: observedPath, ...tokens }, stdio: "ignore" });
+      assert.equal((await waitForExit(child)).code, 2);
+    }
+    await assert.rejects(readFile(observedPath, "utf8"), { code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

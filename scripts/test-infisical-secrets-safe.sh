@@ -73,12 +73,12 @@ if NODE_OPTIONS="--import=$TMP/fetch.mjs" INFISICAL_UM_WRITE_TOKEN="st.fake-read
   fail "read-only metadata was accepted for a write"
 fi
 
-INFISICAL_UM_WRITE_TOKEN="write-fake" bash "$SRC" set SOURCE_KEY >/dev/null
-grep -qx 'set write-fake' "$INFISICAL_MOCK_LOG" || fail "set did not use the write token"
+NODE_OPTIONS="--import=$TMP/fetch.mjs" MOCK_PERMISSION="write" INFISICAL_UM_WRITE_TOKEN="st.fake-write" bash "$SRC" set SOURCE_KEY >/dev/null
+grep -qx 'set st.fake-write' "$INFISICAL_MOCK_LOG" || fail "set did not use the write token"
 
-INFISICAL_UM_READ_TOKEN="read-fake" INFISICAL_UM_WRITE_TOKEN="write-fake" \
+NODE_OPTIONS="--import=$TMP/fetch.mjs" MOCK_PERMISSION="write" INFISICAL_UM_READ_TOKEN="read-fake" INFISICAL_UM_WRITE_TOKEN="st.fake-write" \
   bash "$SRC" delete FIRST >/dev/null
-grep -qx 'delete write-fake' "$INFISICAL_MOCK_LOG" || fail "delete did not use the write token"
+grep -qx 'delete st.fake-write' "$INFISICAL_MOCK_LOG" || fail "delete did not use the write token"
 [ "$(grep -c '^names read-fake$' "$INFISICAL_MOCK_LOG")" -eq 3 ] \
   || fail "delete did not verify through the read token before and after"
 
@@ -91,6 +91,17 @@ fi
 INFISICAL_UM_CLIENT_ID="um-id" INFISICAL_UM_CLIENT_SECRET="um-secret" \
   bash "$SRC" names >/dev/null
 grep -qx 'names mock-session' "$INFISICAL_MOCK_LOG" || fail "explicit UM machine identity was not retained"
+INFISICAL_UM_CLIENT_ID="um-id" INFISICAL_UM_CLIENT_SECRET="um-secret" \
+  bash "$SRC" set SOURCE_KEY >/dev/null
+grep -qx 'set mock-session' "$INFISICAL_MOCK_LOG" || fail "explicit UM machine identity write was not retained"
+
+if INFISICAL_TOKEN="generic-read-bearer" bash "$SRC" set SOURCE_KEY >/dev/null 2>&1; then
+  fail "generic read bearer was accepted for set"
+fi
+if INFISICAL_UM_WRITE_TOKEN="opaque-bearer" bash "$SRC" set SOURCE_KEY >/dev/null 2>&1; then
+  fail "opaque bearer falsely attested write permissions"
+fi
+[ "$(grep -c '^set ' "$INFISICAL_MOCK_LOG")" -eq 2 ] || fail "unverified bearer reached a write"
 
 if INFISICAL_CLIENT_ID="generic-id" INFISICAL_CLIENT_SECRET="generic-secret" \
   bash "$SRC" names >/dev/null 2>&1; then

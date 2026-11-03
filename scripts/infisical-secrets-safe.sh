@@ -37,7 +37,7 @@
 #   INFISICAL_UM_READ_TOKEN                read-only service token for names/has
 #   INFISICAL_UM_WRITE_TOKEN               write-only service token for set/delete
 #   INFISICAL_UM_CLIENT_ID / _CLIENT_SECRET explicit project machine identity
-#   INFISICAL_TOKEN                        explicit token override for one operation
+#   INFISICAL_TOKEN                        legacy read token only; never used for writes
 #
 set -euo pipefail
 
@@ -74,7 +74,7 @@ infisical_token() {
       ;;
     write)
       token_name="INFISICAL_UM_WRITE_TOKEN"
-      token="${INFISICAL_UM_WRITE_TOKEN:-${INFISICAL_TOKEN:-}}"
+      token="${INFISICAL_UM_WRITE_TOKEN:-}"
       ;;
     *) die "Unsupported Infisical permission" ;;
   esac
@@ -94,8 +94,8 @@ infisical_token() {
   INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$secret" \
     infisical login --method=universal-auth --plain --silent 2>/dev/null)" \
     || die "Infisical login failed (explicit machine identity rejected)."
-  INFISICAL_TOKEN="$token" INFISICAL_UM_PROJECT_ID="$PROJECT_ID" INFISICAL_UM_SECRET_PATH="$SECRET_PATH" \
-    node "$ROOT/scripts/check-infisical-token.mjs" "$permission" || die "Infisical credential verification failed."
+  # This explicit project identity has no service-token metadata to attest.
+  # The target configuration was checked above; Infisical authorizes the operation.
   printf '%s' "$token"
 }
 
