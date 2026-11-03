@@ -15,6 +15,7 @@ export const COLLECTOR_CALL_ID = Symbol.for("usage-monitor.collector-call-id");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const tokenTypes = new Set(["input", "output", "cacheRead", "cacheCreation"]);
 const measuredDuration = (value) => Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+const durationFitsTimestamp = (value, start) => measuredDuration(value) && Number.isFinite(start) && Number.isFinite(new Date(start).getTime()) && Number.isFinite(new Date(start + value).getTime());
 const runFile = promisify(execFile);
 const AckCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const OtlpCount = z.union([AckCount, z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number).pipe(AckCount)]);
@@ -79,10 +80,11 @@ export function collectorSentryEvents(events, { producerId, producerInstanceId =
     const reasoning = event.metadata?.reasoningTokens;
     if (type === "output" && Number.isFinite(reasoning) && reasoning >= 0 && reasoning <= Number.MAX_SAFE_INTEGER) row.tokens.reasoning = (row.tokens.reasoning ?? 0) + reasoning;
     const duration = event.metadata?.durationMs;
-    if (measuredDuration(duration)) {
+    const completed = Date.parse(event.occurredAt);
+    const start = measuredDuration(duration) ? completed - duration : NaN;
+    if (durationFitsTimestamp(duration, start)) {
       row.durationMs = duration;
-      const completed = Date.parse(event.occurredAt);
-      if (callId && Number.isFinite(completed) && Number.isFinite(completed - duration)) row.ts = new Date(completed - duration).toISOString();
+      if (callId) row.ts = new Date(start).toISOString();
     }
     grouped.set(id, row);
   }
@@ -185,7 +187,9 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
   const safeEvent = (row) => {
     const event = JSON.parse(row.payload);
     if (event.eventId !== row.id) throw new Error("Outbox identity mismatch");
+    const hasTiming = durationFitsTimestamp(event.durationMs, Date.parse(event.ts));
     const attributes = scrubOtlpAttributes(event.attributes).filter((attribute) => {
+      if (!hasTiming && attribute.key === "duration_ms") return false;
       const value = scalarFromAnyValue(attribute.value);
       if (typeof value === "number") return Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
       return typeof value === "string" && value.split(",").every((part) => telemetryIdentifier(part));
@@ -193,12 +197,12 @@ export async function drainCollectorSentry(root, config, { fetchImpl = globalThi
     const nativeTurn = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "botfleet.turn");
     const knownCall = attributes.some((attribute) => attribute.key === "gen_ai.operation.name" && scalarFromAnyValue(attribute.value) === "chat");
     // Legacy pending spans keep their durable payload and identity; unknown timing travels as a log.
-    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" && measuredDuration(event.durationMs) ? "span" : "log", name: nativeTurn ? "botfleet.turn" : knownCall || event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
+    const safe = { eventId: row.id, ts: event.ts, kind: event.kind === "span" && hasTiming ? "span" : "log", name: nativeTurn ? "botfleet.turn" : knownCall || event.kind === "span" ? "chat" : "usage_observation", attributes, body: { stringValue: rebuildLogBody(attributes) } };
     if (nativeTurn) {
       if (safe.kind === "span") safe.status = { code: event.status?.code === 2 ? 2 : 1 };
       else safe.severityNumber = event.severityNumber === 17 || event.status?.code === 2 ? 17 : 9;
     }
-    if (measuredDuration(event.durationMs)) safe.durationMs = event.durationMs;
+    if (hasTiming) safe.durationMs = event.durationMs;
     return safe;
   };
 
