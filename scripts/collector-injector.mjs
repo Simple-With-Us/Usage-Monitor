@@ -29,6 +29,13 @@ function custody(path, mode) {
     }
     if (bytes > 16384) throw new Error("invalid_custody");
     const raw = buffer.subarray(0, bytes).toString("utf8");
+    if (mode === "service-token" && raw.startsWith("st.")) {
+      // Existing service-token custody stores raw ASCII, optionally ending in
+      // one newline.  Accept it without rewriting the shared custody file.
+      const token = raw.endsWith("\r\n") ? raw.slice(0, -2) : raw.endsWith("\n") ? raw.slice(0, -1) : raw;
+      if (!/^st\.[\x21-\x7e]+$/.test(token) || /[\r\n]/.test(token)) throw new Error("invalid_custody");
+      return { token };
+    }
     const data = JSON.parse(raw);
     const keys = mode === "service-token" ? ["token"] : ["clientId", "clientSecret"];
     if (!data || Array.isArray(data) || typeof data !== "object" || Object.keys(data).sort().join() !== keys.sort().join() || keys.some((key) => typeof data[key] !== "string" || !data[key].trim() || data[key] !== data[key].trim())) throw new Error("invalid_custody");
