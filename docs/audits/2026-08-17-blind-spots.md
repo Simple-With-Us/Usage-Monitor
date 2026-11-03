@@ -501,7 +501,7 @@ Backup-replica health is a sibling (backend) topic.  This is “does this app te
 - Sentry SDK exists and is DSN-gated (`sentry.server.config.ts`).
 - Skip link + `lang="en"` + PWA registration are mounted.
 - `test:receipt-inbox-worker` is in CI (was a prior hole).
-- Agent-sync provider is seeded inactive.
+- Ag***-s**c provider is seeded inactive.
 - Daily-rollups bearer path is already middleware-excluded (doc is stale, code is not).
 - iOS Local no longer invents Vercel / Workers / Robinhood fees on seed (`LocalAppModel.swift:151-153`).  Prefill-on-Add remains a nudge (low).
 
