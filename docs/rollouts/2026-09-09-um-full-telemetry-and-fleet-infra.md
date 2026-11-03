@@ -58,4 +58,4 @@ Modified:
 
 - Board item: `58c6cf02` (this lane).
 - Cross-seat: `c630ceed` (Claude's fleet-wide Sentry campaign).  No overlap; the DSN is shared, the wire shapes are disjoint, and the existing CI reporter stays untouched.
-- Slack: post a `[MM]` handoff to `#agent-sync` with the PR number once it lands.
+- Slack: post a `[MM]` handoff to `#ag***-s**c` with the PR number once it lands.

@@ -6,19 +6,19 @@ import { setupPrismaSqliteTestDb } from "./setup-test-db";
 
 let dbPath: string;
 let prisma: typeof import("@/lib/prisma").prisma;
-let fetchUsage: typeof import("../adapters/agent-sync-relay").fetchUsage;
-let ensureAgentSyncProviderSeeded: typeof import("../ensure-agent-sync-provider").ensureAgentSyncProviderSeeded;
+let fetchUsage: typeof import("../adapters/simple-tools-relay").fetchUsage;
+let ensureSimpleToolsProviderSeeded: typeof import("../ensure-simple-tools-provider").ensureSimpleToolsProviderSeeded;
 
 beforeAll(async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sync-relay-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "simple-tools-relay-test-"));
   dbPath = path.join(dir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
 
   setupPrismaSqliteTestDb(dbPath);
 
   ({ prisma } = await import("@/lib/prisma"));
-  ({ fetchUsage } = await import("../adapters/agent-sync-relay"));
-  ({ ensureAgentSyncProviderSeeded } = await import("../ensure-agent-sync-provider"));
+  ({ fetchUsage } = await import("../adapters/simple-tools-relay"));
+  ({ ensureSimpleToolsProviderSeeded } = await import("../ensure-simple-tools-provider"));
 });
 
 afterAll(async () => {
@@ -28,7 +28,7 @@ afterAll(async () => {
   }
 });
 
-describe("agent-sync-relay adapter", () => {
+describe("simple-tools-relay adapter", () => {
   let fetchMock: any;
 
   beforeEach(() => {
@@ -41,7 +41,7 @@ describe("agent-sync-relay adapter", () => {
 
   it("fetches uptime status successfully when service is up", async () => {
     const mockResponse = new Response(
-      JSON.stringify({ ok: true, service: "agent-sync-push" }),
+      JSON.stringify({ ok: true, service: "simple-tools-push" }),
       {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -59,7 +59,7 @@ describe("agent-sync-relay adapter", () => {
     expect(res.totalRequests).toBeNull();
     expect(res.rawData).toEqual({
       status: "UP",
-      data: { ok: true, service: "agent-sync-push" },
+      data: { ok: true, service: "simple-tools-push" },
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://agents.simplewithus.com/health",
@@ -82,26 +82,26 @@ describe("agent-sync-relay adapter", () => {
   });
 });
 
-describe("ensureAgentSyncProviderSeeded", () => {
+describe("ensureSimpleToolsProviderSeeded", () => {
   beforeEach(async () => {
-    // Delete any existing agent-sync-relay providers for clean state
+    // Delete any existing simple-tools-relay providers for clean state
     const providers = await prisma.provider.findMany({
-      where: { name: "agent-sync-relay" },
+      where: { name: "simple-tools-relay" },
     });
     for (const p of providers) {
       await prisma.provider.delete({ where: { id: p.id } });
     }
   });
 
-  it("seeds the agent-sync-relay provider if it does not exist", async () => {
-    await ensureAgentSyncProviderSeeded();
+  it("seeds the simple-tools-relay provider if it does not exist", async () => {
+    await ensureSimpleToolsProviderSeeded();
 
     const provider = await prisma.provider.findFirst({
-      where: { name: "agent-sync-relay" },
+      where: { name: "simple-tools-relay" },
     });
 
     expect(provider).toBeDefined();
-    expect(provider?.displayName).toBe("Agent Sync Relay");
+    expect(provider?.displayName).toBe("Simple Tools Relay");
     expect(provider?.type).toBe("builtin");
     // Wave F / E17: catalog/health-only — inactive, never sub-daily poll.
     expect(provider?.isActive).toBe(false);
@@ -110,15 +110,15 @@ describe("ensureAgentSyncProviderSeeded", () => {
   });
 
   it("does not create a duplicate if provider already exists", async () => {
-    await ensureAgentSyncProviderSeeded();
+    await ensureSimpleToolsProviderSeeded();
     const countAfterFirst = await prisma.provider.count({
-      where: { name: "agent-sync-relay" },
+      where: { name: "simple-tools-relay" },
     });
     expect(countAfterFirst).toBe(1);
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureSimpleToolsProviderSeeded();
     const countAfterSecond = await prisma.provider.count({
-      where: { name: "agent-sync-relay" },
+      where: { name: "simple-tools-relay" },
     });
     expect(countAfterSecond).toBe(1);
   });
@@ -126,14 +126,14 @@ describe("ensureAgentSyncProviderSeeded", () => {
   it("increments the alert revision when disabling an existing active relay", async () => {
     const provider = await prisma.provider.create({
       data: {
-        name: "agent-sync-relay",
-        displayName: "Agent Sync Relay",
+        name: "simple-tools-relay",
+        displayName: "Simple Tools Relay",
         isActive: true,
         refreshIntervalMin: 15,
       },
     });
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureSimpleToolsProviderSeeded();
 
     expect(
       await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })
@@ -147,14 +147,14 @@ describe("ensureAgentSyncProviderSeeded", () => {
   it("raises sub-daily refresh floor on an already-inactive relay", async () => {
     const provider = await prisma.provider.create({
       data: {
-        name: "agent-sync-relay",
-        displayName: "Agent Sync Relay",
+        name: "simple-tools-relay",
+        displayName: "Simple Tools Relay",
         isActive: false,
         refreshIntervalMin: 60,
       },
     });
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureSimpleToolsProviderSeeded();
 
     expect(
       await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })

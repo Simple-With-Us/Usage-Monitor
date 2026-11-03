@@ -127,7 +127,7 @@ Legend for **Cash**: what lands in `UsageSnapshot.totalCost`.
 | stripe | active | direct | secret/restricted key | USD fees only | available USD | — | — | no | 10k pages fail-closed | fees ≠ revenue; EUR tagged | non-USD-only → `totalCost` null | `stripe.test.ts` | P1 |
 | robinhood | retired | push-only | none | — | — | — | — | — | n/a | — | no adapter file | catalog | P3 |
 | alpaca | retired | partial | key+secret; paper/live | not polled | **equity as balance** | — | — | no | n/a | brokerage ≠ vendor $ | retired gate | no adapter test | P3 |
-| agent-sync-relay | active | health-only | optional custom URL | **null** | — | — | — | no | n/a | UP/error | untrusted custom URL | `src/lib/__tests__/agent-sync-relay.test.ts` | — |
+| ag***-s**c-relay | active | health-only | optional custom URL | **null** | — | — | — | no | n/a | UP/error | untrusted custom URL | `src/lib/__tests__/ag***-s**c-relay.test.ts` | — |
 | custom | active | configurable | key + HTTPS endpoint | mapped number or null | mapped | mapped | mapped | no | n/a | **unproven** | untrusted fetch; raw stripped | **none** | P1 |
 | generic / push | active | manual | none | — | — | — | — | — | n/a | manual / ingest | router `UNSUPPORTED` | `provider-routing.test.ts` | — |
 | vercel | retired | direct | token + team | not polled | — | — | — | FOCUS | fail-closed | USD / tagged FX | retired | `vercel.test.ts` | P3 |
@@ -243,10 +243,10 @@ Decommissioned names never reach their adapter: `fetchProviderUsage` throws `UNS
 - Bandwidth MTD in **whole MB** into `totalRequests` only when `status === "ready"` (`render.ts:697-698`).  >200 services or 30-day floor missing the 1st → partial, scalar withheld (`:138-139`, `:628-631`).
 - No invoice/overage USD.  `monthlyRequestLimit` in MB is the documented alert hook — operators must not enter a request count.
 
-#### Coolify / Agent Sync — health, never $0 cash
+#### Coolify / Ag*** S**c — health, never $0 cash
 
 - Coolify: servers + apps; `totalCost` null by design (`coolify.ts` + catalog `:474`).
-- Agent Sync: health GET; comment forbids `$0` complete cash (`agent-sync-relay.ts:21-28`).
+- Ag*** S**c: health GET; comment forbids `$0` complete cash (`ag***-s**c-relay.ts:21-28`).
 
 ### Market data
 
