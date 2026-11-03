@@ -57,11 +57,11 @@ export function defaultKimiCodeHome(env = process.env) {
 export function kimiWireIdentity(sessionsRoot, filePath) {
   const sessionKey = sessionKeyFor(sessionsRoot, filePath);
   const parts = sessionKey.split("/");
-  const agentsIndex = parts.lastIndexOf("agents");
+  const canonical = isSafePendingFile(sessionKey) && parts.length === 5 && parts[2] === "agents";
   return {
     sessionKey,
-    sessionId: agentsIndex >= 2 ? parts[agentsIndex - 1] : undefined,
-    agentId: agentsIndex >= 0 ? parts[agentsIndex + 1] : undefined,
+    sessionId: canonical ? parts[1] : undefined,
+    agentId: canonical ? parts[3] : undefined,
   };
 }
 
@@ -93,7 +93,7 @@ export async function readPendingSessions(stateRoot, { readMarker = readFile } =
     const entry = JSON.parse(await readMarker(markerPath, "utf8"));
     if (
       entry?.version !== 1 ||
-      !isCanonicalPendingFile(entry?.file) ||
+      !isSafePendingFile(entry?.file) ||
       typeof entry?.since !== "string" ||
       Number.isNaN(Date.parse(entry.since)) ||
       typeof entry?.generation !== "string" ||
@@ -130,15 +130,18 @@ function pendingMarkerName(file, since, generation) {
   return `${digest}.json`;
 }
 
-function isCanonicalPendingFile(file) {
-  if (typeof file !== "string" || !file || isAbsolute(file) || file.includes("\\")) return false;
+function isSafePendingFile(file) {
+  if (
+    typeof file !== "string" || !file || isAbsolute(file) ||
+    /^[a-z]:/i.test(file) || file.includes("\\") || file.includes("\0")
+  ) return false;
   const parts = file.split("/");
   if (parts.some((part) => !part || part === "." || part === "..")) return false;
-  return parts.length === 5 && parts[2] === "agents" && parts[4] === "wire.jsonl";
+  return parts.at(-1) === "wire.jsonl";
 }
 
 export async function writeKimiPendingMarker(stateRoot, file, since) {
-  if (!isCanonicalPendingFile(file)) throw new Error("Kimi pending-session marker has an invalid source path");
+  if (!isSafePendingFile(file)) throw new Error("Kimi pending-session marker has an invalid source path");
   const directory = `${collectorStatePath(PRODUCER_ID, stateRoot, "pending")}.d`;
   await mkdir(directory, { recursive: true });
   const generation = randomUUID();
@@ -224,6 +227,8 @@ export async function collectKimiEvents({
   env = process.env,
   dryRun = false,
   afterWireOpen,
+  resolveWireIdentity = kimiWireIdentity,
+  readSessionDirectory,
 } = {}) {
   const normalizedHome = resolve(home);
   const sessionsRoot = join(normalizedHome, "sessions");
@@ -237,6 +242,8 @@ export async function collectKimiEvents({
   // is repaired.
   const files = await walkFiles(sessionsRoot, {
     name: "wire.jsonl",
+    reportMissing: true,
+    readDirectory: readSessionDirectory,
     onTraversalError: () => {
       scanStatus.complete = false;
     },
@@ -245,14 +252,17 @@ export async function collectKimiEvents({
   const filesToRead = new Map();
   const discoveredFiles = new Set();
   for (const file of files) {
-    const relativeFile = relative(sessionsRoot, file).replaceAll("\\", "/");
-    if (!isCanonicalPendingFile(relativeFile)) {
+    const relativeFile = relative(sessionsRoot, file).split(sep).join("/");
+    if (!isSafePendingFile(relativeFile)) {
       scanStatus.complete = false;
       continue;
     }
     discoveredFiles.add(file);
+    const identity = resolveWireIdentity(sessionsRoot, file);
     const isPendingFile = pending.has(relativeFile);
-    const fresh = await fileMayContainEventsSince(file, since, {
+    // Unknown layouts still need a durable boundary, even when their mtime is
+    // older than the checkpoint.  Read them to detect incomplete trailing JSON.
+    const fresh = !identity.sessionId || await fileMayContainEventsSince(file, since, {
       onStatError: (error) => {
         if (!(isPendingFile && error?.code === "ENOENT")) scanStatus.complete = false;
       },
@@ -260,13 +270,13 @@ export async function collectKimiEvents({
     if (fresh) {
       filesToRead.set(file, {
         since: since?.toISOString?.() ?? new Date(0).toISOString(),
-        pending: isPendingFile,
+        hasPendingMarker: isPendingFile,
       });
     }
   }
   for (const [relativeFile, pendingEntry] of pending) {
-    if (!isCanonicalPendingFile(relativeFile)) {
-      throw new Error("Kimi pending-session marker contains a noncanonical source path");
+    if (!isSafePendingFile(relativeFile)) {
+      throw new Error("Kimi pending-session marker contains an unsafe source path");
     }
     const file = resolve(sessionsRoot, relativeFile);
     const rel = relative(sessionsRoot, file);
@@ -274,7 +284,7 @@ export async function collectKimiEvents({
       throw new Error("Kimi pending-session marker resolves outside the sessions directory");
     }
     if (!discoveredFiles.has(file)) continue;
-    const identity = kimiWireIdentity(sessionsRoot, file);
+    const identity = resolveWireIdentity(sessionsRoot, file);
     if (!identity.sessionId || !projectNameFromDirectory(workDirBySession?.get(identity.sessionId))) continue;
     const freshEntry = filesToRead.get(file);
     let replaySince = pendingEntry.since;
@@ -285,24 +295,26 @@ export async function collectKimiEvents({
       }
       pendingEntry.since = replaySince;
     }
-    filesToRead.set(file, { since: replaySince, pending: true });
+    filesToRead.set(file, { since: replaySince, hasPendingMarker: true });
   }
   const events = [];
   const resolvedPendingFiles = new Set();
   for (const [filePath, fileEntry] of filesToRead) {
     const replaySinceIso = fileEntry.since;
     const text = await readKimiWire(filePath, sessionsRoot, (error) => {
-      if (!(fileEntry.pending && (error?.code === "ENOENT" || error?.code === "ELOOP"))) scanStatus.complete = false;
+      if (!(fileEntry.hasPendingMarker && (error?.code === "ENOENT" || error?.code === "ELOOP"))) scanStatus.complete = false;
     }, afterWireOpen);
     if (text === null) continue;
-    const identity = kimiWireIdentity(sessionsRoot, filePath);
+    const identity = resolveWireIdentity(sessionsRoot, filePath);
     const workDir = identity.sessionId ? workDirBySession?.get(identity.sessionId) : undefined;
     const project = projectNameFromDirectory(workDir);
     const incompleteTrailingRecord = hasIncompleteTrailingRecord(text);
     if (!identity.sessionId || !project) {
-      const file = relative(sessionsRoot, filePath).replaceAll("\\", "/");
+      const file = relative(sessionsRoot, filePath).split(sep).join("/");
       const known = pending.get(file);
-      const deferredSince = incompleteTrailingRecord
+      // A first unknown-layout source can predate the global checkpoint.  Its
+      // future parser must be able to recover every row, including older ones.
+      const deferredSince = incompleteTrailingRecord || (!identity.sessionId && !known)
         ? EARLIEST_REPLAY_SINCE
         : known && Date.parse(known.since) < Date.parse(replaySinceIso)
           ? known.since
@@ -328,7 +340,7 @@ export async function collectKimiEvents({
         new Date(replaySinceIso),
       ),
     );
-    const relativeFile = relative(sessionsRoot, filePath).replaceAll("\\", "/");
+    const relativeFile = relative(sessionsRoot, filePath).split(sep).join("/");
     if (incompleteTrailingRecord) {
       // A partial last row can become valid after the checkpoint advances.
       // Its timestamp is unknowable until the JSON is complete, so retain the

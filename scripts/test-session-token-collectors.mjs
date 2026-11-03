@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -324,6 +324,20 @@ try {
     onTraversalError: () => { traversalErrors += 1; },
   });
   assert(traversalErrors === 0, "a missing provider root remains a valid empty scan");
+  const child = join(traversalRoot, "disappearing-child");
+  mkdirSync(child);
+  await writeFile(join(child, "usage.jsonl"), "fixture");
+  const missingChild = await walkFiles(traversalRoot, {
+    suffix: ".jsonl",
+    reportMissing: true,
+    readDirectory: async (directory, options) => {
+      const entries = await readdir(directory, options);
+      if (directory === traversalRoot) await rm(child, { recursive: true });
+      return entries;
+    },
+    onTraversalError: (error) => { if (error.code === "ENOENT") traversalErrors += 1; },
+  });
+  assert(missingChild.length === 0 && traversalErrors === 1, "opted-in scans report a nested directory disappearing after discovery");
 } finally {
   await rm(traversalRoot, { recursive: true, force: true });
 }
