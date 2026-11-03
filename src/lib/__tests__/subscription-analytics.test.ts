@@ -68,6 +68,15 @@ describe("subscription analytics discriminators", () => {
     expect(shouldDeriveAnalyticsTokenEstimate({ sourceApp: "fx", service: "fx" })).toBe(true);
   });
 
+  it("treats exact Kimi and ZCode local ledgers as seat analytics, not cash", () => {
+    for (const sourceApp of ["kimi-code", "zcode"]) {
+      const event = { sourceApp, service: sourceApp, metricType: "usage", unit: "token" };
+      expect(isSubscriptionAnalyticsTelemetry(event)).toBe(true);
+      expect(shouldDeriveAnalyticsTokenEstimate(event)).toBe(true);
+      expect(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS).toContain(sourceApp);
+    }
+  });
+
   it("keeps only the existing OpenCode PAYG message-cost shape in cash", () => {
     const cost = {
       sourceApp: "opencode",
@@ -108,6 +117,8 @@ describe("subscription analytics discriminators", () => {
       "deepseek-dsh",
       "opencode",
       "fx",
+      "kimi-code",
+      "zcode",
     ]);
   });
 });

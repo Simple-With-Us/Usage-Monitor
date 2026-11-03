@@ -60,6 +60,7 @@ describe("agent-telemetry-accuracy", () => {
 
   it("treats billing_api telemetry as reliable when tokens are present", () => {
     expect(isReliableTokenTelemetryKind("billing_api")).toBe(true);
+    expect(isReliableTokenTelemetryKind("local_database")).toBe(true);
     const cursor = resolveTelemetryAccuracy({
       name: "Cursor",
       tokenTelemetryKind: "billing_api",
