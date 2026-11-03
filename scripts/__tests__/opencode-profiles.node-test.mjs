@@ -135,10 +135,13 @@ test("missing and unreadable explicit sources retain the checkpoint while other 
   await assert.rejects(() => collectOpencodeDatabases({ dbPaths: Array(10).fill(primary) }), /one to nine/);
 });
 
-test("a missing implicit default is empty while explicit and additional missing databases retain the checkpoint", async (t) => {
+test("missing implicit default paths are empty while explicit and additional missing paths retain the checkpoint", async (t) => {
   const root = await harness(t);
   const missingPrimary = join(root, "default", "opencode.db");
+  const blockingParent = join(root, "blocking-file");
+  const blockedPrimary = join(blockingParent, "opencode.db");
   const child = join(root, "child.db");
+  await writeFile(blockingParent, "a file blocking the database parent path");
   fixture(child, { session: "ses_child", message: "msg_child", child: true });
   const childEvents = await collectOpencodeEvents({ dbPath: child, since: new Date(0) });
 
@@ -153,10 +156,21 @@ test("a missing implicit default is empty while explicit and additional missing 
   assert.equal(implicitScan.complete, true);
   assert.equal(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: implicitScan.complete }), true);
 
+  const blockedImplicitScan = { complete: true };
+  const blockedImplicitEvents = await collectOpencodeDatabases({
+    dbPaths: [blockedPrimary, child],
+    allowMissingPrimary: true,
+    since: new Date(0),
+    scanStatus: blockedImplicitScan,
+  });
+  assert.deepEqual(blockedImplicitEvents, childEvents);
+  assert.equal(blockedImplicitScan.complete, true);
+  assert.equal(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: blockedImplicitScan.complete }), true);
+
   const explicitScan = { complete: true };
   const explicitWarnings = [];
   const explicitEvents = await collectOpencodeDatabases({
-    dbPaths: [missingPrimary, child],
+    dbPaths: [blockedPrimary, child],
     allowMissingPrimary: false,
     since: new Date(0),
     scanStatus: explicitScan,
@@ -169,7 +183,7 @@ test("a missing implicit default is empty while explicit and additional missing 
 
   const additionalScan = { complete: true };
   const additionalEvents = await collectOpencodeDatabases({
-    dbPaths: [child, missingPrimary],
+    dbPaths: [child, blockedPrimary],
     allowMissingPrimary: true,
     since: new Date(0),
     scanStatus: additionalScan,
