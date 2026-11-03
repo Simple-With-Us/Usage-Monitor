@@ -37,6 +37,14 @@ identities also cover every untracked overlay path, byte, and executable flag. 
 updater recomputes these identities before activation, rollback, transition
 recovery, or receipt generation.  Do not edit a published release in place.
 
+Dependency file hashing opens the final path without following a symlink,
+checks its owner, regular-file type, inode, mode, and size on that descriptor,
+and reads at most 8 MiB through the same descriptor before checking for
+changes.  The descriptor closes on every path.  These checks do not make ancestor-directory
+lookups atomic or prevent the same owner from modifying a release after
+validation; the runtime tree and its ancestors must remain trusted and published
+releases must remain unchanged while collectors can use them.
+
 A legacy SHA-only directory is accepted only as the existing `current`
 migration source.  Its tracked scripts are verified against Git, and a separate
 content-addressed tree receives a fresh dependency copy without importing or
