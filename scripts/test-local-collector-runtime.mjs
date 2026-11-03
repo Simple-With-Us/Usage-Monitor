@@ -227,6 +227,29 @@ fs.renameSync = (source, target) => {
   assert(readFileSync(join(runtime, "previous", "scripts", "lib", "infisical-service-token.mjs")).equals(firstTrackedCompatibility), "tracked compatibility file stays unchanged after overlay refresh");
   truthfulReceipt(runtime);
 
+  const lateCorruptionRuntime = join(root, "late-git-object-corruption");
+  cpSync(runtime, lateCorruptionRuntime, { recursive: true, verbatimSymlinks: true });
+  const lateCorruptionRelease = join(lateCorruptionRuntime, thirdRelease);
+  const lateObject = git(lateCorruptionRelease, ["rev-parse", `${thirdSha}:scripts/lib/infisical-service-token.mjs`]);
+  const lateCorruptionHook = join(root, "late-git-object-corruption.mjs");
+  const lateCorruptionMarker = join(root, "late-git-object-corrupted");
+  writeFileSync(lateCorruptionHook, `import cp from 'node:child_process'; import fs from 'node:fs'; import { deflateSync } from 'node:zlib'; import { syncBuiltinESMExports } from 'node:module';
+const original = cp.execFileSync;
+cp.execFileSync = (command, args, ...rest) => {
+  const result = original(command, args, ...rest);
+  if (command === '/usr/bin/git' && args.includes('fsck') && args.includes(${JSON.stringify(lateCorruptionRelease)}) && !fs.existsSync(${JSON.stringify(lateCorruptionMarker)})) {
+    const directory = ${JSON.stringify(join(lateCorruptionRelease, ".git", "objects", lateObject.slice(0, 2)))};
+    fs.mkdirSync(directory, { recursive: true });
+    const bytes = Buffer.from('object changed after a successful integrity check\\n');
+    fs.writeFileSync(directory + '/${lateObject.slice(2)}', deflateSync(Buffer.concat([Buffer.from('blob ' + bytes.length + '\\0'), bytes])));
+    fs.writeFileSync(${JSON.stringify(lateCorruptionMarker)}, 'changed');
+  }
+  return result;
+}; syncBuiltinESMExports();\n`);
+  const lateCorruption = spawnSync(process.execPath, ["--import", lateCorruptionHook, updater, "--rollback", "--runtime-root", lateCorruptionRuntime], { env, encoding: "utf8" });
+  assert(lateCorruption.status !== 0 && lateCorruption.stderr.includes("Release Git object integrity check failed") && existsSync(lateCorruptionMarker), "a later use boundary rechecks object integrity after an earlier successful fsck");
+  assert(readlinkSync(join(lateCorruptionRuntime, "current")) === thirdRelease && readlinkSync(join(lateCorruptionRuntime, "previous")) === readlinkSync(join(runtime, "previous")) && !existsSync(join(lateCorruptionRuntime, ".transition.json")), "late Git corruption fails before publishing either pointer or a transition");
+
   function legacyLinksFixture(home, bothLegacy = false) {
     cpSync(runtime, home, { recursive: true, verbatimSymlinks: true });
     rmSync(join(home, "previous"));
