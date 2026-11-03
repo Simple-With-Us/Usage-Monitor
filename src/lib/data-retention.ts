@@ -20,6 +20,15 @@ const DEFAULT_SNAPSHOT_RAW_DATA_RETENTION_DAYS = 14;
 const DEFAULT_BATCH_SIZE = 250;
 const DEFAULT_RETENTION_INTERVAL_HOURS = 6;
 
+// Owner-recorded expenses are a permanent ledger, never retention-pruned:
+// they share the ExternalUsageEvent table under this sourceApp and must be
+// excluded from pruneExternalUsageEvents selection. This is the literal
+// value of OWNER_EXPENSE_SOURCE_APP in src/lib/owner-expense.ts, duplicated
+// here because owner-expense.ts transitively imports this module (via
+// budget-status), so importing the constant would close an import cycle.
+// A retention test pins this literal to the canonical constant.
+const OWNER_RECORDED_EXPENSE_SOURCE_APP = "owner-recorded-expense";
+
 // A retention batch runs as ONE transaction, so a transient SQLite
 // busy/timeout (Prisma P1008 under ingest writer contention, e.g. a WAL
 // checkpoint landing mid-batch) rolls the whole batch back and is safe to
@@ -687,7 +696,13 @@ async function pruneExternalUsageEvents(
     const batch = await withInternalUsageWriteAdmission(() =>
       withRetentionWriteRetry(() => prisma.$transaction(async (tx) => {
       const rows = await tx.externalUsageEvent.findMany({
-        where: { occurredAt: { lt: cutoff } },
+        where: {
+          occurredAt: { lt: cutoff },
+          // Owner-recorded expenses are a permanent ledger (see
+          // OWNER_RECORDED_EXPENSE_SOURCE_APP above): never roll them up,
+          // tombstone them, or delete them through this prune.
+          sourceApp: { not: OWNER_RECORDED_EXPENSE_SOURCE_APP },
+        },
         orderBy: { occurredAt: "asc" },
         take: batchSize,
         select: {
