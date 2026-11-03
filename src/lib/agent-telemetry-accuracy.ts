@@ -14,13 +14,14 @@ export type TokenTelemetryKind =
   | "character_estimate"
   | "none";
 
-export type TelemetryAccuracy = "reported" | "none_in_window" | "unavailable";
+export type TelemetryAccuracy = "reported" | "partial" | "none_in_window" | "unavailable";
 
 export interface TelemetryAccuracyInput {
   name: string;
   tokenTelemetryKind: TokenTelemetryKind;
   totalTokens: number;
   isRunningOnMac: boolean;
+  isPartial?: boolean;
   unavailableReason?: string;
 }
 
@@ -50,6 +51,7 @@ export function resolveTelemetryAccuracy(
     tokenTelemetryKind,
     totalTokens,
     isRunningOnMac,
+    isPartial = false,
     unavailableReason,
   } = input;
 
@@ -68,6 +70,14 @@ export function resolveTelemetryAccuracy(
   }
 
   if (totalTokens > 0) {
+    if (isPartial) {
+      return {
+        accuracy: "partial",
+        usageIsReliable: true,
+        label: "partial report",
+        note: `${name} has a partial token breakdown.\u00A0 Observed token totals are a lower bound.`,
+      };
+    }
     return {
       accuracy: "reported",
       usageIsReliable: true,
@@ -139,15 +149,24 @@ export function formatAgentSeatPrimary(platform: {
 
 export function telemetryIncompleteNoteFor(
   unreliableNames: readonly string[],
+  partialNames: readonly string[] = [],
 ): string | null {
-  if (unreliableNames.length === 0) return null;
+  const sentences: string[] = [];
   if (unreliableNames.length === 1) {
-    return `Token totals omit ${unreliableNames[0]} because that seat is not reporting usage.`;
+    sentences.push(`Token totals omit ${unreliableNames[0]} because that seat is not reporting usage.`);
+  } else if (unreliableNames.length === 2) {
+    sentences.push(`Token totals omit ${unreliableNames[0]} and ${unreliableNames[1]} because those seats are not reporting usage.`);
+  } else if (unreliableNames.length > 2) {
+    const head = unreliableNames.slice(0, -1).join(", ");
+    const last = unreliableNames[unreliableNames.length - 1];
+    sentences.push(`Token totals omit ${head}, and ${last} because those seats are not reporting usage.`);
   }
-  if (unreliableNames.length === 2) {
-    return `Token totals omit ${unreliableNames[0]} and ${unreliableNames[1]} because those seats are not reporting usage.`;
+  if (partialNames.length === 1) {
+    sentences.push(`Observed token totals for ${partialNames[0]} are a lower bound because its token breakdown is incomplete.`);
+  } else if (partialNames.length > 1) {
+    const head = partialNames.slice(0, -1).join(", ");
+    const last = partialNames[partialNames.length - 1];
+    sentences.push(`Observed token totals for ${head}, and ${last} are lower bounds because their token breakdowns are incomplete.`);
   }
-  const head = unreliableNames.slice(0, -1).join(", ");
-  const last = unreliableNames[unreliableNames.length - 1];
-  return `Token totals omit ${head}, and ${last} because those seats are not reporting usage.`;
+  return sentences.length ? sentences.join("\u00A0 ") : null;
 }

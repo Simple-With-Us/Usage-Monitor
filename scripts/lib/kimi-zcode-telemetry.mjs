@@ -86,7 +86,7 @@ export function parseKimiUsageJsonl(
       },
     });
     for (const event of parsed) {
-      event.confidence = "actual";
+      event.confidence = tokenBreakdownComplete ? "actual" : "estimated";
       if (nonEmptyString(project)) event.project = project.trim();
     }
     events.push(...parsed);

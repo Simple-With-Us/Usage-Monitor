@@ -148,14 +148,20 @@ export function parseCollectorArgs(argv, now = new Date(), { defaultLookbackDays
   };
 }
 
-export async function walkFiles(root, { suffix, name, onTraversalError } = {}) {
+export async function walkFiles(root, {
+  suffix,
+  name,
+  onTraversalError,
+  reportMissing = false,
+  readDirectory = readdir,
+} = {}) {
   const out = [];
   async function walk(dir) {
     let entries;
     try {
-      entries = await readdir(dir, { withFileTypes: true });
+      entries = await readDirectory(dir, { withFileTypes: true });
     } catch (error) {
-      if (!(error && typeof error === "object" && error.code === "ENOENT")) {
+      if (reportMissing || !(error && typeof error === "object" && error.code === "ENOENT")) {
         onTraversalError?.(error);
       }
       return;

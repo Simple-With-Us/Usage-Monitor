@@ -1,13 +1,23 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { rmSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
 
-import { collectKimiEvents, kimiWireIdentity } from "../kimi-usage-collector.mjs";
+import {
+  acknowledgeKimiEvents,
+  collectKimiEvents,
+  deferPendingSession,
+  finishKimiPass,
+  kimiWireIdentity,
+  readPendingSessions,
+  writeKimiPendingMarker,
+} from "../kimi-usage-collector.mjs";
 import {
   KIMI_PRODUCER_ID,
   parseKimiSessionIndexJsonl,
@@ -22,7 +32,11 @@ import {
   defaultZcodeDbPath,
   readZcodeModelUsageRows,
 } from "../zcode-usage-collector.mjs";
-import { configureCollectorSentryToken } from "../lib/run-session-token-collector.mjs";
+import {
+  canAdvanceCollectorCheckpoint,
+  collectorStatePath,
+  configureCollectorSentryToken,
+} from "../lib/run-session-token-collector.mjs";
 import { collectorSentryEvents } from "../lib/collector-sentry-bridge.mjs";
 
 let tempRoot;
@@ -31,6 +45,10 @@ afterEach(async () => {
   if (tempRoot) await rm(tempRoot, { recursive: true, force: true });
   tempRoot = undefined;
 });
+
+function kimiStateRoot() {
+  return join(tempRoot, "collector-state");
+}
 
 function kimiTurn(overrides = {}) {
   return {
@@ -96,6 +114,7 @@ describe("Kimi exact usage telemetry", () => {
       "token:cacheCreation",
     ]);
     expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
+    expect(events.every((event) => event.confidence === "estimated")).toBe(true);
   });
 
   it("marks the split incomplete when cache-creation usage is absent", () => {
@@ -109,6 +128,7 @@ describe("Kimi exact usage telemetry", () => {
       "token:cacheRead",
     ]);
     expect(events.every((event) => event.metadata.tokenBreakdownComplete === false)).toBe(true);
+    expect(events.every((event) => event.confidence === "estimated")).toBe(true);
   });
 
   it("keeps event ids stable when unrelated lines are inserted before a record", () => {
@@ -141,7 +161,7 @@ describe("Kimi exact usage telemetry", () => {
       join(home, "session_index.jsonl"),
       `${JSON.stringify({ sessionId: "session-a", workDir: "/Users/jay/.botfleet/workspaces/demo" })}\n`,
     );
-    const events = await collectKimiEvents({ home, since: new Date(0) });
+    const events = await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
     expect(events).toHaveLength(4);
     expect(events.every((event) => event.metadata["agent.launcher"] === "botfleet")).toBe(true);
     expect(events.every((event) => event.project === "demo")).toBe(true);
@@ -151,25 +171,1215 @@ describe("Kimi exact usage telemetry", () => {
     });
   });
 
-  it("defers durable rows while the session index is unreadable so attribution can be retried", async () => {
+  it("advances the global checkpoint and replays deferred rows after the session index recovers", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
     const home = join(tempRoot, ".kimi-code");
     const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
     await mkdir(join(wire, ".."), { recursive: true });
     await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
     const incomplete = { complete: true };
-    expect(await collectKimiEvents({ home, since: new Date(0), scanStatus: incomplete })).toEqual([]);
-    expect(incomplete.complete).toBe(false);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: incomplete })).toEqual([]);
+    expect(incomplete.complete).toBe(true);
+    expect(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: incomplete.complete })).toBe(true);
 
     await writeFile(
       join(home, "session_index.jsonl"),
       `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
     );
     const recovered = { complete: true };
-    const events = await collectKimiEvents({ home, since: new Date(0), scanStatus: recovered });
+    const events = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(Date.now() + 60_000),
+      scanStatus: recovered,
+    });
     expect(events).toHaveLength(4);
     expect(events.every((event) => event.project === "Usage-Monitor")).toBe(true);
     expect(recovered.complete).toBe(true);
+    await acknowledgeKimiEvents(kimiStateRoot(), recovered);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toEqual([]);
+  });
+
+  it("adds an earlier marker when an older overlapping scan follows a newer marker", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const now = Date.now();
+    await writeFile(wire, `${JSON.stringify(kimiTurn({ time: (now - 10 * 60 * 60_000) / 1000 }))}\n`);
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(now - 60 * 60_000),
+      }),
+    ).toEqual([]);
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+
+    const olderReplay = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(now - 24 * 60 * 60_000),
+    });
+    expect(olderReplay).toHaveLength(4);
+    expect(olderReplay.every((event) => event.project === "Usage-Monitor")).toBe(true);
+  });
+
+  it("defers rows whose session is absent from the readable index and restores attribution on replay", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "another-session", workDir: "/Code/Other" })}\n`,
+    );
+
+    const incomplete = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: incomplete })).toEqual([]);
+    expect(incomplete.complete).toBe(true);
+
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Users/jay/.botfleet/workspaces/demo" })}\n`,
+    );
+    const recovered = { complete: true };
+    const events = await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: recovered });
+    expect(events).toHaveLength(4);
+    expect(events.every((event) => event.project === "demo")).toBe(true);
+    expect(events.every((event) => event.metadata["agent.launcher"] === "botfleet")).toBe(true);
+    expect(recovered.complete).toBe(true);
+  });
+
+  it("lowers an unmapped source's boundary even when its mtime predates the requested scan", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const file = "workspace/session-a/agents/main/wire.jsonl";
+    const wire = join(home, "sessions", file);
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    const later = new Date(kimiTurn().time + 60_000);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: later });
+    const before = (await readPendingSessions(kimiStateRoot())).get(file);
+    expect(before.since).toBe(later.toISOString());
+    const earlier = new Date(kimiTurn().time - 60_000);
+    await utimes(wire, new Date(0), new Date(0));
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: earlier })).toEqual([]);
+    const lowered = (await readPendingSessions(kimiStateRoot())).get(file);
+    expect(lowered.since).toBe(earlier.toISOString());
+    expect(lowered.markerNames).not.toEqual(before.markerNames);
+    expect(lowered.sourceFingerprint).not.toBe(before.sourceFingerprint);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: earlier })).toEqual([]);
+    expect((await readPendingSessions(kimiStateRoot())).get(file)).toEqual(lowered);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
+  });
+
+  it.each(["success", "write failure", "acknowledgement failure"])("handles %s when lowering an unmapped boundary whose discovered source disappears before stat", async (outcome) => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const file = "workspace/session-a/agents/main/wire.jsonl";
+    const wire = join(home, "sessions", file);
+    const content = `${JSON.stringify(kimiTurn())}\n`;
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, content);
+    const later = new Date(kimiTurn().time + 60_000);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: later });
+    const before = (await readPendingSessions(kimiStateRoot())).get(file);
+    expect(before.since).toBe(later.toISOString());
+    const earlier = new Date(kimiTurn().time - 60_000);
+    await utimes(wire, new Date(0), new Date(0));
+    let identityCalls = 0;
+    const status = { complete: true };
+    const failMutation = async () => { throw new Error("injected marker mutation failure"); };
+    expect(await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: earlier, scanStatus: status,
+      ...(outcome === "write failure" ? { writePendingMarker: failMutation } : {}),
+      ...(outcome === "acknowledgement failure" ? { acknowledgePendingMarkers: failMutation } : {}),
+      resolveWireIdentity: (root, path) => {
+        identityCalls += 1;
+        if (identityCalls === 2) rmSync(wire);
+        return kimiWireIdentity(root, path);
+      },
+    })).toEqual([]);
+    expect(identityCalls).toBe(2);
+    expect(status.complete).toBe(outcome === "success");
+    const lowered = (await readPendingSessions(kimiStateRoot())).get(file);
+    if (outcome === "write failure") {
+      expect(lowered).toEqual(before);
+    } else {
+      expect(lowered.since).toBe(earlier.toISOString());
+      expect(lowered.sourceFingerprint).toBeUndefined();
+      expect(lowered.markerNames.size).toBe(outcome === "success" ? 1 : 2);
+      expect(lowered.markerNames).not.toEqual(before.markerNames);
+      if (outcome === "acknowledgement failure") {
+        expect([...before.markerNames].every((name) => lowered.markerNames.has(name))).toBe(true);
+      }
+    }
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false }, passStartedAt: new Date(),
+      scanStatus: status, stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toHaveLength(outcome === "success" ? 1 : 0);
+    expect((await readPendingSessions(kimiStateRoot())).get(file)).toEqual(lowered);
+    await writeFile(wire, content);
+    await utimes(wire, new Date(0), new Date(0));
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: earlier })).toEqual([]);
+    expect((await readPendingSessions(kimiStateRoot())).get(file).since).toBe(earlier.toISOString());
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
+  });
+
+  it("keeps recovered pending markers intact during a dry run", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+
+    const dryRunStatus = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus: dryRunStatus,
+        dryRun: true,
+      }),
+    ).toHaveLength(4);
+    await acknowledgeKimiEvents(kimiStateRoot(), dryRunStatus, { dryRun: true });
+
+    const realStatus = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus: realStatus,
+      }),
+    ).toHaveLength(4);
+  });
+
+  it("writes the checkpoint before deleting resolved markers and preserves them on checkpoint failure", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+    const recovered = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus: recovered,
+      }),
+    ).toHaveLength(4);
+
+    await expect(
+      finishKimiPass({
+        args: { dryRun: false, explicitSince: false },
+        passStartedAt: new Date(),
+        scanStatus: recovered,
+        stateRoot: kimiStateRoot(),
+        recordSuccess: async () => {
+          throw new Error("checkpoint write failed");
+        },
+      }),
+    ).rejects.toThrow("checkpoint write failed");
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toHaveLength(4);
+
+    const order = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: recovered,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async () => {
+        order.push("checkpoint");
+        expect(
+          await collectKimiEvents({
+            home,
+            stateRoot: kimiStateRoot(),
+            since: new Date(Date.now() + 60_000),
+          }),
+        ).toHaveLength(4);
+      },
+    });
+    order.push("finish");
+    expect(order).toEqual(["checkpoint", "finish"]);
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toEqual([]);
+  });
+
+  it("acknowledges only pending markers observed for resolved files", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wireA = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wireA, ".."), { recursive: true });
+    await writeFile(wireA, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+
+    const wireB = join(home, "sessions", "workspace", "session-b", "agents", "main", "wire.jsonl");
+    await mkdir(join(wireB, ".."), { recursive: true });
+    await writeFile(wireB, `${JSON.stringify(kimiTurn({ time: 1_779_256_801_302 }))}\n`);
+    const firstResolved = { complete: true };
+    await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(0),
+      scanStatus: firstResolved,
+    });
+    await acknowledgeKimiEvents(kimiStateRoot(), firstResolved);
+
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      [
+        JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" }),
+        JSON.stringify({ sessionId: "session-b", workDir: "/Code/Other" }),
+      ].join("\n") + "\n",
+    );
+    const replay = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(Date.now() + 60_000),
+    });
+    expect(replay).toHaveLength(4);
+    expect(replay.every((event) => event.metadata["session.id"] === "session-b")).toBe(true);
+  });
+
+  it("preserves a marker generation created after the resolving scan observed its marker", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+
+    const resolvingScan = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus: resolvingScan,
+      }),
+    ).toHaveLength(4);
+    await writeKimiPendingMarker(
+      kimiStateRoot(),
+      "workspace/session-a/agents/main/wire.jsonl",
+      new Date(0).toISOString(),
+    );
+    await acknowledgeKimiEvents(kimiStateRoot(), resolvingScan);
+
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toHaveLength(4);
+  });
+
+  it("preserves deferred rows when an unmapped scan overlaps a resolver", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    const index = join(home, "session_index.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const first = kimiTurn();
+    const second = kimiTurn({ time: first.time + 1000 });
+    await writeFile(wire, `${JSON.stringify(first)}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(index, `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`);
+
+    const resolvingScan = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: resolvingScan })).toHaveLength(4);
+    await writeFile(wire, `${JSON.stringify(first)}\n${JSON.stringify(second)}\n`);
+    await rm(index);
+    const deferredScan = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: deferredScan })).toEqual([]);
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: deferredScan,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async () => {},
+    });
+    await acknowledgeKimiEvents(kimiStateRoot(), resolvingScan);
+    await writeFile(index, `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`);
+
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(8);
+  });
+
+  it("does not force-read a pending source until its session mapping exists", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await rm(wire);
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "another-session", workDir: "/Code/Other" })}\n`,
+    );
+
+    const scanStatus = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus,
+      }),
+    ).toEqual([]);
+    expect(scanStatus.complete).toBe(true);
+
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toHaveLength(4);
+  });
+
+  it("keeps a deleted pending marker without freezing the scan and replays if the file returns", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/Usage-Monitor" })}\n`,
+    );
+    await rm(wire);
+
+    const missing = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+        scanStatus: missing,
+      }),
+    ).toEqual([]);
+    expect(missing.complete).toBe(true);
+
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toHaveLength(4);
+  });
+
+  it("retains markers from overlapping scans of distinct files", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wireA = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    const wireB = join(home, "sessions", "workspace", "session-b", "agents", "main", "wire.jsonl");
+    await mkdir(join(wireA, ".."), { recursive: true });
+    await mkdir(join(wireB, ".."), { recursive: true });
+    await writeFile(wireA, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(wireB, `${JSON.stringify(kimiTurn({ time: 1_779_256_801_302 }))}\n`);
+    await utimes(wireA, new Date("2026-04-20T00:00:00Z"), new Date("2026-04-20T00:00:00Z"));
+    await utimes(wireB, new Date("2026-05-02T00:00:00Z"), new Date("2026-05-02T00:00:00Z"));
+
+    const first = { complete: true };
+    const second = { complete: true };
+    await Promise.all([
+      collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date("2026-04-15T00:00:00Z"),
+        scanStatus: first,
+      }),
+      collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date("2026-05-01T00:00:00Z"),
+        scanStatus: second,
+      }),
+    ]);
+
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      [
+        JSON.stringify({ sessionId: "session-a", workDir: "/Code/App-A" }),
+        JSON.stringify({ sessionId: "session-b", workDir: "/Code/App-B" }),
+      ].join("\n") + "\n",
+    );
+    const replay = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(Date.now() + 60_000),
+    });
+    expect(replay).toHaveLength(8);
+    expect(new Set(replay.map((event) => event.project))).toEqual(new Set(["App-A", "App-B"]));
+  });
+
+  it("fails closed when the durable pending state is corrupt", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    const path = `${collectorStatePath(KIMI_PRODUCER_ID, kimiStateRoot(), "pending")}.d/corrupt.json`;
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(path, "{corrupt state\n");
+
+    await expect(
+      collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) }),
+    ).rejects.toThrow();
+  });
+
+  it("fails the pending snapshot if a listed marker disappears before it can be read", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    await writeKimiPendingMarker(kimiStateRoot(), "workspace/session-a/agents/main/wire.jsonl", new Date(0).toISOString());
+    await expect(readPendingSessions(kimiStateRoot(), {
+      readMarker: async (path) => {
+        await rm(path);
+        const error = new Error("marker disappeared");
+        error.code = "ENOENT";
+        throw error;
+      },
+    })).rejects.toThrow("marker disappeared");
+  });
+
+  it("defers a mapped session until its working directory yields a project", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    const index = join(home, "session_index.jsonl");
+    await writeFile(index, `${JSON.stringify({ sessionId: "session-a", workDir: "/" })}\n`);
+    const unresolved = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: unresolved })).toEqual([]);
+    await acknowledgeKimiEvents(kimiStateRoot(), unresolved);
+    await writeFile(index, `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const events = await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) });
+    expect(events).toHaveLength(4);
+    expect(events.every((event) => event.project === "App")).toBe(true);
+  });
+
+  it("retains a pending marker until an incomplete trailing row is complete", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const first = JSON.stringify(kimiTurn());
+    const second = JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }));
+    await writeFile(wire, `${first}\n${second.slice(0, -2)}`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const partial = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000), scanStatus: partial })).toHaveLength(4);
+    await finishKimiPass({ args: { dryRun: false, explicitSince: false }, passStartedAt: new Date(), scanStatus: partial, stateRoot: kimiStateRoot(), recordSuccess: async () => {} });
+    await writeFile(wire, `${first}\n${second}\n`);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(8);
+  });
+
+  it("retains an old partial row that completes before its session is mapped", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const row = JSON.stringify(kimiTurn());
+    await writeFile(wire, row.slice(0, -2));
+    const deferred = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date("2026-10-01T00:00:00Z"), scanStatus: deferred })).toEqual([]);
+    await finishKimiPass({ args: { dryRun: false, explicitSince: false }, passStartedAt: new Date(), scanStatus: deferred, stateRoot: kimiStateRoot(), recordSuccess: async () => {} });
+    await writeFile(wire, `${row}\n`);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const replay = await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) });
+    expect(replay).toHaveLength(4);
+    expect(replay.every((event) => event.project === "App")).toBe(true);
+  });
+
+  it("retains an old partial row when attribution was already available", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(
+      join(home, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`,
+    );
+    const first = JSON.stringify(kimiTurn());
+    const second = JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }));
+    await writeFile(wire, `${first}\n${second.slice(0, -2)}`);
+    const partial = { complete: true };
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date("2026-10-01T00:00:00Z"),
+        scanStatus: partial,
+      }),
+    ).toEqual([]);
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: partial,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async () => {},
+    });
+
+    await writeFile(wire, `${first}\n${second}\n`);
+    expect(
+      await collectKimiEvents({
+        home,
+        stateRoot: kimiStateRoot(),
+        since: new Date(Date.now() + 60_000),
+      }),
+    ).toHaveLength(8);
+  });
+
+  it("replays pending sources when the configured home is relative", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const relativeHome = relative(process.cwd(), home);
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home: relativeHome, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({ home: relativeHome, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
+  });
+
+  it.each([
+    "sessions/../outside/session-a/agents/main/wire.jsonl",
+    "/outside/wire.jsonl",
+    "C:/outside/wire.jsonl",
+    "outside\\wire.jsonl",
+    "outside//wire.jsonl",
+    "./wire.jsonl",
+    "outside/not-wire.jsonl",
+    "outside/\0/wire.jsonl",
+  ])("rejects unsafe pending-marker path %j", async (invalidFile) => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    const pendingDirectory = `${collectorStatePath(KIMI_PRODUCER_ID, kimiStateRoot(), "pending")}.d`;
+    await mkdir(pendingDirectory, { recursive: true });
+    const since = new Date(0).toISOString();
+    const generation = "00000000-0000-4000-8000-000000000000";
+    const name = `${createHash("sha256").update(`${invalidFile}\0${since}\0${generation}`).digest("hex")}.json`;
+    await writeFile(
+      join(pendingDirectory, name),
+      `${JSON.stringify({ version: 1, file: invalidFile, since, generation })}\n`,
+    );
+
+    await expect(
+      collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) }),
+    ).rejects.toThrow("invalid shape");
+  });
+
+  it("compacts observed deferred generations while retaining a replayable marker", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    const directory = `${collectorStatePath(KIMI_PRODUCER_ID, kimiStateRoot(), "pending")}.d`;
+    for (let i = 0; i < 3; i += 1) {
+      await writeKimiPendingMarker(kimiStateRoot(), "workspace/session-a/agents/main/wire.jsonl", new Date(0).toISOString());
+    }
+    let writes = 0;
+    let acknowledgements = 0;
+    for (let i = 0; i < 4; i += 1) {
+      await collectKimiEvents({
+        home, stateRoot: kimiStateRoot(), since: new Date(0),
+        writePendingMarker: async (...args) => { writes += 1; return writeKimiPendingMarker(...args); },
+        acknowledgePendingMarkers: async (...args) => { acknowledgements += 1; return acknowledgeKimiEvents(...args); },
+      });
+      expect((await readdir(directory)).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+      expect((await readPendingSessions(kimiStateRoot())).values().next().value.sourceFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(writes).toBe(1);
+    expect(acknowledgements).toBe(1);
+    const fingerprint = (await readPendingSessions(kimiStateRoot())).values().next().value.sourceFingerprint;
+    await writeKimiPendingMarker(kimiStateRoot(), "workspace/session-a/agents/main/wire.jsonl", new Date(0).toISOString(), fingerprint);
+    await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(0),
+      writePendingMarker: async (...args) => { writes += 1; return writeKimiPendingMarker(...args); },
+      acknowledgePendingMarkers: async (...args) => { acknowledgements += 1; return acknowledgeKimiEvents(...args); },
+    });
+    expect(writes).toBe(1);
+    expect(acknowledgements).toBe(2);
+    expect((await readdir(directory)).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
+  });
+
+  it("defers a shallow future layout while advancing the checkpoint and replays after recognition", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const futureLayout = join(home, "sessions", "workspace", "session-a", "wire.jsonl");
+    await mkdir(join(futureLayout, ".."), { recursive: true });
+    await writeFile(futureLayout, `${JSON.stringify(kimiTurn())}\n`);
+    await utimes(futureLayout, new Date(0), new Date(0));
+    const discoveredSince = new Date(kimiTurn().time + 60_000);
+    const status = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: discoveredSince, scanStatus: status })).toEqual([]);
+    expect(status.complete).toBe(true);
+    expect(canAdvanceCollectorCheckpoint({ dryRun: false, explicitSince: false }, { scanComplete: status.complete })).toBe(true);
+    const pending = await readPendingSessions(kimiStateRoot());
+    expect(pending.get("workspace/session-a/wire.jsonl")?.since).toBe(new Date(0).toISOString());
+
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: status,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toHaveLength(1);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(pending);
+
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const replayStatus = { complete: true };
+    // Simulate a later collector release recognizing this same source path.
+    const replay = await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(Date.now() + 60_000),
+      scanStatus: replayStatus,
+      resolveWireIdentity: (root, file) => ({
+        ...kimiWireIdentity(root, file),
+        sessionId: "session-a",
+        agentId: "main",
+      }),
+    });
+    expect(replay).toHaveLength(4);
+    expect(replay.every((event) => event.project === "App")).toBe(true);
+    expect(replayStatus.complete).toBe(true);
+    await acknowledgeKimiEvents(kimiStateRoot(), replayStatus);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+  });
+
+  it("preserves deep archive and stray files without freezing canonical progress or accumulating markers", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const sourcePaths = [
+      "wire.jsonl",
+      "archive/old/workspace/session-a/agents/main/wire.jsonl",
+      "stray/one/two/three/four/five/six/seven/eight/wire.jsonl",
+      "workspace/session-a/agents/main/wire.jsonl",
+    ];
+    for (const path of sourcePaths) {
+      const wire = join(home, "sessions", path);
+      await mkdir(join(wire, ".."), { recursive: true });
+      await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    }
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const directory = `${collectorStatePath(KIMI_PRODUCER_ID, kimiStateRoot(), "pending")}.d`;
+    const firstSince = new Date("2026-04-01T00:00:00Z");
+    for (let i = 0; i < 4; i += 1) {
+      const status = { complete: true };
+      const events = await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: i === 0 ? firstSince : new Date(0), scanStatus: status });
+      expect(events).toHaveLength(4);
+      expect(events.every((event) => event.metadata["session.id"] === "session-a")).toBe(true);
+      expect(status.complete).toBe(true);
+      const pending = await readPendingSessions(kimiStateRoot());
+      expect([...pending.keys()].sort()).toEqual(sourcePaths.slice(0, 3).sort());
+      expect([...pending.values()].every((entry) => entry.since === new Date(0).toISOString())).toBe(true);
+      expect((await readdir(directory)).filter((name) => name.endsWith(".json"))).toHaveLength(3);
+    }
+  });
+
+  it("does not reopen pending unknown sources until recognition replays every old and appended row", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const first = JSON.stringify(kimiTurn());
+    const second = JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }));
+    await writeFile(wire, `${first}\n`);
+    const since = new Date(kimiTurn().time + 60_000);
+    let opens = 0;
+    let writes = 0;
+    let acknowledgements = 0;
+    const options = {
+      home, stateRoot: kimiStateRoot(), since, afterWireOpen: () => { opens += 1; },
+      writePendingMarker: async (...args) => { writes += 1; return writeKimiPendingMarker(...args); },
+      acknowledgePendingMarkers: async (...args) => { acknowledgements += 1; return acknowledgeKimiEvents(...args); },
+    };
+    const firstStatus = { complete: true };
+    expect(await collectKimiEvents({ ...options, scanStatus: firstStatus })).toEqual([]);
+    expect(opens).toBe(1);
+    expect(firstStatus.complete).toBe(true);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").since).toBe(new Date(0).toISOString());
+    writes = 0;
+    acknowledgements = 0;
+    expect(await collectKimiEvents(options)).toEqual([]);
+    expect(opens).toBe(1);
+    expect(writes).toBe(0);
+    expect(acknowledgements).toBe(0);
+    await writeFile(wire, `${first}\n${second}\n`);
+    expect(await collectKimiEvents(options)).toEqual([]);
+    expect(opens).toBe(1);
+    expect(writes).toBe(1);
+    expect(acknowledgements).toBe(1);
+    expect(await collectKimiEvents(options)).toEqual([]);
+    expect(writes).toBe(1);
+    expect(acknowledgements).toBe(1);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").markerNames.size).toBe(1);
+
+    await utimes(wire, new Date(0), new Date(0));
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const replayStatus = { complete: true };
+    const replay = await collectKimiEvents({
+      ...options,
+      scanStatus: replayStatus,
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    });
+    expect(opens).toBe(2);
+    expect(replay).toHaveLength(8);
+    expect(new Set(replay.map((event) => event.occurredAt)).size).toBe(2);
+    expect(replay.every((event) => event.project === "App")).toBe(true);
+    expect(replayStatus.complete).toBe(true);
+    await acknowledgeKimiEvents(kimiStateRoot(), replayStatus);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+  });
+
+  it.each(["write", "acknowledgement"])("isolates a deferred marker %s failure and retains healthy canonical events", async (failure) => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const unknown = join(home, "sessions", "future", "wire.jsonl");
+    const canonical = join(home, "sessions", "workspace", "session-a", "agents", "main", "wire.jsonl");
+    const first = JSON.stringify(kimiTurn());
+    const second = JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }));
+    await mkdir(join(unknown, ".."), { recursive: true });
+    await writeFile(unknown, `${first}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    const before = (await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl");
+    await writeFile(unknown, `${first}\n${second}\n`);
+    await mkdir(join(canonical, ".."), { recursive: true });
+    await writeFile(canonical, `${first}\n`);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const status = { complete: true };
+    const failMutation = async () => { throw new Error("injected marker mutation failure"); };
+    const events = await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: status,
+      ...(failure === "write" ? { writePendingMarker: failMutation } : { acknowledgePendingMarkers: failMutation }),
+    });
+    expect(events).toHaveLength(4);
+    expect(events.every((event) => event.project === "App")).toBe(true);
+    expect(status.complete).toBe(false);
+    const after = (await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl");
+    expect(after.since).toBe(before.since);
+    expect([...before.markerNames].every((name) => after.markerNames.has(name))).toBe(true);
+    expect(after.markerNames.size).toBe(failure === "write" ? 1 : 2);
+    if (failure === "write") expect(after).toEqual(before);
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false }, passStartedAt: new Date(),
+      scanStatus: status, stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toEqual([]);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl")).toEqual(after);
+
+    const recovered = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: recovered })).toHaveLength(4);
+    expect(recovered.complete).toBe(true);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").markerNames.size).toBe(1);
+    const replay = await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000),
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    });
+    expect(replay).toHaveLength(8);
+    expect(new Set(replay.map((event) => event.occurredAt)).size).toBe(2);
+
+    const inMemoryStatus = { complete: true };
+    const nextFingerprint = "a".repeat(64);
+    const retained = await deferPendingSession(kimiStateRoot(), "future/wire.jsonl", before.since, before, nextFingerprint, {
+      dryRun: false, scanStatus: inMemoryStatus,
+      writePendingMarker: failure === "write" ? failMutation : async () => "new-generation.json",
+      acknowledgePendingMarkers: failMutation,
+    });
+    expect(inMemoryStatus.complete).toBe(false);
+    expect(retained.since).toBe(before.since);
+    expect(retained.boundaryMarkerName).toBe(before.boundaryMarkerName);
+    if (failure === "write") {
+      expect(retained).toBe(before);
+      expect(retained.sourceFingerprint).toBe(before.sourceFingerprint);
+    } else {
+      expect(retained.markerNames).toEqual(new Set([...before.markerNames, "new-generation.json"]));
+      expect(retained.sourceFingerprint).toBeUndefined();
+      const sameSource = await deferPendingSession(kimiStateRoot(), "future/wire.jsonl", new Date(-1).toISOString(), before, before.sourceFingerprint, {
+        dryRun: false, scanStatus: inMemoryStatus,
+        writePendingMarker: async () => "earlier-generation.json", acknowledgePendingMarkers: failMutation,
+      });
+      expect(sameSource.since).toBe(new Date(-1).toISOString());
+      expect(sameSource.boundaryMarkerName).toBe("earlier-generation.json");
+      expect(sameSource.sourceFingerprint).toBe(before.sourceFingerprint);
+      expect(sameSource.markerNames).toEqual(new Set([...before.markerNames, "earlier-generation.json"]));
+
+      const compacted = await deferPendingSession(kimiStateRoot(), "future/wire.jsonl", sameSource.since, sameSource, sameSource.sourceFingerprint, {
+        dryRun: false, scanStatus: inMemoryStatus,
+        writePendingMarker: async () => { throw new Error("unchanged source must not write"); },
+        acknowledgePendingMarkers: async (_stateRoot, compactStatus) => {
+          expect(compactStatus.resolvedPendingMarkers.get("future/wire.jsonl"))
+            .toEqual(new Set([...before.markerNames]));
+        },
+      });
+      expect(compacted.since).toBe(sameSource.since);
+      expect(compacted.boundaryMarkerName).toBe("earlier-generation.json");
+      expect(compacted.markerNames).toEqual(new Set(["earlier-generation.json"]));
+    }
+  });
+
+  it("keeps the deterministic earliest boundary when marker acknowledgement fails", async () => {
+    const fingerprint = "b".repeat(64);
+    const nextFingerprint = "c".repeat(64);
+    const earlier = "2026-01-01T00:00:00.000Z";
+    const later = "2026-01-02T00:00:00.000Z";
+    const known = {
+      since: earlier,
+      markerNames: new Set(["m-marker.json"]),
+      boundaryMarkerName: "m-marker.json",
+      sourceFingerprint: fingerprint,
+    };
+    const cases = [
+      {
+        label: "first marker",
+        known: undefined,
+        since: later,
+        marker: "only-marker.json",
+        expectedSince: later,
+        expectedBoundary: "only-marker.json",
+        expectedFingerprint: nextFingerprint,
+      },
+      {
+        label: "newer boundary",
+        known,
+        since: later,
+        marker: "a-newer-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "m-marker.json",
+        expectedFingerprint: undefined,
+      },
+      {
+        label: "equal boundary with smaller name",
+        known,
+        since: earlier,
+        marker: "a-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "a-marker.json",
+        expectedFingerprint: undefined,
+      },
+      {
+        label: "equal boundary with larger name",
+        known,
+        since: earlier,
+        marker: "z-marker.json",
+        expectedSince: earlier,
+        expectedBoundary: "m-marker.json",
+        expectedFingerprint: undefined,
+      },
+    ];
+    for (const testCase of cases) {
+      const scanStatus = { complete: true };
+      const retained = await deferPendingSession(
+        "unused-state-root", "future/wire.jsonl", testCase.since, testCase.known, nextFingerprint,
+        {
+          dryRun: false,
+          scanStatus,
+          writePendingMarker: async () => testCase.marker,
+          acknowledgePendingMarkers: async () => { throw new Error("injected acknowledgement failure"); },
+        },
+      );
+      expect(scanStatus.complete, testCase.label).toBe(false);
+      expect(retained.since, testCase.label).toBe(testCase.expectedSince);
+      expect(retained.boundaryMarkerName, testCase.label).toBe(testCase.expectedBoundary);
+      expect(retained.markerNames, testCase.label).toEqual(
+        new Set([...(testCase.known?.markerNames ?? []), testCase.marker]),
+      );
+      expect(retained.sourceFingerprint, testCase.label).toBe(testCase.expectedFingerprint);
+    }
+  });
+
+  it.each(["append", "truncate"])("rejects an unknown source that changes by %s after open without storing a stale marker", async (mutation) => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    const first = `${JSON.stringify(kimiTurn())}\n`;
+    const both = `${first}${JSON.stringify(kimiTurn({ time: kimiTurn().time + 1000 }))}\n`;
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, mutation === "append" ? first : both);
+    const scanStatus = { complete: true };
+    let writes = 0;
+    const writePendingMarker = async (...args) => { writes += 1; return writeKimiPendingMarker(...args); };
+    expect(await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus, writePendingMarker,
+      afterWireOpen: async () => writeFile(wire, mutation === "append" ? both : first),
+    })).toEqual([]);
+    expect(scanStatus.complete).toBe(false);
+    expect(writes).toBe(0);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false }, passStartedAt: new Date(),
+      scanStatus, stateRoot: kimiStateRoot(),
+      recordSuccess: async () => { throw new Error("checkpoint should not advance"); },
+    });
+
+    const stableStatus = { complete: true };
+    expect(await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(0), scanStatus: stableStatus, writePendingMarker,
+    })).toEqual([]);
+    expect(stableStatus.complete).toBe(true);
+    expect(writes).toBe(1);
+    const stable = await readPendingSessions(kimiStateRoot());
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0), writePendingMarker })).toEqual([]);
+    expect(writes).toBe(1);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(stable);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({
+      home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000),
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    })).toHaveLength(mutation === "append" ? 8 : 4);
+  });
+
+  it("blocks checkpoint advancement if a session directory disappears during traversal", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const sessionsRoot = join(home, "sessions");
+    const child = join(sessionsRoot, "future");
+    await mkdir(child, { recursive: true });
+    await writeFile(join(child, "wire.jsonl"), `${JSON.stringify(kimiTurn())}\n`);
+    const status = { complete: true };
+    expect(await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(0),
+      scanStatus: status,
+      readSessionDirectory: async (directory, options) => {
+        const entries = await readdir(directory, options);
+        if (directory === sessionsRoot) await rm(child, { recursive: true });
+        return entries;
+      },
+    })).toEqual([]);
+    expect(status.complete).toBe(false);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: status,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toEqual([]);
+  });
+
+  it("blocks checkpoint advancement if a new unknown source disappears before open without a marker", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const turn = `${JSON.stringify(kimiTurn())}\n`;
+    await writeFile(wire, turn);
+    const status = { complete: true };
+    const since = new Date(kimiTurn().time + 60_000);
+    expect(await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since,
+      scanStatus: status,
+      resolveWireIdentity: (root, file) => {
+        // Discovery has completed, but no durable marker or file handle exists.
+        rmSync(file);
+        return kimiWireIdentity(root, file);
+      },
+    })).toEqual([]);
+    expect(status.complete).toBe(false);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+    const checkpointWrites = [];
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus: status,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async (...args) => checkpointWrites.push(args),
+    });
+    expect(checkpointWrites).toEqual([]);
+
+    await writeFile(wire, turn);
+    const recovered = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since, scanStatus: recovered })).toEqual([]);
+    expect(recovered.complete).toBe(true);
+    expect((await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl").since).toBe(new Date(0).toISOString());
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    expect(await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since,
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    })).toHaveLength(4);
+  });
+
+  it("retains an unknown deleted source without freezing and compacts again when it returns", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    const pending = await readPendingSessions(kimiStateRoot());
+    await rm(wire);
+    const status = { complete: true };
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000), scanStatus: status })).toEqual([]);
+    expect(status.complete).toBe(true);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(pending);
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) });
+    const restored = (await readPendingSessions(kimiStateRoot())).get("future/wire.jsonl");
+    expect(restored.since).toBe(new Date(0).toISOString());
+    expect(restored.markerNames.size).toBe(1);
+  });
+
+  it("keeps unknown-layout dry runs immutable and preserves epoch for an incomplete older source", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const wire = join(home, "sessions", "future", "wire.jsonl");
+    await mkdir(join(wire, ".."), { recursive: true });
+    const turn = JSON.stringify(kimiTurn());
+    await writeFile(wire, turn.slice(0, -5));
+    await utimes(wire, new Date(0), new Date(0));
+    const since = new Date(Date.now() + 60_000);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since, dryRun: true })).toEqual([]);
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(new Map());
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since })).toEqual([]);
+    const pending = await readPendingSessions(kimiStateRoot());
+    expect(pending.get("future/wire.jsonl").since).toBe(new Date(0).toISOString());
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since, dryRun: true });
+    expect(await readPendingSessions(kimiStateRoot())).toEqual(pending);
+    await writeFile(wire, `${turn}\n`);
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const status = { complete: true };
+    expect(await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since,
+      scanStatus: status,
+      resolveWireIdentity: (root, file) => ({ ...kimiWireIdentity(root, file), sessionId: "session-a", agentId: "main" }),
+    })).toHaveLength(4);
+    expect(status.complete).toBe(true);
+  });
+
+  it("retains a marker and blocks the checkpoint when a parent changes after open", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const agent = join(home, "sessions", "workspace", "session-a", "agents", "main");
+    const original = `${agent}-original`;
+    const outside = join(tempRoot, "outside");
+    const wire = join(agent, "wire.jsonl");
+    await mkdir(agent, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(join(outside, "wire.jsonl"), `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    const scanStatus = { complete: true };
+    expect(await collectKimiEvents({
+      home,
+      stateRoot: kimiStateRoot(),
+      since: new Date(Date.now() + 60_000),
+      scanStatus,
+      afterWireOpen: async () => {
+        await rename(agent, original);
+        await symlink(outside, agent);
+      },
+    })).toEqual([]);
+    expect(scanStatus.complete).toBe(false);
+    await finishKimiPass({
+      args: { dryRun: false, explicitSince: false },
+      passStartedAt: new Date(),
+      scanStatus,
+      stateRoot: kimiStateRoot(),
+      recordSuccess: async () => { throw new Error("checkpoint should not advance"); },
+    });
+    await rm(agent);
+    await rename(original, agent);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
+  });
+
+  it("does not replay a pending file or directory replaced by a symlink", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "kimi-collector-"));
+    const home = join(tempRoot, ".kimi-code");
+    const agent = join(home, "sessions", "workspace", "session-a", "agents", "main");
+    const wire = join(agent, "wire.jsonl");
+    const outside = join(tempRoot, "outside");
+    await mkdir(agent, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    await writeFile(join(outside, "wire.jsonl"), `${JSON.stringify(kimiTurn())}\n`);
+    await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) });
+    await writeFile(join(home, "session_index.jsonl"), `${JSON.stringify({ sessionId: "session-a", workDir: "/Code/App" })}\n`);
+    await rm(wire);
+    await symlink(join(outside, "wire.jsonl"), wire);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) })).toEqual([]);
+    await rm(agent, { recursive: true });
+    await symlink(outside, agent);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(0) })).toEqual([]);
+    await rm(agent);
+    await mkdir(agent);
+    await writeFile(wire, `${JSON.stringify(kimiTurn())}\n`);
+    expect(await collectKimiEvents({ home, stateRoot: kimiStateRoot(), since: new Date(Date.now() + 60_000) })).toHaveLength(4);
   });
 });
 

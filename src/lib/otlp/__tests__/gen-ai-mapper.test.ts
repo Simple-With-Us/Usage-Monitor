@@ -109,6 +109,12 @@ describe("shouldMapGenAiPlatform", () => {
     expect(shouldMapGenAiPlatform("opencode")).toBe(false);
     expect(shouldMapGenAiPlatform("fx")).toBe(false);
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
+    for (const app of ["kimi-code", "kimi-code-cli", "moonshot-kimi", "zcode", "z-code", "glm-code"]) {
+      expect(shouldMapGenAiPlatform(app)).toBe(false);
+    }
+    for (const provider of ["moonshot", "z.ai", "zai", "zhipu", "glm", "bigmodel", "kimi"]) {
+      expect(shouldMapGenAiPlatform(provider)).toBe(true);
+    }
     for (const app of OVERLAP_SOURCE_APPS) {
       expect(shouldMapGenAiPlatform(app)).toBe(false);
     }
@@ -119,6 +125,9 @@ describe("shouldMapGenAiPlatform", () => {
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(true);
     expect(shouldMapGenAiPlatform("opencode")).toBe(true);
     expect(shouldMapGenAiPlatform("fx")).toBe(true);
+    for (const app of ["kimi-code", "kimi-code-cli", "moonshot-kimi", "zcode", "z-code", "glm-code"]) {
+      expect(shouldMapGenAiPlatform(app)).toBe(true);
+    }
   });
 
   it("honors an explicit platform allowlist and still blocks overlap platforms", () => {
