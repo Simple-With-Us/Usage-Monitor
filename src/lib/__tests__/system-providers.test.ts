@@ -12,7 +12,7 @@ describe("system-providers", () => {
     expect(isInternalSystemProviderName("Project-Budgets")).toBe(true);
     expect(isInternalSystemProviderName("project_budgets")).toBe(true);
     expect(isInternalSystemProviderName("openai")).toBe(false);
-    expect(isInternalSystemProviderName("agent-sync-relay")).toBe(false);
+    expect(isInternalSystemProviderName("simple-tools-relay")).toBe(false);
     expect(isInternalSystemProviderName("")).toBe(false);
     expect(isInternalSystemProviderName(null)).toBe(false);
   });
