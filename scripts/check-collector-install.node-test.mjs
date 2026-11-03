@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, linkSync, mkdtempSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, linkSync, lstatSync, mkdtempSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,6 +36,8 @@ function fixture(check, { temporaryRoot = tmpdir() } = {}) {
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+// Compare quiescent trees under fixture()'s private root; pathname-based child
+// lookup requires frozen ancestors and is not an adversarial whole-tree snapshot.
 function snapshot(path, afterDirectoryOpen) {
   try { return { link: readlinkSync(path) }; }
   catch (error) {
@@ -53,7 +55,15 @@ function snapshot(path, afterDirectoryOpen) {
       return Object.fromEntries(names.sort().map(name => [name, snapshot(join(path, name))]));
     } finally { directory.closeSync(); }
   }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) {
+    if (["ENXIO", "ENODEV", "EOPNOTSUPP"].includes(error.code)) {
+      const kind = lstatSync(path);
+      if (kind.isSocket() || kind.isBlockDevice() || kind.isCharacterDevice()) return { special: true };
+    }
+    throw error;
+  }
   try {
     const opened = fstatSync(fd);
     if (!opened.isFile()) return { special: true };
@@ -388,4 +398,35 @@ test("snapshot closes an opened directory when enumeration setup fails", () => f
     throw new Error("synthetic snapshot setup failure");
   }), /synthetic snapshot setup failure/);
   assert.throws(() => handle.readSync(), { code: "ERR_DIR_CLOSED" });
+}));
+
+test("private quiescent snapshots detect changed bytes and membership", () => fixture(({ root }) => {
+  assert.equal(lstatSync(root).mode & 0o077, 0, "fixture roots are private to their owner");
+  const tree = join(root, "quiescent-tree"); mkdirSync(tree);
+  const path = join(tree, "entry"); writeFileSync(path, "original\n");
+  const original = snapshot(tree);
+  assert.deepEqual(snapshot(tree), original);
+  writeFileSync(path, "changed\n");
+  assert.notDeepEqual(snapshot(tree), original);
+  writeFileSync(path, "original\n");
+  assert.deepEqual(snapshot(tree), original);
+  const added = join(tree, "added"); writeFileSync(added, "extra\n");
+  assert.notDeepEqual(snapshot(tree), original);
+  rmSync(added);
+  assert.deepEqual(snapshot(tree), original);
+  rmSync(path);
+  assert.notDeepEqual(snapshot(tree), original);
+}));
+
+test("a quiescent Unix socket is classified and preserved before installer writes", () => fixture(context => {
+  const directory = join(context.destination, "scripts");
+  const socket = join(directory, "fixture-socket");
+  const code = 'import { createServer } from "node:net"; const server = createServer(); server.listen("fixture-socket", () => process.exit(0));';
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", code], { cwd: directory, encoding: "utf8", timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(snapshot(socket), { special: true });
+  installerRefuses(context, /Preserving unrecognized installed collector path: fixture-socket/);
+  assert.equal(lstatSync(socket).isSocket(), true);
 }));
