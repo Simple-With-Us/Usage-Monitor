@@ -2,6 +2,10 @@ const path = require("path");
 const { sentryBuildRelease } = require("./scripts/sentry-build-release.cjs");
 
 const isProduction = process.env.NODE_ENV === "production";
+const releaseName = sentryBuildRelease();
+if (process.env.SENTRY_AUTH_TOKEN && !releaseName) {
+  throw new Error("Sentry upload requires a full source commit SHA");
+}
 // Content-Security-Policy is now handled in src/middleware.ts
 
 /** @type {import('next').NextConfig} */
@@ -56,22 +60,22 @@ const nextConfig = {
 
 module.exports = nextConfig;
 
-// Self error-reporting (review finding O4). withSentryConfig is applied ONLY
-// when a DSN is configured, so CI/dev builds with no Sentry env never load
-// the Sentry build plugin at all. Sourcemap upload additionally requires
-// SENTRY_AUTH_TOKEN; without it the upload is disabled explicitly (silent,
-// never a build failure). Every existing option and header above is passed
-// through untouched.
+// Load the build plugin for runtime instrumentation or authenticated uploads.
+// A build-only upload token is sufficient even when the DSN is injected at runtime.
+// Without the token, local/CI builds keep sourcemap upload disabled.
 // @sentry/nextjs 11 moved withSentryConfig to the /config entry. The package
 // root is the runtime SDK and does not export it (requiring the root yields
 // undefined, and the call throws "withSentryConfig is not a function").
-if (process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN) {
+if (process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN || process.env.SENTRY_AUTH_TOKEN) {
   const { withSentryConfig } = require("@sentry/nextjs/config");
   module.exports = withSentryConfig(nextConfig, {
-    org: process.env.SENTRY_ORG,
+    org: process.env.SENTRY_ORG || "simple-with-us",
     project: process.env.SENTRY_SELF_PROJECT || "usage-monitor",
     authToken: process.env.SENTRY_AUTH_TOKEN,
-  release: { name: sentryBuildRelease() },
+    release: { name: releaseName },
+    errorHandler: process.env.SENTRY_AUTH_TOKEN ? () => {
+      throw new Error("Sentry release upload failed");
+    } : undefined,
     silent: true,
     sourcemaps: {
       disable: !process.env.SENTRY_AUTH_TOKEN,

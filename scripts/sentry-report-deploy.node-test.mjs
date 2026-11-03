@@ -91,12 +91,82 @@ test('build release matches a full source SHA, independent of git metadata',asyn
 test('Next build config wires explicit Sentry release identity',async()=>{
  const {readFileSync}=await import('node:fs');
  const config=readFileSync(new URL('../next.config.js',import.meta.url),'utf8');
- assert.match(config,/release:\s*\{ name: sentryBuildRelease\(\) \}/);
+ assert.match(config,/release:\s*\{ name: releaseName \}/);
  const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
  const builder=docker.split(/FROM .* AS runtime/)[0];
  assert.match(builder,/ARG SOURCE_COMMIT=/);
  assert.match(builder,/SOURCE_COMMIT=\$\{SOURCE_COMMIT\}/);
  assert.ok(builder.indexOf('SOURCE_COMMIT=${SOURCE_COMMIT}')<builder.lastIndexOf('npm run build'));
+});
+
+async function nextBuildConfig(env, onPluginLoad=()=>{}) {
+ const {readFileSync}=await import('node:fs');
+ const {runInNewContext}=await import('node:vm');
+ const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
+ let options, calls=0;
+ const context={__dirname:'/app',process:{env},module:{exports:{}},require:(name)=>{
+   if(name==='path')return {join:()=>'/app'};
+   if(name==='./scripts/sentry-build-release.cjs')return {sentryBuildRelease:()=>sentryBuildRelease(env)};
+   assert.equal(name,'@sentry/nextjs/config');
+   onPluginLoad();
+   return {withSentryConfig:(config,input)=>{calls++;options=input;return config;}};
+ }};
+ runInNewContext(readFileSync(new URL('../next.config.js',import.meta.url),'utf8'),context);
+ return {options,calls,config:context.module.exports};
+}
+test('credential-free builds avoid uploads and the plugin when no DSN is set',async()=>{
+ assert.equal((await nextBuildConfig({})).calls,0);
+ const {options}=await nextBuildConfig({NEXT_PUBLIC_SENTRY_DSN:'test-only'});
+ assert.equal(options.sourcemaps.disable,true);
+ assert.equal(options.authToken,undefined);
+ assert.equal(options.errorHandler,undefined);
+});
+test('build-only token enables uploads to the reporter project for the source SHA',async()=>{
+ const {options,calls,config}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:newer});
+ assert.equal(calls,1);
+ assert.equal(options.org,'simple-with-us');
+ assert.equal(options.project,CONFIG.project);
+ assert.equal(options.release.name,newer);
+ assert.equal(options.authToken,'test-only');
+ assert.equal(options.sourcemaps.disable,false);
+ assert.equal(config.poweredByHeader,false);
+});
+test('authenticated upload errors fail the build without leaking plugin details',async()=>{
+ const {options}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:newer});
+ for(const failure of [new Error('credential-or-response-detail'),null,undefined]) {
+   assert.throws(()=>options.errorHandler(failure),(error)=>{
+     assert.equal(error.message,'Sentry release upload failed');
+     assert.equal(error.cause,undefined);
+     return true;
+   });
+ }
+});
+test('upload token without a full source SHA fails before loading the plugin',async()=>{
+ for(const source of [undefined,'','unknown',newer.slice(0,12)]) {
+   let loaded=false;
+   await assert.rejects(nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:source},()=>{loaded=true;}),/Sentry upload requires a full source commit SHA/);
+   assert.equal(loaded,false);
+   assert.equal((await nextBuildConfig({SOURCE_COMMIT:source})).calls,0);
+ }
+});
+test('explicit build upload routing is preserved',async()=>{
+ const {options}=await nextBuildConfig({SENTRY_DSN:'test-only',SENTRY_AUTH_TOKEN:'test-only',SENTRY_ORG:'other-org',SENTRY_SELF_PROJECT:'other-project',SOURCE_COMMIT:newer});
+ assert.equal(options.org,'other-org');
+ assert.equal(options.project,'other-project');
+});
+test('Docker exposes the upload token only as an optional build secret',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const [builder,runtime]=docker.split(/FROM .* AS runtime/);
+ const buildRun=builder.match(/RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN[\s\S]*?npm run build/)?.[0];
+ assert.ok(buildRun);
+ for(const key of ['SENTRY_AUTH_TOKEN','NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
+   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},env=${key}`),`${key} must reach the build in Coolify secret mode`);
+ }
+ assert.match(builder,/ARG SENTRY_ORG="simple-with-us"/);
+ assert.match(builder,/ARG SENTRY_SELF_PROJECT="usage-monitor"/);
+ assert.doesNotMatch(docker,/^(?:ARG|ENV)\s+SENTRY_AUTH_TOKEN/m);
+ assert.doesNotMatch(runtime,/SENTRY_AUTH_TOKEN/);
 });
 
 test('UM attribution refuses incomplete GitHub PR pagination',async()=>{

@@ -28,6 +28,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # visible inside RUN without it.
 ARG NEXT_PUBLIC_SENTRY_DSN=""
 ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
+# Public upload routing is build-time configuration; runtime injection is too late.
+ARG SENTRY_ORG="simple-with-us"
+ARG SENTRY_SELF_PROJECT="usage-monitor"
+ENV SENTRY_ORG=${SENTRY_ORG} SENTRY_SELF_PROJECT=${SENTRY_SELF_PROJECT}
 # Bind the compiled SDK release to the same revision exposed by runtime health.
 # Docker stages do not inherit ARG/ENV values from the later runtime stage.
 ARG SOURCE_COMMIT=""
@@ -40,7 +44,17 @@ ENV SOURCE_COMMIT=${SOURCE_COMMIT} GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 # succeed (and stayed unfixable, because the bad image is cached against the
 # commit SHA). The explicit test after it guards against the fetch script ever
 # regaining a silent-skip path.
-RUN npm run build \
+# The upload token is available only to this RUN via BuildKit, never ARG/ENV.
+# Builders without a secret keep the credential-free CI/local build path.
+# Coolify's secret mode passes every build variable as a secret, including
+# public routing and revision values that otherwise arrive as build arguments.
+RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN \
+    --mount=type=secret,id=NEXT_PUBLIC_SENTRY_DSN,env=NEXT_PUBLIC_SENTRY_DSN \
+    --mount=type=secret,id=SENTRY_ORG,env=SENTRY_ORG \
+    --mount=type=secret,id=SENTRY_SELF_PROJECT,env=SENTRY_SELF_PROJECT \
+    --mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT \
+    --mount=type=secret,id=GIT_COMMIT_SHA,env=GIT_COMMIT_SHA \
+    npm run build \
   && FETCH_LITESTREAM_REQUIRED=true bash scripts/fetch-litestream.sh \
   && test -x bin/litestream \
   && ./bin/litestream version
