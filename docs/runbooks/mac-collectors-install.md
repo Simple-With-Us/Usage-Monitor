@@ -39,8 +39,9 @@ recovery, or receipt generation.  Do not edit a published release in place.
 
 Dependency file hashing opens the final path without following a symlink,
 checks its owner, regular-file type, inode, mode, and size on that descriptor,
-and reads at most 8 MiB through the same descriptor before checking for
-changes.  The descriptor closes on every path.  These checks do not make ancestor-directory
+and streams at most 8 MiB through the same descriptor using one shared 64-KiB
+buffer per digest before checking for changes.  The descriptor closes on every
+path, and the length-prefixed content identity is unchanged.  These checks do not make ancestor-directory
 lookups atomic or prevent the same owner from modifying a release after
 validation; the runtime tree and its ancestors must remain trusted and published
 releases must remain unchanged while collectors can use them.
@@ -51,11 +52,21 @@ then rebuilt in a fresh checkout whose exact commit must be an ancestor of the
 approved origin's current `main`.  Unbound legacy dependencies and untracked
 files are never copied or imported; each rebuilt tree receives a clean copy of
 the invoking updater's Zod dependency and only the missing compatibility entry
-points from a verified bound release.  The donor is an already-bound current or
-previous release when available, otherwise the requested approved forward
-release, or a separately verified `origin/main` release for rollback bootstrap.
-That bootstrap donor is not activated; both historical Git versions remain
+points from a verified bound release.  Automatic donor selection tries bound
+current and previous releases in that order, then clean approved rebuilds of
+the historical current and previous commits for rollback, and finally the
+requested forward release or current `origin/main` for rollback bootstrap.  Every
+candidate must pass approved ancestry and cross-version import checks for both
+historical versions before a migration journal or either link changes.  That
+bootstrap donor is not activated; both historical Git versions remain
 the versions requested by the existing links and the rollback command.
+
+If none is compatible, migration fails explicitly and preserves both links.  An
+operator can select a known compatible historical donor with
+`--migration-donor-sha <full-40-character-sha>` alongside `--rollback` or `--sha`.  The
+pinned donor still requires approved ancestry and complete compatibility
+validation; an invalid pin fails without silently selecting another donor.  Compatibility
+imports are never skipped to force a rollback.
 
 All rebuilt trees must pass dependency identity and cross-version import
 validation before the migration journal or either link is published.  An
