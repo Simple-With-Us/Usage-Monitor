@@ -5,12 +5,14 @@ import argparse
 import copy
 import hashlib
 import http.client
+import io
 import json
 import os
 from pathlib import Path
 import re
 import socket
 import stat
+import struct
 import sys
 import time
 import urllib.parse
@@ -24,7 +26,7 @@ BASE = "um1654-repr-01a1a250-6bd2a7ec"
 NAMES = (BASE + "-a", BASE + "-b")
 VOLUME = BASE + "-journal"
 RAM_ROOT = "/dev/shm/" + BASE
-PLAN_SHA256 = "5b6d74c1d55106ce71ae010aec65e0d7968305f4306f1d77d5e94c76101d5bf4"
+PLAN_SHA256 = "ca0b792e8273ae04154774aa7f12adf09fe1f87deb525a883f4597ffc2e7d361"
 LABELS = {"com.simplewithus.fixture.task": "UM-1654", "com.simplewithus.fixture.session": SESSION,
           "com.simplewithus.fixture.nonce": "6bd2a7ec", "com.simplewithus.fixture.role": "container"}
 VOLUME_LABELS = {**LABELS, "com.simplewithus.fixture.role": "journal"}
@@ -33,6 +35,17 @@ ENV = ["PATH=/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8", "GPG_KEY=", "PYTHON_
        "PYTHON_SHA256=", "FIXTURE_MARKER=synthetic-um1654"]
 MAX_BYTES = 1024 * 1024
 MAX_REQUESTS = 30
+MASKED_PATHS = ["/proc/acpi", "/proc/asound", "/proc/interrupts", "/proc/kcore", "/proc/keys",
+                "/proc/latency_stats", "/proc/sched_debug", "/proc/scsi", "/proc/timer_list",
+                "/proc/timer_stats", "/sys/devices/virtual/powercap", "/sys/firmware"]
+READONLY_PATHS = ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"]
+HOST_ZERO_FIELDS = {"BlkioWeight", "CpuShares", "CpuPeriod", "CpuQuota", "CpuRealtimePeriod", "CpuRealtimeRuntime",
+                    "MemoryReservation", "CpuCount", "CpuPercent", "IOMaximumIOps", "IOMaximumBandwidth"}
+HOST_EMPTY_LIST_FIELDS = {"Binds", "Links", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "GroupAdd", "VolumesFrom",
+                         "CapAdd", "Devices", "DeviceRequests", "DeviceCgroupRules", "Ulimits", "BlkioWeightDevice",
+                         "BlkioDeviceReadBps", "BlkioDeviceWriteBps", "BlkioDeviceReadIOps", "BlkioDeviceWriteIOps"}
+HOST_EMPTY_MAP_FIELDS = {"Annotations", "StorageOpt", "Sysctls"}
+HOST_EMPTY_STRING_FIELDS = {"CpusetCpus", "CpusetMems"}
 
 
 class Stop(Exception):
@@ -76,36 +89,235 @@ def source_payload():
     return {"Image": IMAGE_REFERENCE, "User": "10001:10001", "Entrypoint": ["/usr/local/bin/python3"],
             "Cmd": ["-c", "raise SystemExit(97)"], "WorkingDir": "/", "Env": list(ENV),
             "Labels": dict(LABELS), "Healthcheck": {"Test": ["NONE"]},
+            "NetworkDisabled": True, "Domainname": "", "StopSignal": "SIGTERM", "StopTimeout": 1,
             "AttachStdin": False, "AttachStdout": False, "AttachStderr": False,
             "OpenStdin": False, "StdinOnce": False, "Tty": False, "ExposedPorts": {},
             "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "Privileged": False,
                 "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0}, "AutoRemove": False,
                 "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
                 "Memory": 67108864, "NanoCpus": 100000000, "PidsLimit": 16,
+                "MemorySwap": 67108864, "MemorySwappiness": 0, "OomKillDisable": False, "OomScoreAdj": 0,
                 "LogConfig": {"Type": "none", "Config": {}}, "IpcMode": "private", "PidMode": "",
-                "CgroupnsMode": "private", "PortBindings": {},
+                "CgroupnsMode": "private", "UTSMode": "", "UsernsMode": "", "CgroupParent": "", "Cgroup": "",
+                "ContainerIDFile": "", "VolumeDriver": "", "Isolation": "", "Runtime": "runc", "Init": False,
+                "PublishAllPorts": False, "ShmSize": 1048576, "PortBindings": {},
+                "MaskedPaths": list(MASKED_PATHS), "ReadonlyPaths": list(READONLY_PATHS),
                 "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=1m"},
-                "Mounts": [{"Type": "volume", "Source": VOLUME, "Target": "/data", "ReadOnly": False},
-                           {"Type": "bind", "Source": RAM_ROOT + "/config.json", "Target": "/run/fixture/config.json", "ReadOnly": True}]}}
+                "Mounts": [{"Type": "volume", "Source": VOLUME, "Target": "/data", "ReadOnly": False, "VolumeOptions": {"NoCopy": True}},
+                           {"Type": "bind", "Source": RAM_ROOT + "/config.json", "Target": "/run/fixture/config.json", "ReadOnly": True,
+                            "BindOptions": {"Propagation": "rprivate", "CreateMountpoint": False}}]}}
+
+
+def same_json(left, right):
+    return canonical(left) == canonical(right)
+
+
+def validate_create_payload(payload):
+    """Closed API-1.53 Config/HostConfig policy; no unreviewed field is forwarded."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("HostConfig"), dict):
+        raise Stop("invalid fixture create shape")
+    expected = source_payload()
+    optional_config = {"Hostname", "ArgsEscaped", "Volumes", "OnBuild", "Shell"}
+    if set(payload) - set(expected) - optional_config:
+        raise Stop("unreviewed fixture Config field")
+    for key, value in expected.items():
+        if key in ("HostConfig", "Image", "Healthcheck", "ExposedPorts"):
+            continue
+        if key not in payload or not same_json(payload[key], value):
+            raise Stop("synthetic Config mismatch; preserve resources")
+    if payload.get("Image") not in (IMAGE_REFERENCE, IMAGE_ID):
+        raise Stop("unexpected fixture image reference")
+    hostname = payload.get("Hostname")
+    if hostname is not None and not re.fullmatch(r"[0-9a-f]{12}", hostname):
+        raise Stop("unexpected fixture hostname")
+    if (payload.get("ArgsEscaped") is not None and payload.get("ArgsEscaped") is not False
+            or payload.get("OnBuild") not in (None, []) or payload.get("Shell") not in (None, [])):
+        raise Stop("unexpected executable Config default")
+    if payload.get("ExposedPorts") not in (None, {}):
+        raise Stop("unexpected exposed ports")
+    hints = payload.get("Volumes")
+    if hints is not None and (not isinstance(hints, dict) or set(hints) - {"/data", "/run/fixture/config.json", "/tmp"}
+                              or any(value != {} for value in hints.values())):
+        raise Stop("unexpected anonymous volume hint")
+    health = payload.get("Healthcheck")
+    if (not isinstance(health, dict) or health.get("Test") != ["NONE"]
+            or set(health) - {"Test", "Interval", "Timeout", "StartPeriod", "StartInterval", "Retries"}
+            or any(type(value) is not int or value != 0 for key, value in health.items() if key != "Test")):
+        raise Stop("unexpected fixture healthcheck")
+    host, required = payload["HostConfig"], expected["HostConfig"]
+    allowed = set(required) | HOST_ZERO_FIELDS | HOST_EMPTY_LIST_FIELDS | HOST_EMPTY_MAP_FIELDS | HOST_EMPTY_STRING_FIELDS | {"ConsoleSize"}
+    if set(host) - allowed:
+        raise Stop("unreviewed fixture HostConfig field")
+    for key, value in required.items():
+        if key in ("Mounts", "LogConfig"):
+            continue
+        if key not in host or not same_json(host[key], value):
+            raise Stop("synthetic HostConfig mismatch; preserve resources")
+    for key in HOST_ZERO_FIELDS & set(host):
+        if type(host[key]) is not int or host[key] != 0:
+            raise Stop("unreviewed fixture resource default")
+    for key in HOST_EMPTY_LIST_FIELDS & set(host):
+        if host[key] is not None and host[key] != []:
+            raise Stop("unexpected fixture host access")
+    for key in HOST_EMPTY_MAP_FIELDS & set(host):
+        if host[key] is not None and host[key] != {}:
+            raise Stop("unexpected fixture host options")
+    for key in HOST_EMPTY_STRING_FIELDS & set(host):
+        if host[key] != "":
+            raise Stop("unexpected fixture CPU affinity")
+    if "ConsoleSize" in host and not same_json(host["ConsoleSize"], [0, 0]):
+        raise Stop("unexpected fixture console default")
+    logging = host.get("LogConfig")
+    if (not isinstance(logging, dict) or set(logging) - {"Type", "Config"}
+            or logging.get("Type") != "none" or logging.get("Config") not in (None, {})):
+        raise Stop("unexpected fixture logging")
+    declarations = host.get("Mounts")
+    if not isinstance(declarations, list) or len(declarations) != 2:
+        raise Stop("unexpected fixture mount declarations")
+    seen = set()
+    for declaration in declarations:
+        if not isinstance(declaration, dict) or set(declaration) - {"Type", "Source", "Target", "ReadOnly", "Consistency", "BindOptions", "VolumeOptions"}:
+            raise Stop("unreviewed fixture mount option")
+        target = declaration.get("Target")
+        desired = next((row for row in required["Mounts"] if row["Target"] == target), None)
+        if (desired is None or target in seen or declaration.get("Type") != desired["Type"]
+                or declaration.get("Source") != desired["Source"] or declaration.get("ReadOnly", False) is not desired["ReadOnly"]
+                or declaration.get("Consistency", "") != ""):
+            raise Stop("unexpected fixture mount declaration")
+        if declaration["Type"] == "bind":
+            options = declaration.get("BindOptions")
+            if (not isinstance(options, dict) or set(options) - {"Propagation", "CreateMountpoint", "NonRecursive", "ReadOnlyNonRecursive", "ReadOnlyForceRecursive"}
+                    or options.get("Propagation") != "rprivate"
+                    or any(value is not False for key, value in options.items() if key != "Propagation")
+                    or declaration.get("VolumeOptions") not in (None, {})):
+                raise Stop("unexpected fixture bind propagation or access")
+        else:
+            options = declaration.get("VolumeOptions")
+            if (not isinstance(options, dict) or options.get("NoCopy") is not True
+                    or set(options) - {"NoCopy", "Subpath"} or options.get("Subpath", "") != ""
+                    or declaration.get("BindOptions") not in (None, {})):
+                raise Stop("unexpected fixture volume options")
+        seen.add(target)
+
+
+class Deadline:
+    def __init__(self, clock, seconds=15):
+        self.clock, self.end = clock, clock() + seconds
+
+    def remaining(self):
+        remaining = self.end - self.clock()
+        if remaining <= 0:
+            raise Stop("absolute Engine deadline exceeded")
+        return remaining
+
+
+class DeadlineReader(io.RawIOBase):
+    """Buffered HTTP header parsing must check the deadline on every recv."""
+    def __init__(self, sock):
+        self.sock = sock
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        return self.sock.recv_into(buffer)
+
+
+class DeadlineBufferedReader(io.BufferedReader):
+    def __init__(self, raw, deadline):
+        super().__init__(raw)
+        self.deadline = deadline
+
+    def readline(self, size=-1):
+        self.deadline.remaining()
+        result = super().readline(size)
+        self.deadline.remaining()
+        return result
+
+
+class DeadlineSocket:
+    def __init__(self, raw, deadline):
+        self.raw, self.deadline, self.wire_bytes = raw, deadline, 0
+
+    def recv_into(self, buffer):
+        self.raw.settimeout(self.deadline.remaining())
+        count = self.raw.recv_into(memoryview(buffer)[:min(len(buffer), MAX_BYTES + 1 - self.wire_bytes)])
+        self.deadline.remaining()
+        self.wire_bytes += count
+        if self.wire_bytes > MAX_BYTES:
+            raise Stop("Engine wire response exceeds limit")
+        return count
+
+    def sendall(self, data):
+        self.raw.settimeout(self.deadline.remaining())
+        self.raw.sendall(data)
+        self.deadline.remaining()
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise Stop("unsupported Engine socket file mode")
+        return DeadlineBufferedReader(DeadlineReader(self), self.deadline)
+
+    def fileno(self):
+        return self.raw.fileno()
+
+    def peer(self):
+        return struct.unpack("3i", self.raw.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+
+    def close(self):
+        self.raw.close()
 
 
 class UnixConnection(http.client.HTTPConnection):
     def __init__(self):
         super().__init__("localhost", timeout=15)
+        self.auto_open = 0
+        self.deadline = None
+        self.begun = False
+        self.connect_attempted = False
+
+    def begin(self, deadline):
+        if self.begun:
+            raise Stop("Engine connection cannot reconnect")
+        self.begun, self.deadline = True, deadline
+        self.connect()
+        return self.identity()
 
     def connect(self):
+        if self.connect_attempted or self.sock is not None or self.deadline is None:
+            raise Stop("unreviewed Engine reconnect")
+        self.connect_attempted = True
         info = os.lstat(SOCKET)
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
             raise Stop("fixed Engine socket custody mismatch")
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(15)
-        self.sock.connect(SOCKET)
+        raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            raw.settimeout(self.deadline.remaining())
+            raw.connect(SOCKET)
+            wrapped = DeadlineSocket(raw, self.deadline)
+            if wrapped.peer()[1] != 0:
+                raise Stop("Engine peer is not root")
+            self.sock = wrapped
+        except Exception:
+            raw.close()
+            raise
+
+    def identity(self):
+        if not isinstance(self.sock, DeadlineSocket) or self.sock.fileno() < 0:
+            raise Stop("pinned Engine connection closed")
+        return (id(self.sock), self.sock.fileno(), self.sock.peer())
+
+    def reset_response_budget(self):
+        if not isinstance(self.sock, DeadlineSocket):
+            raise Stop("pinned Engine socket unavailable")
+        self.sock.wire_bytes = 0
 
 
 class FixtureEngine:
     """Fixed fixture routes only; even an armed instance has no start/exec route."""
-    def __init__(self, *, armed=False, connection=UnixConnection, clock=time.monotonic):
+    def __init__(self, *, armed=False, expected_daemon=None, connection=UnixConnection, clock=time.monotonic):
         self.armed, self.connection, self.clock = armed, connection, clock
+        self.expected_daemon = expected_daemon
         self.ids = set()
         self.bodies = {}
         self.calls = 0
@@ -119,6 +331,7 @@ class FixtureEngine:
     def permit_body(self, name, body):
         if name not in NAMES or name in self.bodies:
             raise Stop("invalid or repeated create body")
+        validate_create_payload(body)
         self.bodies[name] = digest(body)
 
     def request(self, method, path, body=None):
@@ -135,45 +348,61 @@ class FixtureEngine:
             for name in NAMES:
                 if path == "/containers/create?name=" + name:
                     allowed = name in self.bodies and digest(body) == self.bodies[name]
+                    if allowed:
+                        validate_create_payload(body)
         if method == "DELETE" and body is None:
             allowed = path == "/volumes/" + VOLUME + "?force=false" or any(
                 path == "/containers/" + identifier + "?v=false&force=false&link=false" for identifier in self.ids)
-        if not allowed or self.calls >= MAX_REQUESTS:
+        wire_calls = 1 if method == "GET" else 2
+        if not allowed or self.calls + wire_calls > MAX_REQUESTS:
             raise Stop("route, payload or request budget refused before socket access")
         if method != "GET":
+            if not re.fullmatch(r"[a-f0-9]{64}", self.expected_daemon or ""):
+                raise Stop("reviewed daemon fingerprint required before mutation")
             mutation = (method, path)
             if mutation in self.mutations:
                 raise Stop("fixture mutation already attempted; preserve evidence")
             self.mutations.add(mutation)
-        self.calls += 1
         connection = self.connection()
-        deadline = self.clock() + 15
+        deadline = Deadline(self.clock)
         try:
             encoded = None if body is None else canonical(body).encode()
             if encoded is not None and len(encoded) > MAX_BYTES:
                 raise Stop("create body exceeds limit")
-            connection.request(method, PREFIX + path, body=encoded,
-                               headers={"Accept": "application/json", "Content-Type": "application/json"})
-            remaining = deadline - self.clock()
-            if remaining <= 0:
-                raise Stop("Engine request deadline exceeded")
-            if connection.sock is not None:
-                connection.sock.settimeout(remaining)
-            response = connection.getresponse()
-            raw = bytearray()
-            while True:
-                remaining = deadline - self.clock()
-                if remaining <= 0:
-                    raise Stop("Engine request deadline exceeded")
-                if connection.sock is not None:
-                    connection.sock.settimeout(remaining)
-                chunk = response.read1(min(65536, MAX_BYTES + 1 - len(raw)))
-                if not chunk:
-                    break
-                raw.extend(chunk)
-                if len(raw) > MAX_BYTES:
-                    raise Stop("Engine response exceeds limit")
-            return response.status, decode(raw) if raw else None
+            pinned = connection.begin(deadline)
+
+            def exchange(verb, route, data=None):
+                if connection.identity() != pinned:
+                    raise Stop("Engine connection identity changed")
+                deadline.remaining()
+                self.calls += 1
+                connection.request(verb, PREFIX + route, body=data,
+                                   headers={"Accept": "application/json", "Content-Type": "application/json"})
+                if connection.identity() != pinned:
+                    raise Stop("Engine connection identity changed")
+                connection.reset_response_budget()
+                response = connection.getresponse()
+                raw = bytearray()
+                while True:
+                    deadline.remaining()
+                    chunk = response.read1(min(65536, MAX_BYTES + 1 - len(raw)))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+                    if len(raw) > MAX_BYTES:
+                        raise Stop("Engine response exceeds limit")
+                return response.status, decode(raw) if raw else None, response.will_close
+
+            if method != "GET":
+                status, info, closing = exchange("GET", "/info")
+                if (status != 200 or closing or connection.identity() != pinned
+                        or not isinstance(info, dict) or not isinstance(info.get("ID"), str)
+                        or hashlib.sha256(info["ID"].encode()).hexdigest() != self.expected_daemon):
+                    raise Stop("same-connection daemon verification failed before mutation")
+                if method == "POST" and path.startswith("/containers/create?"):
+                    validate_create_payload(decode(encoded))
+            status, value, _closing = exchange(method, path, encoded)
+            return status, value
         except Exception:
             raise Stop("Engine response unavailable; preserve evidence and reconcile without retry") from None
         finally:
@@ -276,34 +505,9 @@ def owned(inspected, identifier, name):
 
 
 def synthetic(inspected):
-    config, host = inspected["Config"], inspected["HostConfig"]
-    expected = source_payload()
-    for key in ("User", "Entrypoint", "Cmd", "WorkingDir", "Env", "Labels", "OpenStdin", "StdinOnce", "Tty"):
-        if config.get(key) != expected[key]:
-            raise Stop("synthetic Config mismatch; preserve resources")
-    if config.get("Healthcheck", {}).get("Test") != ["NONE"] or config.get("ExposedPorts") not in (None, {}):
-        raise Stop("synthetic healthcheck or ports mismatch")
-    for key, value in expected["HostConfig"].items():
-        if key in ("Mounts", "LogConfig"):
-            continue
-        if host.get(key) != value:
-            raise Stop("synthetic HostConfig mismatch; preserve resources")
-    if host.get("LogConfig", {}).get("Type") != "none" or host["LogConfig"].get("Config") not in (None, {}):
-        raise Stop("unexpected fixture logging")
-    declarations = host.get("Mounts")
-    if not isinstance(declarations, list) or len(declarations) != 2:
-        raise Stop("unexpected fixture mount declarations")
-    targets = set()
-    for declaration in declarations:
-        target = declaration.get("Target")
-        desired = next((row for row in expected["HostConfig"]["Mounts"] if row["Target"] == target), None)
-        if (desired is None or target in targets or declaration.get("Type") != desired["Type"]
-                or declaration.get("Source") != desired["Source"]
-                or declaration.get("ReadOnly", False) is not desired["ReadOnly"]):
-            raise Stop("unexpected fixture mount declaration")
-        targets.add(target)
-    if any(host.get(key) for key in ("Binds", "VolumesFrom", "Links", "ExtraHosts", "Devices", "DeviceRequests", "CapAdd")):
-        raise Stop("unexpected fixture host access")
+    payload = copy.deepcopy(inspected["Config"])
+    payload["HostConfig"] = copy.deepcopy(inspected["HostConfig"])
+    validate_create_payload(payload)
     mounts = inspected.get("Mounts")
     if not isinstance(mounts, list):
         raise Stop("invalid fixture mounts")
@@ -347,7 +551,7 @@ class Probe:
             raise Stop("reviewed local daemon identity mismatch")
 
     def mutate(self, method, path, body=None, expected=200):
-        self.verify_daemon()
+        # The transport verifies /info and sends this mutation on one pinned socket.
         return self.call(method, path, body, expected)
 
     def volume(self):
@@ -386,6 +590,7 @@ class Probe:
         observed = []
         for index, name in enumerate(NAMES):
             self.phase = "create-" + str(index)
+            validate_create_payload(payload)
             self.engine.permit_body(name, payload)
             self.evidence.write(f"container-{index}-intent.json", {"name": name, "payload_sha256": digest(payload)})
             self.evidence.check()
@@ -456,7 +661,7 @@ def main():
                 or not re.fullmatch(r"[0-9a-f]{64}", args.expected_daemon_sha256 or "")):
             raise Stop("exact reviewed plan, executor and daemon fingerprints required")
         evidence = RamEvidence()
-        probe = Probe(FixtureEngine(armed=True), evidence, args.expected_daemon_sha256)
+        probe = Probe(FixtureEngine(armed=True, expected_daemon=args.expected_daemon_sha256), evidence, args.expected_daemon_sha256)
         print(canonical(probe.run()))
     except Exception as error:
         print(canonical({"status": "stopped", "reason": str(error) if isinstance(error, Stop) else "unexpected failure; preserve evidence",
