@@ -128,6 +128,15 @@ test("a previously tracked obsolete collector is identifiable without adopting u
   assert.equal(checkCollectorInstall(source, destination).checked, 4);
 }));
 
+test("the main installer preserves an injector outside its rsync allowlist", () => fixture(context => {
+  const injector = join(context.source, "scripts", "collector-injector.mjs");
+  writeFileSync(injector, "export {};\n");
+  const sha = context.commit();
+  cpSync(injector, join(context.destination, "scripts", "collector-injector.mjs"));
+  writeFileSync(join(context.destination, "VERSION"), `sha=${sha}\n`);
+  installerRefuses(context, /Preserving unrecognized installed collector path: collector-injector.mjs/);
+}));
+
 test("installed symlinks and unknown directories are rejected without following them", () => fixture(({ root, source, destination }) => {
   const path = join(destination, "scripts", "lib", "shared.mjs");
   rmSync(path); symlinkSync(join(root, "absent"), path);
@@ -174,6 +183,7 @@ test("a fresh fixture installation copies verified source and records the full p
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(fresh, "scripts", "collector-injector.mjs")), false, "main's rsync graph excludes held injector functionality");
   assert.match(readFileSync(join(fresh, "VERSION"), "utf8"), new RegExp(`^sha=${sha}\\n`));
   assert.equal(readFileSync(join(fresh, "scripts", "grok-usage-collector.mjs"), "utf8"), "export const original = true;\n");
   assert.equal(existsSync(join(fresh, "scripts", "check-collector-install.node-test.mjs")), false);
@@ -237,6 +247,36 @@ test("a source manifest symlink cannot supply dependency authority", () => fixtu
 for (const spec of ["file:../local", "npm:another-package@4.6.6", "latest", "^5.0.0", "4.6.6 || 5.0.0"]) test(`tracked unsupported Zod spec ${spec} is refused`, () => fixture(context => {
   writeFileSync(join(context.source, "package.json"), JSON.stringify({ dependencies: { zod: spec } })); context.commit();
   installerRefuses(context, /Zod must use an explicit stable major-4 npm/);
+}));
+
+for (const [label, manifest] of [
+  ["invalid JSON", "{"],
+  ["null root", "null"],
+  ["array root", "[]"],
+  ["string root", '"manifest"'],
+  ["number root", "42"],
+  ["boolean root", "true"],
+  ["missing dependencies", "{}"],
+  ["null dependencies", '{"dependencies":null}'],
+  ["array dependencies", '{"dependencies":[]}'],
+  ["string dependencies", '{"dependencies":"zod"}'],
+  ["missing zod", '{"dependencies":{}}'],
+  ["null zod", '{"dependencies":{"zod":null}}'],
+  ["number zod", '{"dependencies":{"zod":4}}'],
+  ["array zod", '{"dependencies":{"zod":["^4.6.6"]}}'],
+  ["object zod", '{"dependencies":{"zod":{"version":"^4.6.6"}}}'],
+  ["prototype-shaped zod", '{"dependencies":{"__proto__":{"zod":"^4.6.6"}}}'],
+  ["nonstring dependency", '{"dependencies":{"zod":"^4.6.6","other":false}}'],
+]) test(`tracked manifest ${label} is refused before installer writes`, () => fixture(context => {
+  writeFileSync(join(context.source, "package.json"), manifest); context.commit();
+  installerRefuses(context, /Source package manifest is invalid/);
+}));
+
+test("manifest validation permits unrelated fields without installed dependencies", () => fixture(({ source, destination, commit }) => {
+  writeFileSync(join(source, "package.json"), JSON.stringify({ name: "collector-fixture", private: true, scripts: { ignored: "never executed" }, dependencies: { zod: "~4.6.6", other: "workspace:*" } }));
+  commit();
+  assert.equal(existsSync(join(source, "node_modules")), false);
+  assert.equal(checkCollectorInstall(source, destination).zodSpec, "~4.6.6");
 }));
 
 test("existing Zod is preserved without adopting unrelated dependency metadata", () => fixture(({ root, source, destination }) => {

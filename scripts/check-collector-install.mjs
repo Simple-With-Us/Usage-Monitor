@@ -11,7 +11,7 @@ const INSTALL_PACKAGE = '{"name":"usage-monitor-collectors","private":true,"type
 function selected(name) {
   const parts = name.split("/");
   return parts.length === 2 ? DIRECTORIES.has(parts[0]) && parts[1].endsWith(".mjs") : parts.length === 1 && (
-    name.endsWith("-collector.mjs") || ["collector-injector.mjs", "run-subscription-quota-collector.sh", "antigravity-statusline-telemetry.mjs"].includes(name)
+    name.endsWith("-collector.mjs") || ["run-subscription-quota-collector.sh", "antigravity-statusline-telemetry.mjs"].includes(name)
   );
 }
 
@@ -66,15 +66,24 @@ function directory(path) {
   if (!info?.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid()) throw new Error("Collector installation directory must be owner-owned and regular");
 }
 
+function validatePackageManifest(value) {
+  // Bootstrap validation cannot depend on the package it is about to install.
+  const record = input => input !== null && typeof input === "object" && !Array.isArray(input) && Object.getPrototypeOf(input) === Object.prototype;
+  if (!record(value) || !Object.hasOwn(value, "dependencies") || !record(value.dependencies)) throw new Error("Source package manifest shape is invalid");
+  const dependencies = value.dependencies;
+  if (!Object.hasOwn(dependencies, "zod") || Object.values(dependencies).some(spec => typeof spec !== "string")) throw new Error("Source package manifest dependencies must be strings including zod");
+  return { dependencies };
+}
+
 function sourceZod(source, head) {
   const manifest = inspect(join(source, "package.json"), { text: true, maxBytes: 64 * 1024 });
   const row = git(source, ["ls-tree", "-z", head, "--", "package.json"]);
   const expected = /^(100644|100755) blob ([a-f0-9]{40})\tpackage\.json\0$/.exec(row);
   if (!expected || manifest.mode !== expected[1] || manifest.blob !== expected[2]) throw new Error("Source package manifest must match its tracked commit");
   let parsed;
-  try { parsed = JSON.parse(manifest.text); }
+  try { parsed = validatePackageManifest(JSON.parse(manifest.text)); }
   catch { throw new Error("Source package manifest is invalid"); }
-  const spec = parsed?.dependencies?.zod;
+  const spec = parsed.dependencies.zod;
   if (typeof spec !== "string" || spec.length > 32 || !/^[~^]?4\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(spec)) throw new Error("Zod must use an explicit stable major-4 npm version or caret/tilde range");
   return spec;
 }
