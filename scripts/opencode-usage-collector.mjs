@@ -304,7 +304,7 @@ export async function collectOpencodeDatabases({
       if (!info.isFile()) throw new Error("Not a database file");
       identity = `${info.dev}:${info.ino}`;
     } catch (error) {
-      if (!(index === 0 && allowMissingPrimary && error?.code === "ENOENT")) {
+      if (!(index === 0 && allowMissingPrimary && ["ENOENT", "ENOTDIR"].includes(error?.code))) {
         if (scanStatus) scanStatus.complete = false;
         onWarning?.(`OpenCode database ${index + 1} is unavailable; checkpoint retained`);
       }
