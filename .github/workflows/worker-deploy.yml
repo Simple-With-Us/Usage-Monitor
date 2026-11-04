@@ -55,11 +55,10 @@ jobs:
         env:
           INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
           INFISICAL_ENVIRONMENT: prod
-          INFISICAL_SECRET_PATH: /
+          INFISICAL_SECRET_PATH: /um-worker-deploy
           INFISICAL_NAMES: CLOUDFLARE_FLEET_API_TOKEN
           INFISICAL_REQUIRED: CLOUDFLARE_FLEET_API_TOKEN
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_SECRET }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_UM_WORKER_DEPLOY_READ_TOKEN }}
         run: node scripts/infisical-fetch.mjs
       - name: Deploy exact main and verify receipt
         env:
