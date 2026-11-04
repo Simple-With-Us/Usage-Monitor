@@ -39,10 +39,13 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSqliteDatabasePath } from "./lib/sqlite-database-url.mjs";
 import {
+  knownBackupPaths,
   managedBackups,
   pruneBackupsToRetention,
   removeStalePartials,
+  selectVerifiedBackup,
   settledBackups,
+  stampPromotionTime,
 } from "./lib/sqlite-pre-migration-backup-cleanup.mjs";
 import {
   backupTimeoutMs,
@@ -138,6 +141,24 @@ function assertIntegrity(path) {
     }
   } finally {
     database.close();
+  }
+}
+
+/**
+ * The size of a promoted backup, for the verification log line only.
+ *
+ * A concurrent startup can prune the selected backup between the listing and
+ * this read, so a missing file reports 0 instead of aborting a startup that
+ * already has a verified restore point.
+ */
+function backupSizeBytes(path) {
+  try {
+    return statSync(path).size;
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
   }
 }
 
@@ -306,6 +327,15 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
   const prefix = backupPrefix(databasePath);
   removeStalePartials(backupDirectory, prefix, log);
 
+  // The set of managed backups that already exist when this run starts.  A
+  // managed backup only gets its `.backup.db` name when it is promoted into
+  // place, so a name missing from this listing was promoted after this run
+  // started and belongs to a concurrent startup that may still be verifying
+  // it.  This is a promotion witness that does not depend on any file
+  // timestamp, so it holds even when a rename preserved an mtime that does
+  // not reflect the promotion.
+  const knownPaths = knownBackupPaths(backupDirectory, prefix);
+
   const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
   const stem = `${prefix}${timestamp}-${process.pid}`;
   const partialPath = join(backupDirectory, `${stem}.partial`);
@@ -320,6 +350,7 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     retention,
     startedAtMs,
     ownPath: finalPath,
+    knownPaths,
     log,
   });
 
@@ -334,11 +365,21 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     }
   }
 
+  let promoted = false;
   try {
     createSnapshotWithDeadline(databasePath, partialPath);
     chmodSync(partialPath, 0o600);
+    // Stamp the promotion time before the rename.  A rename preserves mtime,
+    // so without this stamp the promoted file would carry the time its
+    // content was written - and a concurrent startup that wrote earlier but
+    // promoted later would look like the oldest backup, making the retention
+    // prune delete a backup that startup is still verifying.
+    stampPromotionTime(partialPath);
     fsyncFile(partialPath);
     renameSync(partialPath, finalPath);
+    // The rename only happens after the snapshot passed its integrity check,
+    // so a promoted backup is always a verified restore point.
+    promoted = true;
     // The file fsync above persists its contents; fsyncing the containing
     // directory makes the atomic rename durable across a host crash.
     fsyncDirectory(backupDirectory);
@@ -348,15 +389,40 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
       retention,
       startedAtMs,
       ownPath: finalPath,
+      knownPaths,
       log,
     });
     fsyncDirectory(backupDirectory);
+
+    // A concurrent startup on the same volume can promote its own backup
+    // after this one and prune this one under the shared retention count.
+    // That backup was verified the same way and covers the same database, so
+    // the newest surviving backup is an equally valid restore point.  Only
+    // when nothing verified survives does this run fail closed.
+    const verified = selectVerifiedBackup(
+      managedBackups(backupDirectory, prefix),
+      finalPath
+    );
+    if (!verified) {
+      throw new Error("no verified pre-migration backup remains after promotion");
+    }
+    if (verified.path !== finalPath) {
+      log(
+        `WARNING: a concurrent startup pruned this run's backup; using ${basename(verified.path)} as the restore point`
+      );
+    }
     log(
-      `verified ${basename(finalPath)} (${statSync(finalPath).size} bytes; retention ${retention})`
+      `verified ${basename(verified.path)} (${backupSizeBytes(verified.path)} bytes; retention ${retention})`
     );
   } catch (error) {
     rmSync(partialPath, { force: true });
-    rmSync(finalPath, { force: true });
+    // A backup that was never promoted is not a restore point, so it is
+    // removed.  A backup that was promoted has already passed its integrity
+    // check, so it is kept even when a later step fails; destroying a
+    // verified restore point would leave the volume with no backup at all.
+    if (!promoted) {
+      rmSync(finalPath, { force: true });
+    }
     throw error;
   }
 
@@ -366,6 +432,7 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
   const retained = settledBackups(managedBackups(backupDirectory, prefix), {
     startedAtMs,
     ownPath: finalPath,
+    knownPaths,
   });
   if (retained.length > retention) {
     throw new Error(
