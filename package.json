@@ -54,7 +54,7 @@
     "test:receipt-inbox-worker": "vitest run --config workers/receipt-inbox/vitest.config.mjs",
     "test:migrate-safe": "node scripts/test-migrate-safe-repro.mjs",
     "test:sqlite-backup": "node scripts/test-sqlite-pre-migration-backup.mjs",
-    "test:backup-concurrent-startup": "node --test scripts/test-backup-concurrent-startup.mjs scripts/__tests__/sqlite-pre-migration-backup-cleanup.test.mjs",
+    "test:backup-concurrent-startup": "node --test scripts/test-backup-concurrent-startup.mjs scripts/__tests__/sqlite-pre-migration-backup-cleanup.test.mjs scripts/__tests__/sqlite-pre-migration-backup-retention.test.mjs",
     "test:backup-staged-errors": "node scripts/test-backup-staged-errors.mjs",
     "test:r2-archive": "node scripts/test-r2-weekly-archive.mjs",
     "test:startup-config": "node scripts/test-startup-config.mjs",
@@ -63,7 +63,7 @@
     "test:apple-projects": "bash scripts/verify-apple-projects.sh",
     "test:antigravity-collector": "node scripts/test-antigravity-collector.mjs",
     "test:session-token-collectors": "node scripts/test-session-token-collectors.mjs",
-    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
+    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs scripts/idle-collector-sentry.node-test.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
     "test:cf-token-map": "bash scripts/test-cf-token-map.sh",
     "test:replica-status-probe": "bash scripts/test-replica-status-probe.sh",
     "test:quota-wrapper": "bash scripts/test-subscription-quota-wrapper.sh",
@@ -116,7 +116,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0",
-    "wrangler": "4.155.0"
+    "wrangler": "4.156.0"
   },
   "overrides": {
     "minimatch": "^11.0.0",
