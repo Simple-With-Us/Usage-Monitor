@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
-const root = mkdtempSync(join(tmpdir(), "um-collector-runtime-"));
+const root = realpathSync(mkdtempSync(join(tmpdir(), "um-collector-runtime-")));
 try {
   const source = join(root, "source");
   const runtime = join(root, "runtime");
@@ -66,6 +66,7 @@ try {
   );
   assert(invalid.status !== 0, "unknown SHA rejected");
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  execFileSync(process.execPath, ["--test", join(repoRoot, "scripts/check-collector-install.node-test.mjs")]);
   const installed = join(root, "installed");
   mkdirSync(join(installed, "node_modules"), { recursive: true });
   symlinkSync(join(repoRoot, "node_modules", "zod"), join(installed, "node_modules", "zod"));
