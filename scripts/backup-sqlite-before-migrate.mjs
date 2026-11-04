@@ -11,6 +11,11 @@
  * Existing databases fail closed on every backup/verification/retention error.
  * A missing database is the expected first-deploy case and needs no backup.
  *
+ * Two containers can share one /data volume and run this script at the same
+ * time, so the retention prune only ever considers settled backups: a managed
+ * backup written after this run started belongs to a concurrent startup that
+ * may still be verifying it, and it is never pruned here.
+ *
  * References:
  * - https://www.sqlite.org/backup.html
  * - https://nodejs.org/docs/latest-v24.x/api/sqlite.html
@@ -26,16 +31,19 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSqliteDatabasePath } from "./lib/sqlite-database-url.mjs";
-import { removeStalePartials } from "./lib/sqlite-pre-migration-backup-cleanup.mjs";
+import {
+  managedBackups,
+  pruneBackupsToRetention,
+  removeStalePartials,
+  settledBackups,
+} from "./lib/sqlite-pre-migration-backup-cleanup.mjs";
 import {
   backupTimeoutMs,
   clampedIntEnv,
@@ -91,30 +99,6 @@ function retentionCount(raw) {
 
 function backupPrefix(databasePath) {
   return `${basename(databasePath)}.pre-migration-`;
-}
-
-function managedBackups(backupDirectory, prefix) {
-  return readdirSync(backupDirectory, { withFileTypes: true })
-    .filter(
-      (entry) =>
-        entry.isFile() &&
-        entry.name.startsWith(prefix) &&
-        entry.name.endsWith(".backup.db")
-    )
-    .map((entry) => {
-      const path = join(backupDirectory, entry.name);
-      return { path, mtimeMs: statSync(path).mtimeMs };
-    })
-    .sort((left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path));
-}
-
-function pruneToRetention(backupDirectory, prefix, retention) {
-  const existing = managedBackups(backupDirectory, prefix);
-  const removeCount = Math.max(0, existing.length - retention);
-  for (const item of existing.slice(0, removeCount)) {
-    unlinkSync(item.path);
-    log(`pruned old backup ${basename(item.path)}`);
-  }
 }
 
 function assertIntegrity(path) {
@@ -300,6 +284,10 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
   // newly-created directory/file is private even before the explicit chmod.
   process.umask(0o077);
 
+  // Every managed backup written after this moment belongs to a concurrent
+  // startup that may still be verifying it, so it is never pruned here.
+  const startedAtMs = Date.now();
+
   const databasePath = parseDatabasePath(process.env.DATABASE_URL);
   if (!existsSync(databasePath)) {
     log(`no existing database at ${databasePath}; backup not required`);
@@ -317,10 +305,23 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
 
   const prefix = backupPrefix(databasePath);
   removeStalePartials(backupDirectory, prefix, log);
+
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
+  const stem = `${prefix}${timestamp}-${process.pid}`;
+  const partialPath = join(backupDirectory, `${stem}.partial`);
+  const finalPath = join(backupDirectory, `${stem}.backup.db`);
+
   // First repair any prior retention overflow, but preserve the full bounded
   // set while creating the replacement. If the new backup fails, the previous
   // verified backups remain available instead of being pruned preemptively.
-  pruneToRetention(backupDirectory, prefix, retention);
+  pruneBackupsToRetention({
+    backupDirectory,
+    prefix,
+    retention,
+    startedAtMs,
+    ownPath: finalPath,
+    log,
+  });
 
   if (skipWhenSchemaSynced) {
     const diffStatus = schemaDiffStatus();
@@ -333,11 +334,6 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     }
   }
 
-  const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
-  const stem = `${prefix}${timestamp}-${process.pid}`;
-  const partialPath = join(backupDirectory, `${stem}.partial`);
-  const finalPath = join(backupDirectory, `${stem}.backup.db`);
-
   try {
     createSnapshotWithDeadline(databasePath, partialPath);
     chmodSync(partialPath, 0o600);
@@ -346,7 +342,14 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     // The file fsync above persists its contents; fsyncing the containing
     // directory makes the atomic rename durable across a host crash.
     fsyncDirectory(backupDirectory);
-    pruneToRetention(backupDirectory, prefix, retention);
+    pruneBackupsToRetention({
+      backupDirectory,
+      prefix,
+      retention,
+      startedAtMs,
+      ownPath: finalPath,
+      log,
+    });
     fsyncDirectory(backupDirectory);
     log(
       `verified ${basename(finalPath)} (${statSync(finalPath).size} bytes; retention ${retention})`
@@ -357,7 +360,13 @@ async function main({ skipWhenSchemaSynced = false } = {}) {
     throw error;
   }
 
-  const retained = managedBackups(backupDirectory, prefix);
+  // The invariant is measured over settled backups only.  A concurrent
+  // startup's in-flight backup is not this process's to prune, so its
+  // transient presence must not fail this startup.
+  const retained = settledBackups(managedBackups(backupDirectory, prefix), {
+    startedAtMs,
+    ownPath: finalPath,
+  });
   if (retained.length > retention) {
     throw new Error(
       `backup retention invariant failed: found ${retained.length}, expected at most ${retention}`
