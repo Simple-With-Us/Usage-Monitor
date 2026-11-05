@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS expenses (
 CREATE INDEX IF NOT EXISTS idx_expenses_occurred ON expenses (occurred_at DESC);
 
 -- Keys: last_sync_at (dashboard footer), upstream_hash (skips an unchanged
--- ledger), rows_written_today (daily D1 write budget, "YYYY-MM-DD:count" in
--- UTC), manual_sync_at (POST /api/sync cooldown).
+-- ledger), category_basis (the rules the stored categories came from),
+-- rows_written_today (daily D1 write budget, "YYYY-MM-DD:count" in UTC),
+-- manual_sync_at (POST /api/sync cooldown).
 CREATE TABLE IF NOT EXISTS sync_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

@@ -30,11 +30,18 @@ Every guard is checked before the write it protects.  A tripped guard fails the
 | D1 rows written per UTC day | 5000 | Refuse before any write, until the day resets at 6 PM Chicago (7 PM during daylight saving).  The count comes from `meta.rows_written`, and a run reserves its worst case first, so a killed run still counts. |
 | `POST /api/sync` | Once per 60 s | Answer 429 with no sync and no write.  A failed sync holds the slot too. |
 | Upstream fetch | 20 s | Abort the run. |
-| Zero upstream rows over a non-empty mirror | Any | Fail the run and do not advance `last_sync_at`, so the page footer shows the true age of the data. |
+| A malformed upstream page or row | Any | Abort with no writes.  The error names a position and a field, never a value. |
+| Zero upstream rows over a non-empty mirror | Any | Fail every run and do not advance `last_sync_at`, so the page footer shows the true age of the data.  A broken read and a truly emptied ledger look the same, so this holds until someone clears the mirror.  See Operations. |
 | `limits` in `wrangler.jsonc` | 100 ms CPU, 60 subrequests | Backstop, enforced by Cloudflare. |
 | `GUARD_MODE=off` | Set by the account watchdog | Every route answers 503, including `/health`, and the cron does nothing. |
 
 ## Operations
+
+If the ledger really was emptied, and the runs are failing with `upstream returned no rows`, clear the mirror.  The next run then finishes:
+
+```bash
+wrangler d1 execute expenses-site --remote --command "DELETE FROM expenses"
+```
 
 Force a full pass, for example after editing `expenses` by hand:
 
@@ -48,7 +55,7 @@ Check today's write count (`rows_written_today` holds `YYYY-MM-DD:count`, UTC):
 wrangler d1 execute expenses-site --remote --command "SELECT key, value FROM sync_state"
 ```
 
-A malformed counter fails closed.  Deleting that row clears it, and also clears the day's count.
+Runs add to this count inside SQL, so overlapping runs add up.  A run that started before another's reservation can still pass the limit by its own reservation.  A malformed counter fails closed.  Deleting that row clears it, and also clears the day's count.
 
 Bump `SYNC_SHAPE_VERSION` in `src/sync.mjs` whenever `mapUpstreamExpense`, `dedupeUpstreamRows` or the logic of `categorizeExpense` changes what is stored.  Category rule edits force a full pass by themselves.
 
@@ -80,7 +87,7 @@ wrangler d1 execute expenses-site --remote --file workers/expenses-site/schema.s
 
 ## Moving to Workers Free
 
-Not ready yet.  Lower `limits.subrequests` to 50 or less and check whether Free accepts `limits.cpu_ms`.  Measure CPU first: Free allows 10 ms, a sync that changes rows parses and categorizes the whole ledger, and `GET /` measured 19-30 ms before this change.
+Not ready yet.  Follow the Downgrade Checklist in `docs/cloudflare-workers.md` in AI-Fleet-Coordinator: lower `limits.subrequests` to 50 or less, and remove `limits.cpu_ms` if a scratch Worker shows that Free refuses it.  Measure CPU first: Free allows 10 ms, a sync that changes rows parses the whole ledger, and `GET /` measured 19-30 ms before this change.
 
 ## Tests
 

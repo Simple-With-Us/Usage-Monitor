@@ -5,14 +5,17 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "./src/index.mjs";
+import { buildUpsertStatements } from "./src/sync.mjs";
 import schema from "./schema.sql?raw";
 import migration from "./migrations/0001_drop_idx_expenses_category.sql?raw";
 
 const db = env.EXPENSES_DB;
 const LEDGER_ROWS = 256;
-// One insert writes the table, its primary key index and the secondary indexes.
+// One insert writes the table, its primary key index and the secondary index: 3 here.
+// Live D1 measured 4 with the second index the migration drops.
 const INSERT_ROWS_MIN = 3;
 const INSERT_ROWS_MAX = 4;
+const COUNTER_FORMAT = /^\d{4}-\d{2}-\d{2}:\d+$/;
 
 const statements = (sql) =>
   sql
@@ -112,6 +115,61 @@ describe("expenses sync on local D1", () => {
     const refused = await claim("c");
     expect(refused.meta.rows_written).toBe(0);
     expect(refused.meta.changes).toBe(0);
+  });
+
+  it("pins what the sync's own upsert costs, as the comment in sync.mjs states it", async () => {
+    const row = {
+      idempotency_key: "probe",
+      vendor: "v",
+      amount_usd: 1,
+      occurred_at: "2026-01-01",
+      kind: "usage",
+      label: null,
+      notes: null,
+      confidence: "actual",
+      category: "other",
+      calendar_sort: null,
+    };
+    const run = async (fields = {}) =>
+      (await db.batch(buildUpsertStatements(db, [{ ...row, ...fields }], "x")))[0].meta.rows_written;
+    expect(await run()).toBe(3);
+    expect(await run()).toBe(0);
+    expect(await run({ amount_usd: 2 })).toBe(2);
+  });
+
+  it("keeps the counter an integer through a reservation and a settlement", async () => {
+    await cron();
+    expect(await state("rows_written_today")).toMatch(COUNTER_FORMAT);
+    ledger = ledger.map((row, i) => (i === 5 ? { ...row, amountUsd: 99.5 } : row));
+    await cron();
+    expect(await state("rows_written_today")).toMatch(COUNTER_FORMAT);
+  });
+
+  it("adds up overlapping runs in D1 itself", async () => {
+    await cron();
+    const before = await counter();
+    await Promise.all([worker.scheduled({ noRetry() {} }, env), worker.scheduled({ noRetry() {} }, env)]);
+    expect(await counter()).toBe(before + 4);
+    expect(await state("rows_written_today")).toMatch(COUNTER_FORMAT);
+  });
+
+  it("counts the claim of a failed manual sync and nothing for a refused one", async () => {
+    vi.stubGlobal("fetch", async () => new Response("nope", { status: 502 }));
+    const first = await sync();
+    expect(first.status).toBe(502);
+    const claimed = await counter();
+    expect(claimed).toBeGreaterThanOrEqual(2);
+    expect(await state("rows_written_today")).toMatch(COUNTER_FORMAT);
+    expect((await sync()).status).toBe(429);
+    expect(await counter()).toBe(claimed);
+  });
+
+  it("refuses a malformed upstream row before writing anything", async () => {
+    await cron();
+    const before = await counter();
+    ledger = ledger.map((row, i) => (i === 7 ? { ...row, amountUsd: "12.50" } : row));
+    await expect(worker.scheduled({ noRetry() {} }, env)).rejects.toThrow(/expense 7 has a bad amountUsd/);
+    expect(await counter()).toBe(before);
   });
 
   it("writes only state when nothing changed, and only the changed row otherwise", async () => {

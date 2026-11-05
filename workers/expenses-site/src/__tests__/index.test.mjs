@@ -20,7 +20,9 @@ beforeEach(() => {
 
 describe("expenses worker scheduled", () => {
   it("logs a sync failure and rethrows it without allowing a retry", async () => {
-    const error = new Error("upstream 503 from /api/owner-expenses");
+    const error = Object.assign(new Error("upstream 503 from /api/owner-expenses"), {
+      name: "SyncFailure",
+    });
     syncExpenses.mockRejectedValueOnce(error);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const controller = { noRetry: vi.fn() };
@@ -31,7 +33,25 @@ describe("expenses worker scheduled", () => {
 
     expect(syncExpenses).toHaveBeenCalledOnce();
     expect(controller.noRetry).toHaveBeenCalledOnce();
-    expect(consoleError).toHaveBeenCalledWith("expenses scheduled sync failed:", error);
+    expect(consoleError).toHaveBeenCalledWith(
+      JSON.stringify({
+        event: "expenses.scheduled_sync_failed",
+        reason: "upstream 503 from /api/owner-expenses",
+      })
+    );
+    consoleError.mockRestore();
+  });
+
+  it("logs only the name of an error whose text it did not write", async () => {
+    const error = new TypeError("row private-vendor-detail");
+    syncExpenses.mockRejectedValueOnce(error);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(worker.scheduled({}, {})).rejects.toBe(error);
+
+    expect(consoleError).toHaveBeenCalledWith(
+      JSON.stringify({ event: "expenses.scheduled_sync_failed", reason: "TypeError" })
+    );
     consoleError.mockRestore();
   });
 
@@ -75,6 +95,21 @@ describe("expenses worker fetch", () => {
     );
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ ok: false });
+    expect(consoleError).toHaveBeenCalledWith(
+      JSON.stringify({ event: "expenses.health_check_failed", reason: "Error" })
+    );
+    consoleError.mockRestore();
+  });
+
+  it("answers a failed manual sync with no detail, and logs none of it", async () => {
+    syncExpenses.mockRejectedValueOnce(new Error("D1_ERROR: private-detail"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await worker.fetch(syncRequest(), { USAGE_READ_TOKEN: TOKEN });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ ok: false, error: "Sync failed" });
+    expect(consoleError).toHaveBeenCalledWith(
+      JSON.stringify({ event: "expenses.manual_sync_failed", reason: "Error" })
+    );
     consoleError.mockRestore();
   });
 

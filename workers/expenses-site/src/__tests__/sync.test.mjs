@@ -3,16 +3,19 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildUpsertStatements,
-  changedRows,
+  changedExpenses,
   DAILY_ROWS_WRITTEN_BUDGET,
   dedupeUpstreamRows,
   expenseFingerprint,
   loadSuppressedKeys,
   MAX_CHANGED_ROWS_PER_RUN,
   MAX_PAGES,
+  MAX_ROWS_PER_STATEMENT,
   MAX_UPSTREAM_ROWS,
   mapUpstreamExpense,
+  parseUpstreamPage,
   rowsWrittenToday,
+  STATE_WRITE_ROWS,
   syncExpenses,
 } from "../sync.mjs";
 import { BudgetExceeded } from "../budget-guard.mjs";
@@ -22,7 +25,8 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 /**
  * D1's API over real SQLite, so the SQL itself is exercised.  rows_written copies
- * the live measurement: 3 for each expenses row (table plus 2 indexes), else 1.
+ * what sync.workers.test.mjs pins on local D1 for this schema: 3 for an inserted
+ * expense, 2 for a changed one, else 1 per row.
  */
 function sqliteD1() {
   const sqlite = new DatabaseSync(":memory:");
@@ -39,10 +43,15 @@ function sqliteD1() {
     },
     first: async () => sqlite.prepare(sql).get(...args) ?? null,
     run: async () => {
-      const { changes } = sqlite.prepare(sql).run(...args);
-      const perRow = /(INTO|FROM) expenses/.test(sql) ? 3 : 1;
+      const count = () => sqlite.prepare("SELECT COUNT(*) AS n FROM expenses").get().n;
+      const before = count();
+      const changes = Number(sqlite.prepare(sql).run(...args).changes);
+      const inserted = /INTO expenses/.test(sql) ? count() - before : 0;
+      const rowsWritten = /INTO expenses/.test(sql)
+        ? inserted * 3 + (changes - inserted) * 2
+        : changes;
       if (changes > 0) writes.push(sql);
-      return { meta: { changes: Number(changes), rows_written: Number(changes) * perRow } };
+      return { meta: { changes, rows_written: rowsWritten } };
     },
   });
   return {
@@ -50,6 +59,7 @@ function sqliteD1() {
     batch: async (statements) => Promise.all(statements.map((s) => s.run())),
     writes,
     reads,
+    exec: (sql) => sqlite.exec(sql),
     state: (key) => sqlite.prepare("SELECT value FROM sync_state WHERE key = ?").get(key)?.value,
     setState: (key, value) =>
       sqlite.prepare("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)").run(key, value),
@@ -140,20 +150,74 @@ describe("buildUpsertStatements", () => {
   });
 });
 
-describe("changedRows", () => {
+describe("changedExpenses", () => {
   const row = mapUpstreamExpense(upstream);
   // D1 hands every column back, with NULL for the fields upstream leaves unset.
   const stored = new Map([[row.idempotency_key, { ...row }]]);
 
   it("treats a null column and a mapped null as equal", () => {
     expect(row.calendar_sort).toBeNull();
-    expect(changedRows([row], stored)).toEqual([]);
+    expect(changedExpenses([upstream], stored)).toEqual([]);
   });
 
   it("returns new rows and rows with a differing field", () => {
-    const edited = { ...row, category: "other" };
-    expect(changedRows([edited], stored)).toEqual([edited]);
-    expect(changedRows([row], new Map())).toEqual([row]);
+    const edited = { ...upstream, amountUsd: 1 };
+    expect(changedExpenses([edited], stored, { recategorize: false })).toEqual([edited]);
+    expect(changedExpenses([upstream], new Map(), { recategorize: false })).toEqual([upstream]);
+  });
+
+  it("looks at a stored category only when the rules changed", () => {
+    const stale = new Map([[row.idempotency_key, { ...row, category: "other" }]]);
+    expect(changedExpenses([upstream], stale, { recategorize: false })).toEqual([]);
+    expect(changedExpenses([upstream], stale, { recategorize: true })).toEqual([upstream]);
+  });
+});
+
+describe("parseUpstreamPage", () => {
+  const good = { expenses: [upstream], nextCursor: null, hasMore: false };
+  const parse = (body) => () => parseUpstreamPage(JSON.stringify(body));
+  const withRow = (fields) => parse({ ...good, expenses: [{ ...upstream, ...fields }] });
+
+  it("accepts the page the upstream route sends, and hands back only known keys", () => {
+    expect(parseUpstreamPage(JSON.stringify({ ...good, extra: 1 }))).toEqual({
+      expenses: [JSON.parse(JSON.stringify(upstream))],
+      nextCursor: null,
+      hasMore: false,
+    });
+    // label is nullable upstream, and notes and calendarSort are left out when unset.
+    expect(withRow({ label: null, notes: undefined })).not.toThrow();
+  });
+
+  it("refuses text that is not JSON, without quoting it", () => {
+    expect(() => parseUpstreamPage("<html>private</html>")).toThrow(
+      /^upstream answered with invalid JSON$/
+    );
+  });
+
+  it("refuses a page with a bad shape", () => {
+    expect(() => parseUpstreamPage("null")).toThrow("no expenses list");
+    expect(parse({ ...good, expenses: "nope" })).toThrow("no expenses list");
+    expect(parse({ expenses: [], nextCursor: null })).toThrow("no hasMore flag");
+    expect(parse({ expenses: [], hasMore: true, nextCursor: 5 })).toThrow("bad nextCursor");
+    expect(parse({ expenses: [], hasMore: false })).toThrow("bad nextCursor");
+    expect(parse({ ...good, expenses: [null] })).toThrow("expense 0 has a bad row");
+  });
+
+  it.each([
+    ["idempotencyKey", ""],
+    ["idempotencyKey", 7],
+    ["vendor", null],
+    ["amountUsd", "12.50"],
+    ["amountUsd", null],
+    ["occurredAt", "not a date"],
+    ["occurredAt", 20260930],
+    ["kind", 1],
+    ["label", {}],
+    ["notes", []],
+    ["confidence", 1],
+    ["calendarSort", 1],
+  ])("refuses a row whose %s is %j, naming the field and not the value", (field, value) => {
+    expect(withRow({ [field]: value })).toThrow(`upstream expense 0 has a bad ${field}`);
   });
 });
 
@@ -399,6 +463,26 @@ describe("syncExpenses", () => {
       expect(db.state("last_sync_at")).toBeTruthy();
     });
 
+    it("finishes an emptied ledger once the mirror is cleared by hand", async () => {
+      await seed();
+      fetchMock.mockImplementation(async () => page([]));
+      await expect(syncExpenses(envFor(db))).rejects.toThrow("no rows");
+
+      db.exec("DELETE FROM expenses");
+      expect(await syncExpenses(envFor(db))).toMatchObject({ upserted: 0, unchanged: false });
+      expect(db.state("last_sync_at")).not.toBe("2026-11-01T00:00:00.000Z");
+      expect(await syncExpenses(envFor(db))).toMatchObject({ unchanged: true });
+    });
+
+    it("writes nothing when one upstream row is malformed", async () => {
+      await seed();
+      db.writes.length = 0;
+      fetchMock.mockResolvedValueOnce(page([expense("k2"), expense("k3", { amountUsd: "12" })]));
+      await expect(syncExpenses(envFor(db))).rejects.toThrow("expense 1 has a bad amountUsd");
+      expect(db.writes).toEqual([]);
+      expect(db.rows()).toHaveLength(1);
+    });
+
     it("fails on a 200 with no expenses list", async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, text: async () => '{"error":"nope"}' });
       await expect(syncExpenses(envFor(db))).rejects.toThrow("no expenses list");
@@ -467,15 +551,43 @@ describe("syncExpenses", () => {
       await expect(syncExpenses(envFor(db))).rejects.toThrow("D1 failed");
       db.batch = realBatch;
       expect(db.state("upstream_hash")).toBeUndefined();
-      // 1 row x 4 + the 3 state rows + the hash clear + the reservation itself.
-      expect(db.state("rows_written_today")).toBe(`${today()}:${before + 9}`);
+      // A failed run keeps what it reserved: one upsert at the worst case, the final
+      // state write, the hash clear and the reservation itself.
+      expect(db.state("rows_written_today")).toBe(
+        `${today()}:${before + MAX_ROWS_PER_STATEMENT + STATE_WRITE_ROWS + 2}`
+      );
     });
 
     it("records rows written from D1's meta", async () => {
       fetchMock.mockResolvedValueOnce(page([upstream, expense("k2")]));
       await syncExpenses(envFor(db));
-      // Reservation 1 + 2 rows x 3 + last_sync_at + hash + counter.
-      expect(db.state("rows_written_today")).toBe(`${today()}:10`);
+      // Settled to what was written: reservation 1, 2 inserts x 3, then last_sync_at,
+      // hash, basis and counter.
+      expect(db.state("rows_written_today")).toBe(`${today()}:11`);
+    });
+
+    it("adds up the writes of overlapping runs instead of overwriting them", async () => {
+      fetchMock.mockImplementation(async () => page([upstream]));
+      await syncExpenses(envFor(db));
+      const before = Number(db.state("rows_written_today").split(":")[1]);
+
+      const runs = await Promise.all([syncExpenses(envFor(db)), syncExpenses(envFor(db))]);
+
+      expect(runs).toMatchObject([{ unchanged: true }, { unchanged: true }]);
+      // Each run read the same counter, and each costs last_sync_at and the counter.
+      expect(db.state("rows_written_today")).toBe(`${today()}:${before + 4}`);
+    });
+
+    it("does not move a counter another run already rolled to a later day", async () => {
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      const realBatch = db.batch;
+      db.batch = async (statements) => {
+        db.setState("rows_written_today", "2999-01-01:7");
+        return realBatch(statements);
+      };
+      await syncExpenses(envFor(db));
+      db.batch = realBatch;
+      expect(db.state("rows_written_today")).toBe("2999-01-01:7");
     });
 
     it("refuses before fetching once the day's budget is spent", async () => {
@@ -509,8 +621,62 @@ describe("syncExpenses", () => {
       db.batch = realBatch;
       expect(db.state("upstream_hash")).toBeUndefined();
       expect(db.state("last_sync_at")).toBeUndefined();
-      // 1 row x 4 + the 3 state rows + the reservation itself.
-      expect(db.state("rows_written_today")).toBe(`${today()}:8`);
+      // One upsert at the worst case, the final state write and the reservation itself.
+      expect(db.state("rows_written_today")).toBe(
+        `${today()}:${MAX_ROWS_PER_STATEMENT + STATE_WRITE_ROWS + 1}`
+      );
+    });
+  });
+
+  describe("categories", () => {
+    const stored = () => db.rows()[0].category;
+    const seed = async () => {
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      await syncExpenses(envFor(db));
+      expect(stored()).toBe("tech-ai");
+      db.exec("UPDATE expenses SET category = 'other'");
+    };
+
+    it("does not recategorize rows on a text change while the rules are the same", async () => {
+      await seed();
+      fetchMock.mockResolvedValueOnce(page([{ ...upstream, dueDate: "2026-12-01" }]));
+      expect(await syncExpenses(envFor(db))).toMatchObject({ upserted: 0, unchanged: false });
+      expect(stored()).toBe("other");
+    });
+
+    it("recategorizes every row when the rules changed, and records the new basis", async () => {
+      await seed();
+      const basis = db.state("category_basis");
+      expect(basis).toBeTruthy();
+      db.setState("category_basis", "old");
+      db.exec("DELETE FROM sync_state WHERE key = 'upstream_hash'");
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      expect(await syncExpenses(envFor(db))).toMatchObject({ upserted: 1 });
+      expect(stored()).toBe("tech-ai");
+      expect(db.state("category_basis")).toBe(basis);
+    });
+
+    it("keeps comparing categories until a capped pass has finished", async () => {
+      await seed();
+      db.setState("category_basis", "old");
+      const rows = Array.from({ length: MAX_CHANGED_ROWS_PER_RUN + 1 }, (_, i) => expense(`k${i}`));
+      fetchMock.mockImplementation(async () => page([upstream, ...rows]));
+      await expect(syncExpenses(envFor(db))).rejects.toThrow("changed rows over 300");
+      expect(db.state("category_basis")).toBe("old");
+      await syncExpenses(envFor(db));
+      expect(db.state("category_basis")).not.toBe("old");
+      expect(db.rows().find((row) => row.idempotency_key === upstream.idempotencyKey).category).toBe(
+        "tech-ai"
+      );
+    });
+
+    it("categorizes a changed row whose label moved it", async () => {
+      fetchMock.mockResolvedValueOnce(page([{ ...upstream, vendor: "Nobody", label: "Nothing" }]));
+      await syncExpenses(envFor(db));
+      expect(stored()).toBe("other");
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      await syncExpenses(envFor(db));
+      expect(stored()).toBe("tech-ai");
     });
   });
 
@@ -533,6 +699,31 @@ describe("syncExpenses", () => {
       await expect(syncExpenses(envFor(db), { manual: true })).rejects.toThrow("upstream 502");
       expect(await syncExpenses(envFor(db), { manual: true })).toMatchObject({ cooldown: true });
       expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it("counts the claim of a manual sync that then fails", async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 502 });
+      await expect(syncExpenses(envFor(db), { manual: true })).rejects.toThrow("upstream 502");
+      expect(db.state("rows_written_today")).toBe(`${today()}:2`);
+
+      db.setState("manual_sync_at", new Date(Date.now() - 61_000).toISOString());
+      await expect(syncExpenses(envFor(db), { manual: true })).rejects.toThrow("upstream 502");
+      expect(db.state("rows_written_today")).toBe(`${today()}:4`);
+    });
+
+    it("counts nothing for a refused claim", async () => {
+      db.setState("rows_written_today", `${today()}:5`);
+      db.setState("manual_sync_at", new Date(Date.now() - 1000).toISOString());
+      expect(await syncExpenses(envFor(db), { manual: true })).toMatchObject({ cooldown: true });
+      expect(db.state("rows_written_today")).toBe(`${today()}:5`);
+      expect(db.writes).toEqual([]);
+    });
+
+    it("settles a successful manual run to its real writes, claim included", async () => {
+      fetchMock.mockResolvedValue(page([upstream]));
+      await syncExpenses(envFor(db), { manual: true });
+      // Claim and counter 2, reservation 1, insert 3, then last_sync_at, hash, basis, counter.
+      expect(db.state("rows_written_today")).toBe(`${today()}:10`);
     });
 
     it("lets a call through after the window, and the cron never waits on it", async () => {
