@@ -814,6 +814,12 @@ describe("readiness cost", () => {
     expect(config).toContain('"crons": ["17 */12 * * *"]');
   });
 
+  it("keeps the CPU limit high enough for a 10 MiB PDF, so a deploy does not lower it", () => {
+    const config = readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8");
+    expect(config).toContain('"cpu_ms": 500');
+    expect(config).toContain('"subrequests": 30');
+  });
+
   it("backs a cleanup backlog off to 30 seconds instead of 1", async () => {
     const { index, storage } = createEnvironment();
     await index.scheduleNextAlarm(true);

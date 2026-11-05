@@ -137,11 +137,14 @@ deploys the auditor alone.
   be made.
 - **`limits` in each `wrangler.jsonc`.**  CPU and subrequests per invocation.
   Recheck `cpu_ms` before any move to the Free plan, because the documentation
-  describes it as a Paid setting.  The inbox's 200 ms can stop a message of several
-  MiB, which the 10 MiB intake limit still admits: a cold parse measured about 200 ms
-  at 4 MiB and 365 ms near 10 MiB, in Node rather than the Workers runtime.  Its
-  fallback copy is sent first, but no-forward mail has no copy here.  The largest
-  message stored so far is 664 KB.
+  describes it as a Paid setting.  The inbox's 500 ms covers the 10 MiB intake
+  limit as measured: the full intake path for a message that is one base64 PDF took
+  about 135 ms at 4 MiB and 310 ms at 10 MiB, in Node rather than the Workers runtime.
+  At 200 ms, PDF mail stopped from roughly 6.5 MiB.  The higher limit costs little,
+  because public intake is capped at 60 messages a day.  A message that still runs
+  out of CPU has had its fallback copy sent first, but no-forward mail has no copy
+  here.  A deploy applies the value in this file, so keep it equal to the live
+  limit.  The largest message stored so far is 664 KB.
 
 ## Email routing rules
 

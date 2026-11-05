@@ -4,7 +4,7 @@
   "compatibility_date": "2026-07-18",
   "preview_urls": false,
   "limits": {
-    "cpu_ms": 200,
+    "cpu_ms": 500,
     "subrequests": 30
   },
   "routes": [
