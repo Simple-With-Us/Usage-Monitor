@@ -1,4 +1,21 @@
 {
+  "usage-monitor-receipt-lifecycle-auditor": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/receipt-lifecycle-auditor/wrangler.jsonc"
+    ],
+    "probe": "telemetry",
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 50,
+      "max_subrequests": 20,
+      "limits_pending": true
+    }
+  },
   "expenses-jays-services": {
     "command": [
       "npx",
@@ -8,8 +25,13 @@
       "--config",
       "workers/expenses-site/wrangler.jsonc"
     ],
-    "health": "https://expenses.jays.services/api/expenses",
-    "access": true
+    "probe": "telemetry",
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 100,
+      "max_subrequests": 200,
+      "limits_pending": true
+    }
   },
   "usage-monitor-receipt-inbox": {
     "command": [
@@ -22,17 +44,13 @@
     ],
     "health": "https://receipt-inbox.jays.services/health",
     "bearer": "RECEIPT_INBOX_READ_TOKEN",
-    "ok": true
-  },
-  "usage-monitor-receipt-lifecycle-auditor": {
-    "command": [
-      "npx",
-      "--no-install",
-      "wrangler",
-      "deploy",
-      "--config",
-      "workers/receipt-lifecycle-auditor/wrangler.jsonc"
-    ],
-    "health": null
+    "ok": true,
+    "deploy_after": "usage-monitor-receipt-lifecycle-auditor",
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 200,
+      "max_subrequests": 30,
+      "limits_pending": true
+    }
   }
 }
