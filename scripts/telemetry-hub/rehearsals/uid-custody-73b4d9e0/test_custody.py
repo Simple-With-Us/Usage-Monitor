@@ -360,6 +360,64 @@ class CustodyTests(unittest.TestCase):
                 finally:
                     evidence.close()
 
+    def test_stat_only_payload_custody_bounds_full_signature_collision(self):
+        # Adversarial boundary, by design: plan.md states the host actor never
+        # opens the UID-10001 payload to read content, so payload custody is a
+        # physical stat signature only.  A rewrite that preserves the ENTIRE
+        # signature - same inode, with mtime/ctime reading identical because
+        # the filesystem timestamp tick is coarser than the rewrite window -
+        # is NOT detectable without reading content, and this test pins that
+        # residual.  tmpfs (the enforced production parent) has ns granularity,
+        # so the collision is simulated by replaying the captured signature
+        # rather than produced with real timestamps.
+        with tempfile.TemporaryDirectory() as directory, patch.object(P, "RAM_ROOT", directory):
+            root = Path(directory)
+            root.chmod(0o700)
+            (root / "payload").mkdir(mode=0o700)
+            source = root / "payload" / "telemetry-hub.json"
+            source.write_bytes(P.SNAPSHOT_RAW)
+            source.chmod(0o600)
+            evidence = P.Evidence()
+            evidence.fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            evidence.payload_fd = os.open(root / "payload", os.O_RDONLY | os.O_DIRECTORY)
+            evidence.directory_identity = evidence.directory_pin(os.fstat(evidence.fd))
+            evidence.payload_identity = evidence.directory_pin(os.fstat(evidence.payload_fd))
+            original_stat = os.stat
+            def synthetic_uid_stat(path, *args, **kwargs):
+                info = original_stat(path, *args, **kwargs)
+                if path == "telemetry-hub.json":
+                    values = {key: getattr(info, key) for key in P.SIGNATURE_FIELDS}
+                    values.update(st_uid=10001, st_gid=10001)
+                    return types.SimpleNamespace(**values)
+                return info
+            try:
+                # Test-only UID substitution, same as the sibling fixtures.
+                with patch.object(P.os, "stat", side_effect=synthetic_uid_stat):
+                    evidence.capture_payload()
+                # Real in-place, same-size rewrite: the bytes change, the inode stays.
+                source.write_bytes(b"y" * len(P.SNAPSHOT_RAW))
+                self.assertNotEqual(source.read_bytes(), P.SNAPSHOT_RAW)
+                captured = dict(zip(P.SIGNATURE_FIELDS, evidence.payload_signature))
+                def coarse_tick_stat(path, *args, **kwargs):
+                    info = original_stat(path, *args, **kwargs)
+                    if path == "telemetry-hub.json":
+                        return types.SimpleNamespace(**captured)
+                    return info
+                # Under a coarse-tick filesystem reading, the same rewrite is
+                # invisible to stat-only custody (accepted residual).
+                with patch.object(P.os, "stat", side_effect=coarse_tick_stat):
+                    evidence.check()
+                # With true stat reads (same test-only UID substitution) and a
+                # guaranteed timestamp delta, the same rewrite IS refused:
+                # detection depends entirely on the signature changing.
+                after = source.stat()
+                os.utime(source, ns=(after.st_atime_ns + 1000000, after.st_mtime_ns + 1000000))
+                with patch.object(P.os, "stat", side_effect=synthetic_uid_stat):
+                    with self.assertRaisesRegex(P.Stop, "actual synthetic payload identity changed"):
+                        evidence.check()
+            finally:
+                evidence.close()
+
     def test_operator_receipt_deadline_failure_retains_written_file(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(P, "RAM_ROOT", directory):
             root = Path(directory)
