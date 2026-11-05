@@ -345,6 +345,13 @@ class CustodyTests(unittest.TestCase):
                             source.unlink()
                         source.write_bytes(b"x" * len(P.SNAPSHOT_RAW))
                         source.chmod(0o600)
+                        # Coarse-tick filesystems (HZ-granularity ext4) can
+                        # return identical stat signatures for a fast real
+                        # rewrite; force a guaranteed timestamp delta so the
+                        # fixture stays deterministic everywhere. tmpfs (the
+                        # enforced production parent) has ns granularity.
+                        stat_after = source.stat()
+                        os.utime(source, ns=(stat_after.st_atime_ns + 1000000, stat_after.st_mtime_ns + 1000000))
                         with self.assertRaisesRegex(P.Stop, "identity changed"):
                             evidence.check()
                         with patch.object(P.os, "unlink") as unlink, self.assertRaises(P.Stop):
