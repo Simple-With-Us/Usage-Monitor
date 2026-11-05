@@ -241,6 +241,12 @@ jobs:
       - name: Test receipt-inbox worker
         run: npm run test:receipt-inbox-worker
 
+      # Excluded from the root run for the same reason.  It pins what the expenses
+      # sync's daily write budget trusts: D1's own meta.rows_written.  Offline, with
+      # inline bindings in workers/expenses-site/vitest.config.mjs and no secrets.
+      - name: Test expenses worker
+        run: npm run test:expenses-worker
+
       - name: Test safe migration path
         run: npm run test:migrate-safe
 

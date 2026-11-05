@@ -84,4 +84,4 @@ Not ready yet.  Lower `limits.subrequests` to 50 or less and check whether Free
 
 ## Tests
 
-Offline unit tests: `npx vitest run workers/expenses-site`, and `npm run test:budget-guard` for the shared guard, which uses Node's own test runner.
+Offline unit tests: `npx vitest run workers/expenses-site`, and `npm run test:budget-guard` for the shared guard, which uses Node's own test runner.  The real Worker against local D1 in workerd, with a fake upstream: `npm run test:expenses-worker`.
