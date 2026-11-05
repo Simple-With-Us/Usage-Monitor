@@ -529,10 +529,11 @@ describe("receipt inbox email worker", () => {
   });
 });
 
-function receivedHeader(count) {
+function receivedHeader(count, cloudflarePasses = 2) {
   const headers = new Headers();
   for (let number = 0; number < count; number += 1) {
-    headers.append("received", `from a${number}.example (a${number}.example [192.0.2.1]) by b.example with ESMTPS id x${number} for <r@receipts.jays.services>; Tue, 3 Nov 2026 12:00:0${number % 10} +0000`);
+    const by = number < cloudflarePasses ? "cloudflare-email.net" : "b.example";
+    headers.append("received", `from a${number}.example (a${number}.example [192.0.2.1]) by ${by} with ESMTPS id x${number} for <r@receipts.jays.services>; Tue, 3 Nov 2026 12:00:0${number % 10} +0000`);
   }
   return headers;
 }
@@ -584,6 +585,20 @@ describe("mail loop guard", () => {
     const message = receiptMessage(rawReceipt("ordinary chain"), { headers: receivedHeader(7) });
     await handleEmail(message, env);
     expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+  });
+
+  it("never silently drops a long first delivery that crossed Cloudflare once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(mailLoopReason(receivedHeader(15, 1))).toBeNull();
+    expect(warn).toHaveBeenCalledWith(JSON.stringify({ event: "receipt_long_received_chain" }));
+
+    const { env } = createEnvironment();
+    const message = receiptMessage(rawReceipt("long corporate chain"), { headers: receivedHeader(15, 1) });
+    await handleEmail(message, env);
+    expect(message.forwardedTo).toBe("socratic.trade@jays.services");
+    expect(message.rejected).toBeUndefined();
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+    warn.mockRestore();
   });
 });
 

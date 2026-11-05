@@ -41,6 +41,8 @@ const STALE_CLEANUP_BACKLOG_MS = 24 * 60 * 60 * 1000;
 const MAX_RECEIVED_HEADERS = 8;
 const MAX_RECEIVED_SCAN_CHARS = 64 * 1024;
 const RECEIVED_STAMP = /;\s*(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3}\s+\d{2,4}/g;
+const CLOUDFLARE_PASS = /\bby\s+cloudflare-email\.[a-z]+\b/gi;
+const MIN_LOOP_CLOUDFLARE_PASSES = 2;
 export const HOP_HEADER = "X-Receipt-Inbox-Hop";
 const READINESS_PROBE_KEY = "readiness-probe";
 const RECEIPT_ID_PATTERN = /^[0-9a-f]{64}$/;
@@ -256,7 +258,13 @@ export function mailLoopReason(headers) {
   // Headers joins repeats with ", " and every Received date holds a comma, so
   // count the "; <date>" stamp each Received header ends with.
   const received = String(headers.get("received") ?? "").slice(0, MAX_RECEIVED_SCAN_CHARS);
-  return (received.match(RECEIVED_STAMP)?.length ?? 0) > MAX_RECEIVED_HEADERS ? "received_count" : null;
+  if ((received.match(RECEIVED_STAMP)?.length ?? 0) <= MAX_RECEIVED_HEADERS) return null;
+  // A drop is silent and final, so a long chain alone is not enough: a corporate
+  // relay can add many hops on a first delivery.  A loop copy has also crossed
+  // Cloudflare at least twice.  On stored mail, every first delivery shows one pass.
+  if ((received.match(CLOUDFLARE_PASS)?.length ?? 0) >= MIN_LOOP_CLOUDFLARE_PASSES) return "received_count";
+  console.warn(JSON.stringify({ event: "receipt_long_received_chain" }));
+  return null;
 }
 
 function forwardToFallback(message, env) {
@@ -793,7 +801,7 @@ export class ReceiptInboxIndex {
         });
         return { result: "admitted" };
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json(result);
     }
 
@@ -818,7 +826,7 @@ export class ReceiptInboxIndex {
         });
         return { result: "reserved", id: metadata.id, resumed: false };
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json(result);
     }
 
@@ -847,7 +855,7 @@ export class ReceiptInboxIndex {
         ]);
         return "committed";
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json({ result }, result === "not_found" ? 404 : 200);
     }
 

@@ -106,13 +106,16 @@ deploys the auditor alone.
 
 ## Runaway guards
 
-- **Mail loop.**  Every fallback forward carries `X-Receipt-Inbox-Hop`.  A message
-  that arrives with that header, or with more than 8 `Received` headers, is
-  dropped silently before any Durable Object call: no forward, no admission, no
-  bounce, and a `receipt_mail_loop_dropped` log line.  First-pass mail stored so
-  far has at most 7 `Received` headers, and each trip around the fallback mailbox
-  adds about 5.  Anyone can send that header to the public MX, but doing so only
-  suppresses their own message.
+- **Mail loop.**  Every fallback forward carries `X-Receipt-Inbox-Hop`.  A message
+  that arrives with that header, or with more than 8 `Received` headers including
+  at least 2 Cloudflare Email Routing passes, is dropped silently before any Durable
+  Object call: no forward, no admission, no bounce, and a
+  `receipt_mail_loop_dropped` log line.  Each trip around the fallback mailbox adds
+  about 5 `Received` headers and one Cloudflare pass.  A long chain with only one
+  Cloudflare pass is a first delivery, so it is filed as usual and logged as
+  `receipt_long_received_chain`, because a corporate relay can add many hops and a
+  drop leaves no copy anywhere.  Anyone can send the hop header to the public MX,
+  but doing so only suppresses their own message.
 - **Daily intake.**  100 messages and 100 MiB per UTC day in total.  Public mail
   may use 60 messages and 60 MiB of that, and one sender domain may use 20 messages
   and 25 MiB, so the no-forward path always keeps 40 messages.  No-forward mail
@@ -125,9 +128,13 @@ deploys the auditor alone.
   nothing, and mail is forwarded to the fallback (no-forward mail too, because
   nothing else would store it).  Mail is rejected only when no fallback copy can
   be made.
-- **`limits` in each `wrangler.jsonc`.**  CPU and subrequests per invocation.
+- **`limits` in each `wrangler.jsonc`.**  CPU and subrequests per invocation.
   Recheck `cpu_ms` before any move to the Free plan, because the documentation
-  describes it as a Paid setting.
+  describes it as a Paid setting.  The inbox's 200 ms can stop a message of several
+  MiB, which the 10 MiB intake limit still admits: a cold parse measured about 200 ms
+  at 4 MiB and 365 ms near 10 MiB, in Node rather than the Workers runtime.  Its
+  fallback copy is sent first, but no-forward mail has no copy here.  The largest
+  message stored so far is 664 KB.
 
 ## Email routing rules
 

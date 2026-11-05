@@ -76,6 +76,37 @@ describe("receipt inbox Durable Object in workerd", () => {
     });
   });
 
+  it("keeps the backlog alarm backed off after a write request", async () => {
+    const recent = String(Date.now() - 60_000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 450; number += 1) {
+        entries[`pending-expire:${recent}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const before = Date.now();
+    expect((await (await request("/admit", "POST", { bytes: 1, senderDomain: "vendor.example" })).json()).result).toBe("admitted");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(before + 25_000);
+    });
+  });
+
+  it("fails readiness and summary only when the backlog is over a day old", async () => {
+    const stale = String(Date.now() - 25 * 60 * 60 * 1000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 450; number += 1) {
+        entries[`pending-expire:${stale}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const ready = await request("/ready");
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({ reason: "cleanup_backlog" });
+    expect((await request("/summary")).status).toBe(503);
+  });
+
   it("heads a missing fixed key on /health against real R2", async () => {
     const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
       headers: { Authorization: `Bearer ${"r".repeat(32)}` },
