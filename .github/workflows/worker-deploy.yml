@@ -35,6 +35,12 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# Serializes whole runs.  This stays at workflow level because a job-level group would be
+# shared by every matrix job, and GitHub cancels all but the newest pending job in a group.
+# A pull request only runs the guards job, so it gets its own group and never waits on a deploy.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('worker-guards-{0}', github.ref) || 'mapped-workers-production' }}
+  cancel-in-progress: false
 jobs:
   guards:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -50,9 +56,6 @@ jobs:
     if: vars.WORKER_DEPLOY_ENABLED == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    concurrency:
-      group: mapped-workers-production
-      cancel-in-progress: false
     strategy:
       max-parallel: 1
       fail-fast: false
