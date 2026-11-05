@@ -1,1 +1,36 @@
-{"compatibility_date":"2026-10-01","d1_databases":[{"binding":"EXPENSES_DB","database_id":"bdcf14f1-f523-4f85-8438-209cf298577a","database_name":"expenses-site"}],"main":"src/index.mjs","name":"expenses-jays-services","observability":{"enabled":true,"head_sampling_rate":1},"routes":[{"custom_domain":true,"pattern":"expenses.jays.services"}],"triggers":{"crons":["*/15 * * * *"]},"vars":{"UPSTREAM_URL":"https://usage.jays.services"}}
+{
+  "compatibility_date": "2026-10-01",
+  "d1_databases": [
+    {
+      "binding": "EXPENSES_DB",
+      "database_id": "bdcf14f1-f523-4f85-8438-209cf298577a",
+      "database_name": "expenses-site"
+    }
+  ],
+  // Paid-plan backstops.  Free caps subrequests at 50, so lower that at downgrade.
+  "limits": {
+    "cpu_ms": 100,
+    "subrequests": 60
+  },
+  "main": "src/index.mjs",
+  "name": "expenses-jays-services",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  // The hostname is behind Access; no other URL may reach this Worker.
+  "preview_urls": false,
+  "routes": [
+    {
+      "custom_domain": true,
+      "pattern": "expenses.jays.services"
+    }
+  ],
+  "triggers": {
+    "crons": ["7 * * * *"]
+  },
+  "vars": {
+    "UPSTREAM_URL": "https://usage.jays.services"
+  },
+  "workers_dev": false
+}
