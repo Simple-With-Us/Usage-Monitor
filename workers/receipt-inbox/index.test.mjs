@@ -359,11 +359,12 @@ describe("receipt inbox email worker", () => {
     expect(normal.rejected).toBe("Receipt fallback is not configured");
   });
 
-  it("recovers a pending reservation after an R2 failure instead of suppressing the retry", async () => {
+  it("releases its reservation after an R2 failure, so the retry is not suppressed", async () => {
     const { env, storage } = createEnvironment();
     env.RECEIPTS_BUCKET.failNextPut = true;
     await expect(handleEmail(receiptMessage(rawReceipt()), env)).rejects.toThrow("simulated R2 failure");
-    expect([...storage.values.keys()].some((key) => key.startsWith("pending:"))).toBe(true);
+    const reservationKeys = () => [...storage.values.keys()].filter((key) => /^(?:pending|pending-expire|dedupe):/.test(key));
+    expect(reservationKeys()).toEqual([]);
 
     await handleEmail(receiptMessage(rawReceipt()), env);
     const summary = await handleFetch(new Request("https://receipt-inbox.jays.services/v1/receipts/summary", {
@@ -676,6 +677,82 @@ describe("daily intake sub-limits", () => {
   });
 });
 
+describe("failed evidence puts", () => {
+  it("frees the attachment group, so a different wrapper of the same PDF is not busy for a day", async () => {
+    const { env, storage } = createEnvironment();
+    env.RECEIPTS_BUCKET.failNextPut = true;
+    const pdf = rawReceipt("first wrapper");
+    await expect(handleEmail(receiptMessage(pdf), env)).rejects.toThrow("simulated R2 failure");
+    expect([...storage.values.keys()].some((key) => key.startsWith("group:"))).toBe(false);
+
+    await handleEmail(receiptMessage(rawReceipt("second wrapper")), env);
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+  });
+
+  it("still reports the put failure when the release also fails", async () => {
+    const { env, storage } = createEnvironment();
+    const real = env.RECEIPT_INDEX.get();
+    env.RECEIPT_INDEX = {
+      idFromName: () => "receipt-index",
+      get: () => ({
+        fetch: (request, init) => (new URL(request).pathname.startsWith("/release/")
+          ? Response.json({ error: "simulated" }, { status: 503 })
+          : real.fetch(request, init)),
+      }),
+    };
+    env.RECEIPTS_BUCKET.failNextPut = true;
+    await expect(handleEmail(receiptMessage(rawReceipt("release fails")), env)).rejects.toThrow("simulated R2 failure");
+    expect([...storage.values.keys()].some((key) => key.startsWith("pending:"))).toBe(true);
+  });
+
+  it("keeps the reservation when only the commit fails, because the evidence is stored", async () => {
+    const { env, storage, controls } = createEnvironment();
+    controls.failNextCommit = true;
+    await expect(handleEmail(receiptMessage(rawReceipt("commit fails")), env)).rejects.toThrow("HTTP 503");
+    expect([...storage.values.keys()].some((key) => key.startsWith("pending:"))).toBe(true);
+  });
+
+  it("does not release a group marker held by another reservation", async () => {
+    const { index, storage } = createEnvironment();
+    const id = "1".repeat(64);
+    const other = "2".repeat(64);
+    const groupId = "3".repeat(64);
+    const receivedAt = new Date().toISOString();
+    await storage.put({
+      [`pending:${id}`]: { id, groupId, receivedAt, status: "pending" },
+      [`dedupe:${id}`]: { id, status: "pending" },
+      [`group:${groupId}`]: { id: other, status: "committed" },
+    });
+    const released = await index.fetch(new Request(`https://receipt-index.internal/release/${id}`, { method: "POST" }));
+    expect(await released.json()).toEqual({ result: "released" });
+    expect(await storage.get(`group:${groupId}`)).toEqual({ id: other, status: "committed" });
+    const again = await index.fetch(new Request(`https://receipt-index.internal/release/${id}`, { method: "POST" }));
+    expect(await again.json()).toEqual({ result: "not_found" });
+  });
+});
+
+describe("forward failure logs", () => {
+  it("log a fixed kind and never the provider's text", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { env } = createEnvironment();
+    const refused = receiptMessage(rawReceipt("relay refused"), {
+      async forward() { throw new Error("550 CS01 rejected for private.person@example.com"); },
+    });
+    await handleEmail(refused, env);
+    const paused = receiptMessage("x", {
+      async forward() { throw new Error("unexpected failure for private.person@example.com"); },
+    });
+    await handleEmail(paused, { ...env, GUARD_MODE: "off" });
+    const lines = error.mock.calls.map((call) => call.join(" "));
+    expect(lines.map((line) => JSON.parse(line))).toEqual([
+      { event: "receipt_fallback_forward_failed", paused: false, kind: "relay_policy" },
+      { event: "receipt_fallback_forward_failed", paused: true, kind: "other" },
+    ]);
+    expect(lines.join(" ")).not.toContain("private.person");
+    error.mockRestore();
+  });
+});
+
 describe("readiness cost", () => {
   it("never lists R2 on email or summary, and heads one fixed key on /health", async () => {
     const { env } = createEnvironment();
@@ -832,6 +909,22 @@ describe("R2 budget", () => {
     const batch = receiptMessage(rawImageReceipt("budget batch"), { to: "filing-only@receipts.jays.services" });
     await expect(freshHandleEmail(batch, env)).resolves.toBeUndefined();
     expect(batch.rejected).toContain("budget");
+    warn.mockRestore();
+  });
+
+  it("shares one scope across an event, so a second put in it is refused", async () => {
+    const fresh = await freshModule();
+    const { env } = createEnvironment();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const real = createEnvironment();
+    env.RECEIPT_INDEX = { idFromName: () => "receipt-index", get: () => real.env.RECEIPT_INDEX.get() };
+    const id = "b".repeat(64);
+    const run = fresh.budget.invocation();
+    await fresh.storeAndCommitEvidence(env, id, new Uint8Array([1]), run).catch(() => {});
+    const puts = env.RECEIPTS_BUCKET.objects.size;
+    expect(puts).toBe(1);
+    await expect(fresh.storeAndCommitEvidence(env, id, new Uint8Array([1]), run)).rejects.toThrow("per invocation");
+    expect(run.used().r2Put).toBe(1);
     warn.mockRestore();
   });
 

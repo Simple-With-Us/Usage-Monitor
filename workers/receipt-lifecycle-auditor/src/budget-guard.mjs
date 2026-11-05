@@ -1,7 +1,9 @@
 // In-memory runaway guard for Cloudflare Workers and Durable Objects.  It never
 // touches KV, D1, R2 or DO storage to track itself, so checking it costs nothing.
 //
-// It bounds one invocation and one isolate per rolling minute.  Isolates share no
+// It bounds one invocation and one isolate per fixed clock minute.  The minute is a
+// counter that resets, not a rolling window, so a burst straddling a boundary can
+// reach twice the cap in moments; the sustained rate still holds.  Isolates share no
 // memory, so an account-wide day is bounded by the watchdog and the plan, not here.
 //
 // A BudgetExceeded error must be treated as non-retryable: a DO alarm has to catch
@@ -48,7 +50,8 @@ export function createBudget(options) {
   }
 
   return {
-    // One per request, alarm, cron or email event.
+    // One per request, alarm, cron or email event, passed to everything that event
+    // does.  A new scope per operation counts nothing, so perInvocation never trips.
     invocation() {
       const used = Object.create(null);
       const check = (kind) => {

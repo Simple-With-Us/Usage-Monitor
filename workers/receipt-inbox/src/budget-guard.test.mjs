@@ -23,6 +23,17 @@ test("the minute cap spans invocations and resets on the next minute", () => {
   assert.doesNotThrow(() => budget.invocation().spend("fetch"));
 });
 
+test("the minute is a fixed window, so a burst across a boundary reaches twice the cap and no more", () => {
+  let clock = 59_999;
+  const budget = createBudget({ worker: "t", perMinute: { fetch: 2 }, now: () => clock, ...quiet });
+  budget.invocation().spend("fetch");
+  budget.invocation().spend("fetch");
+  clock = 60_000;
+  budget.invocation().spend("fetch");
+  budget.invocation().spend("fetch");
+  assert.throws(() => budget.invocation().spend("fetch"), BudgetExceeded);
+});
+
 test("D1 row counts come from statement meta and stop the next statement", () => {
   const budget = createBudget({ worker: "t", perInvocation: { d1RowsWritten: 100 }, ...quiet });
   const run = budget.invocation();

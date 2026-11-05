@@ -119,8 +119,15 @@ deploys the auditor alone.
 - **Daily intake.**  100 messages and 100 MiB per UTC day in total.  Public mail
   may use 60 messages and 60 MiB of that, and one sender domain may use 20 messages
   and 25 MiB, so the no-forward path always keeps 40 messages.  No-forward mail
-  skips the public and sender limits.
-- **Storage budget.**  Each isolate allows 60 R2 puts and 120 R2 reads a minute.
+  skips the public and sender limits.  The sender limit stops one looping or runaway
+  sender, not a deliberate one: Email Routing requires SPF or DKIM to pass, but
+  anyone can pass them on many subdomains of their own domain.  Such a sender can use
+  up the public part, and public mail then bounces until the next UTC day, with
+  `receipt_quota_exceeded` and scope `public` in the logs.  The cost stays bounded
+  and the no-forward path keeps working.
+- **Storage budget.**  Each event may make one R2 put or one R2 read, and each
+  isolate allows 60 puts and 120 reads per clock minute.  The minute is a counter that
+  resets, not a rolling window, so a burst across a boundary can reach twice that.
   Past the put limit, a message with a fallback copy is left there, and one without
   is rejected so the sender knows.  Past the read limit, the route answers 429.
 - **`GUARD_MODE=off`.**  Set as a Worker secret on either Worker to pause it, so a
@@ -170,8 +177,8 @@ binding never has a missing target.
 
 Both `/health` and the sanitized summary endpoint require the summary-read
 token, so unauthenticated probes cannot generate R2/Durable Object reads.
-Only `/health` probes R2, with a head on one fixed key; an email's own put proves
-R2 on the intake path.
+Only `/health` probes R2, with a head on one fixed key.  On the intake path an
+email's own put proves R2, and a failed put releases its reservation.
 The summary now includes a bounded subject, amount, service, and kind so the
 dashboard can show what arrived.  It still never returns raw MIME, card
 numbers, or mailbox local-parts.
@@ -184,7 +191,8 @@ dashboard session / `OWNER_EXPENSE_TOKEN` form after a human reviews.
 After fallback forwarding, intake is recoverable across R2/index partial
 failures: the index first creates
 a non-visible `pending` reservation, the Worker writes evidence idempotently,
-and a second transaction commits the visible review row. A retry resumes a
+and a second transaction commits the visible review row. A failed put releases
+the reservation, so a resend is not refused as busy; a retry resumes any other
 pending reservation. Pending rows expire after one day; committed review,
 dedupe, sender-domain, and group metadata expire after 180 days in step with the
 R2 evidence lifecycle. Durable Object alarms perform cleanup even when no mail

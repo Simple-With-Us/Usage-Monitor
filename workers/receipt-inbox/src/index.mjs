@@ -16,7 +16,8 @@ const MAX_DAILY_MESSAGES = 100;
 const MAX_DAILY_BYTES = 100 * 1024 * 1024;
 // The public MX may use only part of the day's intake, so the secret no-forward
 // path (one batch measured at 40 messages) always keeps the rest.  One sender
-// domain gets a smaller slice of the public part.
+// domain gets a smaller slice of the public part.  That slice stops one looping or
+// runaway sender, not someone rotating domains; the public cap is what bounds cost.
 const MAX_DAILY_PUBLIC_MESSAGES = 60;
 const MAX_DAILY_PUBLIC_BYTES = 60 * 1024 * 1024;
 const MAX_DAILY_SENDER_MESSAGES = 20;
@@ -55,8 +56,11 @@ const SUPPORTED_ATTACHMENT_TYPES = new Set([
   "image/png",
 ]);
 
-const budget = createBudget({
+// An event makes at most one put (email) or one read (/health, evidence download),
+// so a second one in the same event is a bug to stop, not traffic to allow.
+export const budget = createBudget({
   worker: "usage-monitor-receipt-inbox",
+  perInvocation: { r2Put: 1, r2Read: 1 },
   perMinute: { r2Put: 60, r2Read: 120 },
 });
 
@@ -271,6 +275,20 @@ function forwardToFallback(message, env) {
   return message.forward(env.RECEIPT_FALLBACK_ADDRESS, new Headers({ [HOP_HEADER]: "1" }));
 }
 
+// Fixed words only: relay and provider error text can carry addresses.
+function forwardFailureKind(error) {
+  const text = error instanceof Error ? error.message : "";
+  if (/\bCS\d{2}\b/.test(text)) return "relay_policy";
+  if (/\bhops?\b/i.test(text)) return "hop_limit";
+  if (/verif/i.test(text)) return "destination_unverified";
+  if (/\b(?:spf|dkim|dmarc|authenticat)/i.test(text)) return "sender_unauthenticated";
+  return "other";
+}
+
+function logForwardFailure(error, paused) {
+  console.error(JSON.stringify({ event: "receipt_fallback_forward_failed", paused, kind: forwardFailureKind(error) }));
+}
+
 // Guard off means no Durable Object, R2 or parsing.  Keep the mail in the fallback
 // mailbox instead of bouncing it, including no-forward mail, because nothing else
 // here will store it.  Reject only when no copy can be kept, so the sender knows.
@@ -284,14 +302,14 @@ async function forwardWhileGuardOff(message, env) {
       await forwardToFallback(message, env);
       return;
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error("receipt fallback forward failed while paused:", reason);
+      logForwardFailure(error, true);
     }
   }
   message.setReject("Receipt inbox is paused; please retry later");
 }
 
 export async function handleEmail(message, env, _ctx) {
+  const run = budget.invocation();
   // Accept any *@receipts.jays.services recipient (short or high-entropy).
   // RECEIPT_INBOX_ADDRESS remains a configured identity on that domain used
   // for readiness/health; it is no longer the sole accepted To: address.
@@ -367,8 +385,7 @@ export async function handleEmail(message, env, _ctx) {
     } catch (error) {
       // Relay rejections (e.g. iCloud CS01, hop limits) must not fail intake:
       // admission already succeeded and this Worker still holds the original.
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error("receipt fallback forward failed:", reason);
+      logForwardFailure(error, false);
     }
   }
 
@@ -466,10 +483,10 @@ export async function handleEmail(message, env, _ctx) {
     throw new Error("Receipt index returned an invalid reservation ID");
   }
   try {
-    await storeAndCommitEvidence(env, targetId, raw);
+    await storeAndCommitEvidence(env, targetId, raw, run);
   } catch (error) {
     if (!(error instanceof BudgetExceeded)) throw error;
-    // Throwing would invite redelivery.  The pending row expires by itself, and a
+    // Throwing would invite redelivery.  The reservation is already released, and a
     // forwarded copy is already safe; otherwise tell the sender.
     if (!forwardedToFallback) message.setReject("Receipt inbox storage budget reached; please retry later");
     return;
@@ -482,11 +499,26 @@ export async function handleEmail(message, env, _ctx) {
   return { id: targetId };
 }
 
-export async function storeAndCommitEvidence(env, id, raw) {
-  budget.invocation().spend("r2Put");
-  await env.RECEIPTS_BUCKET.put(evidenceKey(id), raw, {
-    httpMetadata: { contentType: "message/rfc822" },
-  });
+// Nothing was stored, so give the reservation back: a pending group marker would
+// otherwise answer "busy" to a resend with the same attachment for up to a day.
+async function releaseReservation(env, id) {
+  try {
+    await indexRequest(env, `/release/${id}`, { method: "POST" });
+  } catch {
+    // The original failure is the one to report, and the row still expires by itself.
+  }
+}
+
+export async function storeAndCommitEvidence(env, id, raw, run = budget.invocation()) {
+  try {
+    run.spend("r2Put");
+    await env.RECEIPTS_BUCKET.put(evidenceKey(id), raw, {
+      httpMetadata: { contentType: "message/rfc822" },
+    });
+  } catch (error) {
+    await releaseReservation(env, id);
+    throw error;
+  }
   await indexRequest(env, `/commit/${id}`, { method: "POST" });
 }
 
@@ -521,15 +553,16 @@ async function hasValidConfiguration(env) {
   return tokensDistinct;
 }
 
-// Email needs no R2 probe because its put proves R2.  /health uses a head on a fixed
-// key: Class B, and a missing object returns null and still proves the binding.
-async function readiness(env, { probeStorage = false } = {}) {
+// Email needs no R2 probe: its put proves R2, a probe could not cover the moment
+// before that put, and a failed put releases its reservation.  /health uses a head on
+// a fixed key: Class B, and a missing object returns null and still proves the binding.
+async function readiness(env, { probe = null } = {}) {
   if (!(await hasValidConfiguration(env))) return { ready: false, reason: "invalid_configuration" };
   try {
     const lifecycle = await ensureLifecycleAudit(env);
     if (!lifecycle.ok) return { ready: false, reason: "lifecycle_unverified" };
-    if (probeStorage) {
-      budget.invocation().spend("r2Read");
+    if (probe) {
+      probe.spend("r2Read");
       await env.RECEIPTS_BUCKET.head(READINESS_PROBE_KEY);
     }
     await indexRequest(env, "/ready", { method: "GET" });
@@ -635,7 +668,7 @@ async function ensureLifecycleAudit(env, force = false) {
 export async function handleFetch(request, env) {
   if (guardOff(env)) return guardOffResponse();
   try {
-    return await routeFetch(request, env);
+    return await routeFetch(request, env, budget.invocation());
   } catch (error) {
     if (!(error instanceof BudgetExceeded)) throw error;
     const response = json({ error: "Rate limited" }, 429);
@@ -644,7 +677,7 @@ export async function handleFetch(request, env) {
   }
 }
 
-async function routeFetch(request, env) {
+async function routeFetch(request, env, run) {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
     if (
@@ -652,7 +685,7 @@ async function routeFetch(request, env) {
       || env.RECEIPT_INBOX_READ_TOKEN.length < 32
       || !await safeTokenEqual(bearerToken(request), env.RECEIPT_INBOX_READ_TOKEN)
     ) return json({ error: "Unauthorized" }, 401);
-    const result = await readiness(env, { probeStorage: true });
+    const result = await readiness(env, { probe: run });
     return json({ ok: result.ready, status: result.ready ? "ready" : "unavailable", ...(result.reason ? { reason: result.reason } : {}) }, result.ready ? 200 : 503);
   }
 
@@ -666,7 +699,7 @@ async function routeFetch(request, env) {
     const id = evidenceMatch[1];
     const availability = await indexStub(env).fetch(`https://receipt-index.internal/evidence/${id}`);
     if (!availability.ok) return json({ error: "Not found" }, 404);
-    budget.invocation().spend("r2Read");
+    run.spend("r2Read");
     const object = await env.RECEIPTS_BUCKET.get(evidenceKey(id));
     if (!object) return json({ error: "Not found" }, 404);
     return new Response(object.body, {
@@ -733,6 +766,19 @@ function admissionRefusal(daily, bytes, sender, noForward) {
 
 function dailySender(daily, domain) {
   return daily.senders && Object.hasOwn(daily.senders, domain) ? daily.senders[domain] : { count: 0, bytes: 0 };
+}
+
+async function deletePending(storage, id, metadata, expiryKey) {
+  const exactKey = `dedupe:${id}`;
+  const exact = await storage.get(exactKey);
+  const groupKey = metadata.groupId ? `group:${metadata.groupId}` : null;
+  const group = groupKey ? await storage.get(groupKey) : null;
+  await storage.delete([
+    expiryKey,
+    `pending:${id}`,
+    ...(exact?.status === "pending" && exact.id === id ? [exactKey] : []),
+    ...(groupKey && group?.status === "pending" && group.id === id ? [groupKey] : []),
+  ]);
 }
 
 export class ReceiptInboxIndex {
@@ -828,6 +874,24 @@ export class ReceiptInboxIndex {
       });
       await this.scheduleNextAlarm(cleanupBacklog);
       return json(result);
+    }
+
+    const releaseMatch = /^\/release\/([0-9a-f]{64})$/.exec(url.pathname);
+    if (request.method === "POST" && releaseMatch) {
+      const id = releaseMatch[1];
+      const result = await this.state.storage.transaction(async (storage) => {
+        const metadata = await storage.get(`pending:${id}`);
+        if (!metadata) return "not_found";
+        await deletePending(
+          storage,
+          id,
+          metadata,
+          `pending-expire:${timestampKey(Date.parse(metadata.receivedAt) + PENDING_RETENTION_MS)}:${id}`,
+        );
+        return "released";
+      });
+      await this.scheduleNextAlarm(cleanupBacklog);
+      return json({ result });
     }
 
     const commitMatch = /^\/commit\/([0-9a-f]{64})$/.exec(url.pathname);
@@ -1010,16 +1074,7 @@ export class ReceiptInboxIndex {
           await storage.delete(expiryKey);
           return;
         }
-        const exactKey = `dedupe:${id}`;
-        const exact = await storage.get(exactKey);
-        const groupKey = metadata.groupId ? `group:${metadata.groupId}` : null;
-        const group = groupKey ? await storage.get(groupKey) : null;
-        await storage.delete([
-          expiryKey,
-          pendingKey,
-          ...(exact?.status === "pending" && exact.id === id ? [exactKey] : []),
-          ...(groupKey && group?.status === "pending" && group.id === id ? [groupKey] : []),
-        ]);
+        await deletePending(storage, id, metadata, expiryKey);
       });
     }
   }
