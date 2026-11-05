@@ -601,14 +601,21 @@ async function fetchBoundedJson(response, maxBytes = 64 * 1024) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+// A malformed auditor answer must never read as a fresh, verified audit.
+function auditorResult(body) {
+  if (typeof body?.ok !== "boolean" || !Number.isFinite(body?.checkedAt) || body.checkedAt <= 0) {
+    throw new Error("invalid_audit");
+  }
+  return { ok: body.ok, checkedAt: body.checkedAt };
+}
+
 async function auditLifecycle(env) {
   try {
     const response = await env.LIFECYCLE_AUDITOR.fetch("https://receipt-lifecycle-auditor.internal/audit", {
       method: "POST",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await fetchBoundedJson(response);
-    return { ok: body?.ok === true, checkedAt: Number(body?.checkedAt) || Date.now() };
+    return auditorResult(await fetchBoundedJson(response));
   } catch {
     return { ok: false, checkedAt: Date.now() };
   }
@@ -619,9 +626,7 @@ async function readAuditorStatus(env) {
     method: "GET",
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const body = await fetchBoundedJson(response);
-  if (typeof body?.ok !== "boolean" || !Number.isFinite(body?.checkedAt)) throw new Error("invalid_audit");
-  return { ok: body.ok, checkedAt: body.checkedAt };
+  return auditorResult(await fetchBoundedJson(response));
 }
 
 // The auditor's stored result changes only on its cron or a forced audit, so an ok

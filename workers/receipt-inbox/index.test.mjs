@@ -797,6 +797,18 @@ describe("readiness cost", () => {
     expect(controls.lifecycleAuditCalls).toBe(1);
   });
 
+  it("treats a forced audit with no usable time as failed, not as freshly verified", async () => {
+    for (const lifecycleAudit of [{ ok: true }, { ok: true, checkedAt: 0 }, { ok: true, checkedAt: "soon" }, null]) {
+      const { env, storage, controls } = createEnvironment();
+      storage.values.set("lifecycle:audit", { ok: true, checkedAt: 1 });
+      controls.lifecycleAudit = lifecycleAudit;
+      const health = await handleFetch(new Request("https://receipt-inbox.jays.services/health", readHeaders()), env);
+      expect(health.status).toBe(503);
+      expect(await health.json()).toMatchObject({ reason: "lifecycle_unverified" });
+      expect(storage.values.get("lifecycle:audit").ok).toBe(false);
+    }
+  });
+
   it("keeps the cron slots in step with the auditor schedule", () => {
     const config = readFileSync(new URL("../receipt-lifecycle-auditor/wrangler.jsonc", import.meta.url), "utf8");
     expect(config).toContain('"crons": ["17 */12 * * *"]');
