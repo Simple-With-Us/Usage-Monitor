@@ -50,7 +50,7 @@ wrangler d1 execute expenses-site --remote --command "SELECT key, value FROM syn
 
 A malformed counter fails closed.  Deleting that row clears it, and also clears the day's count.
 
-Bump `SYNC_SHAPE_VERSION` in `src/sync.mjs` whenever `mapUpstreamExpense` or `dedupeUpstreamRows` changes what is stored.  Category rule edits force a full pass by themselves.
+Bump `SYNC_SHAPE_VERSION` in `src/sync.mjs` whenever `mapUpstreamExpense`, `dedupeUpstreamRows` or the logic of `categorizeExpense` changes what is stored.  Category rule edits force a full pass by themselves.
 
 ## Secrets (never in the repo)
 
@@ -60,7 +60,7 @@ Bump `SYNC_SHAPE_VERSION` in `src/sync.mjs` whenever `mapUpstreamExpense` or `de
 
 The hostname sits behind Cloudflare Access ("Jay emails only"), same as the other internal dashboards.  The worker itself performs no identity checks.
 
-`GET /health` is the deploy probe (`scripts/worker-targets.json`).  It runs `SELECT 1` and returns only `{ "ok": true }`.  It stays behind Access, with no public bypass: the probe presents `WORKER_HEALTH_ACCESS_CLIENT_ID` and `_SECRET`, so the Access app needs a Service Auth policy that admits that token before auto-deploy can work.
+`GET /health` runs `SELECT 1` and returns only `{ "ok": true }`, for a probe that can pass Access.  It stays behind Access, with no public bypass, so a caller needs a Service Auth policy on the Access app.  `scripts/worker-targets.json` does not point at it.
 
 ## Local dev
 

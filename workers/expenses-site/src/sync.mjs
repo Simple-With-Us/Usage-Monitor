@@ -38,8 +38,9 @@ const UPSTREAM_HASH_KEY = "upstream_hash";
 const ROWS_WRITTEN_KEY = "rows_written_today";
 const MANUAL_SYNC_KEY = "manual_sync_at";
 
-// Bump when mapUpstreamExpense or dedupeUpstreamRows changes what is stored, so
-// the next run compares every row even though the upstream text is the same.
+// Bump when mapUpstreamExpense, dedupeUpstreamRows or the logic of categorizeExpense
+// (not its rules, which are hashed) changes what is stored, so the next run compares
+// every row even though the upstream text is the same.
 const SYNC_SHAPE_VERSION = "1";
 
 const COMPARED_FIELDS = [
@@ -387,7 +388,9 @@ export async function syncExpenses(env, { manual = false } = {}) {
 
   if (staleKeys.length > 0 || toWrite.length > 0) {
     // Reserved first: a run killed mid-write still counts against the day.
-    const reserved = (staleKeys.length + toWrite.length) * MAX_ROWS_PER_STATEMENT + STATE_WRITE_ROWS;
+    const clearHash = state.has(UPSTREAM_HASH_KEY) ? 1 : 0;
+    const reserved =
+      (staleKeys.length + toWrite.length) * MAX_ROWS_PER_STATEMENT + STATE_WRITE_ROWS + clearHash;
     requireRoom(reserved + 1);
     const reservation = await setStateStatement(
       db,
@@ -395,6 +398,15 @@ export async function syncExpenses(env, { manual = false } = {}) {
       `${today}:${spentBefore + written() + reserved + 1}`
     ).run();
     recordD1(run, reservation);
+    // The mirror stops matching the stored hash from here until the run finishes.
+    // Left in place, a run that stops part way and an upstream that then goes back
+    // to the old text would skip the sync over a half-written mirror.
+    if (clearHash) {
+      recordD1(
+        run,
+        await db.prepare("DELETE FROM sync_state WHERE key = ?").bind(UPSTREAM_HASH_KEY).run()
+      );
+    }
   } else {
     requireRoom(STATE_WRITE_ROWS);
   }

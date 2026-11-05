@@ -8,9 +8,8 @@
       "--config",
       "workers/expenses-site/wrangler.jsonc"
     ],
-    "health": "https://expenses.jays.services/health",
-    "access": true,
-    "ok": true
+    "health": "https://expenses.jays.services/api/expenses",
+    "access": true
   },
   "usage-monitor-receipt-inbox": {
     "command": [

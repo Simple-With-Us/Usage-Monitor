@@ -428,6 +428,49 @@ describe("syncExpenses", () => {
       expect(db.state("upstream_hash")).toBeTruthy();
     });
 
+    it("does not skip a half-written mirror when upstream goes back to the old text", async () => {
+      const original = [upstream];
+      fetchMock.mockResolvedValueOnce(page(original));
+      await syncExpenses(envFor(db));
+      expect(db.state("upstream_hash")).toBeTruthy();
+
+      // A burst past the cap writes the first slice and fails the run.
+      const burst = Array.from({ length: MAX_CHANGED_ROWS_PER_RUN + 1 }, (_, i) => ({
+        ...upstream,
+        idempotencyKey: i === 0 ? upstream.idempotencyKey : `k${i}`,
+        amountUsd: i === 0 ? 1 : upstream.amountUsd,
+        label: i === 0 ? upstream.label : `Invoice ${i}`,
+      }));
+      fetchMock.mockResolvedValueOnce(page(burst));
+      await expect(syncExpenses(envFor(db))).rejects.toThrow("changed rows over 300");
+      expect(db.rows().find((row) => row.idempotency_key === upstream.idempotencyKey).amount_usd).toBe(1);
+      expect(db.state("upstream_hash")).toBeUndefined();
+
+      fetchMock.mockResolvedValueOnce(page(original));
+      const result = await syncExpenses(envFor(db));
+
+      expect(result).toMatchObject({ unchanged: false, upserted: 1 });
+      expect(db.rows().find((row) => row.idempotency_key === upstream.idempotencyKey).amount_usd).toBe(
+        upstream.amountUsd
+      );
+    });
+
+    it("counts the hash clear in the reservation when a write fails", async () => {
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      await syncExpenses(envFor(db));
+      const before = Number(db.state("rows_written_today").split(":")[1]);
+      fetchMock.mockResolvedValueOnce(page([{ ...upstream, amountUsd: 7 }]));
+      const realBatch = db.batch;
+      db.batch = async () => {
+        throw new Error("D1 failed");
+      };
+      await expect(syncExpenses(envFor(db))).rejects.toThrow("D1 failed");
+      db.batch = realBatch;
+      expect(db.state("upstream_hash")).toBeUndefined();
+      // 1 row x 4 + the 3 state rows + the hash clear + the reservation itself.
+      expect(db.state("rows_written_today")).toBe(`${today()}:${before + 9}`);
+    });
+
     it("records rows written from D1's meta", async () => {
       fetchMock.mockResolvedValueOnce(page([upstream, expense("k2")]));
       await syncExpenses(envFor(db));
