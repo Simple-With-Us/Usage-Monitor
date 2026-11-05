@@ -45,7 +45,12 @@ auditor or redeploy a stopped inbox.
 
 Before setting WORKER_DEPLOY_ENABLED, disconnect it: in the dashboard, open the Worker, then
 Settings, Builds, Disconnect.  Cloudflare documents that existing deployments keep serving
-traffic after a disconnect.  Then correct the two documents named above.
+traffic after a disconnect.  Then correct the two documents named above, and in the README
+replace the paragraph on connecting the auditor to Git with a pointer to this job, because
+following it would make a second unguarded path.
+
+The trigger can change at any time, so read it again just before setting the variable.  The
+Builds API's triggers list for the Worker should come back empty for all three Workers.
 
 Read on November 4, 2026, the trigger still exists and names the repository's old owner.
 Its last build was at 7:43 PM on October 1, with no build for the 283 commits on `main`
