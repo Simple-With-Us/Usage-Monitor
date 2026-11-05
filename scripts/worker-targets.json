@@ -49,7 +49,7 @@
     "deploy_after": "usage-monitor-receipt-lifecycle-auditor",
     "guard": {
       "status": "gated",
-      "max_cpu_ms": 200,
+      "max_cpu_ms": 500,
       "max_subrequests": 30,
       "limits_pending": true
     }

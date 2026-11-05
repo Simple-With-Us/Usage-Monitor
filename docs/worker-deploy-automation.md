@@ -50,7 +50,7 @@ replace the paragraph on connecting the auditor to Git with a pointer to this jo
 following it would make a second unguarded path.
 
 The trigger can change at any time, so read it again just before setting the variable.  The
-Builds API's triggers list for the Worker should come back empty for all three Workers.
+Builds API's triggers list for the Worker should come back empty for all three Workers.  Reading it needs a token with Workers CI Read, which the deploy credential is not required to have.
 
 Read on November 4, 2026, the trigger still exists and names the repository's old owner.
 Its last build was at 7:43 PM on October 1, with no build for the 283 commits on `main`
@@ -126,7 +126,9 @@ deploy job runs the check with --require-limits and stops first.  `limits_pendi
 pull request pass while the limits land in that Worker's config, and it must be removed
 once they have.  It never excuses a value over the ceiling, and it is ignored by the deploy
 job.  Some ceilings are paid-plan values: the documented Free maximum is 50 subrequests,
-and expenses is at 200, so a move to Free needs a config and ceiling change first.
+and expenses is at 200, so a move to Free needs a config and ceiling change first.  The inbox ceiling is
+500 ms because 200 ms stopped PDF mail from roughly 6.5 MiB, and intake is capped at 60 messages a
+day, so the cost is small.
 
 ## Credentials
 

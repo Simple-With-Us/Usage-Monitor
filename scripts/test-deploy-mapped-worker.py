@@ -225,6 +225,7 @@ class Checks(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,"1 failed invocations"):m.probe(target,"x",after_upload=True)
  def test_only_expenses_tolerates_exceptions(self):
   self.assertEqual([n for n,t in m.TARGETS.items() if "tolerated_exceptions" in t],["expenses-jays-services"])
+  self.assertEqual(m.TARGETS["expenses-jays-services"]["tolerated_exceptions"],12)
  def test_current_main_reads_main_ref_sha(self):
   with patch.dict(os.environ,{"GITHUB_REPOSITORY":"o/r","GH_TOKEN":"t"}),patch("urllib.request.urlopen") as urlopen:
    urlopen.return_value.__enter__.return_value=io.BytesIO(b'{"object":{"sha":"abc"}}')
@@ -285,6 +286,14 @@ class GuardChecks(unittest.TestCase):
  def test_this_repo_covers_exactly_the_three_workers(self):
   self.assertEqual(set(m.TARGETS),{"expenses-jays-services","usage-monitor-receipt-inbox","usage-monitor-receipt-lifecycle-auditor"})
   for target in m.TARGETS.values():self.assertIn(target["guard"]["status"],g.STATUSES)
+ def test_inbox_ceiling_leaves_room_for_large_pdf_mail(self):
+  # 200 ms stopped PDF mail from roughly 6.5 MiB, so a config may go to 500 and no further.
+  guard=m.TARGETS["usage-monitor-receipt-inbox"]["guard"]
+  self.assertEqual((guard["max_cpu_ms"],guard["max_subrequests"]),(500,30))
+  errors,_=g.check_limits("i",{"limits":{"cpu_ms":500,"subrequests":30}},guard,True)
+  self.assertEqual(errors,[])
+  errors,_=g.check_limits("i",{"limits":{"cpu_ms":501,"subrequests":30}},guard,True)
+  self.assertTrue(any("over the registry ceiling 500" in e for e in errors))
  def test_clean_config_passes(self):
   self.assertEqual(self.errors(),([],[]))
  def test_missing_limits_fail(self):
