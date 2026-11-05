@@ -224,6 +224,8 @@ Nothing else leaves the process: no prompts, responses, tool arguments, session 
 
 `ingest.scope_rejected` and `ingest.events_rejected` are mirrored to fleet-infra too, like `ingest.failed` already was, so a refused or rejected producer is visible in the shared fleet health view and not only in this app's own Sentry project.
 
+How the mirror lands in fleet-infra (`recordFleetInfraMetric` in `src/lib/sentry-fleet.ts`):  healthy counters and gauges (`usage.persisted`, `ai.request*`, `poll.snapshot*`, `scheduler.duration_ms`, `rollup.completed`) post a `trace_metric` envelope item, so they show up in Explore > Metrics and never open an issue.  Failure-class names (a `failed`, `rejected`, `error` or `zero_success` segment) still post a warning-level event, so they keep opening fleet-infra issues and paging.  Until 2026-11 every point was an event, which turned each healthy metric into a permanently firing issue.
+
 ## Verifying a new producer against this matrix
 
 Before a new producer is wired:
