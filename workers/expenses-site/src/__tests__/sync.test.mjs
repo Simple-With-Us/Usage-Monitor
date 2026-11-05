@@ -711,6 +711,27 @@ describe("syncExpenses", () => {
       expect(db.writes).toEqual([]);
     });
 
+    it("writes nothing for a refused claim in the same millisecond as the stored one", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-05T22:06:24.123Z"));
+      try {
+        fetchMock.mockResolvedValue(page([upstream]));
+        await syncExpenses(envFor(db), { manual: true });
+        const counter = db.state("rows_written_today");
+        fetchMock.mockClear();
+        db.writes.length = 0;
+
+        const second = await syncExpenses(envFor(db), { manual: true });
+
+        expect(second).toEqual({ cooldown: true, retryAfterSeconds: 60 });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(db.writes).toEqual([]);
+        expect(db.state("rows_written_today")).toBe(counter);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("cools a caller retrying a failed sync too", async () => {
       fetchMock.mockResolvedValueOnce({ ok: false, status: 502 });
       await expect(syncExpenses(envFor(db), { manual: true })).rejects.toThrow("upstream 502");
