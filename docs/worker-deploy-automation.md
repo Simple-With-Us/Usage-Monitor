@@ -15,9 +15,14 @@ Existing schema, bindings and migrations remain owned by each Worker's reviewed
 configuration.  A half-hour drain catches merges made with bot tokens.
 Already-live revisions still get a health check.
 
-The pre-deploy probe fails closed: if the live Worker is unhealthy, or the probe
-credentials do not work, the job stops before any upload.  Fix-forward for a
-Worker that is already broken is a manual deploy or rollback, not this job.
+The pre-deploy HTTP probe fails closed: if the live Worker is unhealthy, or the probe
+credentials do not work, the job stops before any upload.  A telemetry target only has
+to prove its read works before an upload, because that probe looks back a whole day.  Fix-forward for a
+Worker whose HTTP probe already fails is a manual deploy, not this job.
+
+A rollback does not hold on its own.  The live tag then differs from main, so the next
+half-hourly run redeploys main.  Before rolling back, set WORKER_DEPLOY_ENABLED to false
+or revert the commit on main.
 
 ## Targets and order
 
@@ -35,7 +40,7 @@ A target with `health` is called over HTTP.  The inbox uses this, with its read
 A target with `"probe": "telemetry"` is checked from Cloudflare's invocation analytics
 and takes no Worker request, D1 row or Access credential.  It fails on any failed
 invocation of the live version in the last day, and on no invocations at all in that
-window.  Straight after an upload the second half is skipped, because the new version has
+window, so one failure leaves the run red until it ages out or a new version ships.  Straight after an upload the second half is skipped, because the new version has
 not met a cron yet; the next half-hourly run applies both.  A failed read of the
 analytics (including a rate limit) fails closed and the next run tries again.
 
@@ -47,7 +52,9 @@ and WORKER_HEALTH_ACCESS_CLIENT_ID/SECRET are no longer passed.
 
 The limit of telemetry: it sees exceptions, not a run that fails and returns normally.
 The expenses scheduled handler catches its own errors today, so a failed sync reads as
-success until that handler rethrows.
+success until that handler rethrows.  The auditor catches its own audit errors too, so its
+telemetry only shows that the cron ran.  The audit result itself is covered by the inbox
+/health probe, which answers lifecycle_unverified when the audit is not good.
 
 ## Stopped Workers and rotated secrets
 
@@ -58,7 +65,9 @@ stopped Worker shows red every half hour until someone re-arms it.
 
 A secret change makes a new untagged version of the same code, so the receipt walks back
 through secret-only versions to the last tagged one.  It stops at any other untagged
-version, and the job then deploys once, which restores the tag.  A settings or limits
+version, and also when the tagged version found is not the one deployed before the secret
+change (after a rollback, or an upload never deployed).  The job then deploys once, which
+restores the tag.  A settings or limits
 PATCH is one of those: Cloudflare records it as an upload with a new script hash, so it
 cannot be told apart from a code upload.
 

@@ -55,19 +55,37 @@ def live_annotations(name):
     """Annotations of the live version, then of each older one while the newer is secret-only.
 
     A secret change makes a new untagged version of the same code, so the code's release is
-    the first version below it that is not secret-only.  Anything else stops the walk."""
-    version=live_version(name)
-    if not version:return
-    annotations=api("/workers/scripts/"+name+"/versions/"+version).get("annotations") or {}
+    the first version below it that is not secret-only.  That version must also be the one
+    deployed before the secret change: after a rollback or an upload that was never deployed,
+    the next lower number is not the code that was live, so the walk stops with no answer
+    rather than a tag for code that is not running."""
+    history=api("/workers/scripts/"+name+"/deployments")["deployments"]
+    if not history:return
+    versions=history[0].get("versions",[])
+    if len(versions)!=1 or versions[0].get("percentage")!=100:return
+    version=api("/workers/scripts/"+name+"/versions/"+versions[0]["version_id"])
+    annotations=version.get("annotations") or {}
     yield annotations
-    if annotations.get("workers/triggered_by")!="secret":return
-    below=False
-    for item in api("/workers/scripts/"+name+"/versions?per_page=25")["items"]:
-        if below:
-            annotations=item.get("annotations") or {}
-            yield annotations
-            if annotations.get("workers/triggered_by")!="secret":return
-        elif item.get("id")==version:below=True
+    if annotations.get("workers/tag") or annotations.get("workers/triggered_by")!="secret":return
+    number=version.get("number")
+    if type(number) is not int:return
+    passed={versions[0]["version_id"]}
+    items=api("/workers/scripts/"+name+"/versions?per_page=50")["items"]
+    earlier=[v for v in items if type(v.get("number")) is int and v["number"]<number]
+    for item in sorted(earlier,key=lambda v:v["number"],reverse=True):
+        annotations=item.get("annotations") or {}
+        if annotations.get("workers/tag") or annotations.get("workers/triggered_by")!="secret":
+            if item.get("id")==deployed_before(history,passed):yield annotations
+            return
+        yield annotations
+        passed.add(item.get("id"))
+def deployed_before(history,passed):
+    """The version fully deployed just before the versions in passed, newest first."""
+    for deployment in history:
+        versions=deployment.get("versions",[])
+        if len(versions)!=1 or versions[0].get("percentage")!=100:return None
+        if versions[0]["version_id"] not in passed:return versions[0]["version_id"]
+    return None
 def deployed_tag(name):
     for annotations in live_annotations(name):
         if annotations.get("workers/tag"):return annotations["workers/tag"]
@@ -92,21 +110,26 @@ def telemetry_rows(name):
     with urllib.request.urlopen(request,timeout=30) as response:body=json.load(response)
     if body.get("errors"):raise RuntimeError("Cloudflare telemetry read rejected")
     return body["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]
-def telemetry_probe(name,after_upload=False):
+def telemetry_probe(name,after_upload=False,before_upload=False):
     """No failed invocation on the live version, and the Worker has run recently.
 
     A version just uploaded has not met a cron yet, so right after upload only the first
-    half applies; the next half-hour run of the job applies both."""
+    half applies; the next half-hour run of the job applies both.  Before an upload only the
+    read has to work: this looks back a whole day, so one old failure of the live version
+    would hold back the commit that fixes it for up to a day, and the inbox behind the auditor."""
     version=live_version(name)
     if not version:raise RuntimeError("Live version not at 100% for "+name)
     rows=telemetry_rows(name)
     failed=sum(r["sum"]["requests"] for r in rows
       if r["dimensions"]["scriptVersion"]==version and r["dimensions"]["status"] not in TELEMETRY_OK_STATUSES)
+    if before_upload:
+        if failed:print(str(failed)+" failed invocations on the live version of "+name+"; uploading the new version anyway")
+        return
     if failed:raise RuntimeError(str(failed)+" failed invocations on the live version of "+name)
     if not after_upload and not sum(r["sum"]["requests"] for r in rows):
         raise RuntimeError("No invocations of "+name+" in the telemetry window")
-def probe(target, name="unnamed target", after_upload=False):
-    if target.get("probe")=="telemetry":return telemetry_probe(name,after_upload)
+def probe(target, name="unnamed target", after_upload=False, before_upload=False):
+    if target.get("probe")=="telemetry":return telemetry_probe(name,after_upload,before_upload)
     url=target.get("health")
     if not url:raise RuntimeError("Functional probe not configured for "+name)
     headers={"User-Agent":USER_AGENT}
@@ -139,8 +162,9 @@ def main():
         if first_tag!=sha and worker_changed(first_tag,sha):
             raise SystemExit(first+" is not at "+sha[:12]+"; refusing to deploy "+name+" ahead of it")
     # Do not start a deployment unless probe credentials are present and old live service is healthy.
-    # Fail closed: a live Worker that fails this probe is recovered by a manual deploy or rollback.
-    probe(target,name)
+    # Fail closed: a live Worker that fails an HTTP probe is recovered by a manual deploy.  A
+    # telemetry target only has to prove its read works here; see telemetry_probe.
+    probe(target,name,before_upload=True)
     if name.startswith("usage-monitor-receipt-"):
         subprocess.run(["node","scripts/verify-receipt-inbox-lifecycle.mjs"],check=True)
     if current_main()!=sha:print("Superseded before upload; skipping");return

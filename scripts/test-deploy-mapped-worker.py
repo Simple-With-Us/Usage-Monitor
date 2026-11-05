@@ -36,7 +36,7 @@ class Checks(unittest.TestCase):
   self.assertNotIn("health",m.TARGETS["expenses-jays-services"])
  def test_gate_stays_off_and_deploy_job_requires_limits(self):
   with open(".github/workflows/worker-deploy.yml") as f:workflow=f.read()
-  self.assertIn("vars.WORKER_DEPLOY_ENABLED == 'true'",workflow)
+  self.assertIn("vars.WORKER_DEPLOY_ENABLED == 'true' && github.event_name != 'pull_request'",workflow)
   self.assertIn("scripts/check-worker-guards.py --require-limits",workflow)
  def test_api_request_names_a_client(self):
   with patch.dict(os.environ,{"CLOUDFLARE_API_TOKEN":"t"}),patch("urllib.request.urlopen") as urlopen:
@@ -54,23 +54,38 @@ class Checks(unittest.TestCase):
    response.status=200;response.read=lambda *a:b'{"ok":true}'
    m.probe({"health":"https://x/health","ok":True},"x")
    self.assertEqual(urlopen.call_args.args[0].get_header("User-agent"),m.USER_AGENT)
- def live(self,*items,annotations=None,message=None):
-  """api() stand-in: live version 'a' at 100%, with the given version list."""
+ def live(self,*items,annotations=None,message=None,earlier=("b","c")):
+  """api() stand-in: live version 'a' (number 10) at 100%, then the deployments in earlier, newest first."""
   deployment={"versions":[{"version_id":"a","percentage":100}],"annotations":{"workers/message":message} if message else {}}
+  history=[deployment]+[{"versions":[{"version_id":v,"percentage":100}]} for v in earlier]
   def fake(path):
-   if path.endswith("/deployments"):return {"deployments":[deployment]}
+   if path.endswith("/deployments"):return {"deployments":history}
    if "/versions?" in path:return {"items":list(items)}
-   if path.endswith("/versions/a"):return {"annotations":annotations}
+   if path.endswith("/versions/a"):return {"annotations":annotations,"number":10}
    raise AssertionError(path)
   return patch.object(m,"api",side_effect=fake)
  def test_secret_only_version_walks_back_to_the_tag(self):
   secret={"workers/triggered_by":"secret"}
-  with self.live({"id":"newer-undeployed","annotations":{"workers/tag":"wrong"}},{"id":"a","annotations":secret},{"id":"b","annotations":secret},{"id":"c","annotations":{"workers/tag":"sha"}},annotations=secret):
+  with self.live({"id":"newer-undeployed","number":11,"annotations":{"workers/tag":"wrong"}},{"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":secret},{"id":"c","number":8,"annotations":{"workers/tag":"sha"}},annotations=secret):
    self.assertEqual(m.deployed_tag("x"),"sha")
  def test_walk_stops_at_an_untagged_code_version(self):
   secret={"workers/triggered_by":"secret"}
-  with self.live({"id":"a","annotations":secret},{"id":"b","annotations":{"workers/triggered_by":"version_upload"}},{"id":"c","annotations":{"workers/tag":"old"}},annotations=secret):
+  with self.live({"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":{"workers/triggered_by":"version_upload"}},{"id":"c","number":8,"annotations":{"workers/tag":"old"}},annotations=secret):
    self.assertIsNone(m.deployed_tag("x"))
+ def test_walk_does_not_claim_a_version_that_was_rolled_back(self):
+  # b was deployed, then rolled back to c, and a secret change copied c into a.
+  secret={"workers/triggered_by":"secret"}
+  with self.live({"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":{"workers/tag":"bad"}},{"id":"c","number":8,"annotations":{"workers/tag":"good"}},annotations=secret,earlier=("c","b","c")):
+   self.assertIsNone(m.deployed_tag("x"))
+ def test_walk_does_not_claim_an_upload_that_was_never_deployed(self):
+  secret={"workers/triggered_by":"secret"}
+  with self.live({"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":{"workers/tag":"never-live"}},{"id":"c","number":8,"annotations":{"workers/tag":"live"}},annotations=secret,earlier=("c",)):
+   self.assertIsNone(m.deployed_tag("x"))
+ def test_walk_passes_a_label_deployment_on_the_same_version(self):
+  # The watchdog's label is a second deployment of the live version, not older code.
+  secret={"workers/triggered_by":"secret"}
+  with self.live({"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":{"workers/tag":"sha"}},annotations=secret,earlier=("a","b")):
+   self.assertEqual(m.deployed_tag("x"),"sha")
  def test_untagged_settings_upload_is_not_walked(self):
   with self.live(annotations={"workers/triggered_by":"upload"}):self.assertIsNone(m.deployed_tag("x"))
  def test_guard_tripped_on_deployment_message(self):
@@ -79,7 +94,7 @@ class Checks(unittest.TestCase):
   with self.live(annotations={"workers/message":"GUARD-TRIPPED d1 rows"}):self.assertTrue(m.guard_tripped("x"))
  def test_guard_tripped_under_a_secret_version(self):
   secret={"workers/triggered_by":"secret"}
-  with self.live({"id":"a","annotations":secret},{"id":"b","annotations":{"workers/message":"GUARD-TRIPPED x","workers/triggered_by":"version_upload"}},annotations=secret):
+  with self.live({"id":"a","number":10,"annotations":secret},{"id":"b","number":9,"annotations":{"workers/message":"GUARD-TRIPPED x","workers/triggered_by":"version_upload"}},annotations=secret):
    self.assertTrue(m.guard_tripped("x"))
  def test_ordinary_message_is_not_a_trip(self):
   with self.live(annotations={"workers/message":"main abc"},message="Automatic deployment on upload."):self.assertFalse(m.guard_tripped("x"))
@@ -111,6 +126,7 @@ class Checks(unittest.TestCase):
   argv=run.call_args.args[0]
   self.assertIn("--strict",argv);self.assertIn("--keep-vars",argv)
   self.assertEqual(argv[argv.index("--tag")+1],"sha1")
+  self.assertEqual(probe.call_args_list[0].kwargs,{"before_upload":True})
   self.assertEqual(probe.call_args.kwargs,{"after_upload":True})
  def test_deploy_drops_strict_only_after_a_script_api_change(self):
   probe,run=self.run_main(source="api")
@@ -140,6 +156,19 @@ class Checks(unittest.TestCase):
   with patch.object(m,"live_version",return_value="a"),self.rows():
    with self.assertRaisesRegex(RuntimeError,"No invocations"):m.probe({"probe":"telemetry"},"x")
    m.probe({"probe":"telemetry"},"x",after_upload=True)
+ def test_telemetry_failure_does_not_hold_back_the_upload_that_fixes_it(self):
+  with patch.object(m,"live_version",return_value="a"),self.rows(("scriptThrewException","a",1)):
+   m.probe({"probe":"telemetry"},"x",before_upload=True)
+  with patch.object(m,"live_version",return_value="a"),self.rows():
+   m.probe({"probe":"telemetry"},"x",before_upload=True)
+ def test_telemetry_read_failure_still_stops_before_upload(self):
+  with patch.object(m,"live_version",return_value="a"),patch.object(m,"telemetry_rows",side_effect=RuntimeError("Cloudflare telemetry read rejected")):
+   with self.assertRaisesRegex(RuntimeError,"read rejected"):m.probe({"probe":"telemetry"},"x",before_upload=True)
+ def test_http_probe_still_fails_closed_before_upload(self):
+  with patch("urllib.request.urlopen") as urlopen:
+   response=urlopen.return_value.__enter__.return_value
+   response.status=200;response.read=lambda *a:b'{"ok":false}'
+   with self.assertRaisesRegex(RuntimeError,"not ready"):m.probe({"health":"https://x/health","ok":True},"x",before_upload=True)
  def test_telemetry_fails_closed_on_partial_rollout(self):
   with patch.object(m,"live_version",return_value=None):
    with self.assertRaisesRegex(RuntimeError,"not at 100%"):m.probe({"probe":"telemetry"},"x",after_upload=True)
