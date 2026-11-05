@@ -26,6 +26,7 @@
       "workers/expenses-site/wrangler.jsonc"
     ],
     "probe": "telemetry",
+    "tolerated_exceptions": 12,
     "guard": {
       "status": "gated",
       "max_cpu_ms": 100,

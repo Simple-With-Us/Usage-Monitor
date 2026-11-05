@@ -180,7 +180,51 @@ class Checks(unittest.TestCase):
    self.assertEqual(request.full_url,"https://api.cloudflare.com/client/v4/graphql")
    self.assertEqual(request.get_header("User-agent"),m.USER_AGENT)
    urlopen.return_value.__enter__.return_value=io.BytesIO(b'{"data":null,"errors":[{"message":"budget depleted"}]}')
-   with self.assertRaisesRegex(RuntimeError,"telemetry read rejected"):m.telemetry_rows("x")
+   with self.assertRaisesRegex(RuntimeError,"telemetry read rejected: budget depleted"):m.telemetry_rows("x")
+   urlopen.return_value.__enter__.return_value=io.BytesIO(b'<html>not json</html>')
+   with self.assertRaisesRegex(RuntimeError,"telemetry read rejected: the answer is not JSON"):m.telemetry_rows("x")
+ def test_telemetry_result_fails_closed_on_every_malformed_answer(self):
+  def account(rows):return {"data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":rows}]}}}
+  for body,why in (
+    ([],"not an object"),(None,"not an object"),
+    ({"data":None},"no data"),({},"no data"),({"data":[]},"no data"),
+    ({"data":{"viewer":None}},"no data"),({"data":{"viewer":{}}},"no data"),({"data":{"viewer":{"accounts":None}}},"no data"),
+    ({"data":{"viewer":{"accounts":[]}}},"may lack Account Analytics Read"),
+    ({"data":{"viewer":{"accounts":[None]}}},"may lack Account Analytics Read"),
+    ({"data":{"viewer":{"accounts":[{}]}}},"no invocation rows"),
+    (account(None),"no invocation rows"),(account({}),"no invocation rows"),
+    (account([None]),"row is malformed"),(account([{}]),"row is malformed"),
+    (account([{"sum":{"requests":None},"dimensions":{"status":"success","scriptVersion":"a"}}]),"row is malformed"),
+    (account([{"sum":{"requests":1},"dimensions":{"status":"success"}}]),"row is malformed"),
+    ({"errors":["odd"],"data":None},"unreadable error"),({"errors":"odd"},"unreadable error"),
+  ):
+   with self.subTest(body=body):
+    with self.assertRaisesRegex(RuntimeError,"telemetry read rejected: .*"+why):m.telemetry_result(body)
+ def test_telemetry_result_keeps_an_empty_row_list_for_the_probe_to_judge(self):
+  self.assertEqual(m.telemetry_result({"data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":[]}]}}}),[])
+ def test_telemetry_null_data_stops_a_run_before_upload(self):
+  # Through the real probe: a read that returns no account must not pass as a quiet Worker.
+  with patch.dict(os.environ,{"CLOUDFLARE_API_TOKEN":"t"}),patch.object(m,"live_version",return_value="a"),patch("urllib.request.urlopen") as urlopen:
+   urlopen.return_value.__enter__.return_value=io.BytesIO(b'{"data":{"viewer":{"accounts":[]}}}')
+   with self.assertRaisesRegex(RuntimeError,"may lack Account Analytics Read"):m.probe({"probe":"telemetry"},"x",before_upload=True)
+ def test_flaky_rethrowing_sync_stays_green_within_its_tolerance(self):
+  # PR 1902 rethrows sync errors, and the upstream failed about 40 times in 7 days.
+  target=m.TARGETS["expenses-jays-services"]
+  limit=target["tolerated_exceptions"]
+  with patch.object(m,"live_version",return_value="a"),self.rows(("success","a",12),("scriptThrewException","a",limit)):
+   m.probe(target,"expenses-jays-services")
+  with patch.object(m,"live_version",return_value="a"),self.rows(("success","a",11),("scriptThrewException","a",limit+1)):
+   with self.assertRaisesRegex(RuntimeError,str(limit+1)+" failed invocations"):m.probe(target,"expenses-jays-services")
+ def test_tolerance_never_covers_limit_failures_or_a_version_that_only_throws(self):
+  target={"probe":"telemetry","tolerated_exceptions":12}
+  for status in ("exceededCpu","exceededResources","internalError","unknown"):
+   with self.subTest(status=status),patch.object(m,"live_version",return_value="a"),self.rows(("success","a",20),(status,"a",1)):
+    with self.assertRaisesRegex(RuntimeError,"1 failed invocations"):m.probe(target,"x")
+  with patch.object(m,"live_version",return_value="a"),self.rows(("scriptThrewException","a",1)):
+   with self.assertRaisesRegex(RuntimeError,"1 failed invocations"):m.probe(target,"x")
+   with self.assertRaisesRegex(RuntimeError,"1 failed invocations"):m.probe(target,"x",after_upload=True)
+ def test_only_expenses_tolerates_exceptions(self):
+  self.assertEqual([n for n,t in m.TARGETS.items() if "tolerated_exceptions" in t],["expenses-jays-services"])
  def test_current_main_reads_main_ref_sha(self):
   with patch.dict(os.environ,{"GITHUB_REPOSITORY":"o/r","GH_TOKEN":"t"}),patch("urllib.request.urlopen") as urlopen:
    urlopen.return_value.__enter__.return_value=io.BytesIO(b'{"object":{"sha":"abc"}}')

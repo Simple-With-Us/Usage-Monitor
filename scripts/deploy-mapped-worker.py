@@ -12,6 +12,7 @@ GUARD_TRIPPED = "GUARD-TRIPPED"
 # Just under a day, so it spans two 12-hour auditor crons and stays inside a one-day query range.
 TELEMETRY_WINDOW_SECONDS = 24*3600-60
 TELEMETRY_OK_STATUSES = ("success","clientDisconnected","responseStreamDisconnected")
+TELEMETRY_THROWN_STATUS = "scriptThrewException"
 # Paths whose change can alter what a Worker deploy PUBLISHES.  Deliberately narrower than
 # the push: paths: list in .github/workflows/worker-deploy.yml, which also includes test-only
 # files so test changes still run the pipeline.  The push filter cannot cover the schedule and
@@ -107,29 +108,63 @@ def telemetry_rows(name):
     payload={"query":query,"variables":{"a":ACCOUNT,"s":name,"since":since.strftime("%Y-%m-%dT%H:%M:%SZ")}}
     request=urllib.request.Request("https://api.cloudflare.com/client/v4/graphql",data=json.dumps(payload).encode(),
       headers={"Authorization":"Bearer "+os.environ["CLOUDFLARE_API_TOKEN"],"Content-Type":"application/json","User-Agent":USER_AGENT})
-    with urllib.request.urlopen(request,timeout=30) as response:body=json.load(response)
-    if body.get("errors"):raise RuntimeError("Cloudflare telemetry read rejected")
-    return body["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]
-def telemetry_probe(name,after_upload=False,before_upload=False):
+    with urllib.request.urlopen(request,timeout=30) as response:
+        try:body=json.load(response)
+        except ValueError:raise RuntimeError("Cloudflare telemetry read rejected: the answer is not JSON") from None
+    return telemetry_result(body)
+def telemetry_result(body):
+    """The invocation rows in a GraphQL answer, or a clear refusal.
+
+    An empty row list is a real answer (no invocations in the window), and telemetry_probe
+    judges it.  Null data or no account is not, so it must not read as a quiet Worker."""
+    def rejected(why):raise RuntimeError("Cloudflare telemetry read rejected: "+why)
+    if not isinstance(body,dict):rejected("the answer is not an object")
+    errors=body.get("errors")
+    if errors:
+        first=errors[0] if isinstance(errors,list) else None
+        rejected(str(first.get("message") if isinstance(first,dict) else "unreadable error")[:200])
+    data=body.get("data")
+    viewer=data.get("viewer") if isinstance(data,dict) else None
+    accounts=viewer.get("accounts") if isinstance(viewer,dict) else None
+    if not isinstance(accounts,list):rejected("the answer has no data")
+    if not accounts or not isinstance(accounts[0],dict):
+        rejected("the answer has no account; the token may lack Account Analytics Read")
+    rows=accounts[0].get("workersInvocationsAdaptive")
+    if not isinstance(rows,list):rejected("the answer has no invocation rows")
+    for row in rows:
+        try:usable=type(row["sum"]["requests"]) is int and isinstance(row["dimensions"]["status"],str) and "scriptVersion" in row["dimensions"]
+        except (KeyError,TypeError):usable=False
+        if not usable:rejected("an invocation row is malformed")
+    return rows
+def telemetry_probe(name,after_upload=False,before_upload=False,tolerated_exceptions=0):
     """No failed invocation on the live version, and the Worker has run recently.
 
     A version just uploaded has not met a cron yet, so right after upload only the first
     half applies; the next half-hour run of the job applies both.  Before an upload only the
     read has to work: this looks back a whole day, so one old failure of the live version
-    would hold back the commit that fixes it for up to a day, and the inbox behind the auditor."""
+    would hold back the commit that fixes it for up to a day, and the inbox behind the auditor.
+
+    tolerated_exceptions is for a Worker whose handler rethrows a flaky upstream's errors: that
+    many thrown invocations pass, while the version also has successes.  CPU, resource and
+    internal failures never pass, so a limit being hit stays red at once."""
     version=live_version(name)
     if not version:raise RuntimeError("Live version not at 100% for "+name)
     rows=telemetry_rows(name)
-    failed=sum(r["sum"]["requests"] for r in rows
-      if r["dimensions"]["scriptVersion"]==version and r["dimensions"]["status"] not in TELEMETRY_OK_STATUSES)
+    def count(wanted):
+        return sum(r["sum"]["requests"] for r in rows if r["dimensions"]["scriptVersion"]==version and wanted(r["dimensions"]["status"]))
+    failed=count(lambda status:status not in TELEMETRY_OK_STATUSES)
     if before_upload:
         if failed:print(str(failed)+" failed invocations on the live version of "+name+"; uploading the new version anyway")
         return
-    if failed:raise RuntimeError(str(failed)+" failed invocations on the live version of "+name)
+    thrown=count(lambda status:status==TELEMETRY_THROWN_STATUS)
+    succeeded=count(lambda status:status in TELEMETRY_OK_STATUSES)
+    if failed>thrown or thrown>tolerated_exceptions or (thrown and not succeeded):
+        raise RuntimeError(str(failed)+" failed invocations on the live version of "+name)
+    if failed:print(str(failed)+" thrown invocations on the live version of "+name+", within its "+str(tolerated_exceptions)+" a day")
     if not after_upload and not sum(r["sum"]["requests"] for r in rows):
         raise RuntimeError("No invocations of "+name+" in the telemetry window")
 def probe(target, name="unnamed target", after_upload=False, before_upload=False):
-    if target.get("probe")=="telemetry":return telemetry_probe(name,after_upload,before_upload)
+    if target.get("probe")=="telemetry":return telemetry_probe(name,after_upload,before_upload,target.get("tolerated_exceptions",0))
     url=target.get("health")
     if not url:raise RuntimeError("Functional probe not configured for "+name)
     headers={"User-Agent":USER_AGENT}

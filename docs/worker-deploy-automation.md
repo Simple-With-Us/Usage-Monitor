@@ -1,7 +1,8 @@
 # Mapped Worker deploy automation
 
 Default off: set WORKER_DEPLOY_ENABLED=true only after credentials, exact-version
-receipts, and functional probes are reviewed.  No secrets are rotated by this
+receipts, and functional probes are reviewed, and the inbox's Workers Builds trigger is
+disconnected (see below).  No secrets are rotated by this
 workflow.  CLOUDFLARE_FLEET_API_TOKEN is the existing scoped deploy credential, and
 it also needs Account Analytics Read for the telemetry probe.  Receipt inbox also
 needs its existing read token and lifecycle audit token.  Do not widen access or
@@ -33,6 +34,25 @@ on Worker-relevant paths, so a failed auditor run holds the inbox back.  Ambigu
 start-jays-services, fleet-share-api and BotFleet broker are not included.  No iOS
 workflow is changed.
 
+## Disconnect Workers Builds first
+
+The order above and the GUARD-TRIPPED refusal below hold for this job only.
+usage-monitor-receipt-inbox also has a Workers Builds trigger on `main` (AGENTS.md,
+"Receipt email inbox and operations health", and workers/receipt-inbox/README.md, "Git
+repository (Workers Builds)").  Cloudflare documents that every push to that branch runs
+the deploy command.  That path runs neither check, so it could land the inbox ahead of the
+auditor or redeploy a stopped inbox.
+
+Before setting WORKER_DEPLOY_ENABLED, disconnect it: in the dashboard, open the Worker, then
+Settings, Builds, Disconnect.  Cloudflare documents that existing deployments keep serving
+traffic after a disconnect.  Then correct the two documents named above.
+
+Read on November 4, 2026, the trigger still exists and names the repository's old owner.
+Its last build was at 7:43 PM on October 1, with no build for the 283 commits on `main`
+since.  So it looks dormant, probably because the repository moved (an inference, not
+checked), and a repaired connection would start deploying again.  Dormant is not removed.
+The auditor and expenses have no trigger.
+
 ## Probes
 
 A target with `health` is called over HTTP.  The inbox uses this, with its read token.
@@ -42,7 +62,18 @@ and takes no Worker request, D1 row or Access credential.  It fails on any fail
 invocation of the live version in the last day, and on no invocations at all in that
 window, so one failure leaves the run red until it ages out or a new version ships.  Straight after an upload the second half is skipped, because the new version has
 not met a cron yet; the next half-hourly run applies both.  A failed read of the
-analytics (including a rate limit) fails closed and the next run tries again.
+analytics fails closed and the next run tries again.  That covers a rate limit, an answer
+with null data, and an answer with no account, which can mean the token lacks Account
+Analytics Read.  An empty row list is a real answer, so only the no-invocations rule judges it.
+
+A target may set `tolerated_exceptions`.  Expenses sets 12, half of its 24 hourly syncs in
+the window, because once its scheduled handler rethrows, an upstream failure counts as a
+thrown invocation.  The audit counted about 40 of those in 7 days, so with no allowance the
+half-hourly run would be red most of the time and a real failure would not stand out.  Up to
+12 thrown invocations pass while the live version also has successes, and the run logs the
+count.  A version that has only thrown still fails, as does any CPU, resource or internal
+failure, so hitting a limit stays red at once.  A complete sync outage goes red after about 13
+hours.  The cost of a failing sync is capped by that Worker's own guards, not by this probe.
 
 The auditor has no route, so it uses telemetry.  Expenses uses it too.  Its old probe,
 GET /api/expenses, could not pass: that hostname's Access app has no service-auth policy,
@@ -51,8 +82,8 @@ financial list and used about 500 D1 rows every half hour.  No Access policy ha
 and WORKER_HEALTH_ACCESS_CLIENT_ID/SECRET are no longer passed.
 
 The limit of telemetry: it sees exceptions, not a run that fails and returns normally.
-The expenses scheduled handler catches its own errors today, so a failed sync reads as
-success until that handler rethrows.  The auditor catches its own audit errors too, so its
+The expenses scheduled handler catches its own errors until Usage-Monitor PR 1902 lands, so
+a failed sync reads as success before then.  The auditor catches its own audit errors too, so its
 telemetry only shows that the cron ran.  The audit result itself is covered by the inbox
 /health probe, which answers lifecycle_unverified when the audit is not good.
 
