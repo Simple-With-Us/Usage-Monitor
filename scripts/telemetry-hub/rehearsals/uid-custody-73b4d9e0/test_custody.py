@@ -418,6 +418,55 @@ class CustodyTests(unittest.TestCase):
             finally:
                 evidence.close()
 
+    def test_cleanup_happy_path_removes_generated_scope_offline(self):
+        # Offline cleanup contract: generated temporary fixtures only, no
+        # private fingerprints.  When every custody gate holds, cleanup()
+        # removes the payload file, the payload directory and the RAM scope
+        # directory exactly, and closes its descriptors.  The exact reviewed
+        # values (uid/gid, mode, nlink, size, full signature) stay enforced on
+        # the way; the pinned "/dev/shm" parent read is redirected to the
+        # generated parent, which is the same contract against a temp fixture.
+        with tempfile.TemporaryDirectory() as parent_dir:
+            parent = Path(parent_dir)
+            root = parent / P.BASE
+            root.mkdir(mode=0o700)
+            (root / "payload").mkdir(mode=0o700)
+            source = root / "payload" / "telemetry-hub.json"
+            source.write_bytes(P.SNAPSHOT_RAW)
+            source.chmod(0o600)
+            evidence = P.Evidence()
+            evidence.fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            evidence.payload_fd = os.open(root / "payload", os.O_RDONLY | os.O_DIRECTORY)
+            evidence.directory_identity = evidence.directory_pin(os.fstat(evidence.fd))
+            evidence.payload_identity = evidence.directory_pin(os.fstat(evidence.payload_fd))
+            original_stat = os.stat
+            def synthetic_uid_stat(path, *args, **kwargs):
+                info = original_stat(path, *args, **kwargs)
+                if path == "telemetry-hub.json":
+                    values = {key: getattr(info, key) for key in P.SIGNATURE_FIELDS}
+                    values.update(st_uid=10001, st_gid=10001)
+                    return types.SimpleNamespace(**values)
+                return info
+            original_open = os.open
+            def generated_parent_open(path, *args, **kwargs):
+                if path == "/dev/shm":
+                    return original_open(str(parent), *args, **kwargs)
+                return original_open(path, *args, **kwargs)
+            try:
+                with patch.object(P, "RAM_ROOT", str(root)):
+                    with patch.object(P.os, "stat", side_effect=synthetic_uid_stat):
+                        evidence.capture_payload()
+                    with patch.object(P.os, "stat", side_effect=synthetic_uid_stat), \
+                            patch.object(P.os, "open", side_effect=generated_parent_open):
+                        evidence.cleanup()
+                self.assertFalse(source.exists())
+                self.assertFalse((root / "payload").exists())
+                self.assertFalse(root.exists())
+                self.assertIsNone(evidence.fd)
+                self.assertIsNone(evidence.payload_fd)
+            finally:
+                evidence.close()
+
     def test_operator_receipt_deadline_failure_retains_written_file(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(P, "RAM_ROOT", directory):
             root = Path(directory)
