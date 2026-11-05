@@ -366,10 +366,11 @@ class CustodyTests(unittest.TestCase):
         # physical stat signature only.  A rewrite that preserves the ENTIRE
         # signature - same inode, with mtime/ctime reading identical because
         # the filesystem timestamp tick is coarser than the rewrite window -
-        # is NOT detectable without reading content, and this test pins that
-        # residual.  tmpfs (the enforced production parent) has ns granularity,
-        # so the collision is simulated by replaying the captured signature
-        # rather than produced with real timestamps.
+        # is NOT detectable without reading content.  This test documents
+        # that residual for review; it is not an asserted acceptance.  The
+        # collision is simulated by replaying the captured signature rather
+        # than produced with real timestamps, and no timestamp-granularity
+        # guarantee is claimed.
         with tempfile.TemporaryDirectory() as directory, patch.object(P, "RAM_ROOT", directory):
             root = Path(directory)
             root.chmod(0o700)
@@ -404,7 +405,8 @@ class CustodyTests(unittest.TestCase):
                         return types.SimpleNamespace(**captured)
                     return info
                 # Under a coarse-tick filesystem reading, the same rewrite is
-                # invisible to stat-only custody (accepted residual).
+                # invisible to stat-only custody (documented residual, open
+                # review question).
                 with patch.object(P.os, "stat", side_effect=coarse_tick_stat):
                     evidence.check()
                 # With true stat reads (same test-only UID substitution) and a
