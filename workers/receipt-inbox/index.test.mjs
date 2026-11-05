@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { handleEmail, handleFetch, inspectAttachments, isDedicatedReceiptAddress, isNoForwardRecipient, isReceiptInboxAddress, ReceiptInboxIndex, senderAuthentication, validateLifecycleRules } from "./src/index.mjs";
+import { readFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
+import { auditorReadIsRedundant, handleEmail, handleFetch, HOP_HEADER, inspectAttachments, isDedicatedReceiptAddress, isNoForwardRecipient, isReceiptInboxAddress, mailLoopReason, ReceiptInboxIndex, senderAuthentication, validateLifecycleRules } from "./src/index.mjs";
 
 if (typeof crypto.subtle.timingSafeEqual !== "function") {
   Object.defineProperty(crypto.subtle, "timingSafeEqual", {
@@ -17,6 +18,12 @@ if (typeof crypto.subtle.timingSafeEqual !== "function") {
 class FakeBucket {
   objects = new Map();
   failNextPut = false;
+  listCalls = 0;
+  headCalls = 0;
+  async head() {
+    this.headCalls += 1;
+    return null;
+  }
   async put(key, value) {
     if (this.failNextPut) {
       this.failNextPut = false;
@@ -32,6 +39,7 @@ class FakeBucket {
     return bytes ? { body: bytes } : null;
   }
   async list({ prefix = "", limit = 1000 } = {}) {
+    this.listCalls += 1;
     return { objects: [...this.objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, limit) };
   }
 }
@@ -115,7 +123,7 @@ function receiptMessage(rawText, overrides = {}) {
     headers: new Headers({ "authentication-results": "attacker; dkim=pass; dmarc=pass" }),
     raw: stream(raw),
     rawSize: raw.byteLength,
-    async forward(address) { this.forwardedTo = address; },
+    async forward(address, headers) { this.forwardedTo = address; this.forwardedHeaders = headers; },
     setReject(reason) { this.rejected = reason; },
     ...overrides,
   };
@@ -437,7 +445,7 @@ describe("receipt inbox email worker", () => {
       const response = await index.fetch(new Request("https://receipt-index.internal/admit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bytes: 1 }),
+        body: JSON.stringify({ bytes: 1, noForward: true }),
       }));
       expect((await response.json()).result).toBe(number < 100 ? "admitted" : "quota_exceeded");
     }
@@ -518,5 +526,312 @@ describe("receipt inbox email worker", () => {
       deleteObjectsTransition: { condition: { type: "Age", maxAge: 86_400 } },
     }])).toBe(false);
     expect(validateLifecycleRules([{ ...exact, enabled: false }])).toBe(false);
+  });
+});
+
+function receivedHeader(count) {
+  const headers = new Headers();
+  for (let number = 0; number < count; number += 1) {
+    headers.append("received", `from a${number}.example (a${number}.example [192.0.2.1]) by b.example with ESMTPS id x${number} for <r@receipts.jays.services>; Tue, 3 Nov 2026 12:00:0${number % 10} +0000`);
+  }
+  return headers;
+}
+
+function forbidIndex(env) {
+  env.RECEIPT_INDEX = {
+    idFromName: () => "receipt-index",
+    get: () => ({ fetch: () => { throw new Error("must not call the Durable Object"); } }),
+  };
+}
+
+function readHeaders() {
+  return { headers: { Authorization: `Bearer ${"r".repeat(32)}` } };
+}
+
+describe("mail loop guard", () => {
+  it("tags every fallback forward with the hop header", async () => {
+    const { env } = createEnvironment();
+    const message = receiptMessage(rawReceipt("hop tag"));
+    await handleEmail(message, env);
+    expect(message.forwardedHeaders.get(HOP_HEADER)).toBe("1");
+  });
+
+  it("drops a hop-tagged copy before any Durable Object call, forward or reject", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const message = receiptMessage("x", { headers: new Headers({ [HOP_HEADER]: "1" }) });
+    await handleEmail(message, env);
+    expect(message.forwardedTo).toBeUndefined();
+    expect(message.rejected).toBeUndefined();
+  });
+
+  it("drops a copy over 8 Received headers, counting headers rather than date commas", async () => {
+    expect(mailLoopReason(receivedHeader(8))).toBeNull();
+    expect(mailLoopReason(receivedHeader(9))).toBe("received_count");
+    expect(mailLoopReason(new Headers())).toBeNull();
+    expect(mailLoopReason(undefined)).toBeNull();
+
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const message = receiptMessage("x", { headers: receivedHeader(10) });
+    await handleEmail(message, env);
+    expect(message.forwardedTo).toBeUndefined();
+    expect(message.rejected).toBeUndefined();
+  });
+
+  it("files mail with an ordinary Received chain", async () => {
+    const { env } = createEnvironment();
+    const message = receiptMessage(rawReceipt("ordinary chain"), { headers: receivedHeader(7) });
+    await handleEmail(message, env);
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+  });
+});
+
+describe("daily intake sub-limits", () => {
+  const admit = (index, body) => index.fetch(new Request("https://receipt-index.internal/admit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })).then((response) => response.json());
+
+  it("limits one sender domain to 20 messages a day without blocking others", async () => {
+    const { index } = createEnvironment();
+    for (let number = 0; number < 20; number += 1) {
+      expect((await admit(index, { bytes: 1, senderDomain: "spam.example" })).result).toBe("admitted");
+    }
+    expect(await admit(index, { bytes: 1, senderDomain: "spam.example" })).toEqual({ result: "quota_exceeded", scope: "sender" });
+    expect((await admit(index, { bytes: 1, senderDomain: "vendor.example" })).result).toBe("admitted");
+  });
+
+  it("limits one sender domain's bytes, so ten huge messages cannot use the whole day", async () => {
+    const { index } = createEnvironment();
+    const bytes = 10 * 1024 * 1024;
+    expect((await admit(index, { bytes, senderDomain: "big.example" })).result).toBe("admitted");
+    expect((await admit(index, { bytes, senderDomain: "big.example" })).result).toBe("admitted");
+    expect(await admit(index, { bytes, senderDomain: "big.example" })).toEqual({ result: "quota_exceeded", scope: "sender" });
+  });
+
+  it("is not confused by a sender domain named like an Object property", async () => {
+    const { index } = createEnvironment();
+    expect((await admit(index, { bytes: 1, senderDomain: "constructor" })).result).toBe("admitted");
+    expect((await admit(index, { bytes: 1, senderDomain: "constructor" })).result).toBe("admitted");
+  });
+
+  it("keeps a reserve for no-forward batches once public mail reaches its 60", async () => {
+    const { index } = createEnvironment();
+    for (let number = 0; number < 60; number += 1) {
+      expect((await admit(index, { bytes: 1, senderDomain: `d${number}.example` })).result).toBe("admitted");
+    }
+    expect(await admit(index, { bytes: 1, senderDomain: "late.example" })).toEqual({ result: "quota_exceeded", scope: "public" });
+    for (let number = 0; number < 40; number += 1) {
+      expect((await admit(index, { bytes: 1, senderDomain: "agent.example", noForward: true })).result).toBe("admitted");
+    }
+    expect(await admit(index, { bytes: 1, senderDomain: "agent.example", noForward: true })).toEqual({ result: "quota_exceeded", scope: "daily" });
+  });
+
+  it("exempts a large no-forward batch from the sender limit", async () => {
+    const { index } = createEnvironment();
+    for (let number = 0; number < 40; number += 1) {
+      expect((await admit(index, { bytes: 1, senderDomain: "agent.example", noForward: true })).result).toBe("admitted");
+    }
+    expect((await admit(index, { bytes: 1, senderDomain: "vendor.example" })).result).toBe("admitted");
+  });
+
+  it("counts a record written before the sub-limits existed as public", async () => {
+    const { index, storage } = createEnvironment();
+    const day = new Date().toISOString().slice(0, 10);
+    storage.values.set(`daily:${day}`, { count: 60, bytes: 60 });
+    expect((await admit(index, { bytes: 1, senderDomain: "vendor.example" })).scope).toBe("public");
+    expect((await admit(index, { bytes: 1, noForward: true })).result).toBe("admitted");
+  });
+
+  it("sends the sender domain and path from the email handler", async () => {
+    const { env, index } = createEnvironment();
+    for (let number = 0; number < 20; number += 1) await admit(index, { bytes: 1, senderDomain: "openai.com" });
+    const limited = receiptMessage(rawReceipt("over the sender limit"));
+    await handleEmail(limited, env);
+    expect(limited.rejected).toContain("daily intake limit");
+    expect(limited.forwardedTo).toBeUndefined();
+
+    env.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    const batch = receiptMessage(rawReceipt("batch path"), { to: "filing-only@receipts.jays.services" });
+    await handleEmail(batch, env);
+    expect(batch.rejected).toBeUndefined();
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(1);
+  });
+});
+
+describe("readiness cost", () => {
+  it("never lists R2 on email or summary, and heads one fixed key on /health", async () => {
+    const { env } = createEnvironment();
+    await handleEmail(receiptMessage(rawReceipt("readiness cost")), env);
+    await handleFetch(new Request("https://receipt-inbox.jays.services/v1/receipts/summary", readHeaders()), env);
+    expect(env.RECEIPTS_BUCKET.listCalls).toBe(0);
+    expect(env.RECEIPTS_BUCKET.headCalls).toBe(0);
+
+    const health = await handleFetch(new Request("https://receipt-inbox.jays.services/health", readHeaders()), env);
+    expect(health.status).toBe(200);
+    expect(env.RECEIPTS_BUCKET.listCalls).toBe(0);
+    expect(env.RECEIPTS_BUCKET.headCalls).toBe(1);
+  });
+
+  it("reports /health unavailable when the R2 head fails", async () => {
+    const { env } = createEnvironment();
+    env.RECEIPTS_BUCKET.head = async () => { throw new Error("simulated R2 outage"); };
+    const health = await handleFetch(new Request("https://receipt-inbox.jays.services/health", readHeaders()), env);
+    expect(health.status).toBe(503);
+    expect(await health.json()).toMatchObject({ reason: "storage_unavailable" });
+  });
+
+  it("skips the auditor read only for an ok result taken since the latest cron", async () => {
+    const twelveHours = 12 * 60 * 60 * 1000;
+    const slot = Date.UTC(2026, 10, 4, 12, 17);
+    expect(auditorReadIsRedundant({ ok: true, checkedAt: slot + 1000 }, slot + 3600_000)).toBe(true);
+    // A cron has run since this result, including when an off-cron audit made it recent.
+    expect(auditorReadIsRedundant({ ok: true, checkedAt: slot - 3600_000 }, slot + 1000)).toBe(false);
+    expect(auditorReadIsRedundant({ ok: true, checkedAt: slot - twelveHours }, slot + 1000)).toBe(false);
+    expect(auditorReadIsRedundant({ ok: false, checkedAt: slot + 1000 }, slot + 3600_000)).toBe(false);
+    expect(auditorReadIsRedundant({ ok: true, checkedAt: slot + 7200_000 }, slot + 3600_000)).toBe(false);
+
+    const { env, storage, controls } = createEnvironment();
+    await handleEmail(receiptMessage(rawReceipt("fresh audit")), env);
+    expect(controls.lifecycleAuditCalls).toBe(0);
+
+    const past = Date.now() - twelveHours - 60_000;
+    storage.values.set("lifecycle:audit", { ok: true, checkedAt: past });
+    controls.lifecycleAudit = { ok: false, checkedAt: Date.now() };
+    const drifted = receiptMessage(rawReceipt("bad cron result"));
+    await expect(handleEmail(drifted, env)).rejects.toThrow("lifecycle readiness");
+    expect(controls.lifecycleAuditCalls).toBe(1);
+  });
+
+  it("keeps the cron slots in step with the auditor schedule", () => {
+    const config = readFileSync(new URL("../receipt-lifecycle-auditor/wrangler.jsonc", import.meta.url), "utf8");
+    expect(config).toContain('"crons": ["17 */12 * * *"]');
+  });
+
+  it("backs a cleanup backlog off to 30 seconds instead of 1", async () => {
+    const { index, storage } = createEnvironment();
+    await index.scheduleNextAlarm(true);
+    expect(storage.alarmAt).toBeGreaterThanOrEqual(Date.now() + 25_000);
+  });
+});
+
+describe("guard off", () => {
+  const off = { GUARD_MODE: "off" };
+
+  it("answers 503 on every route before any auth or storage", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", readHeaders()), { ...env, ...off });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("3600");
+    expect(env.RECEIPTS_BUCKET.headCalls).toBe(0);
+  });
+
+  it("forwards mail to the fallback instead of bouncing, touching nothing else", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const message = receiptMessage(rawReceipt("paused"));
+    await handleEmail(message, { ...env, ...off });
+    expect(message.forwardedTo).toBe("socratic.trade@jays.services");
+    expect(message.forwardedHeaders.get(HOP_HEADER)).toBe("1");
+    expect(message.rejected).toBeUndefined();
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(0);
+  });
+
+  it("forwards no-forward mail too, since nothing else would keep it", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const message = receiptMessage(rawReceipt("paused batch"), { to: "filing-only@receipts.jays.services" });
+    await handleEmail(message, { ...env, ...off, RECEIPT_NO_FORWARD_LOCAL_PART: "filing-only" });
+    expect(message.forwardedTo).toBe("socratic.trade@jays.services");
+  });
+
+  it("rejects only when no copy can be kept", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const noFallback = receiptMessage("x");
+    await handleEmail(noFallback, { ...env, ...off, RECEIPT_FALLBACK_ADDRESS: undefined });
+    expect(noFallback.rejected).toContain("paused");
+
+    const failing = receiptMessage("x", { async forward() { throw new Error("relay refused"); } });
+    await handleEmail(failing, { ...env, ...off });
+    expect(failing.rejected).toContain("paused");
+  });
+
+  it("still drops looped copies and rejects unknown mailboxes", async () => {
+    const { env } = createEnvironment();
+    forbidIndex(env);
+    const looped = receiptMessage("x", { headers: new Headers({ [HOP_HEADER]: "1" }) });
+    await handleEmail(looped, { ...env, ...off });
+    expect(looped.forwardedTo).toBeUndefined();
+    expect(looped.rejected).toBeUndefined();
+
+    const unknown = receiptMessage("x", { to: "someone@example.com" });
+    await handleEmail(unknown, { ...env, ...off });
+    expect(unknown.rejected).toBe("Unknown receipt mailbox");
+    expect(unknown.forwardedTo).toBeUndefined();
+  });
+
+  it("skips alarm cleanup", async () => {
+    const storage = new FakeStorage();
+    storage.values.set("pending-expire:0000000000001:x", "x");
+    await new ReceiptInboxIndex({ storage }, off).alarm();
+    expect(storage.values.has("pending-expire:0000000000001:x")).toBe(true);
+    await new ReceiptInboxIndex({ storage }, {}).alarm();
+    expect(storage.values.has("pending-expire:0000000000001:x")).toBe(false);
+  });
+});
+
+describe("R2 budget", () => {
+  async function freshModule() {
+    vi.resetModules();
+    return import("./src/index.mjs");
+  }
+
+  it("refuses puts past 60 a minute and neither throws nor loses a forwarded copy", async () => {
+    const { storeAndCommitEvidence, handleEmail: freshHandleEmail } = await freshModule();
+    const { env } = createEnvironment();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const id = "a".repeat(64);
+    env.RECEIPT_INDEX = {
+      idFromName: () => "receipt-index",
+      get: () => env.realIndex,
+    };
+    const real = createEnvironment();
+    env.realIndex = real.env.RECEIPT_INDEX.get();
+    for (let number = 0; number < 60; number += 1) {
+      await storeAndCommitEvidence(env, id, new Uint8Array([1])).catch(() => {});
+    }
+    const before = env.RECEIPTS_BUCKET.objects.size;
+    await expect(storeAndCommitEvidence(env, id, new Uint8Array([1]))).rejects.toThrow("budget exceeded");
+    expect(env.RECEIPTS_BUCKET.objects.size).toBe(before);
+
+    const forwarded = receiptMessage(rawReceipt("budget forwarded"));
+    await expect(freshHandleEmail(forwarded, env)).resolves.toBeUndefined();
+    expect(forwarded.forwardedTo).toBe("socratic.trade@jays.services");
+    expect(forwarded.rejected).toBeUndefined();
+
+    env.RECEIPT_NO_FORWARD_LOCAL_PART = "filing-only";
+    const batch = receiptMessage(rawImageReceipt("budget batch"), { to: "filing-only@receipts.jays.services" });
+    await expect(freshHandleEmail(batch, env)).resolves.toBeUndefined();
+    expect(batch.rejected).toContain("budget");
+    warn.mockRestore();
+  });
+
+  it("answers 429 when R2 reads pass the minute cap", async () => {
+    const { handleFetch: freshHandleFetch } = await freshModule();
+    const { env } = createEnvironment();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const request = () => new Request("https://receipt-inbox.jays.services/health", readHeaders());
+    for (let number = 0; number < 120; number += 1) {
+      expect((await freshHandleFetch(request(), env)).status).toBe(200);
+    }
+    const limited = await freshHandleFetch(request(), env);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(env.RECEIPTS_BUCKET.headCalls).toBe(120);
+    warn.mockRestore();
   });
 });

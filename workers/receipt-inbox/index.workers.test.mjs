@@ -42,11 +42,45 @@ describe("receipt inbox Durable Object in workerd", () => {
 
   it("serializes concurrent reservations at the 100-message daily ceiling", async () => {
     const results = await Promise.all(Array.from({ length: 101 }, async (_, number) => {
-      const response = await request("/admit", "POST", { bytes: number + 1 });
+      const response = await request("/admit", "POST", { bytes: number + 1, noForward: true });
       return response.json();
     }));
     expect(results.filter((result) => result.result === "admitted")).toHaveLength(100);
     expect(results.filter((result) => result.result === "quota_exceeded")).toHaveLength(1);
+  });
+
+  it("serializes concurrent admissions at the per-sender limit", async () => {
+    const results = await Promise.all(Array.from({ length: 25 }, async () => {
+      const response = await request("/admit", "POST", { bytes: 1, senderDomain: "spam.example" });
+      return response.json();
+    }));
+    expect(results.filter((result) => result.result === "admitted")).toHaveLength(20);
+    expect(results.filter((result) => result.scope === "sender")).toHaveLength(5);
+  });
+
+  it("stays ready during a recent cleanup backlog and backs the alarm off", async () => {
+    const recent = String(Date.now() - 60_000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 250; number += 1) {
+        entries[`pending-expire:${recent}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const before = Date.now();
+    expect((await request("/ready")).status).toBe(200);
+    expect((await request("/summary")).status).toBe(200);
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect((await state.storage.list({ prefix: "pending-expire:" })).size).toBeGreaterThan(0);
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(before + 25_000);
+    });
+  });
+
+  it("heads a missing fixed key on /health against real R2", async () => {
+    const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
+      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+    }), env);
+    expect(response.status).toBe(200);
   });
 
   it("lists committed receipts newest first and never lists pending reservations", async () => {

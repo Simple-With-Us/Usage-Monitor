@@ -86,32 +86,50 @@ npm exec -- wrangler secret put RECEIPT_LIFECYCLE_AUDIT_TOKEN --config workers/r
 npm run receipt-inbox:deploy
 ```
 
-## Git repository (Workers Builds)
+## Git repository and deploys
 
 Do **not** make a separate GitHub repo.  Source is already in
-`jaywedgeworth22/Usage-Monitor` (`workers/receipt-inbox` plus
+`Simple-With-Us/Usage-Monitor` (`workers/receipt-inbox` plus
 `workers/receipt-lifecycle-auditor`).  Both workers import
 `workers/receipt-lifecycle.mjs` and take `postal-mime` / `wrangler` from the
-repo-root `package.json`, so the Cloudflare root directory must stay empty
-(the repo root), not `workers/receipt-inbox`.
+repo-root `package.json`, so wrangler must run from the repo root.
 
-`usage-monitor-receipt-inbox` is already connected to `main`.  Its Workers
-Builds deploy command is
-`npx wrangler deploy --config workers/receipt-inbox/wrangler.jsonc`.  That
-dashboard path deploys the inbox only.  It does **not** run the auditor-first
-ordering or the 180-day lifecycle gate.
+**Workers Builds does not deploy this Worker.**  The inbox's trigger was bound
+to the repository's old owner, and its last build was October 1, 2026.  Merges to
+`main` since then have produced no build.  Do not reconnect it: it would deploy
+the inbox alone, skipping the auditor-first ordering and the 180-day lifecycle
+gate.
 
-The auditor Worker stays CLI-deployed (`npm run receipt-inbox:deploy-auditor`).
-When the auditor or the shared lifecycle module changes, deploy from the repo
-root with `npm run receipt-inbox:deploy` so the auditor lands first and
-`verify-lifecycle` re-checks the live R2 rule.
+Deploy from the repo root with `npm run receipt-inbox:deploy`, which verifies the
+live R2 rule and lands the auditor first.  `npm run receipt-inbox:deploy-auditor`
+deploys the auditor alone.
 
-If you also connect the auditor in **Settings → Build → Connect Git**, use
-the same repo / `main` / empty-root / empty-build-command shape, and this
-deploy command:
-`npx wrangler deploy --config workers/receipt-lifecycle-auditor/wrangler.jsonc`.
-Leave **Builds for non-production branches** unchecked.  Prefer the npm
-script when both workers change.
+## Runaway guards
+
+- **Mail loop.**  Every fallback forward carries `X-Receipt-Inbox-Hop`.  A message
+  that arrives with that header, or with more than 8 `Received` headers, is
+  dropped silently before any Durable Object call: no forward, no admission, no
+  bounce, and a `receipt_mail_loop_dropped` log line.  First-pass mail stored so
+  far has at most 7 `Received` headers, and each trip around the fallback mailbox
+  adds about 5.  Anyone can send that header to the public MX, but doing so only
+  suppresses their own message.
+- **Daily intake.**  100 messages and 100 MiB per UTC day in total.  Public mail
+  may use 60 messages and 60 MiB of that, and one sender domain may use 20 messages
+  and 25 MiB, so the no-forward path always keeps 40 messages.  No-forward mail
+  skips the public and sender limits.
+- **Storage budget.**  Each isolate allows 60 R2 puts and 120 R2 reads a minute.
+  Past the put limit, a message with a fallback copy is left there, and one without
+  is rejected so the sender knows.  Past the read limit, the route answers 429.
+- **`GUARD_MODE=off`.**  Set as a Worker secret on either Worker to pause it, so a
+  deploy does not clear it.  HTTP answers 503, alarms and the auditor cron do
+  nothing, and mail is forwarded to the fallback (no-forward mail too, because
+  nothing else would store it).  Mail is rejected only when no fallback copy can
+  be made.
+- **`limits` in each `wrangler.jsonc`.**  CPU and subrequests per invocation.
+  Recheck `cpu_ms` before any move to the Free plan, because the documentation
+  describes it as a Paid setting.
+
+## Email routing rules
 
 ```bash
 # Wrangler resolves this positional value as a Cloudflare zone, so use the apex zone here.
@@ -130,12 +148,14 @@ Confirm the exact current CLI flags with `wrangler email routing rules create
 the app with only the summary-read token. The handler fails closed unless the
 retention acknowledgement and fallback are present. Every deploy re-checks the
 live lifecycle rule. A SQLite-backed Durable Object transaction admits at most
-100 delivery attempts and 100 MiB per UTC day before raw buffering or MIME
-parsing; over-quota email is rejected without forwarding or reading the body.
+100 delivery attempts and 100 MiB per UTC day, with the sub-limits under Runaway
+guards, before raw buffering or MIME parsing; over-quota email is rejected
+without forwarding or reading the body.
 
 The isolated auditor re-reads the exact lifecycle rule through Cloudflare's API
-every 12 hours and stores the result in its own Durable Object. Intake also asks
-it for a fresh audit when local readiness state reaches 24 hours. Readiness
+every 12 hours and stores the result in its own Durable Object.  Intake reads that
+result only when its local copy is not ok or predates the latest cron slot, and
+asks for a fresh audit when local readiness state reaches 24 hours.  Readiness
 fails closed if the audit is stale, if a conflicting enabled delete rule
 overlaps `evidence/`, or if the exact 180-day rule is missing. The same exact
 parser gates deployment. The auditor is deployed first, so the intake service
@@ -143,6 +163,8 @@ binding never has a missing target.
 
 Both `/health` and the sanitized summary endpoint require the summary-read
 token, so unauthenticated probes cannot generate R2/Durable Object reads.
+Only `/health` probes R2, with a head on one fixed key; an email's own put proves
+R2 on the intake path.
 The summary now includes a bounded subject, amount, service, and kind so the
 dashboard can show what arrived.  It still never returns raw MIME, card
 numbers, or mailbox local-parts.
@@ -159,8 +181,9 @@ and a second transaction commits the visible review row. A retry resumes a
 pending reservation. Pending rows expire after one day; committed review,
 dedupe, sender-domain, and group metadata expire after 180 days in step with the
 R2 evidence lifecycle. Durable Object alarms perform cleanup even when no mail
-or dashboard request arrives; readiness fails closed while a cleanup backlog
-remains. Summary results include committed, unexpired rows only.
+or dashboard request arrives, retrying every 30 seconds while a backlog remains;
+readiness fails closed only when a backlog is over a day old.  Summary results
+include committed, unexpired rows only.
 
 An operator can download one unreviewed message for offline review without
 giving Usage Monitor access to message content:

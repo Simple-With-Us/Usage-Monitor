@@ -28,6 +28,8 @@ export default defineConfig({
       "**/scripts/ios-fleet/**",
       // Node's test runner owns backup cleanup repro suites (see test:backup-concurrent-startup).
       "**/scripts/__tests__/**",
+      // The per-worker budget guard copies are node:test suites too.
+      "**/budget-guard.test.mjs",
     ],
     coverage: {
       provider: "v8",
