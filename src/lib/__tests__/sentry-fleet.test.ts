@@ -135,102 +135,192 @@ describe("recordFleetInfraEvent", () => {
   });
 });
 
-describe("recordFleetInfraMetric", () => {
-  it("stamps the app + agent + metric tags and a counter fingerprint", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+const DSN = "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+
+function postedLines(fetchSpy: { mock: { calls: unknown[][] } }, call = 0): string[] {
+  const [, init] = fetchSpy.mock.calls[call] as [string, RequestInit | undefined];
+  return String(init?.body ?? "").split("\n");
+}
+
+describe("recordFleetInfraMetric: failure-class metrics stay issue events", () => {
+  it("stamps the app + agent + metric tags and a metric fingerprint", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
-    await recordFleetInfraMetric("scheduler.tick", 1, {
+    await recordFleetInfraMetric("ingest.failed", 1, {
       total: 10,
-      successes: 9,
+      reason: "TypeError",
     });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const body = String(init?.body ?? "");
-    const lines = body.split("\n");
+    const lines = postedLines(fetchSpy);
+    expect(JSON.parse(lines[1]).type).toBe("event");
     const event = JSON.parse(lines[2]);
     expect(event.tags).toMatchObject({
       app: "usage-monitor",
       agent: "MM",
-      "metric.name": "scheduler.tick",
+      "metric.name": "ingest.failed",
       "metric.kind": "counter",
       "metric.total": "10",
-      "metric.successes": "9",
+      "metric.reason": "TypeError",
     });
-    expect(event.fingerprint).toEqual(["um-fleet", "metric", "scheduler.tick"]);
+    expect(event.fingerprint).toEqual(["um-fleet", "metric", "ingest.failed"]);
     expect(event.extra).toMatchObject({ "metric.value": 1 });
   });
 
   it("marks warning level for metrics containing _rejected in any segment", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
     await recordFleetInfraMetric("ingest.admission_rejected", 1, { route: "ingest/usage" });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const lines = String(init?.body ?? "").split("\n");
-    const event = JSON.parse(lines[2]);
-    expect(event.level).toBe("warning");
+    expect(JSON.parse(postedLines(fetchSpy)[2]).level).toBe("warning");
   });
 
   it("marks warning level for .failed and .error metrics", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
     await recordFleetInfraMetric("ingest.failed", 1, { reason: "TypeError" });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const lines = String(init?.body ?? "").split("\n");
-    expect(JSON.parse(lines[2]).level).toBe("warning");
+    await recordFleetInfraMetric("circuit_error", 1);
+    expect(JSON.parse(postedLines(fetchSpy, 0)[2]).level).toBe("warning");
+    expect(JSON.parse(postedLines(fetchSpy, 1)[2]).level).toBe("warning");
   });
 
-  it("treats non-integer values as gauges", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+  it("keeps the total poll outage page as an issue event", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
-    await recordFleetInfraMetric("scheduler.duration_ms", 1234.5, { outcome: "ok" });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const lines = String(init?.body ?? "").split("\n");
-    const event = JSON.parse(lines[2]);
-    expect(event.tags["metric.kind"]).toBe("gauge");
-    expect(event.extra).toMatchObject({ "metric.value": 1234.5 });
+    await recordFleetInfraMetric("scheduler.provider_fetch_zero_success", 1, {
+      successes: 0,
+      failures: 4,
+    });
+    const lines = postedLines(fetchSpy);
+    expect(JSON.parse(lines[1]).type).toBe("event");
+    expect(JSON.parse(lines[2]).level).toBe("warning");
   });
 
-  it("classifies integer scheduler.duration_ms as a gauge by name, not value", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+  it("writes the real byte length into the envelope item header", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    await recordFleetInfraMetric("ingest.failed", 1, { total: 10 });
+    const lines = postedLines(fetchSpy);
+    const itemHeader = JSON.parse(lines[1]);
+    // Sentry envelope protocol: item `length` is the UTF-8 byte count of
+    // the JSON body that follows.  A zero length on a non-empty payload
+    // makes the receiver treat the item as truncated.
+    expect(itemHeader.type).toBe("event");
+    expect(itemHeader.length).toBe(Buffer.byteLength(lines[2], "utf8"));
+    expect(itemHeader.length).toBeGreaterThan(0);
+  });
+});
+
+describe("recordFleetInfraMetric: healthy metrics go out as Application Metrics", () => {
+  it("never posts an event item for a healthy counter", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    for (const name of [
+      "usage.persisted",
+      "usage.persisted_total",
+      "ai.request",
+      "ai.request_total",
+      "poll.snapshot",
+      "rollup.completed",
+      "scheduler.tick",
+    ]) {
+      await recordFleetInfraMetric(name, 3, { route: "otlp/v1/metrics" });
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(7);
+    for (let i = 0; i < 7; i++) {
+      expect(JSON.parse(postedLines(fetchSpy, i)[1]).type).toBe("trace_metric");
+    }
+  });
+
+  it("serializes a counter in the SDK trace_metric shape", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    await recordFleetInfraMetric("usage.persisted", 5, {
+      provider: "anthropic",
+      cost_usd: 0.0641,
+      count: 2,
+      sampled: true,
+    });
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
+    expect(url).toContain("https://o0.ingest.sentry.io/api/42/envelope/");
+    const lines = postedLines(fetchSpy);
+    const itemHeader = JSON.parse(lines[1]);
+    expect(itemHeader).toMatchObject({
+      type: "trace_metric",
+      item_count: 1,
+      content_type: "application/vnd.sentry.items.trace-metric+json",
+    });
+    expect(itemHeader.length).toBe(Buffer.byteLength(lines[2], "utf8"));
+    const payload = JSON.parse(lines[2]);
+    expect(payload.version).toBe(2);
+    expect(payload.items).toHaveLength(1);
+    const item = payload.items[0];
+    expect(item).toMatchObject({ name: "usage.persisted", type: "counter", value: 5 });
+    expect(item.unit).toBeUndefined();
+    expect(item.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(typeof item.timestamp).toBe("number");
+    expect(item.attributes).toMatchObject({
+      app: { value: "usage-monitor", type: "string" },
+      agent: { value: "MM", type: "string" },
+      provider: { value: "anthropic", type: "string" },
+      cost_usd: { value: 0.0641, type: "double" },
+      count: { value: 2, type: "integer" },
+      sampled: { value: true, type: "boolean" },
+    });
+  });
+
+  it("classifies integer scheduler.duration_ms as a millisecond gauge by name, not value", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
     // Real production duration samples are integers (Date.now() delta).
     await recordFleetInfraMetric("scheduler.duration_ms", 1234, { outcome: "ok" });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const lines = String(init?.body ?? "").split("\n");
-    expect(JSON.parse(lines[2]).tags["metric.kind"]).toBe("gauge");
+    await recordFleetInfraMetric("ai.request.ttft_ms", 250.5);
+    const first = JSON.parse(postedLines(fetchSpy, 0)[2]).items[0];
+    expect(first).toMatchObject({ type: "gauge", unit: "millisecond", value: 1234 });
+    const second = JSON.parse(postedLines(fetchSpy, 1)[2]).items[0];
+    expect(second).toMatchObject({ type: "gauge", unit: "millisecond", value: 250.5 });
   });
 
-  it("writes the real byte length into the envelope item header", async () => {
-    process.env.SENTRY_FLEET_DSN =
-      "https://abcd1234567890abcd@o0.ingest.sentry.io/42";
+  it("treats cost readings as gauges without a time unit", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
-    await recordFleetInfraMetric("scheduler.tick", 1, { total: 10 });
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
-    const body = String(init?.body ?? "");
-    const lines = body.split("\n");
-    const itemHeader = JSON.parse(lines[1]);
-    const eventJson = lines[2];
-    // Sentry envelope protocol: item `length` is the UTF-8 byte count of
-    // the JSON body that follows.  A zero length on a non-empty payload
-    // makes the receiver treat the item as truncated.
-    expect(itemHeader.type).toBe("event");
-    expect(itemHeader.length).toBe(Buffer.byteLength(eventJson, "utf8"));
-    expect(itemHeader.length).toBeGreaterThan(0);
+    await recordFleetInfraMetric("poll.snapshot.cost_usd", 0.107612, { provider: "openai" });
+    const item = JSON.parse(postedLines(fetchSpy)[2]).items[0];
+    expect(item.type).toBe("gauge");
+    expect(item.unit).toBeUndefined();
+  });
+
+  it("is a no-op when SENTRY_FLEET_DSN is absent", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await recordFleetInfraMetric("usage.persisted", 1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("drops non-finite values instead of posting them", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await recordFleetInfraMetric("scheduler.duration_ms", Number.NaN);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("swallows fetch failures and never throws", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
+    await expect(recordFleetInfraMetric("usage.persisted", 1)).resolves.toBeUndefined();
   });
 });
