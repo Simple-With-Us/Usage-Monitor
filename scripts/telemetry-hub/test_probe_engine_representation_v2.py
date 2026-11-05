@@ -12,14 +12,39 @@ V = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(V)
 
 # Reuse the independently reviewed tests against V2 without copying their logic.
+# Explicit comparison, not assert: the pin must also hold under python3 -O.
 RAW = (HERE / "test_probe_engine_representation.py").read_bytes()
-assert hashlib.sha256(RAW).hexdigest() == "c9b52713c5ab0b1be72123ed34c099d48cfb06637ef108e82fd3d98f7857cdd6"
+REVIEWED_ORIGINAL_SHA256 = "508f5b80bdbbedbcf8e05d0f3fc0d436732b3361f467fd945f2590f109eb9dc4"
+if hashlib.sha256(RAW).hexdigest() != REVIEWED_ORIGINAL_SHA256:
+    raise RuntimeError("reviewed original artifact changed: test_probe_engine_representation.py")
 LEGACY = types.ModuleType("v2_reused_fixture_tests")
 LEGACY.__file__ = str(HERE / "test_probe_engine_representation.py")
 exec(compile(RAW, LEGACY.__file__, "exec"), LEGACY.__dict__)
 ORIGINAL = LEGACY.P
 LEGACY.P = V
 OriginalEngine = LEGACY.FakeEngine
+
+
+class ResolvedNormalizationTests(unittest.TestCase):
+    def test_requested_zero_resolving_to_null_accepted_only_for_resolved_payloads(self):
+        # V1 requests MemorySwappiness 0; the reviewed cgroup-v2 daemon resolves
+        # it to null.  The resolved form is accepted only for an already-created
+        # container's inspection, never for an outbound create body.
+        body = copy.deepcopy(ORIGINAL.source_payload())
+        body["HostConfig"]["MemorySwappiness"] = None
+        with self.assertRaisesRegex(ORIGINAL.Stop, "HostConfig"):
+            ORIGINAL.validate_create_payload(body)
+        ORIGINAL.validate_create_payload(body, resolved=True)
+
+    def test_other_resolved_drift_still_refused(self):
+        body = copy.deepcopy(ORIGINAL.source_payload())
+        body["HostConfig"]["MemorySwappiness"] = 7
+        with self.assertRaisesRegex(ORIGINAL.Stop, "HostConfig"):
+            ORIGINAL.validate_create_payload(body, resolved=True)
+        body = copy.deepcopy(ORIGINAL.source_payload())
+        body["HostConfig"]["OomScoreAdj"] = None
+        with self.assertRaisesRegex(ORIGINAL.Stop, "HostConfig"):
+            ORIGINAL.validate_create_payload(body, resolved=True)
 
 
 class FakeEngine(OriginalEngine):
@@ -45,7 +70,7 @@ class V2Tests(unittest.TestCase):
 
     def test_original_reviewed_artifacts_unchanged_and_new_nonce_disjoint(self):
         self.assertEqual(hashlib.sha256((HERE / "probe-engine-representation.py").read_bytes()).hexdigest(),
-                         "da431146b352cc047313624f04d2041073d7d093928308b6b6115217362f1b32")
+                         "f5dab901d05226ec9df52cf51830feede01ba24189921a29ff4f80023581dfa3")
         self.assertEqual(V.BASE, "um1654-repr-01a1a250-8e4a92f7")
         self.assertEqual(V.LABELS["com.simplewithus.fixture.nonce"], "8e4a92f7")
         self.assertTrue(set(V.NAMES).isdisjoint(ORIGINAL.NAMES))

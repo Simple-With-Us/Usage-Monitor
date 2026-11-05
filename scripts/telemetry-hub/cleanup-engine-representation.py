@@ -10,7 +10,7 @@ import stat
 import sys
 import types
 
-SOURCE_SHA256 = "da431146b352cc047313624f04d2041073d7d093928308b6b6115217362f1b32"
+SOURCE_SHA256 = "f5dab901d05226ec9df52cf51830feede01ba24189921a29ff4f80023581dfa3"
 ORIGINAL_PLAN_SHA256 = "ca0b792e8273ae04154774aa7f12adf09fe1f87deb525a883f4597ffc2e7d361"
 PLAN_SHA256 = "d0c05394c4e18fa9629d75fb61fb7a7f1e47742f7e65de9aad9edea3369ca61c"
 DAEMON_SHA256 = "659e19e4b792e0ed00b136b7e91ad7ae1ea7decbf9e7930cdf1488d69b496565"
@@ -169,6 +169,15 @@ class Cleanup:
             self.operations.append(operation)
         try:
             status, value = self.engine.request(method, path)
+        except Stop as error:
+            # Fixed-reason refusals are provably raised before the request is
+            # sent (route/budget fences, daemon verification); only the
+            # transport's post-send wrap leaves the outcome genuinely unknown.
+            # Record which one the operator must reconcile.
+            if (operation is not None
+                    and str(error) != "Engine response unavailable after mutation sent; reconcile without retry"):
+                operation.update(outcome="not_sent", reason=str(error))
+            raise
         except Exception:
             raise Stop("request outcome unknown; stop without retry") from None
         if operation is not None:

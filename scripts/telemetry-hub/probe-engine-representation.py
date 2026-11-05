@@ -112,8 +112,15 @@ def same_json(left, right):
     return canonical(left) == canonical(right)
 
 
-def validate_create_payload(payload):
-    """Closed API-1.53 Config/HostConfig policy; no unreviewed field is forwarded."""
+def validate_create_payload(payload, resolved=False):
+    """Closed API-1.53 Config/HostConfig policy; no unreviewed field is forwarded.
+
+    With resolved=True the payload is a daemon-resolved inspection of an
+    already-created container, so the one normalization recorded in
+    docs/runbooks/engine-representation-stopped-cleanup-plan.md (requested
+    MemorySwappiness 0 resolved to null by the cgroup-v2 daemon) is accepted;
+    an outbound create body stays byte-exact.
+    """
     if not isinstance(payload, dict) or not isinstance(payload.get("HostConfig"), dict):
         raise Stop("invalid fixture create shape")
     expected = source_payload()
@@ -150,6 +157,9 @@ def validate_create_payload(payload):
         raise Stop("unreviewed fixture HostConfig field")
     for key, value in required.items():
         if key in ("Mounts", "LogConfig"):
+            continue
+        if (resolved and key == "MemorySwappiness" and value == 0
+                and key in host and host[key] is None):
             continue
         if key not in host or not same_json(host[key], value):
             raise Stop("synthetic HostConfig mismatch; preserve resources")
@@ -401,10 +411,20 @@ class FixtureEngine:
                     raise Stop("same-connection daemon verification failed before mutation")
                 if method == "POST" and path.startswith("/containers/create?"):
                     validate_create_payload(decode(encoded))
+            if method != "GET":
+                # Only the mutation exchange itself is outcome-unknown on
+                # failure; every earlier failure is provably pre-send.
+                try:
+                    status, value, _closing = exchange(method, path, encoded)
+                except Exception:
+                    raise Stop("Engine response unavailable after mutation sent; reconcile without retry") from None
+                return status, value
             status, value, _closing = exchange(method, path, encoded)
             return status, value
+        except Stop:
+            raise
         except Exception:
-            raise Stop("Engine response unavailable; preserve evidence and reconcile without retry") from None
+            raise Stop("Engine response unavailable before mutation; no mutation was sent") from None
         finally:
             connection.close()
 
@@ -507,7 +527,7 @@ def owned(inspected, identifier, name):
 def synthetic(inspected):
     payload = copy.deepcopy(inspected["Config"])
     payload["HostConfig"] = copy.deepcopy(inspected["HostConfig"])
-    validate_create_payload(payload)
+    validate_create_payload(payload, resolved=True)
     mounts = inspected.get("Mounts")
     if not isinstance(mounts, list):
         raise Stop("invalid fixture mounts")

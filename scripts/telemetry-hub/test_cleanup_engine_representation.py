@@ -67,6 +67,7 @@ class Engine:
         self.landed = False
         self.conflict = None
         self.ghost = None
+        self.refuse = None
         self.before = lambda method, path: None
         self.daemon = "synthetic-daemon"
 
@@ -75,6 +76,8 @@ class Engine:
         self.calls += 2 if method == "DELETE" else 1
         self.routes.append((method, path))
         if method == "DELETE":
+            if self.refuse == len(self.operations) + 1:
+                raise C.Stop("cleanup route refused before socket access")
             if hashlib.sha256(self.daemon.encode()).hexdigest() != C.DAEMON_SHA256:
                 raise C.Stop("synthetic pinned daemon mismatch")
             self.operations.append(path)
@@ -165,6 +168,18 @@ class Tests(unittest.TestCase):
                     self.assertEqual(len(engine.operations), index)
                     self.assertEqual(cleanup.operations[-1]["outcome"], "unknown")
                     self.assertFalse(evidence.cleaned)
+
+    def test_presend_refusal_records_not_sent_and_stops_without_retry(self):
+        for index in (1, 2):
+            with self.subTest(index=index):
+                cleanup, engine, evidence = self.candidate()
+                engine.refuse = index
+                with self.assertRaisesRegex(C.Stop, "refused before socket access"):
+                    cleanup.run()
+                self.assertEqual(len(engine.operations), index - 1)
+                self.assertEqual(cleanup.operations[-1]["outcome"], "not_sent")
+                self.assertEqual(cleanup.operations[-1]["reason"], "cleanup route refused before socket access")
+                self.assertFalse(evidence.cleaned)
 
     def test_conflict_at_each_deletion_stops_without_force_or_ram_cleanup(self):
         for index in (1, 2):

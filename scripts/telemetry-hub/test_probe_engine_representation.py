@@ -548,6 +548,43 @@ class RawSocket:
         self.closed = True
 
 
+class MutationOutcomeHonestyTests(unittest.TestCase):
+    def test_daemon_verification_failure_reports_before_mutation_distinctly(self):
+        connection = Connection(Response(b"", 204), daemon_info=True)
+        connection.daemon_id = "unreviewed-daemon"
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=lambda: connection)
+        identifier = "a" * 64
+        engine.permit_container(identifier)
+        with self.assertRaisesRegex(P.Stop, "same-connection daemon verification failed before mutation"):
+            engine.request("DELETE", "/containers/" + identifier + "?v=false&force=false&link=false")
+        self.assertEqual([args[0] for args, _ in connection.sent], ["GET"])
+        self.assertTrue(connection.closed)
+
+    def test_post_mutation_send_failure_reports_after_mutation_sent(self):
+        class DroppedResponse:
+            status, will_close = 204, False
+            def read1(self, length):
+                raise OSError("synthetic dropped connection")
+        connection = Connection(Response(b"", 204), daemon_info=True)
+        connection.response = DroppedResponse()
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=lambda: connection)
+        identifier = "b" * 64
+        engine.permit_container(identifier)
+        with self.assertRaisesRegex(P.Stop, "Engine response unavailable after mutation sent"):
+            engine.request("DELETE", "/containers/" + identifier + "?v=false&force=false&link=false")
+        self.assertEqual([args[0] for args, _ in connection.sent], ["GET", "DELETE"])
+        self.assertTrue(connection.closed)
+
+    def test_pre_socket_refusal_keeps_its_fixed_reason(self):
+        factory = Mock()
+        engine = P.FixtureEngine(armed=True, expected_daemon=DAEMON, connection=factory)
+        identifier = "c" * 64
+        engine.permit_container(identifier)
+        with self.assertRaisesRegex(P.Stop, "before socket access"):
+            engine.request("DELETE", "/containers/" + identifier + "?v=false&force=true&link=false")
+        factory.assert_not_called()
+
+
 class AbsoluteDeadlineTests(unittest.TestCase):
     def test_incremental_headers_cannot_extend_total_deadline(self):
         clock = TickClock()
