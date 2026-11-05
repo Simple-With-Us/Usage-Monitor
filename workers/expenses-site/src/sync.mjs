@@ -10,7 +10,7 @@
  * upsert below costs 3 rows written to insert a row, 2 to change one (it sets the
  * indexed occurred_at), and 0 when no field differs.  Live D1 still has a second index
  * until the migration runs, so each costs one more there.  Rewriting the whole ledger
- * every run measured 3,076 rows an hour live, 74% of the free daily cap.  So a run
+ * every run measured 3,076 rows an hour live, 74% of the Free plan's daily cap.  So a run
  * writes nothing but its state when the upstream text is unchanged, and otherwise only
  * the rows that differ.  Every guard below is checked before the write it protects.
  */
@@ -48,10 +48,6 @@ const MANUAL_SYNC_KEY = "manual_sync_at";
 // (not its rules, which are hashed) changes what is stored, so the next run compares
 // every row even though the upstream text is the same.
 const SYNC_SHAPE_VERSION = "1";
-// What the stored categories were computed under.  While this matches, a category
-// cannot have changed unless the vendor or label did.
-const CATEGORY_BASIS = `${SYNC_SHAPE_VERSION}:${CATEGORY_RULES_VERSION}`;
-
 // Every stored field but category, the one that costs CPU (about 80 rules per row).
 const PLAIN_FIELDS = [
   "vendor",
@@ -497,8 +493,12 @@ export async function syncExpenses(env, { manual = false } = {}) {
   }
 
   const unique = dedupeUpstreamRows(visible);
-  const basis = state.get(CATEGORY_BASIS_KEY);
-  const changed = changedExpenses(unique, mirror, { recategorize: basis !== CATEGORY_BASIS });
+  // What the stored categories were computed under, hashed because the rules are long.
+  // A rule edit changes it by itself.  While it matches, a category cannot have changed
+  // unless the vendor or label did.
+  const basis = await sha256Hex([SYNC_SHAPE_VERSION, CATEGORY_RULES_VERSION]);
+  const basisChanged = state.get(CATEGORY_BASIS_KEY) !== basis;
+  const changed = changedExpenses(unique, mirror, { recategorize: basisChanged });
   const toWrite = changed.slice(0, MAX_CHANGED_ROWS_PER_RUN).map(mapUpstreamExpense);
   const capped = toWrite.length < changed.length;
 
@@ -553,7 +553,7 @@ export async function syncExpenses(env, { manual = false } = {}) {
   await saveState([
     ["last_sync_at", syncedAt],
     [UPSTREAM_HASH_KEY, upstream.hash],
-    ...(basis === CATEGORY_BASIS ? [] : [[CATEGORY_BASIS_KEY, CATEGORY_BASIS]]),
+    ...(basisChanged ? [[CATEGORY_BASIS_KEY, basis]] : []),
   ]);
   return {
     upserted: toWrite.length,

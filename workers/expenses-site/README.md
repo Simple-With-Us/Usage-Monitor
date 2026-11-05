@@ -37,10 +37,11 @@ Every guard is checked before the write it protects.  A tripped guard fails the
 
 ## Operations
 
-If the ledger really was emptied, and the runs are failing with `upstream returned no rows`, clear the mirror.  The next run then finishes:
+If the ledger really was emptied, and the runs are failing with `upstream returned no rows`, clear the mirror and the stored hash.  The next run then finishes.  The hash has to go too: if upstream came back with its old text, a stored hash would skip the refill and leave the mirror empty.
 
 ```bash
 wrangler d1 execute expenses-site --remote --command "DELETE FROM expenses"
+wrangler d1 execute expenses-site --remote --command "DELETE FROM sync_state WHERE key = 'upstream_hash'"
 ```
 
 Force a full pass, for example after editing `expenses` by hand:
@@ -87,7 +88,7 @@ wrangler d1 execute expenses-site --remote --file workers/expenses-site/schema.s
 
 ## Moving to Workers Free
 
-Not ready yet.  Follow the Downgrade Checklist in `docs/cloudflare-workers.md` in AI-Fleet-Coordinator: lower `limits.subrequests` to 50 or less, and remove `limits.cpu_ms` if a scratch Worker shows that Free refuses it.  Measure CPU first: Free allows 10 ms, a sync that changes rows parses the whole ledger, and `GET /` measured 19-30 ms before this change.
+Not ready yet.  Lower `limits.subrequests` to 50 or less, and remove `limits.cpu_ms` if a scratch Worker shows that Free refuses it.  Measure CPU first: Free allows 10 ms, a sync that changes rows parses the whole ledger, and `GET /` measured 19-30 ms before this change.
 
 ## Tests
 

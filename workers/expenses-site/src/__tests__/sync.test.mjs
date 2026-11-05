@@ -178,7 +178,7 @@ describe("parseUpstreamPage", () => {
   const parse = (body) => () => parseUpstreamPage(JSON.stringify(body));
   const withRow = (fields) => parse({ ...good, expenses: [{ ...upstream, ...fields }] });
 
-  it("accepts the page the upstream route sends, and hands back only known keys", () => {
+  it("accepts the page the upstream route sends, and drops unknown page keys", () => {
     expect(parseUpstreamPage(JSON.stringify({ ...good, extra: 1 }))).toEqual({
       expenses: [JSON.parse(JSON.stringify(upstream))],
       nextCursor: null,
@@ -186,6 +186,13 @@ describe("parseUpstreamPage", () => {
     });
     // label is nullable upstream, and notes and calendarSort are left out when unset.
     expect(withRow({ label: null, notes: undefined })).not.toThrow();
+  });
+
+  it("passes unknown row keys through, and the mapping keeps them out of D1", () => {
+    const body = { ...good, expenses: [{ ...upstream, dueDate: "2026-12-01" }] };
+    const [row] = parseUpstreamPage(JSON.stringify(body)).expenses;
+    expect(row.dueDate).toBe("2026-12-01");
+    expect(mapUpstreamExpense(row)).not.toHaveProperty("dueDate");
   });
 
   it("refuses text that is not JSON, without quoting it", () => {
@@ -469,9 +476,19 @@ describe("syncExpenses", () => {
       await expect(syncExpenses(envFor(db))).rejects.toThrow("no rows");
 
       db.exec("DELETE FROM expenses");
+      db.exec("DELETE FROM sync_state WHERE key = 'upstream_hash'");
       expect(await syncExpenses(envFor(db))).toMatchObject({ upserted: 0, unchanged: false });
       expect(db.state("last_sync_at")).not.toBe("2026-11-01T00:00:00.000Z");
       expect(await syncExpenses(envFor(db))).toMatchObject({ unchanged: true });
+    });
+
+    it("refills a cleared mirror when upstream comes back with the old text", async () => {
+      await seed();
+      db.exec("DELETE FROM expenses");
+      db.exec("DELETE FROM sync_state WHERE key = 'upstream_hash'");
+      fetchMock.mockResolvedValueOnce(page([upstream]));
+      expect(await syncExpenses(envFor(db))).toMatchObject({ upserted: 1, unchanged: false });
+      expect(db.rows()).toHaveLength(1);
     });
 
     it("writes nothing when one upstream row is malformed", async () => {
