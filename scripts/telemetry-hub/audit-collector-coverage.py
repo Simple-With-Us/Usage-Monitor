@@ -15,20 +15,35 @@ from pathlib import Path
 
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TREE_ENTRIES = 20000
+# SHA256 of docs/runbooks/collector-coverage-audit.md as reviewed.  Live
+# inspection refuses to run unless the on-disk plan still matches these
+# reviewed bytes and the caller supplies matching reviewed hashes for both
+# the plan and this helper (same fence as probe-engine-representation.py).
+PLAN_SHA256 = "ba177988aab1dddd3e7a9fc835b2c12216a152965a2dfbcab82004ca7d1a9992"
+
 JOBS = {
     "kimi-code": "com.jays.kimi-usage-collector",
     "zcode": "com.jays.zcode-usage-collector",
     "muse-code": "com.jays.muse-code-usage-collector",
-    "muse": "com.jays.muse-usage-collector",
     "antigravity": "com.jays.antigravity-session-collector",
     "grok": "com.jays.grok-usage-collector",
     "fx": "com.jays.fx-usage-collector",
 }
+# muse is deliberately absent: scripts/muse-usage-collector.mjs runs on the
+# collector VM via cron, not as a Mac LaunchAgent, so there is no
+# com.jays.muse-usage-collector plist to audit on this host.
 SCRIPTS = (
     "kimi-usage-collector.mjs", "zcode-usage-collector.mjs",
     "muse-code-usage-collector.mjs", "muse-usage-collector.mjs",
-    "antigravity-session-collector.mjs", "collector-injector.mjs",
+    "antigravity-session-collector.mjs",
+    "grok-usage-collector.mjs", "fx-usage-collector.mjs",
 )
+# collector-injector.mjs is deliberately absent: the install contract never
+# places it under ~/apps/usage-monitor-collectors/scripts (install-collectors.sh
+# rsyncs only *-collector.mjs plus named exceptions, and
+# check-collector-install aborts when an installed copy contains it), so
+# hashing it here would be a permanent false negative.  Injector presence is
+# still observed per job via the plist ProgramArguments check.
 
 
 def bounded_file(path, limit=MAX_FILE_BYTES):
@@ -169,7 +184,11 @@ def audit(home):
     sources = {"kimi-code": tree_metadata(home / ".kimi-code" / "sessions", now),
                "kimi-index": metadata(home / ".kimi-code" / "session_index.jsonl", now),
                "zcode": metadata(home / ".zcode" / "cli" / "db" / "db.sqlite", now),
-               "muse": tree_metadata(home / ".local" / "share" / "muse" / "sessions", now),
+               # ~/.local/share/muse/sessions is the Muse Code session store
+               # (CodeCaps reads it for the muse-code producer); the muse
+               # producer's subscription-status CLI is collector-VM-only and
+               # has no native Mac source, so muse gets no row here.
+               "muse-code": tree_metadata(home / ".local" / "share" / "muse" / "sessions", now),
                "antigravity": metadata(home / ".cache" / "usage-monitor" / "antigravity-statusline" / "usage.jsonl", now),
                "grok": tree_metadata(home / ".grok" / "sessions", now),
                "fx": metadata(home / ".fx" / "usage.jsonl", now)}
@@ -187,12 +206,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audit-local-mac", action="store_true")
     parser.add_argument("--expected-home", help="Absolute home directory the audited Mac account must have")
+    parser.add_argument("--reviewed-plan-sha256")
+    parser.add_argument("--reviewed-helper-sha256")
     args = parser.parse_args()
     if not args.audit_local_mac:
         print(json.dumps({"mode": "offline_plan", "hosts": ["existing authorized Mac SSH target"],
                           "operations": ["bounded owned installed source/plist reads", "native source stat", "fixed launchctl print"],
-                          "network_requests": 0, "writes": 0, "credential_reads": 0}))
+                          "network_requests": 0, "writes": 0, "credential_reads": 0,
+                          "plan_sha256": PLAN_SHA256}))
         return
+    plan = Path(__file__).resolve().parents[2] / "docs" / "runbooks" / "collector-coverage-audit.md"
+    actual_plan = hashlib.sha256(plan.read_bytes()).hexdigest()
+    actual_helper = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    if (actual_plan != PLAN_SHA256 or args.reviewed_plan_sha256 != actual_plan
+            or args.reviewed_helper_sha256 != actual_helper):
+        raise SystemExit("Refused: exact reviewed plan and helper bytes required")
     if platform.system() != "Darwin" or not args.expected_home or Path.home() != Path(args.expected_home):
         raise SystemExit("Refused: pass --expected-home matching the authorized Mac account home")
     print(json.dumps(audit(Path.home())))
