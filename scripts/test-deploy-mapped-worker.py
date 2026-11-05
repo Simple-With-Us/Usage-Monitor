@@ -156,6 +156,21 @@ class Checks(unittest.TestCase):
   with patch.object(m,"live_version",return_value="a"),self.rows():
    with self.assertRaisesRegex(RuntimeError,"No invocations"):m.probe({"probe":"telemetry"},"x")
    m.probe({"probe":"telemetry"},"x",after_upload=True)
+ def test_run_with_nothing_to_deploy_still_judges_the_telemetry(self):
+  # Through main: the half-hourly run with no upload applies the no-invocations rule and the tolerance.
+  thrown=[("success","a",5),("scriptThrewException","a",13)]
+  for tag,changed,rows,why in (("sha1",True,[],"No invocations"),("a"*40,False,[],"No invocations"),("sha1",True,thrown,"13 failed invocations")):
+   with self.subTest(tag=tag,why=why),patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
+    patch.object(m.subprocess,"check_output",return_value="sha1\n"),\
+    patch.object(m,"current_main",return_value="sha1"),\
+    patch.object(m,"guard_tripped",return_value=False),\
+    patch.object(m,"deployed_tag",return_value=tag),\
+    patch.object(m,"worker_changed",return_value=changed),\
+    patch.object(m,"live_version",return_value="a"),\
+    self.rows(*rows),\
+    patch.object(m.subprocess,"run") as run:
+    with self.assertRaisesRegex(RuntimeError,why):m.main()
+    run.assert_not_called()
  def test_telemetry_failure_does_not_hold_back_the_upload_that_fixes_it(self):
   with patch.object(m,"live_version",return_value="a"),self.rows(("scriptThrewException","a",1)):
    m.probe({"probe":"telemetry"},"x",before_upload=True)

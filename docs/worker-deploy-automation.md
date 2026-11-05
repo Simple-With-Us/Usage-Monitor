@@ -50,7 +50,8 @@ replace the paragraph on connecting the auditor to Git with a pointer to this jo
 following it would make a second unguarded path.
 
 The trigger can change at any time, so read it again just before setting the variable.  The
-Builds API's triggers list for the Worker should come back empty for all three Workers.  Reading it needs a token with Workers CI Read, which the deploy credential is not required to have.
+Builds API's triggers list for the Worker should come back empty for all three Workers.  Reading it needs a
+token with Workers CI Read, which the deploy credential is not required to have.
 
 Read on November 4, 2026, the trigger still exists and names the repository's old owner.
 Its last build was at 7:43 PM on October 1, with no build for the 283 commits on `main`
@@ -71,14 +72,14 @@ analytics fails closed and the next run tries again.  That covers a rate limit,
 with null data, and an answer with no account, which can mean the token lacks Account
 Analytics Read.  An empty row list is a real answer, so only the no-invocations rule judges it.
 
-A target may set `tolerated_exceptions`.  Expenses sets 12, half of its 24 hourly syncs in
-the window, because once its scheduled handler rethrows, an upstream failure counts as a
-thrown invocation.  The audit counted about 40 of those in 7 days, so with no allowance the
+A target may set `tolerated_exceptions`.  Expenses sets 12, half of the 24 syncs in the
+window once PR 1902 moves its cron from every 15 minutes to hourly, because once that PR makes
+its scheduled handler rethrow, an upstream failure counts as a thrown invocation.  The audit counted about 40 of those in 7 days, so with no allowance the
 half-hourly run would be red most of the time and a real failure would not stand out.  Up to
 12 thrown invocations pass while the live version also has successes, and the run logs the
 count.  A version that has only thrown still fails, as does any CPU, resource or internal
 failure, so hitting a limit stays red at once.  A complete sync outage goes red after about 13
-hours.  The cost of a failing sync is capped by that Worker's own guards, not by this probe.
+hours on that hourly cron.  The cost of a failing sync is capped by that Worker's own guards, not by this probe.
 
 The auditor has no route, so it uses telemetry.  Expenses uses it too.  Its old probe,
 GET /api/expenses, could not pass: that hostname's Access app has no service-auth policy,
@@ -125,10 +126,11 @@ the live limits; whether Cloudflare keeps them in that case has not been checked
 deploy job runs the check with --require-limits and stops first.  `limits_pending` lets a
 pull request pass while the limits land in that Worker's config, and it must be removed
 once they have.  It never excuses a value over the ceiling, and it is ignored by the deploy
-job.  Some ceilings are paid-plan values: the documented Free maximum is 50 subrequests,
-and expenses is at 200, so a move to Free needs a config and ceiling change first.  The inbox ceiling is
-500 ms because 200 ms stopped PDF mail from roughly 6.5 MiB, and intake is capped at 60 messages a
-day, so the cost is small.
+job.  Some ceilings are paid-plan values: the documented Free maximums are 50 subrequests
+and 10 ms of CPU, expenses is at 200 subrequests and every CPU ceiling is above 10 ms, so a move
+to Free needs a config and ceiling change first.  The inbox ceiling is 500 ms because 200 ms stopped PDF
+mail from roughly 6.5 MiB, and intake is capped at 100 messages and 100 MiB a day (60 of each for
+public senders once PR 1903 lands), so the cost is small.
 
 ## Credentials
 
