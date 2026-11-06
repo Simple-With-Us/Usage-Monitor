@@ -142,9 +142,14 @@ def maps(root, hub):
     if any(name in ids or name in hub_ids for name in PRODUCERS) or "clutch.mac" not in hub_ids:
         raise Stop("producer already exists or clutch.mac is missing")
     # The receiver enforces 1..64 sources; generation appends PRODUCERS.
-    if not sources or len(sources) + len(PRODUCERS) > 64:
+    if not sources or len(sources) + len(PRODUCERS) > RECEIVER_MAX_SOURCES:
         raise Stop("hub map would violate the receiver 1..64 member limit")
     return ids, sources, tokens + hub_tokens
+
+
+# Canonical receiver capacity, mirrored from parseReceiverSources (.max(64)) in
+# otlp-receiver.mjs; test_receiver_capacity_matches_receiver pins the parity.
+RECEIVER_MAX_SOURCES = 64
 
 
 def validate_manifest(manifest):

@@ -18,11 +18,11 @@ import urllib.parse
 
 ROOT = Path(__file__).resolve().parent
 PINS = {"fixture-base.py": "5b9eb18f78781add8d3640ba5e2aabef16f45ee1fb2f45ae988e4a60671db610",
-        "../../activate-kimi-zcode.py": "3076265f9e3b7bed42e9a97cd0de09530b5c22cad2f381fe3740ba6d43cf4fc7",
+        "../../activate-kimi-zcode.py": "e952cbaf684b546de80904388ea57ecec259f35275e1c611258c2fd34aea0166",
         "../../finite-pinned-lifecycle.py": "efe0abf0ae8eabd1e1512b17fdb6afd6eb6db649ee38b21356d0cc6e6fb1fc9f",
         "../../offline-engine-runtime.py": "a08f41a0772e09a063ec88f01c004417c8e55562737836929a1b4481262c3e9b",
         "../../pinned-engine-lifecycle.py": "ca131fc739b89852fa11cf53f8869417fb0edbb813d06accc4120afb8794ae0b",
-        "../../sync-mounted-sources.py": "5823756830ac80320f97cbd4f7fdb8e35c7f964322ceac358e16e9e2d094f502"}
+        "../../sync-mounted-sources.py": "bf4c65ee7cc24aabf1dd3a62730a29e31b6bced19ac9490ece451fae611ae7de"}
 for name, expected in PINS.items():
     if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
         raise RuntimeError("fixed nonsecret dependency differs")

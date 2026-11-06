@@ -413,9 +413,17 @@ class CustodyTests(unittest.TestCase):
                 with patch.object(P.os, "stat", side_effect=coarse_tick_stat):
                     try:
                         evidence.check()
-                    except P.Stop:
+                    except P.Stop as exc:
+                        # Only a NEW (strengthened-custody) signal is quarantined.
+                        # The failure shapes the current stat-only detector can
+                        # already produce - identity drift, unreadable receipts,
+                        # signature mismatch - re-raise unchanged so they can
+                        # never be masked as a skip.
+                        message = str(exc)
+                        if "identity changed" in message or "receipt" in message or "signature" in message:
+                            raise
                         raise unittest.SkipTest(
-                            "custody strengthened past the stat-only residual; drop this quarantine")
+                            "custody strengthened past the stat-only residual; drop this quarantine") from exc
                 # With true stat reads (same test-only UID substitution) and a
                 # guaranteed timestamp delta, the same rewrite IS refused:
                 # detection depends entirely on the signature changing.

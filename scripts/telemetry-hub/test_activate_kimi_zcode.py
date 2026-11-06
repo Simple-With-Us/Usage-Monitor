@@ -51,6 +51,17 @@ def manifest(api):
         "reservation_receipts": [{"topic": topic, "receipt": "offline-test-only", "acknowledged": True} for topic in ("AFC-600", "Clutch")]}
 
 
+class ReceiverContractTests(unittest.TestCase):
+    def test_receiver_capacity_matches_receiver(self):
+        # Parity guard: the controller's RECEIVER_MAX_SOURCES must equal the
+        # receiver's own .max(N) in parseReceiverSources.
+        receiver = Path(__file__).with_name("otlp-receiver.mjs").read_text()
+        import re
+        match = re.search(r"\.min\(1\)\.max\((\d+)\)", receiver)
+        self.assertIsNotNone(match, "receiver source-capacity bound not found")
+        self.assertEqual(int(match.group(1)), M.RECEIVER_MAX_SOURCES)
+
+
 class ControllerTests(unittest.TestCase):
     def run_controller(self, api, plan=None, factory=None):
         files = {}
