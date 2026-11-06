@@ -579,7 +579,12 @@ test('visual: posted expenses card with tech and other rows', async ({ page }) =
     ],
     nextCursor: null,
     hasMore: false,
-    totals: { count: 2, totalUsd: 242.6, byCategory: { Tech: 50, Other: 192.6, uncategorized: 0 } },
+    totals: {
+      count: 2,
+      totalUsd: 242.6,
+      byCategory: { Tech: 50, Other: 192.6, uncategorized: 0 },
+      counts: { Tech: 1, Other: 1, uncategorized: 0 },
+    },
   }));
   await login(page);
   await page.goto('/ops');
