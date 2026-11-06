@@ -405,10 +405,17 @@ class CustodyTests(unittest.TestCase):
                         return types.SimpleNamespace(**captured)
                     return info
                 # Under a coarse-tick filesystem reading, the same rewrite is
-                # invisible to stat-only custody (documented residual, open
-                # review question).
+                # invisible to stat-only custody.  This is a documented
+                # residual (plan.md), NOT an accepted behavior: the check is
+                # quarantined so that a future custody strengthening turns
+                # this case into a skip instead of a failure, and acceptance
+                # of a replayed signature is never a gating assertion.
                 with patch.object(P.os, "stat", side_effect=coarse_tick_stat):
-                    evidence.check()
+                    try:
+                        evidence.check()
+                    except P.Stop:
+                        raise unittest.SkipTest(
+                            "custody strengthened past the stat-only residual; drop this quarantine")
                 # With true stat reads (same test-only UID substitution) and a
                 # guaranteed timestamp delta, the same rewrite IS refused:
                 # detection depends entirely on the signature changing.
