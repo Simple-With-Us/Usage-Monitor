@@ -591,8 +591,8 @@ test('visual: posted expenses card with tech and other rows', async ({ page }) =
   await pinFonts(page);
   const card = page.locator('section[aria-labelledby="posted-expenses-heading"]');
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await expect(card.getByText('Unusual Whales')).toBeVisible();
-  await expect(card.getByText('GCX.raise')).toBeVisible();
+  await expect(card.getByText('Unusual Whales', { exact: true })).toBeVisible();
+  await expect(card.getByText('GCX.raise', { exact: true })).toBeVisible();
   await expect(card.getByText('$242.60')).toBeVisible();
   await expect(card).toHaveScreenshot('posted-expenses-card.png', stableShot);
 });
