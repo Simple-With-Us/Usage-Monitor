@@ -993,3 +993,27 @@ model QuarantinedOwnerExpense {
   // Human-readable why-held reason shown in the review list.
   matchReason          String    @default("")
 }
+
+// Owner-expense management audit trail (UM-1659).  Every dashboard delete or
+// edit of a posted owner expense writes one row here BEFORE the mutation is
+// applied, in the same transaction, so a removal or change is never silent:
+// `before` is the full pre-change snapshot (same shape the GET
+// /api/owner-expenses route returns, plus cancelledNoRenew), `after` is the
+// post-edit snapshot for edits (null for deletes), and `resultingKey` is the
+// idempotency key the row carries after an edit that rekeyed it (null when
+// the key did not change or the row was deleted).  Deletes additionally
+// upsert an ExternalUsageEventTombstone for the removed key, which is what
+// blocks the receipts intake / ingest from ever resurrecting the entry on a
+// replay or re-forward (persistExternalUsageEvents skips tombstoned keys).
+model OwnerExpenseAudit {
+  id             String   @id @default(uuid())
+  idempotencyKey String
+  action         String // "delete" | "edit"
+  before         Json
+  after          Json?
+  resultingKey   String?
+  createdAt      DateTime @default(now())
+
+  @@index([idempotencyKey])
+  @@index([createdAt])
+}
