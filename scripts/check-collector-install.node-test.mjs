@@ -55,13 +55,13 @@ function snapshot(path, afterDirectoryOpen) {
       return Object.fromEntries(names.sort().map(name => [name, snapshot(join(path, name))]));
     } finally { directory.closeSync(); }
   }
+  const initial = lstatSync(path);
+  if (!initial.isFile()) return { special: true };
   let fd;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) {
-    if (["ENXIO", "ENODEV", "EOPNOTSUPP"].includes(error.code)) {
-      const kind = lstatSync(path);
-      if (kind.isSocket() || kind.isBlockDevice() || kind.isCharacterDevice()) return { special: true };
-    }
+    const kind = lstatSync(path);
+    if (!kind.isFile()) return { special: true };
     throw error;
   }
   try {
