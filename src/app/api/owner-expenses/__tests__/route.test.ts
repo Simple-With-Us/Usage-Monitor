@@ -31,6 +31,8 @@ vi.mock("@/lib/prisma", () => {
     ownerExpenseAudit: {
       create: mocks.auditCreate,
     },
+    // reserveExternalUsageWriter(tx) runs this on the transaction client.
+    $executeRaw: vi.fn(async () => 0),
   };
   return {
     prisma: {

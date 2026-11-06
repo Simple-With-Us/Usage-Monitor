@@ -84,6 +84,10 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
 
 export default function PostedExpensesCard() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  // The filters the visible list was actually loaded with.  Draft input
+  // edits must not leak into Load more / refresh / post-mutation reloads —
+  // a cursor minted under one filter set is meaningless under another.
+  const [appliedFilters, setAppliedFilters] = useState<Filters>(EMPTY_FILTERS);
   const [expenses, setExpenses] = useState<PostedExpense[] | null>(null);
   const [totals, setTotals] = useState<{ count: number; totalUsd: number; Tech: number; Other: number; uncategorized: number } | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -151,6 +155,7 @@ export default function PostedExpensesCard() {
     setSelected(new Set());
     setConfirmingBulk(false);
     setConfirmingKey(null);
+    setAppliedFilters(filters);
     void load(filters, null, false);
   }
 
@@ -183,7 +188,7 @@ export default function PostedExpensesCard() {
       setSelected(new Set());
       setConfirmingBulk(false);
       setConfirmingKey(null);
-      await load(filters, null, false);
+      await load(appliedFilters, null, false);
       if (historyOpen) await loadHistory();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete");
@@ -203,12 +208,17 @@ export default function PostedExpensesCard() {
       idempotencyKey: expense.idempotencyKey,
       provider: String(form.get("provider") ?? "").trim(),
       amountUsd: Number(form.get("amountUsd")),
-      occurredAt: occurred ? new Date(`${occurred}T12:00:00.000Z`).toISOString() : expense.occurredAt,
       kind: String(form.get("kind") ?? expense.kind),
       label: String(form.get("label") ?? "").trim(),
       notes: String(form.get("notes") ?? "").trim() || null,
       confidence: String(form.get("confidence") ?? expense.confidence),
     };
+    // Only send occurredAt when the day actually changed: the form carries
+    // a day, not the stored time-of-day, so always sending it would rekey
+    // (and tombstone) every expense whose stored timestamp is not noon UTC.
+    if (occurred && occurred !== formatDay(expense.occurredAt)) {
+      payload.occurredAt = new Date(`${occurred}T12:00:00.000Z`).toISOString();
+    }
     try {
       const json = await fetchJson("/api/owner-expenses", {
         method: "PATCH",
@@ -223,7 +233,12 @@ export default function PostedExpensesCard() {
           : "Expense updated."
       );
       setEditingKey(null);
-      await load(filters, null, false);
+      // A rekeying edit retires the old key; a selection still holding it
+      // would offer a bulk delete of a key that no longer exists.
+      setSelected(new Set());
+      setConfirmingBulk(false);
+      setConfirmingKey(null);
+      await load(appliedFilters, null, false);
       if (historyOpen) await loadHistory();
     } catch (editError) {
       setError(editError instanceof Error ? editError.message : "Could not save the edit");
@@ -246,7 +261,7 @@ export default function PostedExpensesCard() {
         </div>
         <button
           type="button"
-          onClick={() => void load(filters, null, false)}
+          onClick={() => void load(appliedFilters, null, false)}
           className="flex min-h-11 items-center gap-1 rounded-lg px-2 text-xs font-medium text-blue-600 hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300 dark:hover:bg-blue-950/30"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -498,7 +513,7 @@ export default function PostedExpensesCard() {
           <button
             type="button"
             disabled={loading}
-            onClick={() => void load(filters, nextCursor, true)}
+            onClick={() => void load(appliedFilters, nextCursor, true)}
             className="min-h-11 rounded-lg border border-gray-300 px-4 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
           >
             Load more

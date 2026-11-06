@@ -248,7 +248,18 @@ export async function GET(request: NextRequest) {
     const cursorIndex = expenses.findIndex(
       (expense) => expense.idempotencyKey === cursor
     );
-    if (cursorIndex >= 0) start = cursorIndex + 1;
+    if (cursorIndex < 0) {
+      // The cursor row left the filtered set (deleted or rekeyed since the
+      // page was minted).  Restarting at page 1 would make the client append
+      // duplicates; an empty final page is the honest answer.
+      return NextResponse.json({
+        expenses: [],
+        nextCursor: null,
+        hasMore: false,
+        ...(wantsTotals ? { totals } : {}),
+      });
+    }
+    start = cursorIndex + 1;
   }
   const page = expenses.slice(start, start + limit);
   const hasMore = start + page.length < expenses.length;

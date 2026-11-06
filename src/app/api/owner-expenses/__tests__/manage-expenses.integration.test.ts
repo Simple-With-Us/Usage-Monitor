@@ -260,6 +260,97 @@ describe("UM-1659 posted-expense management (integration)", () => {
     });
   });
 
+  it("undoing a rekeying edit restores the original key and clears its tombstone", async () => {
+    const recorded = await postExpense(TECH_EXPENSE);
+    const edited = await PATCH(
+      sessionRequest(BASE, "PATCH", {
+        idempotencyKey: recorded.idempotencyKey,
+        amountUsd: 45,
+      })
+    );
+    expect(edited.status).toBe(200);
+    const editedBody = await edited.json();
+    const keyB = editedBody.expense.idempotencyKey as string;
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: recorded.idempotencyKey },
+      })
+    ).not.toBeNull();
+
+    // Edit back to the original values: the tombstone on the original key
+    // came from this row's own rekey, so the undo is allowed (not a 409).
+    const undone = await PATCH(
+      sessionRequest(BASE, "PATCH", { idempotencyKey: keyB, amountUsd: 50 })
+    );
+    expect(undone.status).toBe(200);
+    const undoneBody = await undone.json();
+    expect(undoneBody.expense.idempotencyKey).toBe(recorded.idempotencyKey);
+    // The original key is live again, so its tombstone is gone...
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: recorded.idempotencyKey },
+      })
+    ).toBeNull();
+    // ...and a replay of the original receipt is a plain idempotent no-op.
+    const replay = await postExpense(TECH_EXPENSE);
+    expect(replay.persisted).toBe(0);
+    expect(replay.tombstoned).toBeFalsy();
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { sourceApp: "owner-recorded-expense" },
+      })
+    ).toBe(1);
+  });
+
+  it("rejects an edit into a genuinely deleted expense's values (409)", async () => {
+    const deleted = await postExpense(TECH_EXPENSE);
+    await DELETE(
+      sessionRequest(BASE, "DELETE", {
+        idempotencyKeys: [deleted.idempotencyKey],
+      })
+    );
+    const other = await postExpense(OTHER_EXPENSE);
+    const response = await PATCH(
+      sessionRequest(BASE, "PATCH", {
+        idempotencyKey: other.idempotencyKey,
+        provider: "Unusual Whales",
+        amountUsd: 50,
+        occurredAt: TECH_EXPENSE.occurredAt,
+        label: TECH_EXPENSE.label,
+      })
+    );
+    expect(response.status).toBe(409);
+  });
+
+  it("filtered GET with a stale cursor returns an empty final page, not page 1", async () => {
+    await postExpense(TECH_EXPENSE);
+    await postExpense({
+      ...OTHER_EXPENSE,
+      notes: "Category: Tech",
+      label: "Second tech expense",
+    });
+    const page1 = await GET(
+      sessionRequest(`${BASE}?totals=1&category=tech&limit=1`, "GET")
+    );
+    const page1Body = await page1.json();
+    expect(page1Body.expenses).toHaveLength(1);
+    expect(page1Body.hasMore).toBe(true);
+    const cursor = page1Body.nextCursor as string;
+
+    // The cursor row is deleted before the client asks for page 2.
+    await DELETE(sessionRequest(BASE, "DELETE", { idempotencyKeys: [cursor] }));
+    const page2 = await GET(
+      sessionRequest(
+        `${BASE}?totals=1&category=tech&limit=1&cursor=${encodeURIComponent(cursor)}`,
+        "GET"
+      )
+    );
+    const page2Body = await page2.json();
+    expect(page2Body.expenses).toEqual([]);
+    expect(page2Body.hasMore).toBe(false);
+    expect(page2Body.nextCursor).toBeNull();
+  });
+
   it("audit endpoint returns the history and requires a session", async () => {
     const recorded = await postExpense(TECH_EXPENSE);
     await DELETE(
