@@ -36,6 +36,10 @@ class Response:
         chunk, self.raw = self.raw[:count], self.raw[count:]
         return chunk
 
+    def close(self):
+        self.raw = b""
+        self.closed = True
+
 
 class Connection:
     def __init__(self, responses):

@@ -260,14 +260,21 @@ class DockerCompose:
         if (labels.get("com.docker.compose.project.config_files") != self.m["compose_file"]
                 or labels.get("com.docker.compose.project.working_dir") != self.m["compose_directory"]):
             raise Stop("Compose source provenance differs from selected existing container")
-        if self.mounted() != read_snapshot(self.m["snapshot_path"]):
-            raise Stop("host and running mounted snapshots differ")
+        self.mounted()
 
     def mounted(self):
         container = self.inspect()
-        # Returned raw config stays private in process and is never printed.
-        return self.command(["docker", "exec", container, "node", "-e",
-            "process.stdout.write(require('node:fs').readFileSync('/run/secrets/telemetry-hub.json','utf8'))"])
+        host = read_snapshot(self.m["snapshot_path"])
+        # The container emits only the mounted file's SHA-256 digest, so the raw
+        # mounted secret never transits subprocess stdout.
+        remote = self.command(["docker", "exec", container, "node", "-e",
+            "process.stdout.write(require('node:crypto').createHash('sha256')"
+            ".update(require('node:fs').readFileSync('/run/secrets/telemetry-hub.json','utf8'))"
+            ".digest('hex'))"])
+        if remote != C.digest(host):
+            raise Stop("host and running mounted snapshots differ")
+        # Callers receive the private host custody snapshot, never container output.
+        return host
 
     def stop(self):
         raise Stop("live stop is unavailable until a pinned recreation route is reviewed")

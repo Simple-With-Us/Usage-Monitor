@@ -21,8 +21,8 @@ PINS = {"fixture-base.py": "4316fec020d46626c807c434add39ad6c1227109738d53ad7199
         "../../activate-kimi-zcode.py": "472b450cbe33a5a5f1e9bcd18e80a361b36fccd7babd367f8cfcada542b1e4f1",
         "../../finite-pinned-lifecycle.py": "efe0abf0ae8eabd1e1512b17fdb6afd6eb6db649ee38b21356d0cc6e6fb1fc9f",
         "../../offline-engine-runtime.py": "a08f41a0772e09a063ec88f01c004417c8e55562737836929a1b4481262c3e9b",
-        "../../pinned-engine-lifecycle.py": "543ac3b3415c932d75a1d3900b708df3cf72652f96739d6d7daaf9853a6337a0",
-        "../../sync-mounted-sources.py": "5104d3e47f7727e32ea33d3d694a0fcf85ddfc6aea2a4891d344d9cde5b16beb"}
+        "../../pinned-engine-lifecycle.py": "bcd74ec23c6ae63d123be40260cea1f16027113b81e416c659defc03cfc7d159",
+        "../../sync-mounted-sources.py": "b4c81db66b53c67ca07c1a5217763bf491d4311b884ce96858868c06c9a8e79f"}
 for name, expected in PINS.items():
     if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
         raise RuntimeError("fixed nonsecret dependency differs")

@@ -58,6 +58,64 @@ def fixture():
     return manifest, raw, new_map
 
 
+class DigestOnlyMountedTests(unittest.TestCase):
+    """The container must emit only the mounted file's digest, never the raw secret."""
+
+    RAW = json.dumps({"SENTRY_OTLP_ENDPOINT": "https://fake.invalid/otlp",
+                      "SENTRY_PUBLIC_KEY": "fake-public", M.C.HUB_MAP: "[]"})
+
+    def make_backend(self, remote):
+        backend = M.DockerCompose({"snapshot_path": "/fake/config.json"})
+        backend.inspect = lambda: "fake-container"
+        calls = []
+        def command(args):
+            calls.append(args)
+            return remote
+        backend.command = command
+        return backend, calls
+
+    def patched_snapshot(self, raw):
+        old = M.read_snapshot
+        M.read_snapshot = lambda path: raw
+        self.addCleanup(setattr, M, "read_snapshot", old)
+
+    def test_digest_match_returns_host_snapshot_without_raw_stdout(self):
+        self.patched_snapshot(self.RAW)
+        backend, calls = self.make_backend(M.C.digest(self.RAW))
+        self.assertEqual(backend.mounted(), self.RAW)
+        self.assertEqual(calls[0][:3], ["docker", "exec", "fake-container"])
+        program = calls[0][-1]
+        self.assertIn("node:crypto", program)
+        self.assertIn(".digest('hex')", program)
+        self.assertNotIn(self.RAW, json.dumps(calls))
+
+    def test_digest_mismatch_stops(self):
+        self.patched_snapshot(self.RAW)
+        backend, calls = self.make_backend("0" * 64)
+        with self.assertRaises(M.Stop) as caught:
+            backend.mounted()
+        self.assertIn("differ", str(caught.exception))
+
+    def test_preflight_relies_on_digest_check(self):
+        self.patched_snapshot(self.RAW)
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = Path(tmp) / "compose.yml"
+            compose.write_text("services: {}")
+            inspect_item = [{"Config": {"Labels": {
+                "com.docker.compose.project.config_files": str(compose),
+                "com.docker.compose.project.working_dir": tmp}}}]
+            backend, calls = self.make_backend(None)
+            backend.command = lambda args: (json.dumps(inspect_item) if args[1] == "inspect"
+                                            else M.C.digest(self.RAW))
+            backend.m = {"snapshot_path": "/fake/config.json", "compose_file": str(compose),
+                         "compose_sha256": M.C.digest(compose.read_text()), "compose_directory": tmp}
+            self.assertIsNone(backend.preflight())
+            backend.command = lambda args: (json.dumps(inspect_item) if args[1] == "inspect"
+                                            else "0" * 64)
+            with self.assertRaises(M.Stop):
+                backend.preflight()
+
+
 class MountedTests(unittest.TestCase):
     def invariant_fixture(self):
         return {"Config": {"Hostname": "generated", "Image": "mutable-tag", "Labels": {"one": "two"}},

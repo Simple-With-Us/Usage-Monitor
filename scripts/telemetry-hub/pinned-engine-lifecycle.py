@@ -190,6 +190,9 @@ class ReadOnlyEngine:
                     raw.extend(chunk)
                     if len(raw) > MAX_RESPONSE:
                         raise Stop("Engine metadata response exceeds limit")
+                # Close explicitly: some supported runtimes only mark a fully read
+                # response closed via close(), and reuse requires it.
+                response.close()
                 if connection.identity() != pinned:
                     raise Stop("Engine connection identity changed")
                 return response.status, M.C.decode(raw) if raw else None, response.will_close
