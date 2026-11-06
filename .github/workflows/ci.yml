@@ -282,6 +282,11 @@ jobs:
       - name: Test sentry-ci-report
         run: npm run test:sentry-ci-report
 
+      # Fully offline: every subprocess is stubbed in the unittest, so no
+      # Mac, process table or credential is involved.
+      - name: Test security ancestry audit
+        run: npm run test:security-ancestry
+
       - name: Test R2 weekly archive
         run: npm run test:r2-archive
 

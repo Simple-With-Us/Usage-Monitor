@@ -49,6 +49,35 @@ class AncestryTests(unittest.TestCase):
         result = ancestry.audit(501, lambda args: (0, "12\n") if args[0].endswith("pgrep") else (0, "12 1 502 /usr/bin/security\n"))
         self.assertEqual(result["security_processes"], [])
 
+    def test_reused_pid_with_matching_uid_but_foreign_comm_is_not_a_root(self):
+        def run(args):
+            if args[0] == "/usr/bin/pgrep":
+                return 0, "12\n"
+            return 0, "12 1 501 /usr/bin/perl\n"
+        result = ancestry.audit(501, run)
+        self.assertEqual(result["security_processes"], [])
+        self.assertEqual(result["matching_processes"], 1)
+
+    def test_anomalous_row_skips_only_its_chain(self):
+        def run(args):
+            if args[0] == "/usr/bin/pgrep":
+                return 0, "12 13\n"
+            if args[2] == "12":
+                return 0, "12 1 501\n"
+            if args[2] == "13":
+                return 0, "13 1 501 /usr/bin/security\n"
+            return 0, "1 0 0 /sbin/launchd\n"
+        result = ancestry.audit(501, run)
+        self.assertEqual(len(result["security_processes"]), 1)
+        self.assertEqual(result["security_processes"][0][0]["pid"], 13)
+
+    def test_empty_result_keeps_full_schema(self):
+        result = ancestry.audit(501, lambda args: (1, ""))
+        self.assertEqual(result["security_processes"], [])
+        self.assertEqual(result["matching_processes"], 0)
+        self.assertIs(result["process_limit_reached"], False)
+        self.assertTrue(result["limitations"])
+
 
 if __name__ == "__main__":
     unittest.main()

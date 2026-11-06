@@ -12,11 +12,6 @@ import subprocess
 MAX_SECURITY_PROCESSES = 16
 MAX_ANCESTORS = 8
 MAX_OUTPUT_BYTES = 16384
-KNOWN_NAMES = frozenset({
-    "security", "node", "nodejs", "launchd", "bash", "zsh", "sh",
-    "python3", "python", "muse", "Muse", "Clutch", "BotFleet",
-    "CodeCaps", "AgentBar", "Usage Monitor", "env", "sshd",
-})
 # Fixed candidates come from the fleet's documented tools, apps and runtimes.
 # These are equality comparisons against comm metadata, never argv inspection.
 NAME_CANDIDATES = {
@@ -41,6 +36,16 @@ NAME_CANDIDATES = {
     "agentbar": ("AgentBar",),
     "usage_monitor": ("Usage Monitor",),
 }
+
+# Every recognized candidate gets its fixed name emitted; a strict subset
+# would report matched tools like codex or infisical as "other".
+KNOWN_NAMES = frozenset(name for candidates in NAME_CANDIDATES.values() for name in candidates)
+LIMITATIONS = (
+    "concurrent exit and PID reuse can invalidate ancestry",
+    "executable names do not identify script paths or Keychain items",
+    "no process arguments or environment inspected",
+    "unrecognized executable names are reported as other",
+)
 HOME = Path.home()
 PATH_CANDIDATES = {
     "system_security": "/usr/bin/security",
@@ -101,7 +106,8 @@ def process_metadata(pid, run=bounded_run):
 def audit(uid, run=bounded_run):
     code, output = run(["/usr/bin/pgrep", "-x", "-u", str(uid), "security"])
     if code == 1:
-        return {"security_processes": [], "matching_processes": 0}
+        return {"security_processes": [], "matching_processes": 0,
+                "process_limit_reached": False, "limitations": list(LIMITATIONS)}
     if code != 0:
         raise ValueError("process discovery unavailable")
     fields = output.split()
@@ -115,7 +121,12 @@ def audit(uid, run=bounded_run):
             if pid <= 0 or pid in seen:
                 break
             seen.add(pid)
-            row = process_metadata(pid, run)
+            # An anomalous row ends only this chain, like a vanished
+            # process; every other collected chain still reports.
+            try:
+                row = process_metadata(pid, run)
+            except ValueError:
+                break
             if row is None:
                 break
             if not chain and (row["uid"] != uid or row["executable_name"] != "security"):
@@ -126,10 +137,7 @@ def audit(uid, run=bounded_run):
             chains.append(chain)
     return {"security_processes": chains, "matching_processes": len(pids),
             "process_limit_reached": len(pids) > MAX_SECURITY_PROCESSES,
-            "limitations": ["concurrent exit and PID reuse can invalidate ancestry",
-                            "executable names do not identify script paths or Keychain items",
-                            "no process arguments or environment inspected",
-                            "unrecognized executable names are reported as other"]}
+            "limitations": list(LIMITATIONS)}
 
 
 def main():
