@@ -11,7 +11,7 @@ const INSTALL_PACKAGE = '{"name":"usage-monitor-collectors","private":true,"type
 function selected(name) {
   const parts = name.split("/");
   return parts.length === 2 ? DIRECTORIES.has(parts[0]) && parts[1].endsWith(".mjs") : parts.length === 1 && (
-    name.endsWith("-collector.mjs") || ["run-subscription-quota-collector.sh", "antigravity-statusline-telemetry.mjs"].includes(name)
+    name.endsWith("-collector.mjs") || ["run-subscription-quota-collector.sh", "antigravity-statusline-telemetry.mjs", "collector-injector.mjs"].includes(name)
   );
 }
 

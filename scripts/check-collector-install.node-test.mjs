@@ -58,9 +58,11 @@ function snapshot(path, afterDirectoryOpen) {
   let fd;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) {
-    if (["ENXIO", "ENODEV", "EOPNOTSUPP"].includes(error.code)) {
+    // macOS can report EOPNOTSUPP only as errno -102 when opening a socket.
+    const unsupportedSpecial = ["ENXIO", "ENODEV", "EOPNOTSUPP"].includes(error.code) || (process.platform === "darwin" && error.errno === -102);
+    if (unsupportedSpecial) {
       const kind = lstatSync(path);
-      if (kind.isSocket() || kind.isBlockDevice() || kind.isCharacterDevice()) return { special: true };
+      if (!kind.isFile()) return { special: true };
     }
     throw error;
   }
@@ -146,13 +148,13 @@ test("a previously tracked obsolete collector is identifiable without adopting u
   assert.equal(checkCollectorInstall(source, destination).checked, 4);
 }));
 
-test("the main installer preserves an injector outside its rsync allowlist", () => fixture(context => {
+test("an independently modified installed injector is preserved and refused", () => fixture(context => {
   const injector = join(context.source, "scripts", "collector-injector.mjs");
   writeFileSync(injector, "export {};\n");
   const sha = context.commit();
-  cpSync(injector, join(context.destination, "scripts", "collector-injector.mjs"));
+  writeFileSync(join(context.destination, "scripts", "collector-injector.mjs"), "export const modified = true;\n");
   writeFileSync(join(context.destination, "VERSION"), `sha=${sha}\n`);
-  installerRefuses(context, /Preserving unrecognized installed collector path: collector-injector.mjs/);
+  installerRefuses(context, /Preserving independently modified installed collector: collector-injector\.mjs/);
 }));
 
 test("installed symlinks and unknown directories are rejected without following them", () => fixture(({ root, source, destination }) => {
@@ -201,7 +203,7 @@ test("a fresh fixture installation copies verified source and records the full p
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(existsSync(join(fresh, "scripts", "collector-injector.mjs")), false, "main's rsync graph excludes held injector functionality");
+  assert.equal(existsSync(join(fresh, "scripts", "collector-injector.mjs")), true, "the installed runtime includes the scoped injector");
   assert.match(readFileSync(join(fresh, "VERSION"), "utf8"), new RegExp(`^sha=${sha}\\n`));
   assert.equal(readFileSync(join(fresh, "scripts", "grok-usage-collector.mjs"), "utf8"), "export const original = true;\n");
   assert.equal(existsSync(join(fresh, "scripts", "check-collector-install.node-test.mjs")), false);

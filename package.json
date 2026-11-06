@@ -50,7 +50,7 @@
     "test": "vitest run && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard",
     "test:coverage": "vitest run --coverage && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard",
     "test:budget-guard": "node --test \"workers/**/budget-guard.test.mjs\"",
-    "test:infisical-fetch": "node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs scripts/infisical-run.node-test.mjs",
+    "test:infisical-fetch": "node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs scripts/infisical-run.node-test.mjs scripts/collector-injector.node-test.mjs",
     "test:alert-timestamps": "node --test scripts/normalize-alert-timestamps.node-test.mjs",
     "test:receipt-inbox-worker": "vitest run --config workers/receipt-inbox/vitest.config.mjs && node --test workers/receipt-inbox/src/budget-guard.test.mjs workers/receipt-lifecycle-auditor/src/budget-guard.test.mjs",
     "test:expenses-worker": "vitest run --config workers/expenses-site/vitest.config.mjs",
