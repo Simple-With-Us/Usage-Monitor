@@ -72,6 +72,9 @@ class ControllerTests(unittest.TestCase):
         sources = json.loads(api.state["/telemetry"][M.HUB_MAP])
         self.assertEqual(sources[0], json.loads(api.hub)[0])
         self.assertEqual([item["id"] for item in sources], ["clutch.mac", "kimi-code", "zcode"])
+        for key in M.KEYS:
+            self.assertIn(key, api.state["/"])
+            self.assertNotIn(key, api.state["/telemetry"])
         self.assertEqual(len(set(json.loads(files["/fake/private/generated.json"]).values())), 4)
         self.assertFalse(result["mounted_config_changed"])
         self.assertFalse(result["restart_performed"])
@@ -137,7 +140,7 @@ class ControllerTests(unittest.TestCase):
         api = FakeAPI()
         def mutate(current):
             if current.verify_count == 3:
-                current.state["/telemetry"][M.KEYS[0]] = "changed"
+                current.state["/"][M.KEYS[0]] = "changed"
         api.before_verify = mutate
         with self.assertRaisesRegex(M.Stop, "created key changed"):
             self.run_controller(api)

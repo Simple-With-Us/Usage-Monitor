@@ -19,6 +19,7 @@ import tarfile
 import urllib.parse
 
 PREFIX = "/v1.53"
+API_VERSION = tuple(map(int, PREFIX.rsplit("/v", 1)[1].split(".")))
 SOCKET = "/var/run/docker.sock"
 IMAGE_ID = "sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea"
 IMAGE_REFERENCE = "python@" + IMAGE_ID
@@ -709,7 +710,7 @@ class Probe:
             maximum = tuple(map(int, version["ApiVersion"].split(".")))
         except Exception:
             raise Stop("invalid Engine API version") from None
-        if not minimum <= (1, 53) <= maximum:
+        if not minimum <= API_VERSION <= maximum:
             raise Stop("fixed API version unsupported")
         image = self.call("GET", "/images/" + urllib.parse.quote(IMAGE_REFERENCE, safe="") + "/json")
         if image.get("Id") != IMAGE_ID or IMAGE_REFERENCE not in image.get("RepoDigests", []):

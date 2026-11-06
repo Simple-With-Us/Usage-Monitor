@@ -141,6 +141,9 @@ def maps(root, hub):
         hub_tokens.append(source["token"])
     if any(name in ids or name in hub_ids for name in PRODUCERS) or "clutch.mac" not in hub_ids:
         raise Stop("producer already exists or clutch.mac is missing")
+    # The receiver enforces 1..64 sources; generation appends PRODUCERS.
+    if not sources or len(sources) + len(PRODUCERS) > 64:
+        raise Stop("hub map would violate the receiver 1..64 member limit")
     return ids, sources, tokens + hub_tokens
 
 
@@ -276,7 +279,10 @@ def execute(manifest, api, *, writer=exclusive_write, reader=private_read, facto
     writer(manifest["receipt_prefix"] + ".start.json", json.dumps({"status": "started", "manifest_sha256": digest(json.dumps(manifest, sort_keys=True))}))
     expected_maps = {"/": root, "/telemetry": hub}
     expected_values = {}
-    operations = [("/telemetry", key, generated[key], True) for key in KEYS]
+    # Collectors resolve tokens only via FLEET_SECRETS_PATHS ("/", "/global-api-keys"),
+    # so the created collector tokens are written at "/" and read back from there;
+    # only the hub map stays at "/telemetry".
+    operations = [("/", key, generated[key], True) for key in KEYS]
     new_root = root + "," + ",".join(f"{producer}:{generated[KEYS[index * 2]]}" for index, producer in enumerate(PRODUCERS))
     new_hub = json.dumps(sources + [{"id": producer, "platform": producer, "token": generated[KEYS[index * 2 + 1]]} for index, producer in enumerate(PRODUCERS)], separators=(",", ":"))
     operations += [("/", ROOT_MAP, new_root, False), ("/telemetry", HUB_MAP, new_hub, False)]
@@ -287,7 +293,7 @@ def execute(manifest, api, *, writer=exclusive_write, reader=private_read, facto
             if api.read(scope) != expected_names[scope] or api.read(scope, map_key) != expected_maps[scope]:
                 raise Stop("compare-before-write changed; reconcile partial run")
         for key, previous in expected_values.items():
-            if api.read("/telemetry", key) != previous:
+            if api.read("/", key) != previous:
                 raise Stop("created key changed; reconcile partial run")
         # A pre-write receipt is deliberately durable even if the outcome becomes unknown.
         writer(manifest["receipt_prefix"] + f".{index}.intent.json", json.dumps({"step": index, "name": name, "status": "intent"}))
@@ -305,7 +311,7 @@ def execute(manifest, api, *, writer=exclusive_write, reader=private_read, facto
             if api.read(scope) != expected_names[scope] or api.read(scope, key) != expected_maps[scope]:
                 raise Stop("post-write state mismatch; reconcile partial run")
         for key, previous in expected_values.items():
-            if api.read("/telemetry", key) != previous:
+            if api.read("/", key) != previous:
                 raise Stop("created key changed after write; reconcile partial run")
         writer(manifest["receipt_prefix"] + f".{index}.confirmed.json", json.dumps({"step": index, "name": name, "status": "read_back"}))
     result = {"status": "canonical_read_back", "root_members": len(ids) + 2,

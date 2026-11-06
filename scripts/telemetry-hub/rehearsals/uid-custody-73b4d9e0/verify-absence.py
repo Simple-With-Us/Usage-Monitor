@@ -10,7 +10,7 @@ import types
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = (ROOT / "custody.py").read_bytes()
-if hashlib.sha256(SOURCE).hexdigest() != "7eab2c3f50049ac115321ad589a20ca9dbaf33d9edabdc4e776f038750747d5f":
+if hashlib.sha256(SOURCE).hexdigest() != "76fa0391c6613b09de6e06373689353602e0189248dedbc95478b9aaafc15108":
     raise RuntimeError("exact reviewed custody source required")
 C = types.ModuleType("uid_absence_custody")
 C.__file__ = str(ROOT / "custody.py")

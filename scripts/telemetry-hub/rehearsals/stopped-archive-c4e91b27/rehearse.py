@@ -722,19 +722,19 @@ class Probe:
             observed.append(item)
             self.evidence.write(f"container-{index}-confirmed.json", item)
             checked = self.archive(identifier, name, ("old",) if index == 0 else ("new",))
-            if invariants(checked) != invariants(item):
+            if not same_json(invariants(checked), invariants(item)):
                 raise Stop("fixture configuration changed during archive read")
             if index == 0:
                 self.phase = "replace-synthetic-snapshot"
                 self.evidence.replace_snapshot()
                 checked = self.archive(identifier, name, ("old", "new"))
-                if invariants(checked) != invariants(item):
+                if not same_json(invariants(checked), invariants(item)):
                     raise Stop("old fixture configuration changed after host replacement")
             payload = copy.deepcopy(item["Config"])
             payload["Image"] = item["Image"]
             payload["HostConfig"] = copy.deepcopy(item["HostConfig"])
         projections = [invariants(item) for item in observed]
-        mismatch = [key for key in ("Config", "HostConfig", "Mounts", "Image") if projections[0][key] != projections[1][key]]
+        mismatch = [key for key in ("Config", "HostConfig", "Mounts", "Image") if not same_json(projections[0][key], projections[1][key])]
         if mismatch:
             self.evidence.write("mismatch.json", {"fields": mismatch})
             raise Stop("representation mismatch; preserve resources and evidence")

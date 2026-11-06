@@ -240,10 +240,9 @@ class DockerCompose:
             raise Stop("private host network, user or durable/config mounts changed")
         if bool(item["State"]["Running"]) != running:
             raise Stop("unexpected service running state")
-        config = dict(item["Config"])
-        config.pop("Hostname", None)
-        stable = {"Config": config, "HostConfig": item["HostConfig"], "Mounts": item["Mounts"], "Image": item["Image"]}
-        if C.digest(json.dumps(stable, sort_keys=True)) != self.m["container_invariants_sha256"]:
+        # Same canonical projection and compact sorted encoding as the rest of the toolchain.
+        stable = resolved_invariants(item)
+        if C.digest(json.dumps(stable, sort_keys=True, separators=(",", ":"))) != self.m["container_invariants_sha256"]:
             raise Stop("container configuration or durable mounts changed")
         if item["Image"] != self.m["image_id"]:
             raise Stop("image changed")

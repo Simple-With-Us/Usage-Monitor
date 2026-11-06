@@ -2,7 +2,7 @@
 
 Status: offline design and review artifact only.  No rehearsal or production mutation is released.  `finite-pinned-lifecycle.py --execute` refuses before reading a plan or constructing a backend, and the supplied real Engine transport refuses every mutation before socket access.
 
-The newer [archive-reader and wire review](offline-engine-runtime-review.md) supersedes the configuration-only route/count proposal below: it specifies the extended stopped-archive rehearsal, current 113-test boundary, exact shared request budgets and remaining real-Engine proof gaps.  Neither document releases a rehearsal or production execution.
+The newer [archive-reader and wire review](offline-engine-runtime-review.md) supersedes the configuration-only route/count proposal below: it specifies the extended stopped-archive rehearsal, current 122-test boundary, exact shared request budgets and remaining real-Engine proof gaps.  Neither document releases a rehearsal or production execution.
 
 The successful [V2 synthetic execution receipt 637300465](https://simplewithus.zulipchat.com/#narrow/near/637300465) establishes representation equivalence for its cached public Python image, synthetic mounts and network `none`.  Its artifacts and exact invariant projection are recorded in [the activation runbook](kimi-zcode-activation-controller.md#actual-synthetic-engine-evidence).  It does not establish production image, host-network, journal or secret-custody equivalence.
 
