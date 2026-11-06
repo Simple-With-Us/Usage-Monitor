@@ -55,13 +55,15 @@ function snapshot(path, afterDirectoryOpen) {
       return Object.fromEntries(names.sort().map(name => [name, snapshot(join(path, name))]));
     } finally { directory.closeSync(); }
   }
-  const initial = lstatSync(path);
-  if (!initial.isFile()) return { special: true };
   let fd;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) {
-    const kind = lstatSync(path);
-    if (!kind.isFile()) return { special: true };
+    // macOS can report EOPNOTSUPP only as errno -102 when opening a socket.
+    const unsupportedSpecial = ["ENXIO", "ENODEV", "EOPNOTSUPP"].includes(error.code) || (process.platform === "darwin" && error.errno === -102);
+    if (unsupportedSpecial) {
+      const kind = lstatSync(path);
+      if (!kind.isFile()) return { special: true };
+    }
     throw error;
   }
   try {
