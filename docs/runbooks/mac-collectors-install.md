@@ -69,6 +69,86 @@ release.  Immediately before an authorized rollout, freeze independent writers
 and verify the installed graph against the agreed hashes again.  Unbound
 installed helper bytes are not automatically admitted into a content-addressed
 release.
+The updater fetches the fixed public GitHub HTTPS repository without
+authentication.  It deliberately ignores inherited Git variables and system/global
+Git configuration and disables credential prompts; authenticated/private mirrors
+or custom CA/proxy settings available only through Git configuration are not
+supported.  This prevents inherited configuration from redirecting the approved
+origin or changing Git's interpretation of the release checkout.
+
+The detached updater (`scripts/update-local-collector-runtime.mjs`) publishes
+canonical releases as `release-<git-sha>-<content-sha256>` and compatibility
+releases as `compat-<git-sha>-<content-sha256>`.  Both identities cover the exact
+copied Zod paths, bytes, executable flags, and directory set; compatibility
+identities also cover every untracked overlay path, byte, and executable flag.  The
+updater recomputes these identities before activation, rollback, transition
+recovery, or receipt generation.  Do not edit a published release in place.
+
+Dependency file hashing opens the final path without following a symlink,
+checks its owner, regular-file type, inode, mode, and size on that descriptor,
+and streams at most 8 MiB through the same descriptor using one shared 64-KiB
+buffer per digest before checking for changes.  The descriptor closes on every
+path, and the length-prefixed content identity is unchanged.  These checks do not make ancestor-directory
+lookups atomic or prevent the same owner from modifying a release after
+validation; the runtime tree and its ancestors must remain trusted and published
+releases must remain unchanged while collectors can use them.
+
+Existing SHA-only `current` and `previous` links are accepted only as migration
+inputs under the updater lock.  Each legacy tree's tracked scripts are checked,
+then rebuilt in a fresh checkout whose exact commit must be an ancestor of the
+approved origin's current `main`.  Unbound legacy dependencies and untracked
+files are never copied or imported; each rebuilt tree receives a clean copy of
+the invoking updater's Zod dependency and only the missing compatibility entry
+points from a verified bound release.  Automatic donor selection tries bound
+current and previous releases in that order, then clean approved rebuilds of
+the historical current and previous commits for rollback, and finally the
+requested forward release or current `origin/main` for rollback bootstrap.  Every
+candidate must pass approved ancestry and cross-version import checks for both
+historical versions before a migration journal or either link changes.  That
+bootstrap donor is not activated; both historical Git versions remain
+the versions requested by the existing links and the rollback command.
+
+Historical SHA candidates must themselves track every required entry point;
+donor staging does not add missing entry points to the donor.  If both legacy
+versions predate those entry points, an incompatible latest release can leave
+no automatic donor, requiring a verified pin to another compatible approved
+commit that includes them.
+
+If none is compatible, migration fails explicitly and preserves both links.  An
+operator can select a known compatible historical donor with
+`--migration-donor-sha <full-40-character-sha>` alongside `--rollback` or `--sha`.  The
+pinned donor still requires approved ancestry and complete compatibility
+validation; an invalid pin fails without silently selecting another donor.  Compatibility
+imports are never skipped to force a rollback.  The reported failure reason
+describes only the last candidate attempted, not every rejected candidate.
+
+All rebuilt trees must pass dependency identity and cross-version import
+validation before the migration journal or either link is published.  An
+unapproved legacy commit, modified tracked file, unavailable clean donor, or
+incompatible overlay fails without changing the original links.  A migration
+journal names only bound compatibility identities and first preserves the
+logical current/previous pair; recovery completes that identity migration
+before applying the requested update or rollback.  SHA-only journal targets
+remain rejected.  The original legacy directories and their dependency data
+remain untouched and available to in-flight processes.
+
+Published canonical and compatibility releases are retained automatically.  An
+injector already awaiting Infisical may still need its original absolute
+collector path after `current` changes.  Automatic cleanup removes only
+abandoned staging directories; deleting a published release requires separately
+proving that no running collector or injector can still use it.  This includes
+an unreferenced compatibility tree published while preparing a donor candidate
+that subsequently fails validation of the other historical version.
+
+A measured fixture snapshot used 9,369,413–9,507,511 bytes (about 9.4–9.5 MB)
+per published tree.  A forward update that publishes one canonical and one
+compatibility tree therefore adds about 19 MB in that fixture; identical
+content-addressed trees are reused.  These are fixture measurements, not deployed
+inventory or storage bounds; Git history, dependencies, overlay changes, and
+migration bootstrap can change the cost.  [UM-1657](https://linear.app/simple-with-us/issue/UM-1657/add-lease-protected-bounded-retention-for-published-collector-runtimes)
+tracks bounded reclamation with a stable external launcher, process leases,
+and a verified pre-lease cutover.  Published-tree garbage collection is not
+implemented yet.
 
 ## Why a collector can sit at HTTP 409 for weeks (UM-1469)
 
@@ -144,20 +224,39 @@ telemetry hub endpoint, then `launchctl bootstrap`:
 | `com.jays.zcode-usage-collector` | `$ZCODE_DATA_BASE_DIR/.zcode/cli/db/db.sqlite` (`~` by default), opened read-only | `zcode` |
 
 All five run on `/opt/homebrew/opt/node@24/bin/node` (opencode and ZCode need
-`node:sqlite`) and use `USAGE_INGEST_TOKEN` until scoped tokens for `opencode`
-and `fx` are added to `USAGE_INGEST_PRODUCER_TOKENS`.  Kimi and ZCode resolve
-`KIMI_CODE_INGEST_TOKEN` and `ZCODE_INGEST_TOKEN` first, then the unscoped
-fallback.  Their Sentry bridge resolves `KIMI_CODE_TELEMETRY_HUB_TOKEN` and
-`ZCODE_TELEMETRY_HUB_TOKEN` from process environment or `fleet-secrets`; the
-plist contains no bearer value.  Provision each producer in the receiver maps
-before bootstrap, and verify both an ingest ACK and a hub ACK before calling it
-live.  Infisical is optional for the collector: a host environment can supply
-the same scoped names, while an Infisical-backed host must use its approved
-read-only service-token route rather than the retired shared Automation
-identity.  The DSH agent sets
+`node:sqlite`).  The Kimi and ZCode templates use the detached runtime's
+`collector-injector.mjs`; the Muse Code template uses the same launcher.  Choose
+`service-token` or `machine-identity` for `AUTH_MODE`, and point the template at
+an absolute owner-owned regular custody file with mode `0600`, never a
+symlink.  For service-token mode the file contains either a raw ASCII `st.` token
+(optionally followed by one LF or CRLF) or only `{"token":"..."}`; for
+machine-identity mode it contains only `{"clientId":"...","clientSecret":"..."}`.
+Raw tokens cannot contain spaces, control characters, or non-ASCII bytes.  Existing
+custody files are read without rewriting or converting them.
+Use a dedicated Usage Monitor identity, never shared Automation credentials.
+The service token must have exactly read access to the Usage Monitor project,
+`prod:/telemetry`; the launcher verifies its metadata before fetching.  The
+machine identity must be explicitly provisioned for that same scope; the launcher
+cannot attest that its credentials are app-specific or inspect its grants.  Provision
+the profile's two required values in that folder and the producer in the receiver
+maps before bootstrap.  The launcher does not follow imports or expand references,
+and passes only the profile's credentials to the child.  Verify an ingest ACK and,
+where configured, a hub ACK before calling the feed live.  The DSH agent sets
 `USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1`, because BotFleet already reports
 its own workspaces.  A first run backfills the source's retained history and then keeps a watermark
 in `~/.cache/usage-monitor/collector-state/`.
+
+Required folder keys are `KIMI_CODE_INGEST_TOKEN` and
+`KIMI_CODE_TELEMETRY_HUB_TOKEN` for Kimi; `ZCODE_INGEST_TOKEN` and
+`ZCODE_TELEMETRY_HUB_TOKEN` for ZCode; and `MUSE_CODE_ACCESS_TOKEN` and
+`MUSE_CODE_INGEST_TOKEN` for Muse Code.  The launcher fails before starting a
+collector if any required value is missing or remains a reference.  An inherited
+`INFISICAL_*` variable also fails the launch; remove it from the LaunchAgent
+environment rather than relying on it for authentication.
+If `USAGE_MONITOR_INGEST_URL` is set, it must be exactly
+`https://usage.jays.services/api/ingest/usage`; leaving it unset preserves the
+collector default.  For an interactive dry run append `--dry-run` to the same
+launcher command; `--debug` is the only other supported collector flag.
 
 Kimi emits only durable `usage.record` rows whose `usageScope` is `turn`;
 session-scope or omitted-scope totals are cumulative and are not added again.  ZCode

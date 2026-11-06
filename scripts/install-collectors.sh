@@ -51,6 +51,7 @@ rsync -a --delete --delete-excluded \
   --include='/lib/' --include='/lib/*.mjs' \
   --include='/telemetry-hub/' --include='/telemetry-hub/*.mjs' \
   --include='/*-collector.mjs' \
+  --include='/collector-injector.mjs' \
   --include='/run-subscription-quota-collector.sh' \
   --include='/antigravity-statusline-telemetry.mjs' \
   --exclude='*' \
@@ -67,6 +68,7 @@ printf 'sha=%s\ninstalled=%s\nsource=%s\n' "$SHA" "$(date -u +%FT%TZ)" "$SRC" > 
 for f in "$DEST"/scripts/*-collector.mjs; do
   node --check "$f"
 done
+node --check "$DEST/scripts/collector-injector.mjs"
 node --input-type=module -e 'await import(process.argv[1]);' "$DEST/scripts/lib/collector-sentry-bridge.mjs"
 bash -n "$DEST/scripts/run-subscription-quota-collector.sh"
 echo "installed $SHA -> $DEST"

@@ -269,6 +269,13 @@ class Checks(unittest.TestCase):
   yaml_paths=set(re.findall(r"^\s+-\s+'([^']+)'",workflow,re.M))
   missing=[p for p in m.WORKER_PATHS if p not in yaml_paths]
   self.assertEqual(missing,[],"WORKER_PATHS entries missing from workflow push filter: "+str(missing))
+ def test_worker_deploy_uses_its_scoped_infisical_service_token(self):
+  with open(".github/workflows/worker-deploy.yml") as f:workflow=f.read()
+  self.assertIn("INFISICAL_TOKEN: ${{ secrets.INFISICAL_UM_WORKER_DEPLOY_READ_TOKEN }}",workflow)
+  self.assertIn("INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5",workflow)
+  self.assertIn("INFISICAL_SECRET_PATH: /um-worker-deploy",workflow)
+  self.assertNotIn("INFISICAL_AUTOMATION_CLIENT_ID",workflow)
+  self.assertNotIn("INFISICAL_AUTOMATION_CLIENT_SECRET",workflow)
  def test_superseded_main_skips_before_any_mutation(self):
   with patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
    patch.object(m.subprocess,"check_output",return_value="old\n"),\
