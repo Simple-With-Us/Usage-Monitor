@@ -542,6 +542,56 @@ test('visual: receipt inbox held duplicates panel', async ({ page }) => {
   await expect(card).toHaveScreenshot('receipt-inbox-held-duplicates.png', stableShot);
 });
 
+// Posted Expenses card on /ops (UM-1659, Kody rule [4]): the management
+// surface for owner-recorded expenses — search/filter, Tech vs Other
+// totals, edit and tombstoned delete.  The list endpoint is stubbed with a
+// frozen two-row fixture (one Tech, one Other); /api/operations and every
+// other card still come from the test server.
+test('visual: posted expenses card with tech and other rows', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  await page.route(/\/api\/owner-expenses\?/, (route) => json(route, {
+    expenses: [
+      {
+        idempotencyKey: 'owner-recorded-expense:v1:visual-fixture-uw',
+        vendor: 'Unusual Whales',
+        amountUsd: 50,
+        occurredAt: '2026-07-30T12:00:00.000Z',
+        kind: 'one_time',
+        label: 'Unusual Whales trial',
+        notes: 'Category: Tech',
+        confidence: 'actual',
+        cancelledNoRenew: false,
+        category: 'Tech',
+      },
+      {
+        idempotencyKey: 'owner-recorded-expense:v1:visual-fixture-gcx',
+        vendor: 'GCX.raise',
+        amountUsd: 192.6,
+        occurredAt: '2026-09-08T12:00:00.000Z',
+        kind: 'one_time',
+        label: 'Princess Cruises gift cards',
+        notes: 'Category: Other',
+        confidence: 'actual',
+        cancelledNoRenew: false,
+        category: 'Other',
+      },
+    ],
+    nextCursor: null,
+    hasMore: false,
+    totals: { count: 2, totalUsd: 242.6, byCategory: { Tech: 50, Other: 192.6, uncategorized: 0 } },
+  }));
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.locator('section[aria-labelledby="posted-expenses-heading"]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('Unusual Whales')).toBeVisible();
+  await expect(card.getByText('GCX.raise')).toBeVisible();
+  await expect(card.getByText('$242.60')).toBeVisible();
+  await expect(card).toHaveScreenshot('posted-expenses-card.png', stableShot);
+});
+
 // Fleet Alerts card on /ops (#1715, Kody rule [4]): new visible UI element gets
 // a pinned screenshot.  /api/fleet-alerts is stubbed with a fixed two-topic
 // payload (one firing, one clear); every other card keeps its test-server shape.
