@@ -4,20 +4,30 @@
 // Monitor: every HTTP call goes through an injected fetch stub, and the
 // fixtures are the response shapes documented for the Admin API.
 //
-// This suite runs under Vitest, not node:test.  The repository's Vitest
-// include is the default (`**/*.test.mjs`), so it collects every file in
-// this directory.  A node:test suite collected this way is imported by
-// Vitest, registers zero tests there, and fails the run with "No test suite
-// found in file".  Vitest is a dev dependency only -- the collector itself
-// runs on Node builtins alone, with no third-party package.
+// This suite runs under Vitest, not node:test.  A node:test suite collected
+// by Vitest is imported by Vitest, registers zero tests there, and fails the
+// run with "No test suite found in file".  Vitest is a dev dependency only --
+// the collector itself runs on Node builtins alone, with no third-party
+// package.
+//
+// It lives in scripts/collector-tests/ and not in scripts/__tests__/ because
+// the Vitest config excludes scripts/__tests__/ wholesale, that directory
+// being reserved for the node:test suites Node's own runner owns.  A Vitest
+// suite that lived there was therefore never collected, and a regression
+// written in it protected nothing.  The import path is unchanged:  the suite
+// is one level below scripts/ either way.
 
 import assert from "node:assert/strict";
 
 import { describe, it } from "vitest";
 
 import {
+  CURSOR_ADMIN_ATTRIBUTIONS,
   CURSOR_ADMIN_DATE_RANGE_ERROR,
   CURSOR_ADMIN_MAX_WINDOW_DAYS,
+  CURSOR_ADMIN_MIXED_PROVIDER,
+  CURSOR_ADMIN_UNKNOWN_PROVIDER,
+  attributeDailyUsageRow,
   buildDailyUsageEvents,
   buildSpendEvent,
   buildSpendEvents,
@@ -169,6 +179,36 @@ function defaultRoutes(overrides = {}) {
     "/teams/spend": overrides.spend ?? (() => jsonResponse(200, SPEND_RESPONSE)),
   };
 }
+
+// A day whose only usage is Grok Bot's agent surface.  The billing-category
+// counters stay non-zero on purpose:  they are not Cursor surfaces, and a
+// real Grok Bot day carries them (the live feed read on Oct 22, 2026 showed
+// agentRequests 6766 with subscriptionIncludedReqs 6709 and every editor
+// counter at zero).
+const GROK_ONLY_ROW = {
+  ...DAILY_ROW,
+  composerRequests: 0,
+  chatRequests: 0,
+  cmdkUsages: 0,
+  bugbotUsages: 0,
+  agentRequests: 42,
+  mostUsedModel: "grok-bot-automation",
+};
+
+// The same day with Cursor's own composer surface on it as well:  the row
+// holds two things and the feed gives no way to split it.
+const GROK_MIXED_ROW = {
+  ...DAILY_ROW,
+  composerRequests: 3,
+  chatRequests: 0,
+  cmdkUsages: 0,
+  bugbotUsages: 0,
+  agentRequests: 42,
+  mostUsedModel: "grok-bot-automation",
+};
+
+// A row that names no model at all.
+const UNKNOWN_MODEL_ROW = { ...DAILY_ROW, mostUsedModel: "" };
 
 describe("cursor daily usage events", () => {
   it("builds the expected event shape and carries the model through", () => {
@@ -497,5 +537,88 @@ describe("dry run", () => {
     ]);
     assert.equal(printed.includes("usage events: 1"), true);
     assert.equal(printed.includes("spend events: 1"), true);
+  });
+});
+
+describe("cursor daily usage attribution", () => {
+  it("attributes a Grok-only row to Grok Bot and not to Cursor", () => {
+    const events = buildDailyUsageEvents([GROK_ONLY_ROW], { now: NOW });
+    assert.equal(events.length, 1);
+    const event = events[0];
+    assert.equal(event.provider, "grok-bot");
+    assert.equal(event.metadata.attribution, "grok-bot");
+    assert.equal(event.metadata.model, "grok-bot-automation");
+    assert.equal(event.producerKeyRef, "grok-bot-automation");
+    // The source never changes:  only the attributed provider moves.
+    assert.equal(event.service, "cursor-admin-api");
+    assert.equal(event.quantity, 42);
+  });
+
+  it("keeps a mixed-model row visible instead of claiming Cursor or Grok Bot", () => {
+    const events = buildDailyUsageEvents([GROK_MIXED_ROW], { now: NOW });
+    assert.equal(events.length, 1);
+    const event = events[0];
+    assert.equal(event.provider, CURSOR_ADMIN_MIXED_PROVIDER);
+    assert.equal(event.metadata.attribution, CURSOR_ADMIN_ATTRIBUTIONS.MIXED);
+    assert.notEqual(event.provider, "cursor");
+    assert.notEqual(event.provider, "grok-bot");
+    assert.equal(event.service, "cursor-admin-api");
+    // composerRequests 3 + agentRequests 42
+    assert.equal(event.quantity, 45);
+  });
+
+  it("keeps a row that names no model visible as unknown", () => {
+    const events = buildDailyUsageEvents([UNKNOWN_MODEL_ROW], { now: NOW });
+    assert.equal(events.length, 1);
+    const event = events[0];
+    assert.equal(event.provider, CURSOR_ADMIN_UNKNOWN_PROVIDER);
+    assert.equal(event.metadata.attribution, CURSOR_ADMIN_ATTRIBUTIONS.UNKNOWN);
+    assert.equal(event.producerKeyRef, undefined);
+  });
+
+  it("attributes a Cursor-hosted model to Cursor", () => {
+    const events = buildDailyUsageEvents([DAILY_ROW], { now: NOW });
+    const event = events[0];
+    assert.equal(event.provider, "cursor");
+    assert.equal(event.metadata.attribution, CURSOR_ADMIN_ATTRIBUTIONS.CURSOR);
+    assert.equal(event.metadata.attributionBasis, "the row's dominant model is a Cursor-hosted model");
+  });
+
+  it("reports the attribution and the basis for it", () => {
+    const grok = attributeDailyUsageRow(GROK_ONLY_ROW);
+    assert.equal(grok.attribution, CURSOR_ADMIN_ATTRIBUTIONS.GROK_BOT);
+    assert.equal(grok.provider, "grok-bot");
+    assert.equal(grok.model, "grok-bot-automation");
+    assert.equal(
+      grok.basis,
+      "the row's dominant model is Grok Bot and the row carries only agent usage",
+    );
+    assert.equal(attributeDailyUsageRow(GROK_MIXED_ROW).attribution, CURSOR_ADMIN_ATTRIBUTIONS.MIXED);
+    assert.equal(attributeDailyUsageRow(UNKNOWN_MODEL_ROW).attribution, CURSOR_ADMIN_ATTRIBUTIONS.UNKNOWN);
+    assert.equal(attributeDailyUsageRow(DAILY_ROW).attribution, CURSOR_ADMIN_ATTRIBUTIONS.CURSOR);
+  });
+
+  it("never lets a Grok row fall through to the Cursor provider", () => {
+    for (const row of [GROK_ONLY_ROW, GROK_MIXED_ROW]) {
+      const event = buildDailyUsageEvents([row], { now: NOW })[0];
+      assert.notEqual(event.provider, "cursor");
+      assert.equal(event.service, "cursor-admin-api");
+    }
+  });
+
+  it("keeps the event id stable when the attribution moves", () => {
+    // The id is one row per day per user, and it does NOT carry the
+    // attribution:  the same day and the same user are one stored row whether
+    // the row is attributed to Cursor or to Grok Bot.  A row published twice
+    // is therefore one row and never two.
+    const cursorId = buildDailyUsageEvents([DAILY_ROW], { now: NOW })[0].eventId;
+    const grokId = buildDailyUsageEvents([GROK_ONLY_ROW], { now: NOW })[0].eventId;
+    assert.equal(typeof cursorId, "string");
+    assert.equal(grokId, cursorId);
+    // The same row twice yields the same id, whatever its attribution.
+    assert.equal(
+      buildDailyUsageEvents([GROK_ONLY_ROW], { now: NOW })[0].eventId,
+      grokId,
+    );
   });
 });

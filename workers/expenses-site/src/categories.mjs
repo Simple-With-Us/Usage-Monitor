@@ -139,6 +139,14 @@ const RULES = [
 ];
 
 /**
+ * Changes whenever a rule changes, and feeds the sync's unchanged-ledger hash,
+ * so a rule edit forces a full pass without anyone remembering to bump a number.
+ */
+export const CATEGORY_RULES_VERSION = JSON.stringify(
+  RULES.map(([slug, rules]) => [slug, rules.map(String)])
+);
+
+/**
  * @param {string} vendor
  * @param {string | null | undefined} label
  * @returns {keyof typeof CATEGORIES}

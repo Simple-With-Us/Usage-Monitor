@@ -97,6 +97,21 @@ describe("receipt lifecycle auditor", () => {
     expect(storage.values.get("audit")).toMatchObject({ ok: true });
   });
 
+  it("does nothing when the usage guard is off", async () => {
+    const { env, storage } = createEnvironment();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const paused = { ...env, GUARD_MODE: "off" };
+    const response = await auditor.fetch(new Request("https://auditor.internal/audit", { method: "POST" }), paused);
+    expect(response.status).toBe(503);
+    expect((await auditor.fetch(new Request("https://auditor.internal/status"), paused)).status).toBe(503);
+    const work = [];
+    await auditor.scheduled({}, paused, { waitUntil: (promise) => work.push(promise) });
+    expect(work).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(storage.values.size).toBe(0);
+  });
+
   it("keeps state validation inside the Durable Object", async () => {
     const { env, storage } = createEnvironment();
     await expect(persistAudit(env, { ok: true, checkedAt: 123 })).resolves.toBeUndefined();
