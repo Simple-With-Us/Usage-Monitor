@@ -123,6 +123,14 @@ class WireSocket(RawSocket):
         self.raw = self.responses.pop(0)
 
 
+class PipelinedSocket(RawSocket):
+    """Both responses delivered up front: worst-case prefetch exposure."""
+    def __init__(self, blob):
+        super().__init__()
+        self.raw = blob
+        self.chunk = len(blob)
+
+
 class TransportTests(unittest.TestCase):
     def engine(self, connection, clock=None):
         factory = Mock(return_value=connection)
@@ -266,6 +274,26 @@ class TransportTests(unittest.TestCase):
                 connection.begin(E.Deadline(Clock()))
             factory.assert_called_once_with(E.socket.AF_UNIX, E.socket.SOCK_STREAM)
             connection.close()
+
+    def test_pipelined_second_response_survives_response_close(self):
+        def wire(value):
+            body = json.dumps(value).encode()
+            return (b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                    + b"\r\n\r\n" + body)
+        def wire_chunked(value):
+            body = json.dumps(value).encode()
+            return (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + ("%x\r\n" % len(body)).encode() + body + b"\r\n0\r\n\r\n")
+        for first, second in ((wire({"ID": DAEMON_ID}), wire({"ApiVersion": "1.55"})),
+                              (wire_chunked({"ID": DAEMON_ID}), wire_chunked({"ApiVersion": "1.55"})),
+                              (wire({"ID": DAEMON_ID}), wire_chunked({"ApiVersion": "1.55"}))):
+            raw = PipelinedSocket(first + second)
+            with patch.object(E.os, "lstat", return_value=Mock(st_mode=stat.S_IFSOCK, st_uid=0)), \
+                    patch.object(E.socket, "socket", return_value=raw):
+                engine = E.ReadOnlyEngine(expected_daemon=DAEMON_SHA, clock=Clock())
+                self.assertEqual(engine.request("GET", E.PREFIX + "/version"), (200, {"ApiVersion": "1.55"}))
+                self.assertEqual(len(raw.sent), 2)
+                self.assertTrue(raw.closed)
 
     def test_real_http_parser_sends_daemon_and_target_on_one_fake_socket(self):
         def wire(value, closing=False):

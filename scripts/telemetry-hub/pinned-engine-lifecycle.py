@@ -70,11 +70,15 @@ class DeadlineBufferedReader(io.BufferedReader):
         self.deadline.remaining()
         return result
 
+    def close(self):
+        """Response close must not discard bytes prefetched for the next response."""
+
 
 class DeadlineSocket:
     """Bound all received wire bytes, including HTTP headers and chunk framing."""
     def __init__(self, raw, deadline):
         self.raw, self.deadline, self.wire_bytes = raw, deadline, 0
+        self._file = None
 
     def recv_into(self, buffer):
         self.raw.settimeout(self.deadline.remaining())
@@ -93,7 +97,9 @@ class DeadlineSocket:
     def makefile(self, mode):
         if mode != "rb":
             raise Stop("unsupported Engine socket file mode")
-        return DeadlineBufferedReader(DeadlineReader(self), self.deadline)
+        if self._file is None:
+            self._file = DeadlineBufferedReader(DeadlineReader(self), self.deadline)
+        return self._file
 
     def fileno(self):
         return self.raw.fileno()
