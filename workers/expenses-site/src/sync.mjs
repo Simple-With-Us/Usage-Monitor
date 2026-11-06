@@ -336,8 +336,8 @@ function setStateStatement(db, key, value) {
  * Adds to the day's counter inside SQL, so overlapping runs add up instead of each
  * writing a total from its own stale read.  rows may be negative when a run settles a
  * reservation.  With claimedAt, it adds only if that manual claim is the stored one,
- * so a refused claim in the same batch writes nothing (a refusal in the very same
- * millisecond as the claim counts 2 rows too many, which is harmless).  A stored value
+ * so a refused claim in the same batch writes nothing, even in the very same
+ * millisecond as the stored claim (each claim carries its own nonce).  A stored value
  * from a later day is left alone; one that does not parse is too, and still fails
  * closed on read.
  * D1 binds a JS number as REAL, hence the casts: 5.0 would not parse.
@@ -364,7 +364,9 @@ function addToCounterStatement(db, today, rows, claimedAt = null) {
  * A failed sync keeps the slot too: a caller retrying on errors is cooled as well.
  */
 async function claimManualSync(db, now, today) {
-  const claimedAt = now.toISOString();
+  // The ISO time leads, so the value still orders by time against the cutoff; the
+  // nonce makes each claim unique, so a refused claim never matches a stored one.
+  const claimedAt = `${now.toISOString()}#${crypto.randomUUID()}`;
   const cutoff = new Date(now.getTime() - MANUAL_SYNC_COOLDOWN_MS).toISOString();
   return db.batch([
     db
