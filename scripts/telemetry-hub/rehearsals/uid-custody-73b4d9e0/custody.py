@@ -22,7 +22,7 @@ PINS = {"fixture-base.py": "5b9eb18f78781add8d3640ba5e2aabef16f45ee1fb2f45ae988e
         "../../finite-pinned-lifecycle.py": "efe0abf0ae8eabd1e1512b17fdb6afd6eb6db649ee38b21356d0cc6e6fb1fc9f",
         "../../offline-engine-runtime.py": "a08f41a0772e09a063ec88f01c004417c8e55562737836929a1b4481262c3e9b",
         "../../pinned-engine-lifecycle.py": "ca131fc739b89852fa11cf53f8869417fb0edbb813d06accc4120afb8794ae0b",
-        "../../sync-mounted-sources.py": "bf4c65ee7cc24aabf1dd3a62730a29e31b6bced19ac9490ece451fae611ae7de"}
+        "../../sync-mounted-sources.py": "e0acc7c080b55545dba22a1abe1250992a777a76cc2f47d232a5962edc8f9f58"}
 for name, expected in PINS.items():
     if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
         raise RuntimeError("fixed nonsecret dependency differs")

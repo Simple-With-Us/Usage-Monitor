@@ -341,13 +341,14 @@ def execute(manifest, backend, *, read=read_snapshot, write=C.exclusive_write, r
         readback = backend.mounted()
     except Stop as exc:
         # Only the digest mismatch proves the recreated container still serves the
-        # pre-replacement inode.  Inspection or command failures leave the readback
-        # state unknown, so they keep their own Stop and must not inherit the
-        # no-rollback instruction for a content mismatch.
-        if "host and running mounted snapshots differ" not in str(exc):
-            raise
-        raise Stop("actual in-container snapshot readback differs; reconcile without rollback: "
-                   + str(exc)) from exc
+        # pre-replacement inode.  Every other post-replacement mounted() failure leaves
+        # the readback unverified, but the snapshot is already replaced and rolling back
+        # would fork custody, so the no-rollback guidance applies either way, with the
+        # original cause preserved.
+        if "host and running mounted snapshots differ" in str(exc):
+            raise Stop("actual in-container snapshot readback differs; reconcile without rollback: "
+                       + str(exc)) from exc
+        raise Stop("post-replacement readback unverified (" + str(exc) + "); reconcile without rollback") from exc
     if readback != new_raw:
         raise Stop("actual in-container snapshot readback differs; reconcile without rollback")
     after = backend.journal()

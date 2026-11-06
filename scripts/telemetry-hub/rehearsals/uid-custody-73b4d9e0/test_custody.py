@@ -414,13 +414,13 @@ class CustodyTests(unittest.TestCase):
                     try:
                         evidence.check()
                     except P.Stop as exc:
-                        # Only a NEW (strengthened-custody) signal is quarantined.
-                        # The failure shapes the current stat-only detector can
-                        # already produce - identity drift, unreadable receipts,
-                        # signature mismatch - re-raise unchanged so they can
-                        # never be masked as a skip.
+                        # Receipt failures are ordinary failures and must never be
+                        # masked as a skip.  The payload-identity signal is the
+                        # strengthened-custody case this quarantine exists for:
+                        # plan.md records that a custody strengthening turns this
+                        # into a skip, never a failure.
                         message = str(exc)
-                        if "identity changed" in message or "receipt" in message or "signature" in message:
+                        if "receipt" in message:
                             raise
                         raise unittest.SkipTest(
                             "custody strengthened past the stat-only residual; drop this quarantine") from exc

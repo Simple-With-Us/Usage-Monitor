@@ -226,15 +226,21 @@ class MountedTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Stop, "reconcile without rollback"):
             self.run_controller(DigestStopBackend())
 
-    def test_post_replacement_command_failure_keeps_original_stop(self):
+    def test_post_replacement_command_failure_keeps_no_rollback_guidance(self):
         class CommandStopBackend(Backend):
             def mounted(self):
                 self.step("mounted")
                 raise M.Stop("Docker operation refused or outcome unknown; reconcile private receipts")
         with self.assertRaises(M.Stop) as caught:
             self.run_controller(CommandStopBackend())
-        self.assertIn("reconcile private receipts", str(caught.exception))
-        self.assertNotIn("without rollback", str(caught.exception))
+        message = str(caught.exception)
+        # Non-digest failures are relabeled as an unverified readback (not a content
+        # mismatch) but MUST keep the no-rollback guidance and the original cause,
+        # because the snapshot is already replaced and rollback would fork custody.
+        self.assertIn("post-replacement readback unverified", message)
+        self.assertIn("reconcile without rollback", message)
+        self.assertIn("reconcile private receipts", message)
+        self.assertNotIn("readback differs", message)
 
     def test_compare_failure_does_not_recreate(self):
         backend = Backend()
