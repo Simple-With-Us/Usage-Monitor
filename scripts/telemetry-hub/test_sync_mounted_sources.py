@@ -92,9 +92,9 @@ class DigestOnlyMountedTests(unittest.TestCase):
         for call in calls:
             for arg in call:
                 self.assertNotIn(self.RAW, arg)
-        # The container's stdout is the digest of the raw snapshot, never the raw value.
-        self.assertRegex(remote, r"^[0-9a-f]{64}$")
-        self.assertNotIn(self.RAW, remote)
+        # The per-argument check above proves the raw snapshot never reaches argv;
+        # asserting on `remote` here would only re-check this test's own digest of
+        # the fixture, not anything the backend emitted.
 
     def test_digest_mismatch_stops(self):
         self.patched_snapshot(self.RAW)
@@ -225,6 +225,16 @@ class MountedTests(unittest.TestCase):
                 raise M.Stop("host and running mounted snapshots differ")
         with self.assertRaisesRegex(M.Stop, "reconcile without rollback"):
             self.run_controller(DigestStopBackend())
+
+    def test_post_replacement_command_failure_keeps_original_stop(self):
+        class CommandStopBackend(Backend):
+            def mounted(self):
+                self.step("mounted")
+                raise M.Stop("Docker operation refused or outcome unknown; reconcile private receipts")
+        with self.assertRaises(M.Stop) as caught:
+            self.run_controller(CommandStopBackend())
+        self.assertIn("reconcile private receipts", str(caught.exception))
+        self.assertNotIn("without rollback", str(caught.exception))
 
     def test_compare_failure_does_not_recreate(self):
         backend = Backend()
