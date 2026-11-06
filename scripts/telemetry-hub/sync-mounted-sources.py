@@ -334,7 +334,15 @@ def execute(manifest, backend, *, read=read_snapshot, write=C.exclusive_write, r
     write(manifest["receipt_prefix"] + ".stopped.json", json.dumps(before))
     replace(manifest["snapshot_path"], old_raw, new_raw)
     backend.recreate()
-    if backend.mounted() != new_raw:
+    # Post-replacement readback: a digest Stop here means the recreated container
+    # still serves the pre-replacement inode.  Keep the no-rollback instruction on
+    # this path; the snapshot is already replaced and rolling back would fork custody.
+    try:
+        readback = backend.mounted()
+    except Stop as exc:
+        raise Stop("actual in-container snapshot readback differs; reconcile without rollback: "
+                   + str(exc)) from exc
+    if readback != new_raw:
         raise Stop("actual in-container snapshot readback differs; reconcile without rollback")
     after = backend.journal()
     if (after["device"] != before["device"] or after["logical_end"] < before["logical_end"]

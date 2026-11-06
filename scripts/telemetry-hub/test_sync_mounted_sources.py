@@ -81,13 +81,20 @@ class DigestOnlyMountedTests(unittest.TestCase):
 
     def test_digest_match_returns_host_snapshot_without_raw_stdout(self):
         self.patched_snapshot(self.RAW)
-        backend, calls = self.make_backend(M.C.digest(self.RAW))
+        remote = M.C.digest(self.RAW)
+        backend, calls = self.make_backend(remote)
         self.assertEqual(backend.mounted(), self.RAW)
         self.assertEqual(calls[0][:3], ["docker", "exec", "fake-container"])
         program = calls[0][-1]
         self.assertIn("node:crypto", program)
         self.assertIn(".digest('hex')", program)
-        self.assertNotIn(self.RAW, json.dumps(calls))
+        # Per-argument check: json.dumps would escape RAW's quotes and vacuously pass.
+        for call in calls:
+            for arg in call:
+                self.assertNotIn(self.RAW, arg)
+        # The container's stdout is the digest of the raw snapshot, never the raw value.
+        self.assertRegex(remote, r"^[0-9a-f]{64}$")
+        self.assertNotIn(self.RAW, remote)
 
     def test_digest_mismatch_stops(self):
         self.patched_snapshot(self.RAW)
@@ -210,6 +217,14 @@ class MountedTests(unittest.TestCase):
     def test_actual_old_bind_inode_readback_blocks_success(self):
         with self.assertRaisesRegex(M.Stop, "in-container"):
             self.run_controller(Backend(), corrupt_mount=True)
+
+    def test_post_replacement_digest_stop_keeps_no_rollback_instruction(self):
+        class DigestStopBackend(Backend):
+            def mounted(self):
+                self.step("mounted")
+                raise M.Stop("host and running mounted snapshots differ")
+        with self.assertRaisesRegex(M.Stop, "reconcile without rollback"):
+            self.run_controller(DigestStopBackend())
 
     def test_compare_failure_does_not_recreate(self):
         backend = Backend()
