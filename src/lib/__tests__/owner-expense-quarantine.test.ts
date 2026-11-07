@@ -17,6 +17,7 @@ beforeAll(async () => {
 const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
   findMany: vi.fn(),
+  tombstoneFindUnique: vi.fn(),
   quarantineCreate: vi.fn(),
   quarantineFindUnique: vi.fn(),
   quarantineUpdate: vi.fn(),
@@ -29,6 +30,9 @@ vi.mock("@/lib/prisma", () => ({
     externalUsageEvent: {
       findUnique: mocks.findUnique,
       findMany: mocks.findMany,
+    },
+    externalUsageEventTombstone: {
+      findUnique: mocks.tombstoneFindUnique,
     },
     quarantinedOwnerExpense: {
       create: mocks.quarantineCreate,
@@ -48,6 +52,7 @@ vi.mock("@/lib/budget-status", () => ({
 
 beforeEach(() => {
   mocks.findUnique.mockReset().mockResolvedValue(null);
+  mocks.tombstoneFindUnique.mockReset().mockResolvedValue(null);
   mocks.findMany.mockReset().mockResolvedValue([]);
   mocks.quarantineCreate.mockReset().mockResolvedValue({ id: "q-1" });
   mocks.quarantineFindUnique.mockReset().mockResolvedValue(null);
@@ -137,6 +142,24 @@ describe("recordOwnerExpense duplicate quarantine", () => {
     expect(result.persisted).toBe(1);
     expect(result.quarantined).toBeUndefined();
     expect(mocks.quarantineCreate).not.toHaveBeenCalled();
+  });
+
+  it("records nothing for a tombstoned key (owner-deleted expense, UM-1659)", async () => {
+    mocks.tombstoneFindUnique.mockResolvedValue({ idempotencyKey: "k" });
+    const result = await recordOwnerExpense(baseInput());
+    expect(result.persisted).toBe(0);
+    expect(result.tombstoned).toBe(true);
+    expect(result.quarantined).toBeUndefined();
+    expect(mocks.quarantineCreate).not.toHaveBeenCalled();
+    expect(mocks.persistExternalUsageEvents).not.toHaveBeenCalled();
+  });
+
+  it("force:true does NOT bypass a tombstone (post-anyway cannot resurrect)", async () => {
+    mocks.tombstoneFindUnique.mockResolvedValue({ idempotencyKey: "k" });
+    const result = await recordOwnerExpense(baseInput(), { force: true });
+    expect(result.persisted).toBe(0);
+    expect(result.tombstoned).toBe(true);
+    expect(mocks.persistExternalUsageEvents).not.toHaveBeenCalled();
   });
 
   it("scopes the duplicate scan to owner-recorded expenses in a bounded window", async () => {
