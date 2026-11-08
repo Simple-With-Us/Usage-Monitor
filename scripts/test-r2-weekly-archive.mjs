@@ -413,6 +413,34 @@ await test("uploadMultipart aborts and preserves the signer error when a part ne
   }
 });
 
+await test("uploadMultipart rejects non-positive part geometry before any S3 call", async () => {
+  const s3 = makeS3Stub();
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: 10,
+      fetchImpl: s3.fetchImpl,
+      partBytes: 0,
+    }),
+    /partBytes must be a positive integer/
+  );
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: -1,
+      fetchImpl: s3.fetchImpl,
+    }),
+    /fileBytes must be a non-negative integer/
+  );
+  assert.equal(s3.calls.length, 0, "validation happens before CreateMultipartUpload");
+});
+
 // --------------------------------------------------------------- config ----
 
 await test("resolveArchiveConfig refuses to fall back to the B2 litestream keys", () => {

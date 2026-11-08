@@ -376,6 +376,14 @@ export async function uploadMultipart({
   fetchImpl,
   partBytes = MULTIPART_PART_BYTES,
 }) {
+  // Fail fast on nonsense geometry: partBytes 0 makes partCount Infinity and
+  // the part loop below would issue empty PUTs forever instead of failing.
+  if (!Number.isSafeInteger(fileBytes) || fileBytes < 0) {
+    throw new Error(`uploadMultipart fileBytes must be a non-negative integer, got ${fileBytes}`);
+  }
+  if (!Number.isSafeInteger(partBytes) || partBytes <= 0) {
+    throw new Error(`uploadMultipart partBytes must be a positive integer, got ${partBytes}`);
+  }
   let uploadId;
   try {
     const createResponse = await s3Request({
