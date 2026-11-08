@@ -377,8 +377,28 @@ function preparePreviousRelease(previousPath, previousSha, newPath) {
 function checkoutApprovedSource(path, sha = null) {
   run("git", ["-C", path, "init", "--quiet", "--template="]);
   run("git", ["-C", path, "remote", "add", "origin", repositoryUrl()]);
+  // Resolve the floating-main case first, so BOTH paths below carry an
+  // explicit commit.  A plain ls-remote against the fixed origin needs no
+  // clone state and cannot be steered by local configuration.
+  if (sha === null) {
+    sha = run("git", ["-C", path, "ls-remote", "--quiet", "--heads", "origin", "main"], { capture: true }).trim().split("\t")[0];
+  }
+  // Fetch the release snapshot BEFORE any filtered fetch registers this
+  // clone as partial.  A blobless fetch leaves every blob missing, and
+  // GIT_NO_LAZY_FETCH (set on every git call) then makes the checkout
+  // impossible, so a fresh install against a filter-honoring server could
+  // never complete (UM-1661, found live against GitHub).  The depth-1 fetch
+  // carries only this one commit's full tree and keeps the fixed origin and
+  // no-lazy-fetch posture; after it, the blobless fetch into the shallow
+  // clone still succeeds and supplies main's commit graph for the ancestry
+  // check.  A failed snapshot fetch is swallowed so an unknown SHA still
+  // reaches the ancestry check and fails with its canonical refusal.
+  try {
+    run("git", ["-C", path, "fetch", "--quiet", "--depth=1", "origin", sha]);
+  } catch {
+    // The ancestry check below rejects unknown or unreachable SHAs.
+  }
   run("git", ["-C", path, "fetch", "--quiet", "--filter=blob:none", "origin", "main"]);
-  if (sha === null) sha = run("git", ["-C", path, "rev-parse", "FETCH_HEAD"], { capture: true }).trim();
   try {
     run("git", ["-C", path, "cat-file", "-e", `${sha}^{commit}`], { capture: true });
     run("git", ["-C", path, "merge-base", "--is-ancestor", sha, "FETCH_HEAD"], { capture: true });
