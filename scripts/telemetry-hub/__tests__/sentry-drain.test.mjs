@@ -98,13 +98,21 @@ describe("the sentry sender drain", () => {
     assert.equal(journal.getOffset("sentry") > 0, true);
   });
 
-  it("stops at the wall-clock budget", async () => {
+  it("stops at the wall-clock budget between chunks and keeps the remainder for the next pass", async () => {
     const journal = await openJournal();
     await journal.appendBatch(Array.from({ length: 450 }, (_, i) => spanEvent(i)));
     const calls = [];
-    const result = await sender(journal, calls, { drainBudgetMs: 0 }).runOnce();
-    assert.equal(result.ok, true);
-    assert.equal(result.delivered, 200);
+    const stopped = await sender(journal, calls, { drainBudgetMs: 0 }).runOnce();
+    assert.equal(stopped.ok, true);
+    assert.equal(stopped.budgetStopped, true);
+    assert.equal(stopped.delivered, 200);
+    // the offset did not advance past the undelivered events
+    assert.equal(journal.getOffset("sentry"), 0);
+    const calls2 = [];
+    const rest = await sender(journal, calls2).runOnce();
+    assert.equal(rest.ok, true);
+    assert.equal(rest.delivered, 250);
+    assert.ok(journal.getOffset("sentry") > 0);
   });
 
   it("keeps delivered events when Sentry starts refusing mid-drain and resumes later", async () => {

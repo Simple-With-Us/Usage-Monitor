@@ -492,6 +492,12 @@ export function createSentrySender({
         quarantined += outcome.quarantined.length;
         await journal.markSentBatch(destination, ids);
         deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          //  Budget stop between chunks.  The offset stays where it was, so
+          //  the rest of this batch is re-read next pass and the sent set
+          //  keeps the delivered events from going out twice.
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
       }
 
       const logChunks = chunkBySize(logs, buildLogsEnvelope, {
@@ -521,6 +527,9 @@ export function createSentrySender({
         quarantined += outcome.quarantined.length;
         await journal.markSentBatch(destination, ids);
         deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
       }
 
       //  The offset advances per fully delivered batch, so progress is
