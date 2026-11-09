@@ -267,6 +267,139 @@ test("a grant that does not match its binding is refused before any secret is re
   await assert.rejects(() => resolve(["CLAUDE_INGEST_TOKEN"], { env: {} }), /does not match its binding/);
 });
 
+test("a malformed Infisical response is refused whole, not read field by field", async () => {
+  const grantId = "7933c487-9059-430b-b251-b40783639f39";
+  const binding = {
+    account: "claude-usage-collector-read",
+    label: "Claude usage",
+    grantId,
+    project: PROJECT,
+    folders: FOLDERS,
+  };
+  // The metadata body carries a shape the schema does not allow:  scopes is
+  // not a list of scope objects.
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: () => ({ token: tokenFor(grantId), status: "ok" }),
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/api/v2/service-token") {
+        return new Response(JSON.stringify({ ...serviceTokenMetadata(grantId), scopes: "prod:/" }));
+      }
+      throw new Error("a secret read must not happen when the metadata body is malformed");
+    },
+  });
+  await assert.rejects(() => resolve(["CLAUDE_INGEST_TOKEN"], { env: {} }), /Infisical response is invalid/);
+});
+
+test("a secret body with a malformed row is refused", async () => {
+  const grantId = "7933c487-9059-430b-b251-b40783639f39";
+  const binding = {
+    account: "claude-usage-collector-read",
+    label: "Claude usage",
+    grantId,
+    project: PROJECT,
+    folders: FOLDERS,
+  };
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: () => ({ token: tokenFor(grantId), status: "ok" }),
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/api/v2/service-token") {
+        return new Response(JSON.stringify(serviceTokenMetadata(grantId)));
+      }
+      return new Response(JSON.stringify({ secrets: [{ secretKey: "CLAUDE_INGEST_TOKEN" }] }));
+    },
+  });
+  await assert.rejects(() => resolve(["CLAUDE_INGEST_TOKEN"], { env: {} }), /secret response is invalid/);
+});
+
+test("a binding that lists its folders in another order is the same grant", async () => {
+  const grantId = "7933c487-9059-430b-b251-b40783639f39";
+  const binding = {
+    account: "claude-usage-collector-read",
+    label: "Claude usage",
+    grantId,
+    project: PROJECT,
+    folders: ["/global-api-keys", "/"],
+  };
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: () => ({ token: tokenFor(grantId), status: "ok" }),
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/api/v2/service-token") {
+        return new Response(JSON.stringify(serviceTokenMetadata(grantId)));
+      }
+      return new Response(
+        JSON.stringify({ secrets: [{ secretKey: "CLAUDE_INGEST_TOKEN", secretValue: "from-infisical" }] }),
+      );
+    },
+  });
+  assert.equal(await resolve(["CLAUDE_INGEST_TOKEN"], { env: {} }), "from-infisical");
+});
+
+test("strict injected secrets means the environment only, and no keychain read", async () => {
+  const grantId = "7933c487-9059-430b-b251-b40783639f39";
+  const binding = {
+    account: "claude-usage-collector-read",
+    label: "Claude usage",
+    grantId,
+    project: PROJECT,
+    folders: FOLDERS,
+  };
+  let reads = 0;
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: () => {
+      reads += 1;
+      return { token: tokenFor(grantId), status: "ok" };
+    },
+    fetchImpl: async () => {
+      throw new Error("strict mode must not reach Infisical");
+    },
+  });
+  const strictEnv = { COLLECTOR_STRICT_INJECTED_SECRETS: "1" };
+  assert.equal(await resolve(["CLAUDE_INGEST_TOKEN"], { env: strictEnv }), null);
+  assert.equal(reads, 0);
+  assert.equal(
+    await resolve(["CLAUDE_INGEST_TOKEN"], { env: { ...strictEnv, CLAUDE_INGEST_TOKEN: "from-env" } }),
+    "from-env",
+  );
+  assert.equal(reads, 0);
+});
+
+test("one resolver reads the keychain once for every name it is asked for", async () => {
+  const grantId = "7933c487-9059-430b-b251-b40783639f39";
+  const binding = {
+    account: "claude-usage-collector-read",
+    label: "Claude usage",
+    grantId,
+    project: PROJECT,
+    folders: FOLDERS,
+  };
+  let reads = 0;
+  let metadataRequests = 0;
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: () => {
+      reads += 1;
+      return { token: tokenFor(grantId), status: "ok" };
+    },
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/api/v2/service-token") {
+        metadataRequests += 1;
+        return new Response(JSON.stringify(serviceTokenMetadata(grantId)));
+      }
+      return new Response(
+        JSON.stringify({
+          secrets: [
+            { secretKey: "CLAUDE_INGEST_TOKEN", secretValue: "one" },
+            { secretKey: "MUSE_CODE_INGEST_TOKEN", secretValue: "two" },
+          ],
+        }),
+      );
+    },
+  });
+  assert.equal(await resolve(["CLAUDE_INGEST_TOKEN"], { env: {} }), "one");
+  assert.equal(await resolve(["MUSE_CODE_INGEST_TOKEN"], { env: {} }), "two");
+  assert.equal(reads, 1, "the keychain is read once per resolver");
+  assert.equal(metadataRequests, 1, "the metadata is fetched once per resolver");
+});
+
 for (const [stem, [account, label, grantId]] of Object.entries(SCOPED_BINDINGS)) {
   test(`the ${stem} binding names its own grant and pins it`, async () => {
     const binding = await import(`./lib/${stem}-run-session-token-collector.mjs`);

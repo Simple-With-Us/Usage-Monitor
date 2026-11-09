@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { readKeychainServiceToken } from "./keychain-service-token.mjs";
 
 /**
@@ -22,6 +24,38 @@ const TOKEN_PATTERN = /^st\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_+/=-]+$/;
 
 /** The folders every collector grant reads. */
 export const DEFAULT_COLLECTOR_FOLDERS = ["/", "/global-api-keys"];
+
+/**
+ * The trust boundary.  Both Infisical responses are external, so neither is
+ * read field by field before it is validated:  a malformed or hostile body
+ * is refused whole, and only the validated shape reaches the binding check
+ * or the secret map.  Unknown keys are dropped rather than carried along.
+ */
+const ScopeSchema = z.object({
+  environment: z.string(),
+  secretPath: z.string(),
+});
+
+const ServiceTokenMetadataSchema = z.object({
+  workspace: z.string(),
+  name: z.string(),
+  _id: z.string().optional(),
+  id: z.string().optional(),
+  scopes: z.array(ScopeSchema),
+  permissions: z.array(z.string()),
+  expiresAt: z.string(),
+});
+
+const SecretRowSchema = z.object({
+  secretKey: z.string(),
+  secretValue: z.string(),
+  secretValueHidden: z.boolean().optional(),
+});
+
+const SecretsResponseSchema = z.object({
+  secrets: z.array(SecretRowSchema),
+  imports: z.array(z.object({ secrets: z.array(SecretRowSchema) })).optional(),
+});
 
 /**
  * Read this consumer's scoped service token out of the owner's login
@@ -64,13 +98,20 @@ export function readScopedServiceToken(binding, { readKeychain = readKeychainSer
  * The scoped read is the DEFAULT and not the `fleet-secrets` CLI:  the CLI
  * reads with the Automation identity, which is broader than this consumer's
  * grant.  Each collector may read only what it was granted.
+ *
+ * COLLECTOR_STRICT_INJECTED_SECRETS=1 means the environment is the only
+ * source, exactly as it is for the shared resolver:  a host that asked for
+ * env-only resolution gets env-only resolution, and the scoped read is not
+ * attempted at all.
  */
 export function createScopedCollectorTokenResolver(binding, deps = {}) {
   const { account, label, grantId, project, folders = DEFAULT_COLLECTOR_FOLDERS } = binding;
   const { readKeychain = readKeychainServiceToken, fetchImpl } = deps;
-  const boundScopes = folders.map((folder) => `prod:${folder}`);
+  // Sorted, because the granted scopes are sorted before they are compared:
+  //  a binding that lists its folders in another order is the same grant.
+  const boundScopes = folders.map((folder) => `prod:${folder}`).sort();
 
-  function scopedLookup(env) {
+  function buildScopedLookup() {
     let auth, metadata, failure;
     const folderCache = new Map();
     const deadline = Date.now() + 60_000;
@@ -129,10 +170,10 @@ export function createScopedCollectorTokenResolver(binding, deps = {}) {
       if (metadata) return;
       try {
         auth = readScopedServiceToken(binding, { readKeychain });
-        const m = await request("/api/v2/service-token");
-        const scopes = Array.isArray(m.scopes)
-          ? m.scopes.map((scope) => `${scope.environment}:${scope.secretPath}`).sort()
-          : [];
+        const parsed = ServiceTokenMetadataSchema.safeParse(await request("/api/v2/service-token"));
+        if (!parsed.success) throw new Error("Infisical response is invalid");
+        const m = parsed.data;
+        const scopes = m.scopes.map((scope) => `${scope.environment}:${scope.secretPath}`).sort();
         if (
           m.workspace !== project ||
           m.name !== account ||
@@ -159,25 +200,23 @@ export function createScopedCollectorTokenResolver(binding, deps = {}) {
       for (const folder of folders) {
         if (!folderCache.has(folder)) {
           const promise = (async () => {
-            const result = await request("/api/v4/secrets", {
-              projectId: project,
-              environment: "prod",
-              secretPath: folder,
-              includeImports: "true",
-              recursive: "false",
-              expandSecretReferences: folder === "/" ? "false" : "true",
-              includePersonalOverrides: "true",
-            });
-            if (!Array.isArray(result.secrets) || (result.imports != null && !Array.isArray(result.imports))) {
-              throw new Error("Infisical secret response is invalid");
-            }
+            const parsed = SecretsResponseSchema.safeParse(
+              await request("/api/v4/secrets", {
+                projectId: project,
+                environment: "prod",
+                secretPath: folder,
+                includeImports: "true",
+                recursive: "false",
+                expandSecretReferences: folder === "/" ? "false" : "true",
+                includePersonalOverrides: "true",
+              }),
+            );
+            if (!parsed.success) throw new Error("Infisical secret response is invalid");
+            const result = parsed.data;
             const values = new Map();
             const add = (rows, override) => {
-              if (!Array.isArray(rows)) throw new Error("Infisical import response is invalid");
               for (const row of rows) {
-                if (typeof row.secretKey !== "string" || typeof row.secretValue !== "string" || row.secretValueHidden === true) {
-                  throw new Error("Infisical secret response is invalid");
-                }
+                if (row.secretValueHidden === true) throw new Error("Infisical secret response is invalid");
                 if (override || !values.has(row.secretKey)) values.set(row.secretKey, row.secretValue);
               }
             };
@@ -207,15 +246,26 @@ export function createScopedCollectorTokenResolver(binding, deps = {}) {
     };
   }
 
+  // One lookup per resolver, so the keychain read, the metadata request and
+  // the per-folder fetches are shared by every name this resolver is asked
+  // for, instead of repeated once per name.
+  let scoped = null;
+  function scopedLookup() {
+    if (!scoped) scoped = buildScopedLookup();
+    return scoped;
+  }
+
   return async function resolveCollectorToken(
     tokenEnvVarNames = ["USAGE_INGEST_TOKEN"],
     { env = process.env, fleetSecretsGet: lookup } = {},
   ) {
-    const read = lookup ?? scopedLookup(env);
+    const strict = env.COLLECTOR_STRICT_INJECTED_SECRETS === "1";
+    const read = strict ? null : (lookup ?? scopedLookup());
     let failure;
     for (const name of tokenEnvVarNames) {
       const value = env[name]?.trim();
       if (value) return value;
+      if (!read) continue;
       try {
         const remote = (await read(name))?.trim();
         if (remote) return remote;
