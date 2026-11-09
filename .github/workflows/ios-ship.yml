@@ -383,6 +383,18 @@ jobs:
             echo "::warning title=TestFlight standing testers::tester sync exited ${rc}; see the standing-testers lines above.  The TestFlight upload itself succeeded."
           fi
 
+      # The in-ship ensure-tf-ready runs before standing-tester sync, so rc=5
+      # is common when the internal group does not exist yet.  Re-check after
+      # sync so the job summary reflects post-sync installability (OPS-1052).
+      - name: Re-check TestFlight readiness after tester sync (usage)
+        id: recheck_usage
+        if: ${{ !cancelled() && steps.ship_usage.outcome == 'success' && steps.gate.outputs.ship_usage == '1' }}
+        continue-on-error: true
+        run: |
+          build="${{ steps.plan.outputs.build_usage }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage recheck"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-recheck-tf-ready.sh" usage "$build"
+
       # !cancelled() so a Client failure does not silently skip Local; the
       # secrets step must have succeeded so we never ship without signing.
       - name: Ship LocalUsageMonitor to TestFlight
@@ -420,6 +432,35 @@ jobs:
           set -e
           if [ "$rc" -ne 0 ]; then
             echo "::warning title=TestFlight standing testers::tester sync exited ${rc}; see the standing-testers lines above.  The TestFlight upload itself succeeded."
+          fi
+
+      - name: Re-check TestFlight readiness after tester sync (usage-local)
+        id: recheck_usage_local
+        if: ${{ !cancelled() && steps.ship_usage_local.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
+        continue-on-error: true
+        run: |
+          build="${{ steps.plan.outputs.build_usage_local }}"
+          [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage-local recheck"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/ios-recheck-tf-ready.sh" usage-local "$build"
+
+      - name: iOS ship summary (TestFlight readiness after sync)
+        if: ${{ always() && steps.gate.outputs.should_ship == '1' }}
+        run: |
+          set -euo pipefail
+          echo "## TestFlight readiness (after standing-tester sync)"
+          if [ "${{ steps.gate.outputs.ship_usage }}" = "1" ] && [ "${{ steps.ship_usage.outcome }}" = "success" ]; then
+            if [ -n "${{ steps.recheck_usage.outputs.tf_ready_summary }}" ]; then
+              echo "- Usage Monitor Client (${{ steps.recheck_usage.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage.outputs.tf_ready_rc }} — ${{ steps.recheck_usage.outputs.tf_ready_summary }}"
+            else
+              echo "- Usage Monitor Client: post-sync readiness check did not run"
+            fi
+          fi
+          if [ "${{ steps.gate.outputs.ship_usage_local }}" = "1" ] && [ "${{ steps.ship_usage_local.outcome }}" = "success" ]; then
+            if [ -n "${{ steps.recheck_usage_local.outputs.tf_ready_summary }}" ]; then
+              echo "- Local Monitor (${{ steps.recheck_usage_local.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage_local.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage_local.outputs.tf_ready_rc }} — ${{ steps.recheck_usage_local.outputs.tf_ready_summary }}"
+            else
+              echo "- Local Monitor: post-sync readiness check did not run"
+            fi
           fi
 
       # Saved even when a ship step failed or the run was cancelled, but only on
