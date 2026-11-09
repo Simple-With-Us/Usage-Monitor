@@ -723,10 +723,10 @@ Socratic.Trade #3089) and runs `scripts/ios-ship-testflight.sh`, which execs
 in-repo `scripts/ios-fleet/ship-testflight.sh`. LocalUsageMonitor stays skipped.
 Dispatch:
 
-Dispatch through the Fleet Tools relay where a dispatch verb exists; the
-relay has no workflow-dispatch verb yet, so `gh workflow run ios-ship.yml`
-remains the logged gh fallback for this dispatch until one lands (logged in
-the Fleet GitOPS deficiencies document).
+Dispatch through the Fleet Tools relay with `gr_workflow_dispatch`
+(`workflow: ios-ship.yml`, `ref: main`).  If the relay refuses the dispatch,
+`gh workflow run ios-ship.yml` is the backup for that one step only, logged in
+the Fleet GitOPS deficiencies document.
 
 Bundle IDs `com.simplewithus.usage.client.ios` (Usage Monitor) and
 `com.simplewithus.usage.local.ios` (Local Monitor), team `CC8UTF7ATG`.
