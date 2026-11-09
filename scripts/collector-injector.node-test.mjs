@@ -136,12 +136,21 @@ test("child launch forwards signals and exit without placing secrets in argv", a
 });
 test("templates select the injector and failures never print custody values", (t) => {
   const { path } = fixture(t);
-  for (const profile of Object.keys(pairs)) {
+  // muse-code is the exception: its template must NOT route through the
+  // injector.  The Muse CLI rotates its Meta access token inside the
+  // macOS keychain, so a provisioned copy goes stale and the collector reads
+  // the keychain itself; its LaunchAgent invokes the collector directly.
+  for (const profile of ["kimi", "zcode"]) {
     const template = readFileSync(new URL(`./com.jays.${profile}-usage-collector.plist.example`, import.meta.url), "utf8");
     assert.match(template, /collector-injector\.mjs/); assert.ok(template.includes(`<string>${profile}</string>`));
     assert.match(template, /<string>AUTH_MODE<\/string>/);
     assert.equal(template.includes("sentinel"), false);
   }
+  const museCodeTemplate = readFileSync(new URL("./com.jays.muse-code-usage-collector.plist.example", import.meta.url), "utf8");
+  assert.ok(museCodeTemplate.includes("muse-code-usage-collector.mjs"));
+  assert.equal(museCodeTemplate.includes("collector-injector"), false);
+  assert.equal(museCodeTemplate.includes("AUTH_MODE"), false);
+  assert.equal(museCodeTemplate.includes("sentinel"), false);
   const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "invalid", path], { encoding: "utf8" });
   assert.notEqual(result.status, 0); assert.equal((result.stdout + result.stderr).includes("sentinel"), false);
 });

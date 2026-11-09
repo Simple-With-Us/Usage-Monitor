@@ -225,7 +225,7 @@ describe("fetchMuseCodeKey (HTTP shape)", () => {
     );
   });
 
-  it("throws on non-2xx status and never touches the body for the error message", async () => {
+  it("maps 401 to a typed auth-required error and never touches the body", async () => {
     let bodyRead = false;
     const fetchImpl = vi.fn(async () => ({
       status: 401,
@@ -238,13 +238,29 @@ describe("fetchMuseCodeKey (HTTP shape)", () => {
       },
     }));
 
+    let caught;
     try {
-      await expect(fetchMuseCodeKey("dummy-token", { fetchImpl })).rejects.toThrow(
-        /HTTP 401 from api\.meta\.ai/,
-      );
+      await fetchMuseCodeKey("dummy-token", { fetchImpl });
+    } catch (error) {
+      caught = error;
     } finally {
       expect(bodyRead).toBe(false);
     }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught.message).toMatch(/authorization required from api\.meta\.ai \(HTTP 401\)/);
+    expect(caught.code).toBe("MUSE_CODE_AUTH_REQUIRED");
+  });
+
+  it("throws a generic HTTP error on other non-2xx statuses", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      status: 500,
+      ok: false,
+      json: async () => ({}),
+    }));
+
+    await expect(fetchMuseCodeKey("dummy-token", { fetchImpl })).rejects.toThrow(
+      /HTTP 500 from api\.meta\.ai/,
+    );
   });
 });
 
@@ -389,6 +405,25 @@ describe("collectMuseCode wiring", () => {
     // logging of the access token starts.
     expect(init.body).toBe("{}");
     expect(init.body).not.toContain("tk_live_FIXTURE");
+  });
+
+  it("skips cleanly when Meta rejects the keychain token (401)", async () => {
+    const execFileImpl = vi.fn(async () => ({
+      stdout: JSON.stringify({ access_token: "tk_live_FIXTURE" }),
+    }));
+    const fetchImpl = vi.fn(async () => ({
+      status: 401,
+      ok: false,
+      json: async () => ({}),
+    }));
+    const result = await collectMuseCode({
+      execFileImpl,
+      fetchImpl,
+      platform: "darwin",
+    });
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("access-token-rejected");
+    expect(result.events).toEqual([]);
   });
 
   it("emits zero events when the payload reports is_subs_active=false", async () => {
