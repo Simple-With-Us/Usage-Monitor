@@ -19,7 +19,7 @@
 import { pathToFileURL } from "node:url";
 
 import { postUsageBatches } from "./lib/session-token-collectors.mjs";
-import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { resolveCollectorToken } from "./lib/muse-code-run-session-token-collector.mjs";
 import { buildQuotaEvent, clampPercent, toIsoTimestamp } from "./lib/quota-event.mjs";
 
 const PRODUCER_ID = "muse-code";
@@ -259,7 +259,7 @@ async function main() {
     process.exit(0);
   }
 
-  const token = resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   if (!token && !DRY_RUN) {
     log(
       "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`.",
