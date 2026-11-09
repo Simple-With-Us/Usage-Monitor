@@ -210,6 +210,16 @@ jobs:
       - name: Validate Prisma schema
         run: npx prisma validate
 
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line, so a runner or developer on the wrong Node version
+      # fails fast here instead of producing runtime artifacts that look like
+      # product failures.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
+
       - name: Typecheck
         run: npm run typecheck
 
