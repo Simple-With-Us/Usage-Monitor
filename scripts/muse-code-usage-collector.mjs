@@ -153,7 +153,15 @@ export async function readMuseCodeAccessTokenFromKeychain({
     return null;
   }
   const trimmed = stdout.trim();
-  if (!trimmed) return null;
+  if (!trimmed) {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned empty content; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   let parsed;
   try {
     parsed = JSON.parse(trimmed);
@@ -166,9 +174,25 @@ export async function readMuseCodeAccessTokenFromKeychain({
     );
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed || typeof parsed !== "object") {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned an unexpected JSON shape; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   const token = parsed.access_token;
-  if (typeof token !== "string" || !token.trim()) return null;
+  if (typeof token !== "string" || !token.trim()) {
+    log(
+      `muse-code: macOS keychain entry "${service}" is missing a string access_token; ` +
+        "the CLI may have stored a non-standard payload.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   return token.trim();
 }
 
@@ -325,6 +349,11 @@ export async function fetchMuseCodeKey(accessToken, {
   if (!response.ok) {
     // Deliberately do not include the response body: it can carry the API
     // key id and account email.
+    if (response.status === 401 || response.status === 403) {
+      const error = new Error(`authorization required from api.meta.ai (HTTP ${response.status})`);
+      error.code = "MUSE_CODE_AUTH_REQUIRED";
+      throw error;
+    }
     throw new Error(`HTTP ${response.status} from api.meta.ai`);
   }
   let parsed = null;
@@ -348,7 +377,23 @@ export async function collectMuseCode({
   if (!accessToken) {
     return { provider: PROVIDER, status: "skipped", events: [] };
   }
-  const payload = await fetchMuseCodeKey(accessToken, { fetchImpl });
+  let payload;
+  try {
+    payload = await fetchMuseCodeKey(accessToken, { fetchImpl });
+  } catch (error) {
+    if (error?.code === "MUSE_CODE_AUTH_REQUIRED") {
+      // The keychain token itself was rejected (CLI signed out or the token
+      // revoked).  That is a skip, not a failure: zero events, exit 0, and
+      // the next tick retries quietly once the CLI holds a valid token.
+      log(
+        "muse-code: Meta rejected the keychain access token (401/403); " +
+          "skipping this run (exit 0, zero events).  Sign in with the Muse " +
+          "CLI so the keychain entry holds a valid token.",
+      );
+      return { provider: PROVIDER, status: "skipped", reason: "access-token-rejected", events: [] };
+    }
+    throw error;
+  }
   if (DEBUG) debugLog("fetched /muse-code/key payload (keys omitted)");
   const events = quotaEventsFromMuseCode(payload, now);
   return {
