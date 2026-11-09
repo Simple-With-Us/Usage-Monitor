@@ -375,7 +375,7 @@ export async function collectMuseCode({
 } = {}) {
   const accessToken = await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform });
   if (!accessToken) {
-    return { provider: PROVIDER, status: "skipped", events: [] };
+    return { provider: PROVIDER, status: "skipped", reason: "access-token-missing", events: [] };
   }
   let payload;
   try {
@@ -399,6 +399,10 @@ export async function collectMuseCode({
   return {
     provider: PROVIDER,
     status: events.length === 0 ? "skipped" : "ok",
+    // Every skipped result carries a distinct reason so callers can tell
+    // the skip causes apart: access-token-missing, access-token-rejected,
+    // or no-quota-windows (inactive subscription or empty payload).
+    ...(events.length === 0 ? { reason: "no-quota-windows" } : {}),
     events,
   };
 }
@@ -425,9 +429,11 @@ async function main() {
 
   if (result.status === "skipped") {
     log(
-      result.events.length === 0
-        ? "skipped (no quota windows emitted; keychain ACL or inactive subscription)"
-        : "skipped",
+      result.reason
+        ? `skipped (${result.reason})`
+        : result.events.length === 0
+          ? "skipped (no quota windows emitted; keychain ACL or inactive subscription)"
+          : "skipped",
     );
     process.exit(0);
   }
