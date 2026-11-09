@@ -376,6 +376,7 @@ describe("collectMuseCode wiring", () => {
       now: OBSERVED,
     });
     expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("access-token-missing");
     expect(result.events).toEqual([]);
     expect(execFileImpl).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -442,6 +443,7 @@ describe("collectMuseCode wiring", () => {
       platform: "darwin",
     });
     expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no-quota-windows");
     expect(result.events).toEqual([]);
   });
 });
