@@ -204,6 +204,19 @@ jobs:
           node-version-file: .node-version
           cache: npm
 
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line.
+      #
+      # It runs BEFORE `npm ci`.  The script is plain Node with no
+      # dependencies, so a runner on the wrong runtime fails here, before it
+      # builds node_modules under the wrong ABI and leaves a poisoned install
+      # and npm cache behind for later steps to reuse.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
+
       - name: Install dependencies
         run: npm ci
 
