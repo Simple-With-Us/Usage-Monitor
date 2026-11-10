@@ -474,9 +474,139 @@ describe("parseClaudeSessionJsonl", () => {
       },
     });
     const events = parseClaudeSessionJsonl(line, { sessionKey: "test/claude-session.jsonl" });
-    expect(events).toHaveLength(4);
+    // Four token types, the input split into its stored row and the remainder.
+    expect(events).toHaveLength(5);
     expect(events[0].producerKeyRef).toBe("claude-3-7-sonnet");
-    expect(events.find((e) => e.label === "token:input")?.quantity).toBe(1200);
+    // Anthropic's input_tokens excludes cache reads and writes, so the call's
+    // input rows total the full 1500.
+    expect(
+      events.filter((e) => e.label === "token:input").reduce((sum, e) => sum + e.quantity, 0)
+    ).toBe(1500);
+    expect(events.find((e) => e.label === "token:cacheRead")?.quantity).toBe(300);
+  });
+
+  it("keeps cache reads that exceed the uncached input", () => {
+    // The usual Claude Code shape: a tiny uncached input on a huge cached prefix.
+    const line = JSON.stringify({
+      timestamp: "2026-10-29T14:00:00.000Z",
+      message: {
+        id: "msg_1",
+        model: "claude-opus-5-5",
+        usage: {
+          input_tokens: 90,
+          output_tokens: 168,
+          cache_read_input_tokens: 777_223,
+          cache_creation_input_tokens: 1_200,
+        },
+      },
+    });
+    const events = parseClaudeSessionJsonl(line, { sessionKey: "s" });
+    const quantity = (label) => events.find((e) => e.label === label)?.quantity;
+    expect(quantity("token:input")).toBe(90);
+    expect(quantity("token:cacheRead")).toBe(777_223);
+    expect(quantity("token:cacheCreation")).toBe(1_200);
+    expect(quantity("token:output")).toBe(168);
+  });
+
+  it("counts one API call once, however many content-block lines repeat its usage", () => {
+    const usage = { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 1000 };
+    const line = (type, extra = {}) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-1",
+        requestId: "req_A",
+        timestamp: "2026-10-29T14:00:00.000Z",
+        message: { id: "msg_A", model: "claude-opus-5-5", usage, content: [{ type }] },
+        ...extra,
+      });
+    const text = [
+      line("thinking"),
+      line("text"),
+      line("tool_use"),
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-1",
+        requestId: "req_B",
+        timestamp: "2026-10-29T14:00:05.000Z",
+        message: { id: "msg_B", model: "claude-opus-5-5", usage, content: [{ type: "text" }] },
+      }),
+    ].join("\n");
+    const events = parseClaudeSessionJsonl(text, { sessionKey: "s", extraMetadata: { collector: "transcript" } });
+    // Two calls x three non-zero token types.
+    expect(events).toHaveLength(6);
+    // The transcript's requestId is not a verifiable provider id (only OpenRouter
+    // rows are ever verified), so Claude events must not carry providerRequestId:
+    // compliance would otherwise count them as pending forever.
+    expect(events.every((e) => e.providerRequestId === undefined)).toBe(true);
+    expect(events.every((e) => e.metadata["session.id"] === "sess-1")).toBe(true);
+    expect(events.every((e) => e.metadata.collector === "transcript")).toBe(true);
+  });
+
+  it("keeps the old input row's id and sends the uncounted input as its own row", () => {
+    // cacheRead <= input: the old inclusive split sent input 5000 - 1200 = 3800.
+    const line = JSON.stringify({
+      timestamp: "2026-10-29T14:00:00.000Z",
+      message: {
+        id: "msg_1",
+        model: "claude-opus-4",
+        usage: { input_tokens: 5000, output_tokens: 10, cache_read_input_tokens: 1200 },
+      },
+    });
+    const events = parseClaudeSessionJsonl(line, { sessionKey: "s" });
+    const inputs = events.filter((e) => e.label === "token:input");
+    expect(inputs.map((e) => e.quantity).sort((a, b) => a - b)).toEqual([1200, 3800]);
+    // The 3800 row is the row the old parser stored, byte for byte.
+    const legacy = tokenEventsFromBreakdown({
+      producerId: CLAUDE_PRODUCER_ID,
+      provider: "anthropic",
+      service: "claude-code",
+      sessionKey: "s",
+      occurredAtIso: "2026-10-29T14:00:00.000Z",
+      model: "claude-opus-4",
+      breakdown: splitInclusiveCache({ input: 5000, output: 10, cacheRead: 1200 }),
+      extraId: "L0:claude-opus-4",
+    });
+    expect(events.find((e) => e.quantity === 3800)?.eventId).toBe(
+      legacy.find((e) => e.label === "token:input")?.eventId
+    );
+    expect(inputs.reduce((sum, e) => sum + e.quantity, 0)).toBe(5000);
+  });
+
+  it("does not offer a subagent (sidechain) call to the BotFleet coverage drop", () => {
+    const usage = { input_tokens: 5, output_tokens: 40 };
+    const text = [
+      JSON.stringify({ sessionId: "s1", timestamp: "2026-10-29T14:00:00.000Z", message: { id: "a", model: "m", usage } }),
+      JSON.stringify({ sessionId: "s1", isSidechain: true, timestamp: "2026-10-29T14:00:01.000Z", message: { id: "b", model: "m", usage } }),
+    ].join("\n");
+    const events = parseClaudeSessionJsonl(text, { sessionKey: "s", extraMetadata: { "agent.launcher": "botfleet" } });
+    const byMessageLine = (prefix) => events.filter((e) => e.timestamp === undefined && e.occurredAt.startsWith(prefix));
+    expect(byMessageLine("2026-10-29T14:00:00").every((e) => e.metadata["agent.launcher"] === "botfleet")).toBe(true);
+    expect(byMessageLine("2026-10-29T14:00:01").every((e) => !("agent.launcher" in e.metadata))).toBe(true);
+  });
+
+  it("counts a call copied into a second transcript once when the pass shares its set", () => {
+    const usage = { input_tokens: 5, output_tokens: 40 };
+    const line = JSON.stringify({ timestamp: "2026-10-29T14:00:00.000Z", message: { id: "msg_A", model: "m", usage } });
+    const seenMessageIds = new Set();
+    const original = parseClaudeSessionJsonl(line, { sessionKey: "orig", seenMessageIds });
+    const fork = parseClaudeSessionJsonl(line, { sessionKey: "fork", seenMessageIds });
+    expect(original.length).toBeGreaterThan(0);
+    expect(fork).toEqual([]);
+  });
+
+  it("keeps the eventId the first line of a call always had, as the call grows", () => {
+    const usage = { input_tokens: 5, output_tokens: 40 };
+    const first = JSON.stringify({
+      timestamp: "2026-10-29T14:00:00.000Z",
+      message: { id: "msg_A", model: "m", usage },
+    });
+    const later = JSON.stringify({
+      timestamp: "2026-10-29T14:00:01.000Z",
+      message: { id: "msg_A", model: "m", usage },
+    });
+    const before = parseClaudeSessionJsonl(first, { sessionKey: "s" });
+    const after = parseClaudeSessionJsonl([first, later, later].join("\n"), { sessionKey: "s" });
+    expect(after.map((e) => e.eventId)).toEqual(before.map((e) => e.eventId));
   });
 
   it("reads usage from a top-level obj.usage as a fallback", () => {

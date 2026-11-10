@@ -153,8 +153,9 @@ export default function Nav() {
               <BrandMark />
               {/*
                 Always show the product name next to the icon — including mobile.
-                iOS apps use CFBundleDisplayName (Usage Client Monitor /
-                Usage Local Monitor); the website brand is plain "Usage Monitor".
+                The iOS apps list as "Usage Monitor Client" and "Usage Monitor Local";
+                their home-screen labels are "Usage Monitor" and "Local Monitor".
+                The website brand is plain "Usage Monitor".
               */}
               <span className="truncate text-sm font-semibold tracking-tight text-gray-900 dark:text-gray-100 sm:text-base">
                 Usage Monitor

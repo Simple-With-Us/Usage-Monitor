@@ -1,14 +1,32 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for opencode session usage.
 //
-// Reads assistant rows from opencode's SQLite store
+// Reads opencode's SQLite store
 // (${OPENCODE_DB:-${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db},
 // table session_message, column data JSON) read-only, because opencode may be
 // running.  One usage event per token type per completed assistant message:
 // input, output (reasoning folded in; split kept in metadata), cacheRead and
 // cacheCreation.  opencode reports cost 0 for almost every row, so no cost
-// event is sent; UM derives cost from tokens.  A non-zero reported cost is
-// kept in metadata.reportedCostUsd.
+// event is sent for those; UM derives cost from tokens.  A non-zero reported
+// cost is kept in metadata.reportedCostUsd.
+//
+// On top of the token rows the collector sends (scripts/lib/opencode-session-telemetry.mjs):
+//   - the top-level `project` (session directory basename or project name) on
+//     every event, plus metadata.sessionId on a token row only when that row
+//     was completed after the one fixed shape boundary (see
+//     resolveOpencodeSessionIdCutoffMs), so a replay of a row Usage Monitor
+//     already stored still dedupes instead of answering HTTP 409,
+//   - the project name of a session frozen the first time it is seen
+//     (freezeProjectNames), so a project opencode names later, or a directory
+//     that gets renamed, cannot change the content of a stored row and take
+//     the whole batch down with a 409,
+//   - a cost event for every assistant message that reported a real cost,
+//   - one context-window utilization row per assistant message (how full the
+//     context was on that turn), read from opencode's models-dev catalog,
+//   - one session-fact row per session (title, activity, message counts,
+//     files changed, session cost),
+//   - compaction / model-switch / agent-switch / location-switch lifecycle rows.
 //
 // Usage:
 //   node scripts/opencode-usage-collector.mjs [--dry-run] [--debug] [--days N] [--since ISO]
@@ -17,25 +35,39 @@
 //   OPENCODE_INGEST_TOKEN or USAGE_INGEST_TOKEN
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
 //   OPENCODE_DB (default ~/.local/share/opencode/opencode.db)
+//   OPENCODE_ADDITIONAL_DBS_JSON (optional JSON array of up to eight explicit absolute database paths)
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
   OPENCODE_PRODUCER_ID,
   filterEventsSince,
-  parseOpencodeMessageRows,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  buildOpencodeExtraEvents,
+  buildOpencodeTokenEvents,
+  freezeProjectNames,
+  parseModelsDevCatalog,
+  projectNamesBySession,
+  readOpencodeTelemetry,
+  OPENCODE_SESSION_ID_CUTOFF_MS,
+  resolveOpencodeSessionIdCutoffMs,
+} from "./lib/opencode-session-telemetry.mjs";
+import {
+  botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
+  collectorStatePath,
   expandHome,
+  isBotFleetSessionPath,
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/opencode-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -59,6 +91,90 @@ export function defaultOpencodeDbPath(env = process.env) {
   return join(expandHome(dataHome), "opencode", "opencode.db");
 }
 
+/** Additional profiles supplement the ordinary source without discovering new stores. */
+export function opencodeDbPaths(env = process.env) {
+  const primary = resolve(defaultOpencodeDbPath(env));
+  if (!env.OPENCODE_ADDITIONAL_DBS_JSON) return [primary];
+  let additional;
+  try {
+    additional = JSON.parse(env.OPENCODE_ADDITIONAL_DBS_JSON);
+  } catch {
+    throw new Error("OPENCODE_ADDITIONAL_DBS_JSON must be a bounded array of absolute database paths");
+  }
+  if (!Array.isArray(additional) || additional.length > 8 || additional.some((path) =>
+    typeof path !== "string" || !path || path.length > 4096 || path.includes("\0") || !isAbsolute(expandHome(path))
+  )) {
+    throw new Error("OPENCODE_ADDITIONAL_DBS_JSON must be a bounded array of absolute database paths");
+  }
+  return [primary, ...additional.map(expandHome)];
+}
+
+/**
+ * Where the frozen project names live.  The file sits beside the collector's
+ * checkpoint but is a file of its own, because it has to outlive the
+ * checkpoint: a lost checkpoint replays the last rows, and a lost freeze
+ * would let a renamed project change their content and collide with the rows
+ * Usage Monitor already stored.
+ */
+export function opencodeProjectNamesPath(producerId = PRODUCER_ID, stateRoot) {
+  return collectorStatePath(producerId, stateRoot, "project-names");
+}
+
+/**
+ * The project names every session was attributed to the first time it was
+ * seen.  A missing or unreadable file is an empty map, not a failure: the
+ * collector then freezes the names it sees from now on.
+ */
+export async function readFrozenProjectNames(path) {
+  const names = new Map();
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return names;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const stored = parsed?.projectNames;
+    if (!stored || typeof stored !== "object") return names;
+    for (const [sessionId, name] of Object.entries(stored)) {
+      if (typeof sessionId === "string" && sessionId && typeof name === "string" && name) {
+        names.set(sessionId, name);
+      }
+    }
+  } catch {
+    // A corrupt file is an empty map: the names are frozen again from the
+    // next pass on, which is the same state a fresh install starts in.
+  }
+  return names;
+}
+
+/**
+ * Persist the frozen names.  The file is only written when the names moved,
+ * and the keys are sorted so an unchanged freeze does not rewrite the file
+ * every 15 minutes.
+ */
+export async function writeFrozenProjectNames(path, frozen, producerId = PRODUCER_ID) {
+  const sorted = [...frozen.entries()].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+  const body = `${JSON.stringify({
+    version: 1,
+    producerId,
+    projectNames: Object.fromEntries(sorted),
+  })}\n`;
+  try {
+    if ((await readFile(path, "utf8")) === body) return false;
+  } catch {
+    // No file yet, so there is nothing to compare against.
+  }
+  await mkdir(dirname(path), { recursive: true });
+  const tempPath = `${path}.${process.pid}.tmp`;
+  await writeFile(tempPath, body, { mode: 0o600 });
+  await rename(tempPath, path);
+  return true;
+}
+
 /** Read assistant rows updated since `since`, read-only. */
 export async function readOpencodeRows(dbPath, since) {
   const { DatabaseSync } = await import("node:sqlite");
@@ -77,15 +193,88 @@ export async function readOpencodeRows(dbPath, since) {
   }
 }
 
+/**
+ * Every event for the window: the token rows (unchanged ids), the reported
+ * cost, the context utilization, the session facts and the lifecycle signals.
+ */
 export async function collectOpencodeEvents({
   dbPath = defaultOpencodeDbPath(),
   since,
   scanStatus,
+  sessionIdCutoffMs = OPENCODE_SESSION_ID_CUTOFF_MS,
+  frozenProjectNames = new Map(),
+  onWarning,
 } = {}) {
   if (!existsSync(dbPath)) return [];
   try {
-    const rows = await readOpencodeRows(dbPath, since);
-    return filterEventsSince(parseOpencodeMessageRows(rows), since);
+    const telemetry = await readOpencodeTelemetry(dbPath, since);
+    // The project name is decided once per session and then held still, so a
+    // project that opencode names later, or a directory that gets renamed,
+    // cannot change the content of a row Usage Monitor already stored.  The
+    // map is updated in place, so the caller can persist what this pass
+    // decided.
+    const projectBySession = freezeProjectNames(
+      projectNamesBySession(telemetry.sessions, telemetry.projects),
+      frozenProjectNames,
+    );
+    // Sessions BotFleet launched (their directory is a BotFleet workspace).
+    // Their token rows are tagged for exact receiver-verified billed-call
+    // coverage; session identity or approximate timing alone proves no overlap.
+    // The explicit USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1 switch excludes them.
+    const botFleetSessionIds = new Set(
+      (telemetry.sessions ?? [])
+        .filter((session) => typeof session?.directory === "string" && session.directory)
+        .filter((session) => isBotFleetSessionPath(`${session.directory.replace(/\/+$/, "")}/`))
+        .map((session) => session.id)
+        .filter((id) => typeof id === "string" && id)
+    );
+    const tokenEvents = buildOpencodeTokenEvents({
+      assistantRows: botFleetChildExclusionEnabled()
+        ? telemetry.assistantRows.filter((row) => !botFleetSessionIds.has(row?.session_id))
+        : telemetry.assistantRows,
+      projectBySession,
+      sessionIdCutoffMs,
+      botFleetSessionIds,
+    });
+    const catalog = parseModelsDevCatalog(telemetry.catalogValue);
+    // A catalog that cannot be used is not a silent event: every context row
+    // would report a null limit and the context feature would disappear
+    // without a word, so the reason goes into the run log.
+    if (catalog.problem) {
+      onWarning?.(`models.dev catalog unusable: ${catalog.problem}`);
+    }
+    // A catalog that IS usable but is not the expected shape is reported the
+    // same way: the limits still work, so the run log has to say that the
+    // envelope changed instead of letting the change pass unnoticed.
+    if (catalog.warning) {
+      onWarning?.(`models.dev catalog warning: ${catalog.warning}`);
+    }
+    const extraEvents = buildOpencodeExtraEvents({
+      ...telemetry,
+      catalog,
+      projectBySession,
+      onWarning,
+    });
+    for (const event of extraEvents) {
+      const sessionId = event.metadata?.sessionId;
+      if (typeof sessionId !== "string" || !sessionId) continue;
+      // Correlation-only additions preserve existing replay identities.
+      event.metadata["session.id"] = sessionId;
+      if (botFleetSessionIds.has(sessionId)) event.metadata["agent.launcher"] = "botfleet";
+    }
+    // The session fact is dated at the session's creation instant, so the
+    // window filter would drop it for every session that was created before
+    // the window even though the session is still discovered through its
+    // in-window messages.  Its content never moves and its id is the
+    // session's, so the row is stored once and every later pass dedupes
+    // against it; only sessions seen in the window emit it.
+    const sessionFacts = [];
+    const windowedExtraEvents = [];
+    for (const event of extraEvents) {
+      if (event?.label === "session") sessionFacts.push(event);
+      else windowedExtraEvents.push(event);
+    }
+    return [...filterEventsSince([...tokenEvents, ...windowedExtraEvents], since), ...sessionFacts];
   } catch (error) {
     if (scanStatus) scanStatus.complete = false;
     if (DEBUG) log(`database read failed (${error instanceof Error ? error.message : "error"})`);
@@ -93,36 +282,170 @@ export async function collectOpencodeEvents({
   }
 }
 
+/** Read explicitly configured profiles with shared frozen names and unchanged event identities. */
+export async function collectOpencodeDatabases({
+  dbPaths = opencodeDbPaths(),
+  allowMissingPrimary = false,
+  scanStatus,
+  frozenProjectNames = new Map(),
+  onWarning,
+  ...options
+} = {}) {
+  if (!Array.isArray(dbPaths) || dbPaths.length < 1 || dbPaths.length > 9 || dbPaths.some((path) =>
+    typeof path !== "string" || !path || path.length > 4096 || path.includes("\0") || !isAbsolute(path)
+  )) throw new Error("OpenCode database selection must contain one to nine absolute paths");
+  const databases = new Set();
+  const events = new Map();
+  let collisionReported = false;
+  for (const [index, dbPath] of dbPaths.entries()) {
+    let identity;
+    try {
+      const info = statSync(dbPath, { bigint: true });
+      if (!info.isFile()) throw new Error("Not a database file");
+      identity = `${info.dev}:${info.ino}`;
+    } catch (error) {
+      if (!(index === 0 && allowMissingPrimary && ["ENOENT", "ENOTDIR"].includes(error?.code))) {
+        if (scanStatus) scanStatus.complete = false;
+        onWarning?.(`OpenCode database ${index + 1} is unavailable; checkpoint retained`);
+      }
+      continue;
+    }
+    if (databases.has(identity)) continue;
+    databases.add(identity);
+    const sourceStatus = { complete: true };
+    const sourceEvents = await collectOpencodeEvents({ ...options, dbPath, scanStatus: sourceStatus, frozenProjectNames, onWarning });
+    if (!sourceStatus.complete) {
+      if (scanStatus) scanStatus.complete = false;
+      onWarning?.(`OpenCode database ${index + 1} could not be read completely; checkpoint retained`);
+    }
+    for (const event of sourceEvents) {
+      const previous = events.get(event.eventId);
+      if (!previous) events.set(event.eventId, event);
+      else if (JSON.stringify(previous) !== JSON.stringify(event)) {
+        // The ordinary source retains precedence for a replay identity already sent.
+        if (scanStatus) scanStatus.complete = false;
+        if (!collisionReported) onWarning?.("OpenCode profiles disagree on an event identity; checkpoint retained");
+        collisionReported = true;
+      }
+    }
+  }
+  return [...events.values()];
+}
+
+/** Bucket the window's events by kind for the run log. */
+export function countEventKinds(events) {
+  const counts = { token: 0, cost: 0, context: 0, session: 0, lifecycle: 0 };
+  for (const event of events) {
+    const label = typeof event?.label === "string" ? event.label : "";
+    if (label.startsWith("token:")) counts.token += 1;
+    else if (label.startsWith("context:")) counts.context += 1;
+    else if (label.startsWith("lifecycle:")) counts.lifecycle += 1;
+    else if (label === "session" || label === "session-snapshot") counts.session += 1;
+    else if (event?.metricType === "cost") counts.cost += 1;
+  }
+  return counts;
+}
+
+/** One example event per kind, for --dry-run inspection. */
+export function sampleEventPerKind(events) {
+  const samples = new Map();
+  for (const event of events) {
+    const label = typeof event?.label === "string" ? event.label : "";
+    const kind = label.startsWith("token:")
+      ? "token"
+      : label.startsWith("context:")
+        ? "context"
+        : label.startsWith("lifecycle:")
+          ? "lifecycle"
+          : label === "session" || label === "session-snapshot"
+            ? "session"
+            : event?.metricType === "cost"
+              ? "cost"
+              : null;
+    if (!kind || samples.has(kind)) continue;
+    samples.set(kind, event);
+  }
+  return [...samples.entries()];
+}
+
 async function main() {
   const passStartedAt = new Date();
   let args;
+  let dbPaths;
   try {
     args = await resolveCollectorArgs(process.argv, PRODUCER_ID, { now: passStartedAt });
+    dbPaths = opencodeDbPaths();
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
   const scanStatus = { complete: true };
-  const events = await collectOpencodeEvents({ since: args.since, scanStatus });
-  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`);
+  const dryRun = DRY || args.dryRun;
+  // One fixed instant decides whether a token row carries the session id.  It
+  // is read from OPENCODE_SESSION_ID_CUTOFF_MS and defaults to "never", so the
+  // token rows keep exactly the shape Usage Monitor already stored unless an
+  // operator sets the boundary to the install moment on purpose.  A dry run
+  // previews the shape this run sends, not a different one.
+  const sessionIdCutoffMs = resolveOpencodeSessionIdCutoffMs(process.env);
+  // The project names are read before the pass and written straight after it,
+  // before anything is posted.  A pass that fails to post must still leave
+  // the names where they were, or the next pass would change the content of
+  // the rows the failed pass had already stored.
+  const projectNamesPath = opencodeProjectNamesPath(PRODUCER_ID);
+  const frozenProjectNames = await readFrozenProjectNames(projectNamesPath);
+  const events = await collectOpencodeDatabases({
+    dbPaths,
+    allowMissingPrimary: !process.env.OPENCODE_DB,
+    since: args.since,
+    scanStatus,
+    sessionIdCutoffMs,
+    frozenProjectNames,
+    onWarning: (message) => log(message),
+  });
+  if (!dryRun && (await writeFrozenProjectNames(projectNamesPath, frozenProjectNames, PRODUCER_ID))) {
+    log(`froze the project name of ${frozenProjectNames.size} session(s)`);
+  }
+  const kinds = countEventKinds(events);
+  log(
+    `parsed ${events.length} event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}: ` +
+      `${JSON.stringify(kinds)}`,
+  );
+  // A context row without a limit means the models.dev catalog has no window
+  // for that provider and model, so the utilization is unknown.  Say so when
+  // it happens instead of letting the context feature quietly go blank.
+  const contextWithoutLimit = events.filter(
+    (event) =>
+      typeof event?.label === "string" &&
+      event.label.startsWith("context:") &&
+      event.metadata?.contextLimit == null,
+  ).length;
+  if (contextWithoutLimit > 0) {
+    log(
+      `${contextWithoutLimit} context row(s) carry no context limit: the models.dev catalog has no window for that provider and model`,
+    );
+  }
   if (DEBUG) {
     const models = new Set(events.map((event) => event.producerKeyRef).filter(Boolean));
     log(`models: ${[...models].join(", ") || "(none)"}`);
+    for (const [kind, sample] of sampleEventPerKind(events)) {
+      log(`sample ${kind}: ${JSON.stringify(sample)}`);
+    }
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
     }
     return;
   }
-  const token = resolveCollectorToken(["OPENCODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["OPENCODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   try {
     const ack = await postUsageBatches({
       events,
       ingestUrl: INGEST_URL,
       ingestToken: token,
       producerId: PRODUCER_ID,
-      dryRun: DRY || args.dryRun,
+      dryRun,
       log,
     });
     log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);

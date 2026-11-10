@@ -1,0 +1,6 @@
+{
+  "name": "usage-monitor-telemetry-hub-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": { "zod": "4.6.7" }
+}

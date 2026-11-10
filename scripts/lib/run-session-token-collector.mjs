@@ -6,7 +6,7 @@ import { fleetSecretsGet } from "./fleet-secrets.mjs";
 
 /**
  * Resolves an ingest token from the environment, then from the Mac-side
- * `fleet-secrets` CLI (OPS-818;  the flat ~/.secrets file is no longer read).
+ * `fleet-secrets` CLI (OPS-818;  the retired flat key file is no longer read).
  *
  * Names are tried strictly in order, each in the environment and then through
  * `fleet-secrets get`, so a producer-scoped name kept in Infisical still beats
@@ -20,10 +20,26 @@ export function resolveCollectorToken(
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
-    const fromFleet = lookup(name)?.trim();
+    const fromFleet = env.COLLECTOR_STRICT_INJECTED_SECRETS === "1" ? null : lookup(name)?.trim();
     if (fromFleet) return fromFleet;
   }
   return null;
+}
+
+/** Load one producer-scoped hub bearer into this collector process only.  The
+ * source value remains in fleet-secrets/Infisical and never enters a plist. */
+export function configureCollectorSentryToken(
+  tokenEnvVarNames,
+  { env = process.env, fleetSecretsGet: lookup = fleetSecretsGet } = {},
+) {
+  if (env.COLLECTOR_SENTRY_ENABLED !== "1") return false;
+  if (!env.COLLECTOR_TELEMETRY_HUB_ENDPOINT?.trim()) return false;
+  if (env.COLLECTOR_TELEMETRY_HUB_TOKEN?.trim()) return true;
+  if (env.COLLECTOR_TELEMETRY_HUB_TOKENS_JSON?.trim()) return true;
+  const token = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
+  if (!token) return false;
+  env.COLLECTOR_TELEMETRY_HUB_TOKEN = token;
+  return true;
 }
 
 /** Default lookback when LaunchAgents omit --days/--since.  UTC month-start
@@ -31,10 +47,17 @@ export function resolveCollectorToken(
 export const DEFAULT_COLLECTOR_LOOKBACK_DAYS = 180;
 export const COLLECTOR_STATE_OVERLAP_MINUTES = 24 * 60;
 
-function collectorStatePath(producerId, stateRoot) {
+/**
+ * The state file for one collector.  `suffix` names a sibling file for state
+ * that must outlive the checkpoint (the opencode project-name freeze lives in
+ * one, because a lost checkpoint replays rows and a lost freeze would let a
+ * renamed project change their content).
+ */
+export function collectorStatePath(producerId, stateRoot, suffix) {
   const safeProducerId = producerId.replace(/[^a-zA-Z0-9._-]/g, "_");
   const root = stateRoot ?? join(homedir(), ".cache", "usage-monitor", "collector-state");
-  return join(root, `${safeProducerId}.json`);
+  const safeSuffix = suffix ? String(suffix).replace(/[^a-zA-Z0-9._-]/g, "_") : "";
+  return join(root, safeSuffix ? `${safeProducerId}-${safeSuffix}.json` : `${safeProducerId}.json`);
 }
 
 /**
@@ -46,9 +69,9 @@ function collectorStatePath(producerId, stateRoot) {
 export async function resolveCollectorArgs(
   argv,
   producerId,
-  { stateRoot, now = new Date() } = {},
+  { stateRoot, now = new Date(), defaultLookbackDays, stateOverlapMinutes } = {},
 ) {
-  const args = parseCollectorArgs(argv, now);
+  const args = parseCollectorArgs(argv, now, defaultLookbackDays === undefined ? {} : { defaultLookbackDays });
   if (args.explicitSince) return args;
   try {
     const raw = await readFile(collectorStatePath(producerId, stateRoot), "utf8");
@@ -59,8 +82,14 @@ export async function resolveCollectorArgs(
       !Number.isNaN(successfulThrough.getTime()) &&
       successfulThrough.getTime() <= now.getTime()
     ) {
+      // The replay overlap catches writes that land after the checkpoint.  It
+      // is a per-collector cost: a collector whose source produces tens of
+      // thousands of rows a day cannot afford to re-send a whole day on every
+      // pass, so a producer with a high event volume uses a shorter overlap.
+      const overlapMinutes =
+        stateOverlapMinutes === undefined ? COLLECTOR_STATE_OVERLAP_MINUTES : stateOverlapMinutes;
       const since = new Date(
-        successfulThrough.getTime() - COLLECTOR_STATE_OVERLAP_MINUTES * 60_000,
+        successfulThrough.getTime() - overlapMinutes * 60_000,
       );
       return { ...args, since, resumedFromState: true };
     }
@@ -86,7 +115,7 @@ export async function recordCollectorSuccess(
   await rename(tempPath, path);
 }
 
-export function parseCollectorArgs(argv, now = new Date()) {
+export function parseCollectorArgs(argv, now = new Date(), { defaultLookbackDays = DEFAULT_COLLECTOR_LOOKBACK_DAYS } = {}) {
   const dryRun = argv.includes("--dry-run");
   const debug = argv.includes("--debug");
   let days = null;
@@ -105,7 +134,7 @@ export function parseCollectorArgs(argv, now = new Date()) {
   } else if (Number.isFinite(days) && days > 0) {
     since = new Date(now.getTime() - days * 86_400_000);
   } else {
-    since = new Date(now.getTime() - DEFAULT_COLLECTOR_LOOKBACK_DAYS * 86_400_000);
+    since = new Date(now.getTime() - defaultLookbackDays * 86_400_000);
   }
   if (Number.isNaN(since.getTime())) {
     throw new Error(`Invalid --since ${sinceIso}`);
@@ -119,14 +148,20 @@ export function parseCollectorArgs(argv, now = new Date()) {
   };
 }
 
-export async function walkFiles(root, { suffix, name, onTraversalError } = {}) {
+export async function walkFiles(root, {
+  suffix,
+  name,
+  onTraversalError,
+  reportMissing = false,
+  readDirectory = readdir,
+} = {}) {
   const out = [];
   async function walk(dir) {
     let entries;
     try {
-      entries = await readdir(dir, { withFileTypes: true });
+      entries = await readDirectory(dir, { withFileTypes: true });
     } catch (error) {
-      if (!(error && typeof error === "object" && error.code === "ENOENT")) {
+      if (reportMissing || !(error && typeof error === "object" && error.code === "ENOENT")) {
         onTraversalError?.(error);
       }
       return;
@@ -205,9 +240,56 @@ export function codexSessionKeyFor(codexHome, filePath) {
   return `sessions/${fileName}`;
 }
 
+/** The Codex conversation id from a rollout's `session_meta` row, which is
+ *  the thread id an app-server client such as BotFleet sees. */
+export function codexSessionId(text) {
+  for (const line of text.split("\n")) {
+    if (!line.includes('"session_meta"')) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row?.type !== "session_meta") continue;
+      const id = row.payload?.id;
+      if (typeof id === "string" && id.trim()) return id.trim();
+      // A session_meta row without an id: keep looking for one that has it.
+    } catch {
+      // Keep looking for a valid session_meta row.
+    }
+  }
+  return undefined;
+}
+
+/** Read only the session's own metadata, never a later working-directory hint. */
+export function codexSessionCwd(text) {
+  for (const line of text.split("\n")) {
+    if (!line.includes('"session_meta"')) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row?.type !== "session_meta") continue;
+      if (typeof row.payload?.id !== "string" || !row.payload.id.trim()) return undefined;
+      const cwd = row.payload?.cwd;
+      return typeof cwd === "string" && cwd.startsWith("/") ? cwd : undefined;
+    } catch {
+      // Keep looking for a valid session_meta row.
+    }
+  }
+  return undefined;
+}
+
+/** Add correlation metadata to already-built events.  The eventId is not
+ *  touched, and the monitor ignores a correlation key that only one side of a
+ *  replay carries, so tagging an event the monitor already stored is safe. */
+export function withCorrelationMetadata(events, metadata) {
+  const entries = Object.entries(metadata).filter(([, value]) => value != null && value !== "");
+  if (entries.length === 0) return events;
+  const extra = Object.fromEntries(entries);
+  return events.map((event) => ({ ...event, metadata: { ...(event.metadata ?? {}), ...extra } }));
+}
+
 /** BotFleet emits its child-turn usage separately under producer `botfleet`.
- * Exclude those Codex rollouts here because ingest idempotency is namespaced
- * by producer and cannot collapse the same turn across both producers. */
+ * Ingest idempotency is namespaced by producer and cannot collapse the same
+ * turn across both producers, so these rollouts are either excluded
+ * (USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN=1) or tagged for the monitor's
+ * exact BotFleet coverage check. */
 export function isBotFleetManagedCodexSession(text) {
   for (const line of text.split("\n")) {
     if (!line.includes('"session_meta"')) continue;
@@ -233,6 +315,37 @@ export function botFleetChildExclusionEnabled(env = process.env) {
   return env.USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN === "1";
 }
 
-export function isBotFleetSessionPath(path) {
-  return path.includes("/.botfleet/workspaces/") || path.includes(".botfleet-workspaces-");
+/** The metadata a collector stamps on a session it recognises as BotFleet's
+ *  child, when it sends the session instead of dropping it.  The monitor drops
+ *  such a row at ingest only when a stored `botfleet` turn names the same
+ *  child session (src/lib/botfleet-coverage.ts), so a turn BotFleet never
+ *  reported is kept rather than lost. */
+export const BOTFLEET_LAUNCHER_METADATA = Object.freeze({ "agent.launcher": "botfleet" });
+
+/** Claude Code names a project folder after its cwd with every character
+ *  outside [A-Za-z0-9] replaced by "-", so `~/.botfleet/workspaces/x` becomes
+ *  `-Users-jay--botfleet-workspaces-x`.  Only that exact form, as the name of
+ *  a folder directly under `projects/`, counts; the slug is lossy, so a
+ *  configured root is matched against the transcript's real cwd instead. */
+const CLAUDE_BOTFLEET_PROJECT_FOLDER = /\/projects\/[^/]*--botfleet-workspaces-[^/]+\//;
+
+/** Extra BotFleet workspace roots, for a BotFleet whose data dir is not
+ *  `~/.botfleet` (BotFleet-server sets OMB_DATA_DIR, so its workspaces live in
+ *  `<data>/workspaces`).  Comma-separated absolute paths. */
+export function botFleetWorkspaceRoots(env = process.env) {
+  return String(env.BOTFLEET_WORKSPACES_DIRS ?? "")
+    .split(",")
+    .map((root) => root.trim().replace(/\/+$/, ""))
+    .filter((root) => root.startsWith("/"));
+}
+
+export function isBotFleetSessionPath(path, env = process.env) {
+  if (
+    path.includes("/.botfleet/workspaces/") ||
+    path.includes(".botfleet-workspaces-") ||
+    CLAUDE_BOTFLEET_PROJECT_FOLDER.test(path)
+  ) {
+    return true;
+  }
+  return botFleetWorkspaceRoots(env).some((root) => path.startsWith(`${root}/`));
 }

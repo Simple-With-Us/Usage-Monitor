@@ -41,31 +41,58 @@ export interface IngestCredential {
   allowedSourceApps: ReadonlySet<string> | null;
 }
 
+function resolveProducerCredential(
+  actual: string,
+  rawProducerTokens: string | undefined
+): IngestCredential | null {
+  if (!rawProducerTokens) return null;
+  const entries = rawProducerTokens
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const entry of entries) {
+    const colonIndex = entry.indexOf(":");
+    if (colonIndex <= 0 || colonIndex === entry.length - 1) continue;
+    const producerId = entry.slice(0, colonIndex).trim();
+    const token = entry.slice(colonIndex + 1).trim();
+    if (!producerId || !token) continue;
+    if (safeEqual(actual, token)) {
+      return {
+        credentialId: producerId,
+        token: actual,
+        allowedSourceApps: new Set([producerId, ...(PRODUCER_SOURCE_APP_ALIASES[producerId] ?? [])]),
+      };
+    }
+  }
+  return null;
+}
+
+/** A rotation window has explicit endpoints and can last at most one hour. */
+function matchesPreviousUsageToken(actual: string, now = Date.now()): boolean {
+  const previous = process.env.USAGE_INGEST_PREVIOUS_TOKEN?.trim();
+  const from = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_FROM?.trim();
+  const until = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_UNTIL?.trim();
+  if (!previous || !from || !until) return false;
+  const receiptToken = process.env.BILLING_RECEIPT_INGEST_TOKEN?.trim();
+  if (receiptToken && safeEqual(previous, receiptToken)) return false;
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+  if (!iso.test(from) || !iso.test(until)) return false;
+  const start = Date.parse(from);
+  const end = Date.parse(until);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  if (end <= start || end - start > 3_600_000 || now < start || now >= end) return false;
+  return safeEqual(actual, previous);
+}
+
 export function resolveUsageIngestCredential(request: NextRequest): IngestCredential | null {
   const actual = tokenFromRequest(request, "x-usage-ingest-token");
   if (!actual) return null;
 
-  const rawProducerTokens = process.env.USAGE_INGEST_PRODUCER_TOKENS?.trim();
-  if (rawProducerTokens) {
-    const entries = rawProducerTokens
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const entry of entries) {
-      const colonIndex = entry.indexOf(":");
-      if (colonIndex <= 0 || colonIndex === entry.length - 1) continue;
-      const producerId = entry.slice(0, colonIndex).trim();
-      const token = entry.slice(colonIndex + 1).trim();
-      if (!producerId || !token) continue;
-      if (safeEqual(actual, token)) {
-        return {
-          credentialId: producerId,
-          token: actual,
-          allowedSourceApps: new Set([producerId, ...(PRODUCER_SOURCE_APP_ALIASES[producerId] ?? [])]),
-        };
-      }
-    }
-  }
+  const producerCredential = resolveProducerCredential(
+    actual,
+    process.env.USAGE_INGEST_PRODUCER_TOKENS?.trim()
+  );
+  if (producerCredential) return producerCredential;
 
   const expected = process.env.USAGE_INGEST_TOKEN?.trim();
   // Canonical bool parsing (true/1/yes/on are all "true" per the knob
@@ -80,7 +107,27 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
     };
   }
 
+  if (expected && !requireScoped && matchesPreviousUsageToken(actual)) {
+    return { credentialId: "unscoped", token: actual, allowedSourceApps: null };
+  }
+
   return null;
+}
+
+/**
+ * Trace ingest accepts a separate producer-token map before the ordinary
+ * usage-ingest credentials.  Tokens in OTLP_TRACES_PRODUCER_TOKENS are never
+ * consulted by cash-ledger or metrics routes, so a third-party trace exporter
+ * cannot use its credential to create ExternalUsageEvent rows.
+ */
+export function resolveOtlpTracesCredential(request: NextRequest): IngestCredential | null {
+  const actual = tokenFromRequest(request, "x-usage-ingest-token");
+  if (!actual) return null;
+  const traceCredential = resolveProducerCredential(
+    actual,
+    process.env.OTLP_TRACES_PRODUCER_TOKENS?.trim()
+  );
+  return traceCredential ?? resolveUsageIngestCredential(request);
 }
 
 export function isUsageIngestAuthorized(request: NextRequest): boolean {

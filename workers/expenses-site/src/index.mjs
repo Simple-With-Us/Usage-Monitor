@@ -8,9 +8,12 @@
  * Routes:
  *   GET  /              — dashboard HTML (last 6 months, rolling)
  *   GET  /api/expenses  — JSON: { expenses, asOf, totalCount }
- *   POST /api/sync      — manual sync trigger, Bearer USAGE_READ_TOKEN
- *   scheduled (cron)    — syncExpenses every 15 minutes
+ *   GET  /health        — deploy probe: { ok }, no financial data
+ *   POST /api/sync      — manual sync trigger, Bearer USAGE_READ_TOKEN, one per
+ *                         minute (429 otherwise)
+ *   scheduled (cron)    — syncExpenses every hour
  */
+import { guardOff, guardOffResponse } from "./budget-guard.mjs";
 import { syncExpenses } from "./sync.mjs";
 import { formatAmount, formatDate, renderDashboard } from "./render.mjs";
 import { sideForCategory } from "./categories.mjs";
@@ -51,6 +54,15 @@ async function readTotalCount(db) {
   return row ? row.n : 0;
 }
 
+// Fixed text from the sync or the guard is safe to log.  Anything else logs its name
+// only, because a raw error can carry upstream or D1 content into the Worker's logs.
+const FIXED_TEXT_ERRORS = new Set(["SyncFailure", "BudgetExceeded"]);
+
+function logFailure(event, error) {
+  const reason = FIXED_TEXT_ERRORS.has(error?.name) ? error.message : (error?.name ?? "unknown");
+  console.error(JSON.stringify({ event, reason }));
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -79,19 +91,34 @@ function authorizedSync(request, env) {
 
 export default {
   async fetch(request, env) {
+    if (guardOff(env)) return guardOffResponse();
     const url = new URL(request.url);
+
+    if (url.pathname === "/health" && request.method === "GET") {
+      try {
+        await env.EXPENSES_DB.prepare("SELECT 1").first();
+        return json({ ok: true });
+      } catch (error) {
+        logFailure("expenses.health_check_failed", error);
+        return json({ ok: false }, 503);
+      }
+    }
 
     if (url.pathname === "/api/sync" && request.method === "POST") {
       if (!authorizedSync(request, env)) {
         return json({ error: "Unauthorized" }, 401);
       }
       try {
-        const result = await syncExpenses(env);
+        const result = await syncExpenses(env, { manual: true });
+        if (result.cooldown) {
+          const response = json({ ok: false, error: "Sync cooldown" }, 429);
+          response.headers.set("retry-after", String(result.retryAfterSeconds));
+          return response;
+        }
         return json({ ok: true, ...result });
       } catch (error) {
-        // Never leak upstream/D1 error detail to the caller; it lands in the
-        // worker logs instead.
-        console.error("expenses sync failed:", error);
+        // Never leak upstream/D1 error detail to the caller or the logs.
+        logFailure("expenses.manual_sync_failed", error);
         return json({ ok: false, error: "Sync failed" }, 502);
       }
     }
@@ -135,12 +162,18 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil(
-      syncExpenses(env).catch((error) => {
-        console.error("expenses scheduled sync failed:", error);
-      }),
-    );
+  async scheduled(controller, env) {
+    if (guardOff(env)) return;
+    // The next hourly run is the retry; a retried failure would only spend more.
+    controller.noRetry?.();
+    try {
+      await syncExpenses(env);
+    } catch (error) {
+      // Re-thrown so the invocation counts as failed: a swallowed error hid the
+      // sync failures and the empty-ledger gap of Oct 26 to Nov 3 from analytics.
+      logFailure("expenses.scheduled_sync_failed", error);
+      throw error;
+    }
   },
 };
 

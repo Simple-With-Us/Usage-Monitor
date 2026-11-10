@@ -14,7 +14,8 @@ export async function register() {
   // See INFISICAL.md and src/lib/app-settings.ts.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { appSettings } = await import("@/lib/app-settings");
-    await appSettings.init();
+    const { initializeInfisicalRuntimeSettings } = await import("@/lib/infisical-runtime-settings");
+    await initializeInfisicalRuntimeSettings(appSettings);
     // On-demand refresh for operators: `kill -HUP <pid>` re-reads Infisical.
     // The background timer (default 5 min) handles the steady state.
     // A rejected refresh must not become an unhandled rejection (Node's
@@ -33,9 +34,9 @@ export async function register() {
     });
   }
 
-  // Datadog APM + log injection.  Fail closed on missing/partial keys in
-  // production runtime (not during `next build`).  Sentry stays DSN-gated
-  // and is not replaced.
+  // Datadog APM + log injection.  Opt-in:  a deploy with no DD_* vars stays
+  // dark.  Fail closed on partial keys, or on missing keys when DD_REQUIRE=1
+  // (not during `next build`).  Sentry stays DSN-gated and is not replaced.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { resolveDatadogServerConfig } = await import("@/lib/datadog-options");
     const server = resolveDatadogServerConfig();
@@ -90,9 +91,9 @@ export async function register() {
   // mustKeepFunded flag that predated it, then records completion so it
   // never runs again. The owner remains free to turn Must keep funded back
   // on for any provider from the dashboard; this call is a no-op after its
-  // first successful pass. See src/lib/provider-funding-policy.ts.
+  // first successful pass. See src/lib/provider-funding-policy-cleanup.ts.
   const { clearLlmMustKeepFundedFlags } = await import(
-    "@/lib/provider-funding-policy"
+    "@/lib/provider-funding-policy-cleanup"
   );
   await clearLlmMustKeepFundedFlags();
 

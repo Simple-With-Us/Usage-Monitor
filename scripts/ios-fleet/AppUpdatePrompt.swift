@@ -6,7 +6,7 @@
 //  Copy this file into each app target.  Do not fork behavior.
 //  Do not put this file in a Swift package.
 //
-//  Apple IDs live in jaywedgeworth22/ai-fleet-coordinator site/ios-versions.json
+//  Apple IDs live in Simple-With-Us/AI-Fleet-Coordinator site/ios-versions.json
 //  (runtime manifest) and scripts/ios-fleet/apps.json (ship registry).
 //  Do not hardcode them here.  Live DealDex is net.dealdex (6802474288).
 //
@@ -28,7 +28,7 @@ import SwiftUI
 enum AppUpdatePrompt {
 
     static let defaultManifestURL = URL(
-        string: "https://raw.githubusercontent.com/jaywedgeworth22/ai-fleet-coordinator/main/site/ios-versions.json"
+        string: "https://raw.githubusercontent.com/Simple-With-Us/AI-Fleet-Coordinator/main/site/ios-versions.json"
     )!
 
     private static let skippedVersionKeyPrefix = "appUpdatePrompt.skippedVersion."

@@ -66,6 +66,12 @@ describe("[1m] handling", () => {
     expect(resolvePricingKey("claude-opus-5[1m]")).toBe("claude-opus-5");
   });
 
+  it("claude-sonnet-5[1m] resolves to Sonnet 5 (UM-1610: prod showed it unpriced)", () => {
+    expect(resolvePricingKey("claude-sonnet-5[1m]")).toBe("claude-sonnet-5");
+    expect(getModelPricing("claude-sonnet-5[1m]")?.pricing).toEqual(getModelPricing("claude-sonnet-5")?.pricing);
+    expect(getModelPricing("claude-sonnet-5[1m]")?.pricing.input_cost_per_token).toBeCloseTo(2e-6, 12);
+  });
+
   it("1M context carries no premium on Claude 4.6+ (same rates as the bare id)", () => {
     expect(getModelPricing("claude-sonnet-5-5[1m]")?.pricing).toEqual(
       getModelPricing("claude-sonnet-5-5")?.pricing

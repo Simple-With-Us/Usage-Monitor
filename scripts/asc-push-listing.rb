@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 # Push App Store Connect listing metadata for Usage Client + Local Monitor.
-# Credentials: ~/.secrets/appstore-connect.env (never printed).
+# Credentials: environment, else Infisical Fleet-OPS via fleet-secrets (never printed).
 #
 # Usage:
 #   ruby scripts/asc-push-listing.rb --all
@@ -15,13 +15,30 @@ require "net/http"
 require "uri"
 require "optparse"
 
-ENV_PATH = File.expand_path("~/.secrets/appstore-connect.env")
-abort "missing #{ENV_PATH}" unless File.file?(ENV_PATH)
-File.readlines(ENV_PATH).each do |line|
-  line = line.strip
-  next if line.empty? || line.start_with?("#")
-  k, v = line.split("=", 2)
-  ENV[k] = v&.strip&.delete_prefix('"')&.delete_suffix('"') if k && v
+# AFC-359: credentials come from the environment, else Infisical Fleet-OPS via
+# `fleet-secrets get` (folder /asc:  ASC_KEY_ID, ASC_ISSUER_ID,
+# ASC_KEY_P8 = the .p8 text).  No handoff file is read;  never printed.
+require "open3"
+FLEET_SECRETS_BIN = ENV.fetch("FLEET_SECRETS_BIN", File.expand_path("~/.local/bin/fleet-secrets"))
+def asc_value(name, folder)
+  v = ENV[name].to_s.strip
+  return v unless v.empty?
+  out, _err, st = Open3.capture3(FLEET_SECRETS_BIN, "get", name, "--path", folder)
+  st.success? ? out.strip : ""
+rescue Errno::ENOENT
+  ""
+end
+ENV["ASC_KEY_ID"] = asc_value("ASC_KEY_ID", "/asc")
+ENV["ASC_ISSUER_ID"] = asc_value("ASC_ISSUER_ID", "/asc")
+abort "missing ASC_KEY_ID / ASC_ISSUER_ID (env, or Infisical /asc)" if ENV["ASC_KEY_ID"].empty? || ENV["ASC_ISSUER_ID"].empty?
+
+def asc_private_key_pem
+  path = ENV["ASC_KEY_PATH"].to_s
+  return File.read(File.expand_path(path)) if !path.empty? && File.file?(File.expand_path(path))
+  pem = ENV["ASC_KEY_P8"].to_s.strip
+  pem = asc_value("ASC_KEY_P8", "/asc") if pem.empty?
+  abort "missing ASC private key (ASC_KEY_PATH, ASC_KEY_P8, or Infisical /asc ASC_KEY_P8)" if pem.empty?
+  pem
 end
 
 APPS = {
@@ -35,11 +52,11 @@ APPS = {
     loc_id: nil,
     app_info_id: nil,
     app_info_loc_id: nil,
-    name: "Usage Client Monitor",
+    name: "Usage Monitor Client",
     subtitle: "Live budgets for API spend",
     promotional_text: "Connect your self-hosted Usage Monitor server. See month-to-date spend, provider budgets, project allocation, and alerts — with Face ID lock and offline widgets.",
     description: <<~TXT.strip,
-      Usage Client Monitor is the iOS companion for a Usage Monitor server you host.
+      Usage Monitor Client is the iOS companion for a Usage Monitor server you host.
 
       See month-to-date API spend, budgets, and alerts without living in a browser tab. Point the app at your server URL, store a read token in the Keychain, and keep budgets on your Lock Screen and Home Screen widgets.
 
@@ -63,7 +80,7 @@ APPS = {
       Not a brokerage, bank, or tax product — developer tooling for API cost visibility.
     TXT
     keywords: "api,budget,cost,usage,openai,anthropic,llm,devops,monitor,self-host,spend",
-    whats_new: "Initial App Store release of Usage Client Monitor — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.",
+    whats_new: "Initial App Store release of Usage Monitor Client — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.",
     review_notes: <<~TXT.strip,
       This is a client for a self-hosted Usage Monitor server (developer tools).
 
@@ -88,11 +105,11 @@ APPS = {
     loc_id: nil,
     app_info_id: nil,
     app_info_loc_id: nil,
-    name: "Usage Local Monitor",
+    name: "Usage Monitor Local",
     subtitle: "On-device API budget tracker",
     promotional_text: "Track OpenRouter, OpenAI, Anthropic, and more on your phone — keys in Keychain, budgets in on-device SQLite. No Usage Monitor server required.",
     description: <<~TXT.strip,
-      Usage Local Monitor keeps API and subscription spend visible on your iPhone — entirely on-device.
+      Usage Monitor Local keeps API and subscription spend visible on your iPhone — entirely on-device.
 
       Add the providers you already pay for, store keys in the Keychain, and see month-to-date cost, budgets, renewals, and alerts without running a separate server.
 
@@ -110,14 +127,14 @@ APPS = {
       Individual developers and small teams who want phone-first cost awareness without hosting Usage Monitor.
 
       WHAT IT IS NOT
-      • Not a remote dashboard client (that is Usage Client Monitor)
+      • Not a remote dashboard client (that is Usage Monitor Client)
       • Not a bank, brokerage, or tax product
       • Does not invent spend for providers that only offer console billing — those stay as subscription or manual rows
 
       Privacy-minded: processing is on-device. Keys leave the device only over HTTPS to providers you choose.
     TXT
     keywords: "api,budget,cost,openai,anthropic,openrouter,llm,local,on-device,usage,spend",
-    whats_new: "Initial App Store release of Usage Local Monitor — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.",
+    whats_new: "Initial App Store release of Usage Monitor Local — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.",
     review_notes: <<~TXT.strip,
       On-device developer tools app. No login and no developer-operated backend.
 
@@ -142,7 +159,7 @@ def b64(h)
 end
 
 def jwt_token
-  key = OpenSSL::PKey::EC.new(File.read(File.expand_path(ENV.fetch("ASC_KEY_PATH"))))
+  key = OpenSSL::PKey::EC.new(asc_private_key_pem)
   now = Time.now.to_i
   seg = "#{b64({ alg: "ES256", kid: ENV.fetch("ASC_KEY_ID"), typ: "JWT" })}.#{b64({ iss: ENV.fetch("ASC_ISSUER_ID"), iat: now, exp: now + 1200, aud: "appstoreconnect-v1" })}"
   der = key.dsa_sign_asn1(OpenSSL::Digest::SHA256.digest(seg))

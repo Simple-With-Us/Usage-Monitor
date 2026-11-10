@@ -1,25 +1,27 @@
 /**
  * Honesty rules for coding-agent usage numbers.
  *
- * A missing feed must never render as "little to no usage."  Zero tokens
+ * A missing feed must never render as "little to no usage."  Zero tokens
  * with no trustworthy telemetry is "not reported," not a confirmed idle
- * seat.  Two spaces between sentences in every note a human reads.
+ * seat.  Human-readable notes use the owner-required sentence gap.
  */
 
 export type TokenTelemetryKind =
   | "otlp"
   | "session_jsonl"
+  | "local_database"
   | "billing_api"
   | "character_estimate"
   | "none";
 
-export type TelemetryAccuracy = "reported" | "none_in_window" | "unavailable";
+export type TelemetryAccuracy = "reported" | "partial" | "none_in_window" | "unavailable";
 
 export interface TelemetryAccuracyInput {
   name: string;
   tokenTelemetryKind: TokenTelemetryKind;
   totalTokens: number;
   isRunningOnMac: boolean;
+  isPartial?: boolean;
   unavailableReason?: string;
 }
 
@@ -33,7 +35,12 @@ export interface TelemetryAccuracyResult {
 export function isReliableTokenTelemetryKind(
   kind: TokenTelemetryKind,
 ): boolean {
-  return kind === "otlp" || kind === "session_jsonl" || kind === "billing_api";
+  return (
+    kind === "otlp" ||
+    kind === "session_jsonl" ||
+    kind === "local_database" ||
+    kind === "billing_api"
+  );
 }
 
 export function resolveTelemetryAccuracy(
@@ -44,6 +51,7 @@ export function resolveTelemetryAccuracy(
     tokenTelemetryKind,
     totalTokens,
     isRunningOnMac,
+    isPartial = false,
     unavailableReason,
   } = input;
 
@@ -57,11 +65,19 @@ export function resolveTelemetryAccuracy(
       label: "not reported",
       note:
         unavailableReason ??
-        `${name} does not report token usage.  This is not zero usage.`,
+        `${name} does not report token usage.  This is not zero usage.`,
     };
   }
 
   if (totalTokens > 0) {
+    if (isPartial) {
+      return {
+        accuracy: "partial",
+        usageIsReliable: true,
+        label: "partial report",
+        note: `${name} has a partial token breakdown.\u00A0 Observed token totals are a lower bound.`,
+      };
+    }
     return {
       accuracy: "reported",
       usageIsReliable: true,
@@ -71,7 +87,9 @@ export function resolveTelemetryAccuracy(
           ? `${name} token counts come from the live OTLP stream.`
           : tokenTelemetryKind === "billing_api"
             ? `${name} token counts and billed cost come from the vendor Admin API.`
-            : `${name} token counts come from local session logs.  They are estimates, not a vendor invoice.`,
+            : tokenTelemetryKind === "local_database"
+              ? `${name} exact token counts come from a local usage database.  They are not a vendor invoice.`
+              : `${name} token counts come from local session logs.  They are source-reported analytics, not a vendor invoice.`,
     };
   }
 
@@ -80,7 +98,7 @@ export function resolveTelemetryAccuracy(
       accuracy: "unavailable",
       usageIsReliable: false,
       label: "not reported",
-      note: `${name} is running on the Mac but no token events arrived in this window.  This is not confirmed as zero usage.`,
+      note: `${name} is running on the Mac but no token events arrived in this window.  This is not confirmed as zero usage.`,
     };
   }
 
@@ -97,7 +115,7 @@ export function resolveTelemetryAccuracy(
     accuracy: "none_in_window",
     usageIsReliable: false,
     label: "not reported",
-    note: `No session events for ${name} in this window.  This is not a confirmed zero.`,
+    note: `No session events for ${name} in this window.  This is not a confirmed zero.`,
   };
 }
 
@@ -131,15 +149,24 @@ export function formatAgentSeatPrimary(platform: {
 
 export function telemetryIncompleteNoteFor(
   unreliableNames: readonly string[],
+  partialNames: readonly string[] = [],
 ): string | null {
-  if (unreliableNames.length === 0) return null;
+  const sentences: string[] = [];
   if (unreliableNames.length === 1) {
-    return `Token totals omit ${unreliableNames[0]} because that seat is not reporting usage.`;
+    sentences.push(`Token totals omit ${unreliableNames[0]} because that seat is not reporting usage.`);
+  } else if (unreliableNames.length === 2) {
+    sentences.push(`Token totals omit ${unreliableNames[0]} and ${unreliableNames[1]} because those seats are not reporting usage.`);
+  } else if (unreliableNames.length > 2) {
+    const head = unreliableNames.slice(0, -1).join(", ");
+    const last = unreliableNames[unreliableNames.length - 1];
+    sentences.push(`Token totals omit ${head}, and ${last} because those seats are not reporting usage.`);
   }
-  if (unreliableNames.length === 2) {
-    return `Token totals omit ${unreliableNames[0]} and ${unreliableNames[1]} because those seats are not reporting usage.`;
+  if (partialNames.length === 1) {
+    sentences.push(`Observed token totals for ${partialNames[0]} are a lower bound because its token breakdown is incomplete.`);
+  } else if (partialNames.length > 1) {
+    const head = partialNames.slice(0, -1).join(", ");
+    const last = partialNames[partialNames.length - 1];
+    sentences.push(`Observed token totals for ${head}, and ${last} are lower bounds because their token breakdowns are incomplete.`);
   }
-  const head = unreliableNames.slice(0, -1).join(", ");
-  const last = unreliableNames[unreliableNames.length - 1];
-  return `Token totals omit ${head}, and ${last} because those seats are not reporting usage.`;
+  return sentences.length ? sentences.join("\u00A0 ") : null;
 }

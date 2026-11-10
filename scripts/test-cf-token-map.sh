@@ -26,5 +26,14 @@ fi
 grep -q 'CLOUDFLARE_FLEET_API_TOKEN' "$SRC" || fail "missing fleet token name"
 grep -q 'CLOUDFLARE_JAY_API_TOKEN' "$SRC" || fail "missing JAY token name"
 grep -qi 'Never prints a' "$SRC" || fail "missing value-blind banner"
+grep -q 'INFISICAL_UM_READ_TOKEN' "$SRC" || fail "missing UM read-token route"
+if grep -q 'INFISICAL_AUTOMATION_' "$SRC" || grep -q 'fleet-secrets' "$SRC"; then
+  fail "shared Automation credential fallback remains"
+fi
+if grep -q '\${INFISICAL_CLIENT_ID:-\|\${INFISICAL_CLIENT_SECRET:-' "$SRC"; then
+  fail "generic machine-identity credentials remain in the helper"
+fi
+
+bash "$ROOT/scripts/test-infisical-secrets-safe.sh"
 
 printf 'ok  cf-token-map offline checks\n'

@@ -39,7 +39,7 @@ public struct MacHealthResponse: Codable, Hashable, Sendable {
             diskUsagePct: 87.0,
             uptimeSeconds: 86400 * 5 + 3600 * 4,
             processes: [
-                "agent-sync": "running",
+                "operator": "running",
                 "docker": "not_enabled",
                 "litestream": "not_enabled",
                 "ollama": "not_enabled"
@@ -53,11 +53,11 @@ public struct MacHealthResponse: Codable, Hashable, Sendable {
                 "copilot": "running"
             ],
             pm2Processes: [
-                MacPm2Process(name: "agent-sync-live", status: "online", pid: 14205, cpu: 0.1, memory: 45000000),
+                MacPm2Process(name: "operator-live", status: "online", pid: 14205, cpu: 0.1, memory: 45000000),
                 MacPm2Process(name: "fleet-heartbeat", status: "online", pid: 14206, cpu: 0.0, memory: 32000000)
             ],
             launchdProcesses: [
-                MacLaunchdProcess(name: "com.jays.agent-sync-poll", status: "running", pid: 1205),
+                MacLaunchdProcess(name: "com.jays.operator-poll", status: "running", pid: 1205),
                 MacLaunchdProcess(name: "com.jays.mac-watchdog", status: "running", pid: 1206)
             ],
             lastHeartbeatAt: "2026-08-24T05:00:00.000Z"

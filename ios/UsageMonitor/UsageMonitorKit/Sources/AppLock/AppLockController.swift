@@ -48,7 +48,7 @@ public final class AppLockController {
     ) {
         self.authenticator = authenticator
         // Plain app name from the host target's CFBundleDisplayName
-        // (Usage Client Monitor / Usage Local Monitor).
+        // (Usage Monitor Client / Usage Monitor Local).
         let name = AppProductName.displayName
         self.reason = reason ?? "Unlock \(name) to view your spending."
         self.phase = initialPhase

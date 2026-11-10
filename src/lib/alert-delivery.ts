@@ -30,6 +30,7 @@ import {
   type ApnsConfig,
   type ApnsTransport,
 } from "@/lib/apns";
+import { withSlowScanTiming } from "@/lib/slow-scan-timing";
 
 export type AlertDeliveryChannel =
   | { kind: "slack"; url: string }
@@ -209,8 +210,8 @@ const SEVERITY_RANK: Record<AlertSeverity, number> = {
 // ProviderAlertNotification.providerId is a REQUIRED foreign key to Provider,
 // so project-scoped alerts cannot persist (and therefore cannot dedup,
 // hysteresis, remind, or resolve) without a real Provider row. This dedicated
-// inactive system row — same pattern as the self-seeded "Agent Sync Relay"
-// catalog row (ensure-agent-sync-provider.ts) — carries every per-project
+// inactive system row — same pattern as the self-seeded "Simple Tools Relay"
+// catalog row (ensure-simple-tools-provider.ts) — carries every per-project
 // incident with `scope` = project id, reusing the machinery unchanged.
 // Name constants: PROJECT_ALERTS_PROVIDER_* from @/lib/system-providers.
 // S1c: unassigned-spend info alerts only fire above this default floor (and
@@ -2466,7 +2467,9 @@ export async function deliverProviderAlerts(options: {
           const anomalyConfig = resolveAnomalyConfig();
           const [projectStatus, anomaliesByProjectId, openProjectAlerts] =
             await Promise.all([
-              computeProjectBudgetStatus(now),
+              withSlowScanTiming("[project-budget-scan]", () =>
+                computeProjectBudgetStatus(now)
+              ),
               loadSpendAnomaliesByProjectId(now, anomalyConfig, projects),
               db.providerAlertNotification.findMany({
                 where: {
@@ -2564,7 +2567,11 @@ export async function deliverProviderAlerts(options: {
   const canonicalByProviderId = options.db
     ? new Map<string, Awaited<ReturnType<typeof computeBudgetStatus>>["providers"][number]>()
     : new Map(
-        (await computeBudgetStatus(now)).providers.map((status) => [status.id, status])
+        (
+          await withSlowScanTiming("[provider-budget-scan]", async () =>
+            computeBudgetStatus(now)
+          )
+        ).providers.map((status) => [status.id, status])
       );
 
   result.evaluatedProviders = alertTargets.length;
