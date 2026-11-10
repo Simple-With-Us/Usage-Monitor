@@ -6,9 +6,9 @@
  *   node scripts/add-anthropic-subscription.mjs
  */
 
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 function log(message) {
   console.log(`[add-anthropic-sub] ${message}`);

@@ -6,16 +6,41 @@ import Networking
 import UIKit
 #endif
 
-/// The server-address + API-token entry, the heart of the Settings screen.
-/// Verifies a token before it is ever written to the Keychain and keeps the
-/// flow forgiving: paste support, reveal toggle, inline typed errors, and a
-/// "save anyway" escape hatch when the server (not the token) is at fault.
+/// Server-address entry (+ first-run connect wizard). Token entry is a separate
+/// section so Full Access can sit between step 1 (server) and step 3 (token).
 struct ConnectionSection: View {
     @Bindable var model: SettingsViewModel
-    @FocusState private var tokenFocused: Bool
 
     var body: some View {
-        // MARK: Server address
+        // MARK: First-run wizard (ordered connect steps)
+        if showsConnectWizard {
+            Section {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    connectStep(
+                        number: 1,
+                        title: "Server URL",
+                        detail: "Confirm the monitor host below (leave empty for the default)."
+                    )
+                    connectStep(
+                        number: 2,
+                        title: "Dashboard password",
+                        detail: "Sign in under Full Access for budgets, history, and edits."
+                    )
+                    connectStep(
+                        number: 3,
+                        title: "Optional read token",
+                        detail: "Add a read token for background refresh and widgets without a session."
+                    )
+                }
+                .padding(.vertical, Theme.Spacing.xs)
+            } header: {
+                Text("Get connected")
+            } footer: {
+                Text("Do these in order. Full Access is required to edit budgets and manage subscriptions; a read token alone is enough for Overview and background alerts.")
+            }
+        }
+
+        // MARK: 1 — Server address
         Section {
             HStack(spacing: Theme.Spacing.sm) {
                 Image(systemName: "network")
@@ -50,7 +75,7 @@ struct ConnectionSection: View {
                 .disabled(!model.isHostValid)
             }
         } header: {
-            Text("Server")
+            Text(showsConnectWizard ? "1 · Server URL" : "Server")
         } footer: {
             if !model.isHostValid {
                 Text("Enter a secure HTTPS monitor address with no path, query, or sign-in details.")
@@ -59,8 +84,45 @@ struct ConnectionSection: View {
                 Text("Requests go securely to \(model.resolvedHostDisplay). Leave empty to use the default monitor.")
             }
         }
+    }
 
-        // MARK: API token
+    /// First-run wizard surfaces until a token is stored (Full Access alone is
+    /// enough for session reads, but the wizard stays until the optional token
+    /// path has been considered).
+    private var showsConnectWizard: Bool {
+        !model.hasStoredToken
+    }
+
+    private func connectStep(number: Int, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            Text("\(number)")
+                .font(Theme.Typography.captionEmphasis)
+                .foregroundStyle(Theme.Colors.accent)
+                .frame(width: 22, height: 22)
+                .background(Theme.Colors.accentSoft, in: Circle())
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(Theme.Typography.callout.weight(.semibold))
+                    .foregroundStyle(Theme.Colors.primaryText)
+                Text(detail)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Step \(number): \(title). \(detail)")
+    }
+}
+
+/// Optional read-token entry (connect wizard step 3). Placed after Full Access
+/// so the Settings form order matches: server → password → token.
+struct TokenConnectionSection: View {
+    @Bindable var model: SettingsViewModel
+    @FocusState private var tokenFocused: Bool
+
+    var body: some View {
         Section {
             statusRow
             tokenField
@@ -69,11 +131,11 @@ struct ConnectionSection: View {
                 Button(role: .destructive) {
                     model.showRemoveConfirmation = true
                 } label: {
-                    Label("Remove token", systemImage: "trash")
+                    Label("Remove Token", systemImage: "trash")
                 }
             }
         } header: {
-            Text("API Token")
+            Text(showsConnectWizard ? "3 · Optional read token" : "API Token")
         } footer: {
             footerContent
         }
@@ -82,11 +144,15 @@ struct ConnectionSection: View {
             isPresented: $model.showRemoveConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Remove token", role: .destructive) { model.removeToken() }
+            Button("Remove Token", role: .destructive) { model.removeToken() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Budget data will stop loading until you enter a token again. The token is only stored on this device.")
         }
+    }
+
+    private var showsConnectWizard: Bool {
+        !model.hasStoredToken
     }
 
     // MARK: - Pieces
@@ -119,7 +185,7 @@ struct ConnectionSection: View {
                         .foregroundStyle(Theme.Colors.accent)
                 }
                 Spacer()
-                StatusBadge("Not checked", status: .neutral)
+                StatusBadge("Not Checked", status: .neutral)
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("API token configured, not verified this session")
@@ -227,10 +293,10 @@ struct ConnectionSection: View {
     @ViewBuilder
     private var footerContent: some View {
         if model.hasStoredToken {
-            Text("Your token is stored securely in the device Keychain, never in iCloud or backups. Enter a new one above to replace it.")
+            Text("Your token is stored securely in the device Keychain, never in iCloud or backups. Enter a new one above to replace it. Background refresh and the home-screen widget use this token.")
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("Paste your monitor's read token to load budgets. It is verified before being saved to the Keychain and is never stored in plain text.")
+                Text("Optional. A read token loads Overview budgets in the background and powers widgets without keeping a dashboard session. Prefer signing in with the dashboard password (Full Access, step 2) for day-to-day use. Tokens are verified before Keychain storage.")
                 if let url = monitorURL {
                     Link(destination: url) {
                         Label("Where do I find my token?", systemImage: "questionmark.circle")
@@ -241,8 +307,6 @@ struct ConnectionSection: View {
         }
     }
 
-    /// A link to the monitor the user is pointed at, so a first-run user can go
-    /// mint / copy a read token instead of guessing where it comes from.
     private var monitorURL: URL? {
         URL(string: "https://\(model.resolvedHostDisplay)/settings")
     }
@@ -255,11 +319,6 @@ struct ConnectionSection: View {
         model.hasStoredToken ? "Enter a new token" : "Paste your API token"
     }
 
-    /// Whether the clipboard holds *any* string — checked with `hasStrings`,
-    /// which does NOT read the contents, so it never triggers iOS's "pasted
-    /// from…" transparency banner. The actual `.string` read happens only when
-    /// the user taps Paste (see ``pasteFromClipboard()``), so the banner appears
-    /// once, on an explicit action, instead of on every re-render of `body`.
     private var pasteboardHasString: Bool {
         #if canImport(UIKit)
         return UIPasteboard.general.hasStrings

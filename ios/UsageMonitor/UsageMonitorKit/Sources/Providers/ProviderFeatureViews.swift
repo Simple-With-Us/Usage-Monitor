@@ -40,8 +40,8 @@ struct StatusFilterBar: View {
             onChange?()
         } label: {
             HStack(spacing: Theme.Spacing.xs) {
-                if let symbol = facet.systemImage {
-                    Image(systemName: symbol).imageScale(.small)
+                if SystemImage.resolved(facet.systemImage) != nil {
+                    Image(safeSystemName: facet.systemImage).imageScale(.small)
                 }
                 Text(facet.label)
                 if facet != .all {
@@ -95,7 +95,7 @@ struct SpendCompositionBar: View {
                         Circle()
                             .fill(component.kind.color)
                             .frame(width: 9, height: 9)
-                        Image(systemName: component.kind.systemImage)
+                        Image(safeSystemName: component.kind.systemImage, fallback: "circle")
                             .font(.caption2)
                             .foregroundStyle(Theme.Colors.secondaryText)
                         Text(component.label)
@@ -148,6 +148,8 @@ struct DetailStatRow: View {
                 .modifier(MonospacedDigitIf(enabled: monospaced))
                 .multilineTextAlignment(.trailing)
         }
+        .contentShape(Rectangle())
+        .copyableValue(value, label: label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label), \(value)")
     }

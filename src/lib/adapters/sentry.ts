@@ -7,14 +7,13 @@ import {
   type AdapterExternalBillingRecord,
   type UsageResult,
 } from "./helpers";
-
-interface SentryUsageGroup {
-  project: string;
-  category: string;
-  outcome: string;
-  quantity: number;
-  unit: "bytes" | "events" | "milliseconds";
-}
+import {
+  sentryUsageCategoriesView,
+  sentryUsageServiceName,
+  sentryUsageUnitForCategory,
+  type SentryCategoryTotal,
+  type SentryUsageGroup,
+} from "@/lib/sentry-usage-categories";
 
 interface SentryProjectDiscovery {
   projectIds: string[];
@@ -49,11 +48,7 @@ function readQuantity(value: unknown): number {
 }
 
 function unitForCategory(category: string): SentryUsageGroup["unit"] {
-  if (category === "attachment") return "bytes";
-  if (category === "profile_duration" || category === "profile_duration_ui") {
-    return "milliseconds";
-  }
-  return "events";
+  return sentryUsageUnitForCategory(category);
 }
 
 function readLinkAttribute(
@@ -257,6 +252,74 @@ function sumUnit(groups: SentryUsageGroup[], unit: SentryUsageGroup["unit"]): nu
   return sum;
 }
 
+function readOptionalQuantity(value: unknown): number | null {
+  const parsed = parseNumber(value);
+  if (parsed == null || !Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+interface SentryStatsSummaryView {
+  available: boolean;
+  status?: number;
+  byCategory?: SentryCategoryTotal[];
+}
+
+function parseStatsSummary(data: unknown): SentryCategoryTotal[] | null {
+  if (!isRecord(data) || !Array.isArray(data.projects)) return null;
+  const groups: SentryUsageGroup[] = [];
+  for (const project of data.projects) {
+    if (!isRecord(project) || !Array.isArray(project.stats)) return null;
+    const projectId = typeof project.id === "string" || typeof project.id === "number"
+      ? String(project.id)
+      : "unknown";
+    for (const stat of project.stats) {
+      if (!isRecord(stat) || typeof stat.category !== "string" || !isRecord(stat.outcomes)) {
+        return null;
+      }
+      for (const [outcome, quantity] of Object.entries(stat.outcomes)) {
+        const parsed = readOptionalQuantity(quantity);
+        if (parsed == null) return null;
+        if (parsed === 0) continue;
+        groups.push({
+          project: projectId,
+          category: stat.category,
+          outcome,
+          quantity: parsed,
+          unit: unitForCategory(stat.category),
+        });
+      }
+    }
+  }
+  return sentryUsageCategoriesView(groups).byCategory;
+}
+
+async function fetchOptionalStatsSummary(
+  monthStart: string,
+  periodEnd: string,
+  orgSlug: string,
+  headers: Record<string, string>
+): Promise<SentryStatsSummaryView> {
+  const query = new URLSearchParams({
+    field: "sum(quantity)",
+    start: monthStart,
+    end: periodEnd,
+  });
+  try {
+    const response = await fetchJson(
+      `${SENTRY_API_ORIGIN}/api/0/organizations/${encodeURIComponent(orgSlug)}/stats-summary/?${query.toString()}`,
+      { headers }
+    );
+    if (!response.ok) {
+      return { available: false, status: response.status };
+    }
+    const byCategory = parseStatsSummary(response.data);
+    if (!byCategory) return { available: false, status: 200 };
+    return { available: true, status: 200, byCategory };
+  } catch {
+    return { available: false };
+  }
+}
+
 export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
@@ -285,6 +348,13 @@ export async function fetchUsage(
   const eventCount = sumUnit(groups, "events");
   const byteCount = sumUnit(groups, "bytes");
   const millisecondCount = sumUnit(groups, "milliseconds");
+  const categories = sentryUsageCategoriesView(groups);
+  const statsSummary = await fetchOptionalStatsSummary(
+    monthStart,
+    periodEnd,
+    orgSlug,
+    headers
+  );
   const records: AdapterExternalBillingRecord[] = groups.map((group) => ({
     externalId: [
       "mtd",
@@ -296,7 +366,7 @@ export async function fetchUsage(
       .map(encodeURIComponent)
       .join(":"),
     kind: "billing_period",
-    serviceName: `Project ${group.project}: ${group.category} (${group.outcome})`,
+    serviceName: sentryUsageServiceName(group.project, group.category, group.outcome),
     status: "usage_reported",
     currentPeriodStart: monthStart,
     currentPeriodEnd: periodEnd,
@@ -320,24 +390,28 @@ export async function fetchUsage(
         start: monthStart,
         end: periodEnd,
       },
-      field: "sum(quantity)",
-      groupedBy: ["category", "outcome", "project"],
-      queryStrategy: "per_project",
-      projectDiscovery: {
-        accessibleProjects: discovery.projectIds.length,
-        pages: discovery.pages,
-      },
-      groups,
-      totals: {
-        events: eventCount,
-        bytes: byteCount,
-        milliseconds: millisecondCount,
-      },
-      capabilities: {
-        usageByCategoryOutcomeProject: true,
-        billingCost: false,
-        requestQuota: false,
-        subscriptionStatus: false,
+      categories,
+      stats: {
+        field: "sum(quantity)",
+        groupedBy: ["category", "outcome", "project"],
+        queryStrategy: "per_project",
+        projectDiscovery: {
+          accessibleProjects: discovery.projectIds.length,
+          pages: discovery.pages,
+        },
+        totals: {
+          events: eventCount,
+          bytes: byteCount,
+          milliseconds: millisecondCount,
+        },
+        capabilities: {
+          usageByCategoryOutcomeProject: true,
+          billingCost: false,
+          prepaidBalance: false,
+          requestQuota: false,
+          subscriptionStatus: false,
+        },
+        statsSummary,
       },
     },
     externalBilling: {

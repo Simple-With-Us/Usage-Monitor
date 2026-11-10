@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { isClaudeCodeAnalyticsTelemetry } from "@/lib/external-usage-events";
+import { isSubscriptionAnalyticsTelemetry } from "@/lib/external-usage-events";
 import { isReceiptCashEvent } from "@/lib/receipt-cash";
 import { resolveProviderIdentity } from "@/lib/provider-identity";
 
@@ -24,7 +24,7 @@ export type DailySeriesProviderIdentity = {
  * **provider id**, using the same `resolveProviderIdentity` ownership as
  * budget-status pushed-cost attribution (exact name before alias).
  *
- * Excludes subscription charges, prepaid receipt cash, Claude Code
+ * Excludes subscription charges, prepaid receipt cash, subscription-seat
  * API-equivalent estimates, and status metrics.
  *
  * Returns dense arrays from day 1 of the UTC month through `now`'s UTC day
@@ -83,7 +83,7 @@ export async function loadMtdDailyVariableUsageByProviderId(
   for (const row of rows) {
     if (row.costUsd == null || !(row.costUsd > 0)) continue;
     if (row.metricType === SUBSCRIPTION_METRIC_TYPE) continue;
-    if (isClaudeCodeAnalyticsTelemetry(row)) continue;
+    if (isSubscriptionAnalyticsTelemetry(row)) continue;
     if (
       isReceiptCashEvent({
         sourceApp: row.sourceApp,

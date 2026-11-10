@@ -5,11 +5,13 @@ import { computeProjectBudgetStatus, bustBudgetStatusCache } from "@/lib/budget-
 import { canonicalProjectKey } from "@/lib/provider-identity";
 import { backfillProjectIdFromMetadataName } from "@/lib/project-resolver";
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
-
+import { readJsonBody } from "@/lib/provider-input";
 import { parseProjectCreateInput } from "@/lib/project-input";
+import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
 
 export async function GET(request: NextRequest) {
   try {
+    await ensureFleetProjectsSeeded();
     const status = await computeProjectBudgetStatus();
     if (request.nextUrl.searchParams.get("includeSummary") === "1") {
       return NextResponse.json({ projects: status.projects, summary: status.summary });
@@ -32,7 +34,9 @@ export async function POST(request: NextRequest) {
 
   let input;
   try {
-    input = parseProjectCreateInput(await request.json());
+    // readJsonBody (vs request.json()) applies the shared byte ceiling from
+    // bounded-request-body.ts, same as PUT /api/projects/:id.
+    input = parseProjectCreateInput(await readJsonBody(request));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Invalid request" },
@@ -54,10 +58,10 @@ export async function POST(request: NextRequest) {
 
     const project = await prisma.project.create({
       data: {
-        name,
+        name: input.name,
         nameKey,
-        description,
-        monthlyBudgetUsd,
+        description: input.description,
+        monthlyBudgetUsd: input.monthlyBudgetUsd,
       },
     });
 

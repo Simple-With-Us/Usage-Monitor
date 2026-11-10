@@ -150,9 +150,54 @@ public struct ProviderManagementItem: Codable, Hashable, Sendable, Identifiable 
         !(credentialManagement?.readOnlyFields.contains("isActive") ?? false)
     }
 
+    /// Matches web Settings: Infisical-managed rows cannot be deleted (server 409).
+    public var canDelete: Bool {
+        credentialManagement == nil
+    }
+
+    /// Whether the server can poll this provider. Mirrors web `supportsManualFetch`
+    /// — never surface a Fetch button that can only fail.
+    public var canFetch: Bool {
+        if credentialManagement?.alias == true { return false }
+        let t = type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if t == "manual_provider" || t == "generic" || t == "push" { return false }
+        let key = Self.canonicalKey(name)
+        if Self.manualSyncProviderKeys.contains(key) { return false }
+        return true
+    }
+
+    public var inventoryStatusLabel: String {
+        if !isActive { return "Inactive" }
+        return canFetch ? "Active" : "Manually only"
+    }
+
     public var latestSnapshotDate: Date? {
         latestSnapshot.flatMap { ISO8601DateParser.date(from: $0.fetchedAt) }
     }
+
+    private static let manualSyncProviderKeys: Set<String> = [
+        "voyage", "roic", "fmp", "finnhub", "alphavantage", "marketstack",
+        "tiingo", "massive", "fred", "quiver-quant", "robinhood",
+    ]
+
+    private static func canonicalKey(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+    }
+}
+
+/// Response from `DELETE /api/providers/:id` (`{ "success": true }`).
+public struct ProviderDeleteReceipt: Codable, Hashable, Sendable {
+    public var success: Bool
+    public init(success: Bool) { self.success = success }
+}
+
+/// Response from `DELETE /api/subscriptions/:id` (`{ "ok": true }`).
+public struct SubscriptionDeleteReceipt: Codable, Hashable, Sendable {
+    public var ok: Bool
+    public init(ok: Bool) { self.ok = ok }
 }
 
 /// Minimal response from `PUT /api/providers/:id`.

@@ -59,5 +59,28 @@ enum DashboardPreview {
         )
         return BudgetStore(apiClient: client)
     }
+
+    /// A `QuotaWindowsStore` plus the stubbed `APIClient` it should be driven
+    /// with — `QuotaWindowsStore.loadIfNeeded(using:)` takes the client
+    /// explicitly rather than holding one, unlike `BudgetStore` above.
+    @MainActor
+    static func quotaWindowsStore(
+        _ response: QuotaWindowsResponse = .sample,
+        statusCode: Int = 200
+    ) -> (store: QuotaWindowsStore, client: APIClient) {
+        PreviewStubURLProtocol.payload = (try? JSONEncoder().encode(response)) ?? Data()
+        PreviewStubURLProtocol.statusCode = statusCode
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PreviewStubURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let client = APIClient(
+            configuration: .production,
+            tokenStore: InMemoryTokenStore(token: "preview-token"),
+            session: session
+        )
+        return (QuotaWindowsStore(), client)
+    }
 }
 #endif

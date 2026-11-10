@@ -783,4 +783,34 @@ describe("project attribution (integration)", () => {
       (await prisma.externalUsageEvent.findUniqueOrThrow({ where: { idempotencyKey: "multi-unknown" } })).projectId
     ).toBeNull();
   });
+
+  it("executes project attribution backfill BEFORE retention pruning during maintenance", async () => {
+    const { runDataRetentionMaintenance } = await import("../data-retention");
+    const proj = await prisma.project.create({
+      data: { name: "Retention Project", nameKey: "retention-project" },
+    });
+
+    const oldDate = new Date(Date.now() - 100 * 86_400_000);
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "retention-order-1",
+        sourceApp: "test-app",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 10,
+        occurredAt: oldDate,
+        metadata: { project: "Retention Project" },
+      },
+    ]);
+
+    await runDataRetentionMaintenance();
+
+    const rollups = await prisma.externalUsageEventDailyRollup.findMany({
+      where: { sourceApp: "test-app" },
+    });
+    expect(rollups.length).toBeGreaterThan(0);
+    expect(rollups[0].projectId).toBe(proj.id);
+  });
 });

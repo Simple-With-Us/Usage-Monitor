@@ -54,7 +54,7 @@ public struct ProviderAlert: Codable, Hashable, Sendable, Identifiable {
         case "renewal_overdue": return "Renewal overdue"
         case "renewal_due": return "Renewal due soon"
         case "missing_balance_visibility": return "Balance not visible"
-        case "stale_snapshot": return "Stale data"
+        case "stale_snapshot": return "Sync lag" // legacy code; no longer emitted
         case "missing_snapshot": return "No recent data"
         case "unconfigured_budget": return "Budget not configured"
         case "usage_reconciliation_discrepancy": return "Usage discrepancy"

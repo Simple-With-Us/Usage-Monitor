@@ -14,7 +14,236 @@ export interface ProjectBudgetResponse {
   };
 }
 
-export type TimeframeOption = "1d" | "7d" | "30d" | "90d" | "180d" | "all";
+export type TimeframeOption =
+  | "1d"
+  | "7d"
+  | "30d"
+  | "90d"
+  | "180d"
+  | "365d"
+  | "all"
+  | `month:${string}`  // e.g. "month:2026-08" — calendar month
+  | `year:${string}`;  // e.g. "year:2026" — calendar year
+
+export function isCalendarMonth(tf: TimeframeOption): tf is `month:${string}` {
+  return (tf as string).startsWith("month:");
+}
+
+export function isCalendarYear(tf: TimeframeOption): tf is `year:${string}` {
+  return (tf as string).startsWith("year:");
+}
+
+export function isRollingPeriod(tf: TimeframeOption): boolean {
+  return !isCalendarMonth(tf) && !isCalendarYear(tf);
+}
+
+/** Return the current UTC calendar month token, e.g. "month:2026-08". */
+export function currentMonthToken(): TimeframeOption {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `month:${y}-${m}` as TimeframeOption;
+}
+
+function parseMonthToken(tf: string): { year: number; month: number } | null {
+  const match = tf.match(/^month:(\d{4})-(\d{2})$/);
+  if (!match) return null;
+  return { year: Number(match[1]), month: Number(match[2]) };
+}
+
+function parseYearToken(tf: string): number | null {
+  const match = tf.match(/^year:(\d{4})$/);
+  if (!match) return null;
+  return Number(match[1]);
+}
+
+/**
+ * Build the /api/usage-events URL for a given timeframe.
+ * Rolling periods use ?days=N; calendar months/years use ?from=&to=.
+ */
+export function buildUsageEventsUrl(
+  tf: TimeframeOption,
+  projectId?: string | null
+): string {
+  const projectSuffix = projectId ? `&projectId=${encodeURIComponent(projectId)}` : "";
+
+  if (isCalendarMonth(tf)) {
+    const parsed = parseMonthToken(tf as string);
+    if (!parsed) return `/api/usage-events?days=30${projectSuffix}`;
+    const { year, month } = parsed;
+    const from = `${year}-${String(month).padStart(2, "0")}-01`;
+    // Last day of month via day-0 trick
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const to = `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+    return `/api/usage-events?from=${from}&to=${to}${projectSuffix}`;
+  }
+
+  if (isCalendarYear(tf)) {
+    const year = parseYearToken(tf as string);
+    if (!year) return `/api/usage-events?days=365${projectSuffix}`;
+    return `/api/usage-events?from=${year}-01-01&to=${year}-12-31${projectSuffix}`;
+  }
+
+  // Rolling period
+  const days = timeframeToDays(tf);
+  if (days >= 3650) return `/api/usage-events?days=all${projectSuffix}`;
+  return `/api/usage-events?days=${days}${projectSuffix}`;
+}
+
+/**
+ * Human-readable label for a history/chart range (picker + UI).
+ * Always describes the selected token — never substitutes MTD month for rolling.
+ */
+export function timeframeDisplayLabel(tf: TimeframeOption): string {
+  switch (tf as string) {
+    case "1d":
+      return "Past 24 hours";
+    case "7d":
+      return "Past 7 days";
+    case "30d":
+      return "Past 30 days";
+    case "90d":
+      return "Past 90 days";
+    case "180d":
+      return "Past 180 days";
+    case "365d":
+      return "Past 12 months";
+    case "all":
+      return "All time";
+  }
+  if (isCalendarMonth(tf)) {
+    const parsed = parseMonthToken(tf as string);
+    if (!parsed) return tf as string;
+    if (tf === currentMonthToken()) return "This month";
+    const date = new Date(Date.UTC(parsed.year, parsed.month - 1, 1));
+    return date.toLocaleDateString("en-US", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  if (isCalendarYear(tf)) {
+    const year = parseYearToken(tf as string);
+    return year ? String(year) : (tf as string);
+  }
+  return tf as string;
+}
+
+/** Alias for chart/telemetry surfaces — same as timeframeDisplayLabel. */
+export function historyRangeLabel(tf: TimeframeOption): string {
+  return timeframeDisplayLabel(tf);
+}
+
+/** Compact label for the active "More" chip (e.g. "Jul 2026", "2025", "All"). */
+export function timeframeShortLabel(tf: TimeframeOption): string {
+  switch (tf as string) {
+    case "1d":
+      return "24h";
+    case "7d":
+      return "7d";
+    case "30d":
+      return "30d";
+    case "90d":
+      return "90d";
+    case "180d":
+      return "180d";
+    case "365d":
+      return "12m";
+    case "all":
+      return "All";
+  }
+  if (isCalendarMonth(tf)) {
+    const parsed = parseMonthToken(tf as string);
+    if (!parsed) return "Month";
+    if (tf === currentMonthToken()) return "This month";
+    const date = new Date(Date.UTC(parsed.year, parsed.month - 1, 1));
+    return date.toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  if (isCalendarYear(tf)) {
+    const year = parseYearToken(tf as string);
+    return year ? String(year) : "Year";
+  }
+  return "More";
+}
+
+/** True when `tf` is the primary-rail "This month" selection (current UTC month). */
+export function isCurrentCalendarMonth(tf: TimeframeOption): boolean {
+  return isCalendarMonth(tf) && tf === currentMonthToken();
+}
+
+/** True when `tf` is one of the primary chips (This month / 30d / 90d / 180d / 365d / 7d). */
+export function isPrimaryHistoryChip(tf: TimeframeOption): boolean {
+  if (tf === "30d" || tf === "90d" || tf === "180d" || tf === "365d" || tf === "7d") return true;
+  return isCurrentCalendarMonth(tf);
+}
+
+/**
+ * MTD budget surfaces only — always the current UTC calendar month name.
+ * Do not use for chart/history range display (use historyRangeLabel).
+ */
+export function mtdSpendLabel(): string {
+  return new Date().toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
+ * @deprecated Prefer mtdSpendLabel() for budgets or historyRangeLabel(tf) for charts.
+ * Rolling/year/all → current month name (budget truth). Calendar month → that month.
+ */
+export function spendPeriodLabel(tf: TimeframeOption): string {
+  if (isCalendarMonth(tf)) {
+    const parsed = parseMonthToken(tf as string);
+    if (!parsed) return mtdSpendLabel();
+    const date = new Date(Date.UTC(parsed.year, parsed.month - 1, 1));
+    return date.toLocaleDateString("en-US", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  return mtdSpendLabel();
+}
+
+/**
+ * Generate an array of calendar-month TimeframeOptions, newest first.
+ * count=13 gives the current month + the previous 12.
+ */
+export function generateMonthOptions(
+  count = 13
+): Array<{ token: TimeframeOption; label: string }> {
+  const options: Array<{ token: TimeframeOption; label: string }> = [];
+  const now = new Date();
+  for (let i = 0; i < count; i++) {
+    // Subtract i months from the current UTC month
+    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const y = date.getUTCFullYear();
+    const mo = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const token: TimeframeOption = `month:${y}-${mo}` as TimeframeOption;
+    const label = date.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+    options.push({ token, label });
+  }
+  return options;
+}
+
+/**
+ * Generate an array of calendar-year TimeframeOptions, newest first.
+ */
+export function generateYearOptions(
+  count = 3
+): Array<{ token: TimeframeOption; label: string }> {
+  const currentYear = new Date().getUTCFullYear();
+  return Array.from({ length: count }, (_, i) => {
+    const year = currentYear - i;
+    return { token: `year:${year}` as TimeframeOption, label: String(year) };
+  });
+}
 
 export function timeframeToDays(tf: TimeframeOption): number {
   switch (tf) {
@@ -28,9 +257,12 @@ export function timeframeToDays(tf: TimeframeOption): number {
       return 90;
     case "180d":
       return 180;
+    case "365d":
+      return 365;
     case "all":
       return 3650;
     default:
+      // calendar-month / year — approximate to avoid NaN downstream
       return 30;
   }
 }
@@ -146,6 +378,7 @@ export function useDashboardData() {
   const fetchGenerationRef = useRef(0);
   const fetchStartedAtRef = useRef(0);
   const unmountAbortRef = useRef<AbortController | null>(null);
+  const staleRefreshStartedRef = useRef(false);
 
   const fetchProviders = useCallback(async (opts?: { background?: boolean }) => {
     const background = opts?.background === true;
@@ -220,6 +453,22 @@ export function useDashboardData() {
       if (providersResult.status === "fulfilled") {
         setLastUpdatedAt(new Date().toISOString());
         lastSuccessAtRef.current = Date.now();
+        if (!staleRefreshStartedRef.current) {
+          staleRefreshStartedRef.current = true;
+          void fetch("/api/providers/refresh-stale", { method: "POST" })
+            .then(async (res) => {
+              if (!res.ok) return;
+              const body = (await res.json().catch(() => null)) as {
+                refreshed?: number;
+              } | null;
+              if ((body?.refreshed ?? 0) > 0) {
+                void fetchProviders({ background: true });
+              }
+            })
+            .catch(() => {
+              /* refresh is best-effort; the 15-minute poll still runs */
+            });
+        }
       }
     } finally {
       // Only the live generation may release the coalesce lock or touch UI.
@@ -247,7 +496,7 @@ export function useDashboardData() {
 
   const fetchPortfolioData = useCallback(async (overrideTimeframe?: TimeframeOption) => {
     const activeTimeframe = overrideTimeframe ?? timeframe;
-    const days = timeframeToDays(activeTimeframe);
+    const usageEventsUrl = buildUsageEventsUrl(activeTimeframe);
     if (portfolioFetchInFlightRef.current) return;
     portfolioFetchInFlightRef.current = true;
     setPortfolioLoading(true);
@@ -258,7 +507,7 @@ export function useDashboardData() {
       // max(latency) rather than the sum. Same pattern as fetchProviders above.
       const [usageResult, projectsResult] = await Promise.allSettled([
         fetchJson<ExternalUsageSummary>(
-          `/api/usage-events?days=${days}`,
+          usageEventsUrl,
           "app telemetry",
           unmountAbortRef.current?.signal
         ),
@@ -403,16 +652,26 @@ export function useDashboardData() {
     };
   }, [fetchProviders]);
 
-  // Portfolio auto-refresh when open
+  // Range-scoped fetch (usage events + project budgets) for the chart /
+  // telemetry section. Runs on mount and whenever `timeframe` changes
+  // (fetchPortfolioData's identity changes with it — see its useCallback
+  // deps above), regardless of whether the portfolio panel is expanded.
+  // The chart-range control sits above the chart unconditionally, so
+  // selecting a new range must never be a no-op just because the section
+  // happens to be collapsed. One grouped query + one project query — cheap
+  // enough to always run.
+  useEffect(() => {
+    void fetchPortfolioData();
+  }, [fetchPortfolioData]);
+
+  // Poll for fresher portfolio/chart data only while the section is open —
+  // no point refreshing data nobody can see. The fetch above already covers
+  // the initial load and every timeframe change.
   useEffect(() => {
     if (!portfolioOpen) return;
-    if (!document.hidden) void fetchPortfolioData();
-    const interval = window.setInterval(
-      () => {
-        if (!document.hidden) void fetchPortfolioData();
-      },
-      AUTO_REFRESH_INTERVAL_MS
-    );
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void fetchPortfolioData();
+    }, AUTO_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [fetchPortfolioData, portfolioOpen]);
 

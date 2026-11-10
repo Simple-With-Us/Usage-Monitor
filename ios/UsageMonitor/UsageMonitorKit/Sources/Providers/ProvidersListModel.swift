@@ -60,8 +60,8 @@ enum ProviderFilter: String, CaseIterable, Identifiable, Hashable {
         case .all: return "All"
         case .overBudget: return "Over"
         case .attention: return "Warning"
-        case .onTrack: return "On track"
-        case .noBudget: return "No budget"
+        case .onTrack: return "On Track"
+        case .noBudget: return "No Budget"
         }
     }
 

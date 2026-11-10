@@ -4,6 +4,7 @@ import DesignSystem
 import Models
 import Networking
 import OfflineCache
+import ProjectBudgets
 
 #if canImport(UIKit)
 import UIKit
@@ -21,13 +22,22 @@ public struct DashboardRootView: View {
     /// trap; the live app always provides it via `RootView`.
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
 
+    @State private var intelligenceStore = IntelligenceStore()
+    @State private var portfolioHistoryStore = PortfolioHistoryStore()
+    @State private var quotaWindowsStore = QuotaWindowsStore()
+    @State private var showBudgetSheet = false
+
     public init() {}
 
     public var body: some View {
         NavigationStack {
             content
                 .navigationTitle(AppTab.dashboard.title)
+                // Inline (centered compact) title — avoid large left-aligned title at rest.
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    // Chart range lives in-content (PortfolioHistorySection), not the nav bar —
+                    // a toolbar picker looked global and used to filter nothing.
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             Task { await refresh() }
@@ -39,6 +49,46 @@ public struct DashboardRootView: View {
                     }
                 }
                 .task { await store.loadIfNeeded() }
+                // Quiet refresh: if cache age ≥ 30m, pull again (don't label "stale").
+                .task(id: store.lastCachedAt) {
+                    guard let cachedAt = store.lastCachedAt else { return }
+                    let staleness = BudgetStaleness(cachedAt: cachedAt)
+                    if staleness.isStale() {
+                        await store.refresh()
+                    }
+                }
+                // While Overview is visible, re-check about every 30 minutes.
+                .task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(30 * 60))
+                        guard !Task.isCancelled else { return }
+                        if let cachedAt = store.lastCachedAt,
+                           BudgetStaleness(cachedAt: cachedAt).isStale() {
+                            await store.refresh()
+                        } else if store.lastCachedAt == nil {
+                            await store.loadIfNeeded()
+                        }
+                    }
+                }
+                .task(id: env?.accessIdentityRevision) { [apiClient = env?.apiClient] in
+                    intelligenceStore.reset()
+                    portfolioHistoryStore.reset()
+                    quotaWindowsStore.reset()
+                    if let apiClient {
+                        await intelligenceStore.loadIfNeeded(using: apiClient)
+                        await portfolioHistoryStore.loadIfNeeded(using: apiClient)
+                        await quotaWindowsStore.loadIfNeeded(using: apiClient)
+                    }
+                }
+                .sheet(isPresented: $showBudgetSheet) {
+                    BudgetConfigSheet(
+                        providers: store.state.value?.providers ?? [],
+                        client: env?.apiClient,
+                        onSaved: { Task { await refresh() } },
+                        onRequestSignIn: { env?.openSettingsForBudgetManagement() }
+                    )
+                    .presentationDetents([.medium, .large])
+                }
         }
     }
 
@@ -64,13 +114,47 @@ public struct DashboardRootView: View {
 
     private func loaded(_ data: DashboardViewData) -> some View {
         RefreshableScrollView(onRefresh: { await refresh() }) {
+            // Only surface a banner when a refresh *failed*. Quietly stale
+            // cache age alone is noise — the footer already shows "Updated …"
+            // and load/refresh will pull fresh data without nagging.
             if let error = store.lastError {
                 StaleDataBanner(error: error)
-            } else if let staleness = budgetStaleness, staleness.isStale() {
-                BudgetStalenessBanner(staleness: staleness)
             }
 
-            DashboardContentView(data: data, generatedAt: store.state.value?.generatedAtDate)
+            DashboardContentView(
+                data: data,
+                generatedAt: store.state.value?.generatedAtDate,
+                onSelectProvider: { id in env?.openProvider(id: id) },
+                // Tap the budget card → in-place config sheet (owner 2026-08-31);
+                // the Settings deep link remains the signed-out fallback inside
+                // the sheet itself.
+                onManageBudgets: { showBudgetSheet = true },
+                projectRollup: ProjectBudgetsRollup(projects: store.projects),
+                onOpenProjects: { env?.openProjects() }
+            )
+
+            SubscriptionQuotasCard(
+                store: quotaWindowsStore,
+                onOpenSettings: { env?.selectTab?(.settings) }
+            )
+
+            PortfolioHistorySection(
+                store: portfolioHistoryStore,
+                onOpenSettings: { env?.selectTab?(.settings) },
+                onSelectTimeframe: { option in
+                    Task {
+                        await portfolioHistoryStore.selectTimeframe(
+                            option,
+                            using: env?.apiClient
+                        )
+                    }
+                }
+            )
+
+            IntelligenceSection(
+                store: intelligenceStore,
+                onOpenSettings: { env?.selectTab?(.settings) }
+            )
 
             LastUpdatedFooter(
                 staleness: budgetStaleness,
@@ -139,6 +223,11 @@ public struct DashboardRootView: View {
     @MainActor
     private func refresh() async {
         await store.refresh()
+        if let apiClient = env?.apiClient {
+            await intelligenceStore.refresh(using: apiClient)
+            await portfolioHistoryStore.refresh(using: apiClient)
+            await quotaWindowsStore.refresh(using: apiClient)
+        }
         if store.lastError == nil {
             Haptics.success()
         } else {
@@ -211,7 +300,7 @@ private struct LastUpdatedFooter: View {
             if let staleness {
                 Text(staleness.shortLabel())
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(staleness.isStale() ? Theme.Colors.warning : Theme.Colors.tertiaryText)
+                    .foregroundStyle(Theme.Colors.tertiaryText)
             }
             if incompleteCoverage {
                 Text("Some spend is still syncing and may rise.")

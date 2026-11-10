@@ -26,6 +26,7 @@ final class BudgetStoreTests: XCTestCase {
         _ = await (first, second)
 
         XCTAssertEqual(BudgetStoreURLProtocol.fetchCount, 1)
+        XCTAssertNil(store.state.error, "decode/transport failure hides itself as a nil value below")
         XCTAssertNotNil(store.state.value)
         XCTAssertNotNil(store.lastCachedAt)
     }
@@ -64,15 +65,16 @@ final class BudgetStoreTests: XCTestCase {
         XCTAssertEqual(store.lastCachedAt, cachedAt)
     }
 
-    func testSuccessfulFetchSetsLastCachedAt() async {
+    func testSuccessfulFetchSetsLastCachedAt() async throws {
         let store = BudgetStore(apiClient: makeClient())
         let before = Date()
         BudgetStoreURLProtocol.handler = { _ in .json(Self.budgetJSON) }
 
         await store.load()
 
-        XCTAssertNotNil(store.lastCachedAt)
-        XCTAssertGreaterThanOrEqual(store.lastCachedAt!.timeIntervalSince1970, before.timeIntervalSince1970 - 1)
+        XCTAssertNil(store.state.error, "decode/transport failure hides itself as a nil lastCachedAt below")
+        let lastCachedAt = try XCTUnwrap(store.lastCachedAt)
+        XCTAssertGreaterThanOrEqual(lastCachedAt.timeIntervalSince1970, before.timeIntervalSince1970 - 1)
     }
 
     private func makeClient() -> APIClient {
@@ -86,6 +88,10 @@ final class BudgetStoreTests: XCTestCase {
         )
     }
 
+    /// Mirrors the wire shape of `GET /api/budget-status`
+    /// (`src/lib/budget-status.ts` → `computeProjectBudgetStatus`). Every
+    /// non-optional field of `BudgetSummary` must be present: a missing key
+    /// fails the whole decode, which the store reports as `state.failed`.
     private static let budgetJSON: [String: Any] = [
         "ok": true,
         "generatedAt": "2026-07-20T12:00:00.000Z",
@@ -93,6 +99,8 @@ final class BudgetStoreTests: XCTestCase {
         "providers": [],
         "summary": [
             "totalBudgetUsd": 0,
+            "budgetedSpentUsd": 0,
+            "unbudgetedSpentUsd": 0,
             "totalSpentUsd": 0,
             "remainingUsd": 0,
             "overBudget": false,

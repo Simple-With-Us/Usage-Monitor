@@ -58,8 +58,24 @@ public final class ProviderDepthStore {
     ) async {
         guard historyRange != range else { return }
         historyRange = range
-        guard let client else { return }
-        await loadHistory(providerID: providerID, using: client, isRangeChange: true)
+        // Drop prior-window points immediately so the chart cannot look
+        // unchanged while a new range loads (the "timeframe does nothing"
+        // failure mode when sparse data makes two windows look identical).
+        // On failure, restore the previous window so we never blank the card.
+        let previous = historyState.value
+        if previous != nil {
+            historyState = .loading
+        }
+        guard let client else {
+            if let previous { historyState = .loaded(previous) }
+            return
+        }
+        await loadHistory(
+            providerID: providerID,
+            using: client,
+            isRangeChange: true,
+            previousOnFailure: previous
+        )
     }
 
     /// Chronological reported-spend series for the history chart, or `nil`
@@ -112,9 +128,10 @@ public final class ProviderDepthStore {
     private func loadHistory(
         providerID: String,
         using client: APIClient,
-        isRangeChange: Bool
+        isRangeChange: Bool,
+        previousOnFailure: [UsageSnapshotPoint]? = nil
     ) async {
-        let hadPoints = historyState.value != nil
+        let hadPoints = historyState.value != nil || previousOnFailure != nil
         if hadPoints && isRangeChange {
             isReloadingHistory = true
         } else if historyState.value == nil {
@@ -130,14 +147,19 @@ public final class ProviderDepthStore {
             )
             historyState = .loaded(snapshots)
         } catch is CancellationError {
+            if let previousOnFailure { historyState = .loaded(previousOnFailure) }
             return
         } catch let error as APIError {
             if error == .unauthorized { requiresSession = true }
-            // Keep stale points on a refresh / range-change failure; fail the
-            // state only when there is nothing to show.
-            if historyState.value == nil { historyState = .failed(error) }
+            if let previousOnFailure {
+                historyState = .loaded(previousOnFailure)
+            } else if historyState.value == nil {
+                historyState = .failed(error)
+            }
         } catch {
-            if historyState.value == nil {
+            if let previousOnFailure {
+                historyState = .loaded(previousOnFailure)
+            } else if historyState.value == nil {
                 historyState = .failed(.transport(error.localizedDescription))
             }
         }

@@ -7,13 +7,14 @@
  * Null-state convention:
  *  - `NULL_DISPLAY` ("--") for compact contexts — table cells, cards, charts,
  *    where an absent value just needs a placeholder.
- *  - `NOT_REPORTED` ("Not reported") for prose contexts where the absence
- *    itself needs a short explanation (billing inventory, quota rows).
+ *  - `NOT_REPORTED` ("not reported") for prose contexts where the absence
+ *    itself needs a short explanation (billing inventory, quota rows) — value
+ *    casing, not a heading (fleet UI copy: /Users/jay/apps/FLEET-UI-COPY.md).
  * Pass `nullState` to opt into the prose form; the compact form is the default.
  */
 
 export const NULL_DISPLAY = "--";
-export const NOT_REPORTED = "Not reported";
+export const NOT_REPORTED = "not reported";
 
 export interface FormatCurrencyOptions {
   /** ISO currency code; defaults to USD. A present-but-blank code formats as a raw "UNKNOWN" amount. */
@@ -71,10 +72,13 @@ export function formatCompactNumber(
   options: { maximumFractionDigits?: number } = {}
 ): string {
   const { maximumFractionDigits = 1 } = options;
+  // Lowercase compact suffixes (1.2k, 10m) — fleet UI copy.
   return new Intl.NumberFormat("en-US", {
     notation: "compact",
     maximumFractionDigits,
-  }).format(value);
+  })
+    .format(value)
+    .replace(/([0-9])([KMB])\b/g, (_, d, s) => d + s.toLowerCase());
 }
 
 export interface FormatDateOptions {

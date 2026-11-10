@@ -35,6 +35,8 @@ public struct AlertsRootView: View {
         NavigationStack {
             content
                 .navigationTitle(AppTab.alerts.title)
+                // Inline (centered compact) title — avoid large left-aligned title at rest.
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbarContent }
                 .navigationDestination(for: ProviderAlertItem.self) { item in
                     ProviderAlertDetailView(providerId: item.provider.id, fallback: item.provider)
@@ -143,13 +145,12 @@ public struct AlertsRootView: View {
                     .padding(.vertical, Theme.Spacing.sm)
             } else {
                 ForEach(filtered) { item in
+                    // Avoid simultaneousGesture on NavigationLink — it greys
+                    // the row and often fails to push the detail.
                     NavigationLink(value: item) {
                         AlertCard(item: item)
                     }
                     .buttonStyle(.plain)
-                    .simultaneousGesture(TapGesture().onEnded {
-                        Haptics.selection()
-                    })
                 }
             }
         }

@@ -54,8 +54,8 @@ export interface ProviderIntegrationInstanceState {
 const MODE_LABELS: Record<IntegrationMode, string> = {
   direct: "Direct API",
   partial: "Partial API",
-  "push-only": "Push / manual",
-  manual: "Manual",
+  "push-only": "Manually only",
+  manual: "Manually only",
   "health-only": "Health only",
   configurable: "Custom endpoint",
 };
@@ -266,14 +266,16 @@ export default function ProviderIntegrationDrawer({
             </p>
           </div>
 
-          {isManualProvider && (
-            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm leading-6 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-              <p className="font-semibold">No API Configuration</p>
+          {pollingNotApplicable || anthropicWithoutAdmin ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+              <p className="font-semibold">Manually only</p>
               <p className="mt-1">
-                This provider is currently running as a manual/no-op service because no API credentials have been configured. Fetch actions are disabled.
+                {anthropicWithoutAdmin
+                  ? "Individual Anthropic accounts have no billing poll. An Admin API key exists only for organizations. A Messages API key will not unlock fetch."
+                  : "This account cannot be fetched. Enter plan or receipt numbers yourself, or push telemetry. Adding a key will not unlock polling."}
               </p>
             </div>
-          )}
+          ) : null}
 
           {instanceState ? (
             <Section title="Current configured state">
@@ -283,10 +285,8 @@ export default function ProviderIntegrationDrawer({
                   <dd className="mt-1 font-medium text-gray-900 dark:text-gray-100">
                     {!instanceState.isActive
                       ? "Inactive"
-                      : pollingNotApplicable
-                        ? "Not applicable · push/manual"
-                      : anthropicWithoutAdmin
-                        ? "Skipped · no organization Admin API"
+                      : pollingNotApplicable || anthropicWithoutAdmin
+                        ? "Manually only · no fetch"
                         : "Active"}
                   </dd>
                 </div>

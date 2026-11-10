@@ -10,8 +10,11 @@ import Networking
 ///      token via a disposable client **before** writing it to the Keychain
 ///      (`AppEnvironment.setToken`); never persists to `UserDefaults`.
 ///   2. Full dashboard-session access with native management inventory.
-///   3. Live server status from the public health probes (`ServerStatusSection`).
-///   4. Appearance, security, notifications, and app information.
+///   3. Appearance, security, notifications, and app information.
+///
+/// Live server status and host usage live on the Server tab
+/// (`ServerStatusRootView`).  Settings keeps connection, appearance, and a
+/// jump-link to that tab.
 ///
 /// Contract: keeps `public struct SettingsRootView: View` + `public init()`,
 /// owns its own `NavigationStack` + title, and reads everything through
@@ -19,49 +22,91 @@ import Networking
 public struct SettingsRootView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var model: SettingsViewModel
-    @State private var status: ServerStatusStore
     @State private var access: ManagementAccessStore
+    @State private var showProviderInventory = false
 
     public init() {
         _model = State(initialValue: SettingsViewModel())
-        _status = State(initialValue: ServerStatusStore())
         _access = State(initialValue: ManagementAccessStore())
     }
 
-    /// Preview/test seam — inject a stubbed view-model and status store.
-    init(model: SettingsViewModel, status: ServerStatusStore) {
+    /// Preview/test seam — inject a stubbed view-model.
+    init(model: SettingsViewModel) {
         _model = State(initialValue: model)
-        _status = State(initialValue: status)
         _access = State(initialValue: ManagementAccessStore())
     }
 
     public var body: some View {
         NavigationStack {
-            Form {
-                ConnectionSection(model: model)
-                FullAccessSection(store: access)
-                ServerStatusSection(store: status) {
-                    await status.refresh(using: env.apiClient)
+            ScrollViewReader { proxy in
+                Form {
+                    // Connect order: (1) server → (2) dashboard password → (3) optional token
+                    ConnectionSection(model: model)
+                    FullAccessSection(store: access)
+                    TokenConnectionSection(model: model)
+                    HostUsageLinkSection()
+                    NotificationsSection()
+                    AppearanceSection(settings: env.settings)
+                    SecuritySection(settings: env.settings)
+                    AboutSection(host: model.resolvedHostDisplay)
                 }
-                NotificationsSection()
-                AppearanceSection(settings: env.settings)
-                SecuritySection(settings: env.settings)
-                AboutSection(host: model.resolvedHostDisplay)
+                .navigationTitle(AppTab.settings.title)
+                // Inline (centered compact) title — avoid large left-aligned title at rest.
+                .navigationBarTitleDisplayMode(.inline)
+                .scrollDismissesKeyboard(.interactively)
+                .task {
+                    if ProcessInfo.processInfo.arguments.contains("-ScreenshotScrollBottom") {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        withAnimation {
+                            proxy.scrollTo("settings-bottom-row", anchor: .bottom)
+                        }
+                    }
+                }
             }
-            .navigationTitle(AppTab.settings.title)
-            .scrollDismissesKeyboard(.interactively)
             .task {
                 model.bind(to: env)
-                await status.loadIfNeeded(using: env.apiClient)
             }
             .task(id: env.accessIdentityRevision) {
                 access.resetForIdentityChange()
                 await access.loadIfNeeded(using: env.apiClient)
             }
             .refreshable {
-                await status.refresh(using: env.apiClient)
                 await access.refresh(using: env.apiClient)
             }
+            .navigationDestination(isPresented: $showProviderInventory) {
+                ProviderManagementInventoryView(
+                    client: env.apiClient,
+                    afterMutation: { await env.budgetStore.refresh() }
+                )
+            }
+            .onChange(of: env.pendingSettingsDestination) { _, destination in
+                guard let destination else { return }
+                switch destination {
+                case .providerBudgets:
+                    showProviderInventory = true
+                }
+                env.pendingSettingsDestination = nil
+            }
+        }
+    }
+}
+
+/// Settings stays the place to *connect*.  Host CPU, risk, and fleet backups
+/// live on the Server tab so they have a full screen instead of a buried card.
+private struct HostUsageLinkSection: View {
+    @Environment(AppEnvironment.self) private var env
+
+    var body: some View {
+        Section {
+            Button {
+                env.selectTab?(.serverStatus)
+            } label: {
+                Label("Open Host Usage", systemImage: "server.rack")
+            }
+        } header: {
+            Text("Host")
+        } footer: {
+            Text("CPU, disk, fleet apps, and backups live on the Server tab.")
         }
     }
 }
@@ -86,7 +131,7 @@ private struct AppearanceSection: View {
         } header: {
             Text("Appearance")
         } footer: {
-            Text("Choose how Usage Monitor looks. \"System\" follows your device's Light/Dark setting.")
+            Text("Choose how \(AppInfo.displayName) looks. \"System\" follows your device's Light/Dark setting.")
         }
     }
 }
@@ -105,7 +150,7 @@ private struct SecuritySection: View {
                 Label {
                     Text(lockTitle)
                 } icon: {
-                    Image(systemName: biometry.systemImage)
+                    Image(safeSystemName: biometry.systemImage, fallback: "lock.fill")
                 }
             }
             .tint(Theme.Colors.accent)
@@ -129,17 +174,24 @@ private struct AboutSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("Version", value: "\(AppInfo.version) (\(AppInfo.build))")
+            let versionString = "\(AppInfo.version) (\(AppInfo.build))"
+            LabeledContent("App Version", value: versionString)
+                .copyableRow(label: "App Version", value: versionString)
             LabeledContent("Monitor", value: host)
+                .copyableRow(label: "Monitor", value: host)
             if let url = URL(string: "https://\(host)") {
                 Link(destination: url) {
                     Label("Open the monitor", systemImage: "safari")
                 }
             }
+            Text(AppInfo.aboutFooter)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.secondaryText)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: Theme.Spacing.sm, leading: Theme.Spacing.xs, bottom: Theme.Spacing.sm, trailing: Theme.Spacing.xs))
+                .id("settings-bottom-row")
         } header: {
             Text("About")
-        } footer: {
-            Text("\(AppInfo.displayName) shows your AI provider budgets at a glance. Data stays on your device and the monitor you point it at.")
         }
     }
 }
@@ -148,8 +200,7 @@ private struct AboutSection: View {
 
 #Preview("Not connected — Light") {
     SettingsRootView(
-        model: SettingsViewModel(verifier: StubTokenVerifier(.failure(.unauthorized))),
-        status: ServerStatusStore(probe: PreviewProbe.healthy)
+        model: SettingsViewModel(verifier: StubTokenVerifier(.failure(.unauthorized)))
     )
     .environment(AppEnvironment.preview(token: nil))
     .preferredColorScheme(.light)
@@ -157,57 +208,8 @@ private struct AboutSection: View {
 
 #Preview("Connected — Dark") {
     SettingsRootView(
-        model: SettingsViewModel(verifier: StubTokenVerifier(.success(()))),
-        status: ServerStatusStore(probe: PreviewProbe.healthy)
+        model: SettingsViewModel(verifier: StubTokenVerifier(.success(())))
     )
     .environment(AppEnvironment.preview(token: "verified-token"))
     .preferredColorScheme(.dark)
-}
-
-#Preview("Status degraded — Light") {
-    SettingsRootView(
-        model: SettingsViewModel(verifier: StubTokenVerifier(.success(()))),
-        status: ServerStatusStore(probe: PreviewProbe.degraded)
-    )
-    .environment(AppEnvironment.preview(token: "verified-token"))
-    .preferredColorScheme(.light)
-}
-
-/// Deterministic probes for the SwiftUI canvas (no network).
-private enum PreviewProbe {
-    static let healthy: @Sendable (Networking.APIClient) async throws -> ServerStatusSnapshot = { _ in
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        return ServerStatusSnapshot(
-            health: .init(
-                ok: true,
-                status: "ok",
-                uptimeSeconds: 273_600,
-                service: "usage-monitor",
-                version: "1.8.2",
-                commit: "fe6d9c6d1a"
-            ),
-            readiness: .init(
-                ok: true,
-                status: "ready",
-                checks: .init(
-                    database: .init(ok: true),
-                    scheduler: .init(ok: true),
-                    backup: .init(ok: true)
-                )
-            ),
-            fetchedAt: Date()
-        )
-    }
-
-    static let degraded: @Sendable (Networking.APIClient) async throws -> ServerStatusSnapshot = { _ in
-        ServerStatusSnapshot(
-            health: .init(ok: true, status: "ok", uptimeSeconds: 3_600, service: "usage-monitor", version: "1.8.2"),
-            readiness: .init(
-                ok: false,
-                status: "degraded",
-                checks: .init(database: .init(ok: true), scheduler: .init(ok: false), backup: .init(ok: true))
-            ),
-            fetchedAt: Date()
-        )
-    }
 }

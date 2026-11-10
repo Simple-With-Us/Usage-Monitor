@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import botFleetReceipt from "@/lib/__tests__/fixtures/botfleet-singlecall-v2.json";
 
 const externalUsageMocks = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -7,11 +8,16 @@ const externalUsageMocks = vi.hoisted(() => ({
 }));
 const resolveProjects = vi.hoisted(() => vi.fn());
 const providerFindMany = vi.hoisted(() => vi.fn());
+const persistAiRequests = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/external-usage-events", () => ({
   ExternalUsageIdempotencyCollisionError: class extends Error {},
+  NegativeSubscriptionWindowLimitExceededError: class extends Error {},
   persistExternalUsageEvents: externalUsageMocks.persist,
   syncStatusToUsageSnapshot: externalUsageMocks.syncStatus,
+}));
+vi.mock("@/lib/ai-requests", () => ({
+  persistAiRequests,
 }));
 vi.mock("@/lib/project-resolver", () => ({
   resolveProjectIdsByName: resolveProjects,
@@ -25,6 +31,7 @@ import { tryAcquireIngestAdmission } from "@/lib/ingest-admission";
 import { getNamedRateLimiter } from "@/lib/rate-limit";
 import { signReceiptCashEvent } from "@/lib/receipt-cash";
 import {
+  MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD,
   MAX_NEGATIVE_SUBSCRIPTION_COST_USD,
   MAX_USAGE_TELEMETRY_BODY_BYTES,
 } from "@/lib/usage-telemetry";
@@ -173,6 +180,20 @@ afterEach(() => {
 });
 
 describe("POST /api/ingest/usage admission", () => {
+  it("persists transcript cache reads without inferring native aggregate coverage", async () => {
+    const response = await POST(nextRequest({
+      sourceApp: "claude-code", provider: "anthropic", service: "claude-code",
+      metricType: "usage", unit: "token", quantity: 1000,
+      occurredAt: "2026-10-30T12:00:00Z",
+      metadata: { collector: "transcript", "host.name": "host-a", tokenType: "cacheRead" },
+    }, USAGE_TOKEN));
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist.mock.calls[0][0][0]).toMatchObject({
+      sourceApp: "claude-code", quantity: 1000, metadata: { tokenType: "cacheRead" },
+    });
+    expect(await response.json()).toMatchObject({ received: 1, accepted: 1 });
+  });
+
   it("accepts v2 through the shared schema and returns explicit persistence counts", async () => {
     externalUsageMocks.persist.mockResolvedValueOnce({
       attempted: 1,
@@ -287,6 +308,10 @@ describe("POST /api/ingest/usage admission", () => {
     expect(externalUsageMocks.persist).toHaveBeenCalledWith([
       expect.objectContaining({
         projectId: "proj-alpha-id",
+        // Carried alongside the stamped metadata so the persistence layer can
+        // treat a pre-#887 stored producer metadata.project as an
+        // authoritative overwrite on replay instead of a 409 collision.
+        authoritativeProject: "Alpha",
         metadata: { lane: "rag", project: "Alpha" },
       }),
     ]);
@@ -487,6 +512,34 @@ describe("POST /api/ingest/usage admission", () => {
     release?.();
   });
 
+  it.each(["SQLITE_BUSY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED_SHAREDCACHE"])(
+    "returns retryable receiver_busy for %s without acknowledging data",
+    async (originalCode) => {
+      externalUsageMocks.persist.mockRejectedValueOnce({
+        code: "P1008",
+        meta: { driverAdapterError: { cause: { originalCode } } },
+      });
+      const response = await POST(v2Request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(await response.json()).toMatchObject({
+        ok: false, error: { code: "receiver_busy", retryable: true, retryAfterSeconds: 5 },
+      });
+      const release = tryAcquireIngestAdmission();
+      expect(release).not.toBeNull();
+      release?.();
+    }
+  );
+
+  it("does not classify an unknown busy suffix as lock contention", async () => {
+    externalUsageMocks.persist.mockRejectedValueOnce({
+      code: "P1008", meta: { driverAdapterError: { cause: { originalCode: "SQLITE_BUSY_UNKNOWN" } } },
+    });
+    const response = await POST(v2Request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+  });
+
   it("accepts an exact signed receipt only for its dedicated token and provider ID", async () => {
     const response = await POST(receiptRequest());
     expect(response.status).toBe(202);
@@ -579,9 +632,82 @@ describe("POST /api/ingest/usage admission", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
-      error: expect.stringContaining("reserved"),
+      error: 'sourceApp "subscription" is reserved',
+    });
+  });
+
+  it("rejects ordinary v1 events with future-dated occurredAt beyond 5-minute skew", async () => {
+    const farFutureResponse = await POST(
+      nextRequest(
+        {
+          sourceApp: "socratic-trade",
+          provider: "anthropic",
+          metricType: "usage",
+          costUsd: 5,
+          occurredAt: "2099-01-01T00:00:00.000Z",
+        },
+        USAGE_TOKEN
+      )
+    );
+    expect(farFutureResponse.status).toBe(400);
+    expect(await farFutureResponse.json()).toMatchObject({
+      error: "occurredAt cannot be in the future",
     });
     expect(externalUsageMocks.persist).not.toHaveBeenCalled();
+
+    const nearFutureIso = new Date(Date.now() + 4 * 60 * 1_000).toISOString();
+    const nearFutureResponse = await POST(
+      nextRequest(
+        {
+          sourceApp: "socratic-trade",
+          provider: "anthropic",
+          metricType: "usage",
+          costUsd: 5,
+          occurredAt: nearFutureIso,
+        },
+        USAGE_TOKEN
+      )
+    );
+    expect(nearFutureResponse.status).toBe(202);
+  });
+
+  it("rejects future-dated events in v2 batches with per-event rejections", async () => {
+    const response = await POST(
+      nextRequest(
+        {
+          schemaVersion: 2,
+          producerId: "congress-trade",
+          events: [
+            {
+              eventId: "valid-event-1",
+              provider: "openai",
+              metricType: "usage",
+              costUsd: 1,
+              occurredAt: new Date().toISOString(),
+            },
+            {
+              eventId: "future-event-2",
+              provider: "openai",
+              metricType: "usage",
+              costUsd: 2,
+              occurredAt: "2099-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+        USAGE_TOKEN
+      )
+    );
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(body.persisted).toBe(1);
+    expect(body.rejected).toBe(1);
+    expect(body.rejections).toEqual([
+      {
+        index: 1,
+        eventId: "future-event-2",
+        issues: ["occurredAt cannot be in the future"],
+      },
+    ]);
   });
 
   it("rejects the reserved sourceApp even when it rides alongside ordinary events in a batch", async () => {
@@ -680,6 +806,81 @@ describe("POST /api/ingest/usage admission", () => {
     );
     expect(response.status).toBe(202);
     expect(externalUsageMocks.persist).toHaveBeenCalled();
+  });
+
+  it("rejects a batch whose combined negative subscription magnitude exceeds the per-batch bound even when each event is individually legal", async () => {
+    const negativeEvent = (index: number) => ({
+      sourceApp: "manual-billing-adjustment",
+      provider: "anthropic",
+      metricType: "subscription",
+      billingMode: "manual",
+      unit: "usd",
+      confidence: "estimated",
+      costUsd: -700,
+      occurredAt: "2026-07-14T00:00:00.000Z",
+      idempotencyKey: `batch-bound-test-${index}`,
+    });
+    // 3 x -700 = -2100, past the -2000 aggregate bound while every event is
+    // comfortably inside the -1000 per-event bound.
+    const response = await POST(
+      nextRequest(
+        { events: [negativeEvent(1), negativeEvent(2), negativeEvent(3)] },
+        USAGE_TOKEN
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining(
+        `must not exceed ${MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD} per batch`
+      ),
+    });
+    expect(externalUsageMocks.persist).not.toHaveBeenCalled();
+  });
+
+  it("accepts a batch whose combined negative subscription magnitude lands exactly on the per-batch bound", async () => {
+    const negativeEvent = (index: number) => ({
+      sourceApp: "manual-billing-adjustment",
+      provider: "anthropic",
+      metricType: "subscription",
+      billingMode: "manual",
+      unit: "usd",
+      confidence: "estimated",
+      costUsd: -(MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD / 2),
+      occurredAt: "2026-07-14T00:00:00.000Z",
+      idempotencyKey: `batch-bound-boundary-test-${index}`,
+    });
+    const response = await POST(
+      nextRequest({ events: [negativeEvent(1), negativeEvent(2)] }, USAGE_TOKEN)
+    );
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist).toHaveBeenCalled();
+  });
+
+  it("maps the trailing-window cumulative negative-adjustment rejection to a non-retryable 400", async () => {
+    const { NegativeSubscriptionWindowLimitExceededError } = await import(
+      "@/lib/external-usage-events"
+    );
+    externalUsageMocks.persist.mockRejectedValueOnce(
+      new NegativeSubscriptionWindowLimitExceededError(4600, 500)
+    );
+    const response = await POST(
+      nextRequest(
+        {
+          sourceApp: "manual-billing-adjustment",
+          provider: "anthropic",
+          metricType: "subscription",
+          billingMode: "manual",
+          unit: "usd",
+          confidence: "estimated",
+          costUsd: -100,
+          occurredAt: "2026-07-14T00:00:00.000Z",
+          idempotencyKey: "window-bound-route-test",
+        },
+        USAGE_TOKEN
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/json");
   });
 
   it("passes providerRequestId through to persistExternalUsageEvents when supplied", async () => {
@@ -871,6 +1072,18 @@ describe("POST /api/ingest/usage producer scoping", () => {
     );
   });
 
+  it.each([false, true])("grants receipt authority only to a scoped BotFleet credential: scoped=%s", async (scoped) => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "botfleet:botfleet-test-scoped");
+    const payload = structuredClone(botFleetReceipt);
+    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64) });
+    const response = await POST(nextRequest(payload, scoped ? "botfleet-test-scoped" : USAGE_TOKEN, undefined, 2));
+    expect(response.status).toBe(202);
+    const persisted = externalUsageMocks.persist.mock.calls[0][0][0];
+    expect(persisted.metadata._botFleetReceiptCredential).toBe(scoped ? "botfleet-v1" : undefined);
+    if (scoped) expect(persisted.metadata._botFleetReceiptSignature).toMatch(/^[a-f0-9]{64}$/);
+    else expect(persisted.metadata._botFleetReceiptSignature).toBeUndefined();
+  });
+
   it("accepts a scoped token when events match allowedSourceApps", async () => {
     const response = await POST(
       nextRequest(
@@ -955,5 +1168,88 @@ describe("POST /api/ingest/usage producer scoping", () => {
       )
     );
     expect(resB.status).toBe(202);
+  });
+});
+
+describe("POST /api/ingest/usage canonical AI block (UM-1592)", () => {
+  function aiRequest(ai?: Record<string, unknown>): NextRequest {
+    return nextRequest(
+      {
+        schemaVersion: 2,
+        producerId: "botfleet",
+        events: [{
+          eventId: "turn-1",
+          provider: "anthropic",
+          metricType: "usage",
+          unit: "token",
+          quantity: 60,
+          costUsd: 0.01,
+          occurredAt: "2026-10-17T00:00:00.000Z",
+          ...(ai ? { ai } : { metadata: { promptTokens: 40, completionTokens: 20 } }),
+        }],
+      },
+      USAGE_TOKEN,
+      "https://usage.jays.services/api/ingest/usage",
+      2
+    );
+  }
+
+  it("writes one AiRequest row per ai-block event", async () => {
+    persistAiRequests.mockResolvedValueOnce({ inserted: 1, merged: 0, duplicates: 0 });
+    const response = await POST(aiRequest({
+      model: { requested: "sonnet", served: "claude-sonnet-4-5" },
+      harness: "botfleet",
+      seat: "CLAUDE",
+      tokens: { input: 10, output: 20, cacheRead: 15, cacheWrite5m: 5, cacheWrite1h: 10, reasoning: 4 },
+      durationMs: 900.4,
+      ttftMs: 120,
+      billingMode: "payg",
+      costSource: "billed",
+    }));
+    expect(response.status).toBe(202);
+    expect(persistAiRequests).toHaveBeenCalledTimes(1);
+    const [[requests]] = persistAiRequests.mock.calls;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      kind: "complete",
+      source: "ingest",
+      harness: "botfleet",
+      seat: "CLAUDE",
+      requestedModel: "sonnet",
+      servedModel: "claude-sonnet-4-5",
+      durationMs: 900,
+      ttftMs: 120,
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 15,
+      cacheWriteTokens: 15,
+      cacheWrite5mTokens: 5,
+      cacheWrite1hTokens: 10,
+      reasoningTokens: 4,
+      costUsd: 0.01,
+      costSource: "billed",
+      billingMode: "payg",
+    });
+    expect(requests[0].dedupeKey).toMatch(/^ingest:[0-9a-f]{64}$/);
+  });
+
+  it("does not write AiRequest rows for legacy-mapped events", async () => {
+    const response = await POST(aiRequest());
+    expect(response.status).toBe(202);
+    expect(persistAiRequests).not.toHaveBeenCalled();
+    expect(externalUsageMocks.persist).toHaveBeenCalledWith([
+      expect.objectContaining({
+        metadata: expect.objectContaining({ _aiTokensInput: 40, _aiTokensOutput: 20, _aiSource: "legacy" }),
+      }),
+    ]);
+  });
+
+  it("still ACKs when the AiRequest store fails", async () => {
+    persistAiRequests.mockRejectedValueOnce(new Error("store down"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await POST(aiRequest({ tokens: { input: 1 } }));
+    expect(response.status).toBe(202);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

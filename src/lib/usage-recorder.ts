@@ -1,4 +1,5 @@
 import { adapterHttpAbortStorage } from "@/lib/adapters/helpers";
+import { appSettings } from "@/lib/app-settings";
 import { prisma } from "@/lib/prisma";
 import { fetchProviderUsage } from "@/lib/adapters";
 import { AdapterError, type AdapterErrorCode } from "@/lib/adapters/helpers";
@@ -6,7 +7,16 @@ import {
   isUsageMaintenanceHealthy,
   runUsageMaintenance,
 } from "@/lib/usage-maintenance";
-import { ensureAgentSyncProviderSeeded } from "@/lib/ensure-agent-sync-provider";
+import { ensureSimpleToolsProviderSeeded } from "@/lib/ensure-simple-tools-provider";
+import { ensureCloudflareFleetProvidersSeeded } from "@/lib/ensure-cloudflare-fleet-providers";
+import { ensureRoicProviderSeeded } from "@/lib/ensure-roic-provider";
+import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
+import {
+  effectivePollDueIntervalMs,
+  resolveProviderSyncMode,
+} from "@/lib/provider-sync-mode";
+import { listStalePollableProviderIds } from "@/lib/refresh-stale-providers";
+import { providerPollSnapshotExpected } from "@/lib/anthropic-credentials";
 import {
   bootstrapStGeminiCredentialToInfisical,
   syncProviderCredentialsFromInfisical,
@@ -28,7 +38,20 @@ import {
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { redactProviderRawData } from "@/lib/data-privacy";
 import { budgetPollingPaused } from "@/lib/budget-controls";
+import {
+  assertCursorAdminPollerConfigured,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
+import { pollCursorAdminUsage } from "@/lib/cursor-admin-poller";
 import { isDecommissionedProviderName } from "@/lib/provider-definitions";
+import {
+  logSchedulerDegraded,
+  logSchedulerOutcome,
+  recordSentryCronHeartbeat,
+  recordSchedulerDuration,
+} from "@/lib/sentry-ops";
+import * as Sentry from "@sentry/nextjs";
+import { fanoutPollSnapshot } from "@/lib/usage-fanout";
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
 const providerAttemptTokens = new Map<string, symbol>();
 
@@ -46,7 +69,7 @@ function assertProviderAttemptCurrent(
 }
 
 function resolveProviderTimeoutMs(): number {
-  const raw = process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_PROVIDER_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -112,6 +135,10 @@ export async function recordProviderUsage(
       });
     });
     if (usage.postPersistError) throw usage.postPersistError;
+    void fanoutPollSnapshot(provider.name, {
+      totalCost: snapshot.totalCost,
+      balance: snapshot.balance,
+    });
     return snapshot;
   } finally {
     if (providerAttemptTokens.get(provider.id) === attemptToken) {
@@ -169,7 +196,7 @@ export interface ProviderFetchOutcome {
   // E5: why a skip happened, when the reason matters operationally. Only set
   // for total-tick-budget skips today (other skips are interval/backoff/pause
   // gates whose meaning is already implied by cadence).
-  skipReason?: "tick_budget";
+  skipReason?: "tick_budget" | "manual_no_poll";
 }
 
 export interface FetchAllProvidersResult {
@@ -366,7 +393,17 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 
   const run = (async () => {
-    await withInternalUsageWriteAdmission(() => ensureAgentSyncProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureSimpleToolsProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureRoicProviderSeeded());
+    await withInternalUsageWriteAdmission(() =>
+      ensureCloudflareFleetProvidersSeeded()
+    );
+    try {
+      await withInternalUsageWriteAdmission(() => ensureFleetProjectsSeeded());
+    } catch {
+      // Poll tests mock a provider-only Prisma surface. Missing Project
+      // must not block usage snapshots.
+    }
     // The default-off, exact ST Gemini bootstrap must run before the normal
     // one-way Infisical pull so a successful create can be adopted and bound
     // in this same provider-maintenance pass.
@@ -428,6 +465,12 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
     const errors: ProviderFetchError[] = [];
     const outcomes: ProviderFetchOutcome[] = [];
     const now = Date.now();
+    let staleDueIds = new Set<string>();
+    try {
+      staleDueIds = new Set(await listStalePollableProviderIds(now, 50));
+    } catch {
+      staleDueIds = new Set();
+    }
     const providerTimeoutMs = resolveProviderTimeoutMs();
     const tickStartedAtMs = now;
     const tickBudgetMs = resolveProviderFetchTickBudgetMs();
@@ -450,7 +493,24 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
         });
         continue;
       }
-      const intervalMs = provider.refreshIntervalMin * 60 * 1000;
+      // Never-pollable (voyage, ROIC, push/generic, …): skip quietly. They are
+      // Manually only — not "stale" and not missing a snapshot we can fetch.
+      const syncMode = resolveProviderSyncMode(provider);
+      const snapshotExpected = providerPollSnapshotExpected(provider);
+      if (syncMode === "manual" || !snapshotExpected) {
+        skipped++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "skipped",
+          durationMs: Date.now() - startedAt,
+          skipReason: "manual_no_poll",
+        });
+        continue;
+      }
+      // Cap due interval at 60m so pollable providers refresh at least hourly
+      // (scheduler ticks every 15m; configured interval still wins when shorter).
+      const intervalMs = effectivePollDueIntervalMs(provider.refreshIntervalMin);
       // Pushed quota/credit events intentionally create rawData-less
       // snapshots. They may be newer than the last poll snapshot, but must not
       // hide its retry marker or make an old/missing poll look fresh. The
@@ -458,9 +518,11 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
       // re-selected rawData blob.
       const latestPoll = latestPollByProviderId.get(provider.id);
       const latestPollFetchedAt = latestPoll?.fetchedAt.getTime();
+      const forceDueForStale = staleDueIds.has(provider.id);
       if (
         latestPollFetchedAt &&
         !latestPoll?.retryable &&
+        !forceDueForStale &&
         now - latestPollFetchedAt < intervalMs
       ) {
         skipped++;
@@ -615,7 +677,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 }
 
-const POLL_INTERVAL_MS = 15 * 60 * 1000; // matches the old external cron's */15 schedule exactly - don't change the cadence, only where it runs
+export const POLL_INTERVAL_MS = 15 * 60 * 1000; // matches the old external cron's */15 schedule exactly - don't change the cadence, only where it runs. Sentry cron monitor config in sentry-ops.ts must stay in lockstep.
 let schedulerStarted = false;
 
 // The first tick does real work immediately (provider polling + retention
@@ -642,17 +704,61 @@ export interface UsagePollingSchedulerTickDependencies {
   runMaintenance?: typeof runUsageMaintenance;
   markTickStarted?: typeof markSchedulerTickStarted;
   markTickCompleted?: typeof markSchedulerTickCompleted;
+  pollCursorAdmin?: () => Promise<unknown>;
+  /** Test override.  Production reads CURSOR_ADMIN_POLLER_ENABLED. */
+  cursorAdminEnabled?: boolean;
 }
 
 export async function runUsagePollingSchedulerTick(
   dependencies: UsagePollingSchedulerTickDependencies = {}
 ): Promise<void> {
+  // Root transaction so child fetch/maintenance spans are not dropped as
+  // no_parent_span. forceTransaction is required because the in-process
+  // scheduler is not an HTTP request and otherwise has no active span.
+  return Sentry.startSpan(
+    { name: "usage-scheduler.tick", op: "task", forceTransaction: true },
+    () => runUsagePollingSchedulerTickBody(dependencies)
+  );
+}
+
+async function runUsagePollingSchedulerTickBody(
+  dependencies: UsagePollingSchedulerTickDependencies
+): Promise<void> {
   const markTickStarted = dependencies.markTickStarted ?? markSchedulerTickStarted;
   const markTickCompleted = dependencies.markTickCompleted ?? markSchedulerTickCompleted;
   markTickStarted();
+  const tickStartedAt = Date.now();
   try {
-    const result = await (dependencies.fetchProviders ?? fetchAllDueProviders)();
-    const maintenance = await (dependencies.runMaintenance ?? runUsageMaintenance)();
+    const result = await Sentry.startSpan(
+      { name: "usage-scheduler.fetch-providers", op: "task" },
+      () => (dependencies.fetchProviders ?? fetchAllDueProviders)()
+    );
+    const maintenance = await Sentry.startSpan(
+      { name: "usage-scheduler.maintenance", op: "task" },
+      () => (dependencies.runMaintenance ?? runUsageMaintenance)()
+    );
+    // Billed Cursor usage.  Off unless CURSOR_ADMIN_POLLER_ENABLED is set,
+    // in which case the job is not entered at all (no span, no log, no
+    // Sentry cron check-in).  When it is on, a runtime poll failure stays
+    // isolated so a 429 cannot fail maintenance or readiness.  Enabled
+    // without CURSOR_ADMIN_API_KEY fails in startUsagePollingScheduler
+    // before this interval is armed.
+    const cursorAdminEnabled =
+      dependencies.cursorAdminEnabled ?? isCursorAdminPollerEnabled();
+    if (cursorAdminEnabled) {
+      try {
+        await Sentry.startSpan(
+          { name: "usage-scheduler.cursor-admin-poll", op: "task" },
+          () => (dependencies.pollCursorAdmin ?? pollCursorAdminUsage)()
+        );
+      } catch (error) {
+        console.error(
+          "[cursor-admin] poll failed",
+          error instanceof Error ? error.name : "unknown"
+        );
+      }
+    }
+    const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a
     // provider-fetch outage is upstream (third-party credentials/network/API),
@@ -674,8 +780,45 @@ export async function runUsagePollingSchedulerTick(
       cloudflareLegacyHandoff:
         maintenance.subscriptionAdoption.cloudflareLegacyHandoff,
     });
+    void recordSentryCronHeartbeat("ok");
+    void logSchedulerOutcome("ok", {
+      total: result.total,
+      successes: result.successes,
+      failures: result.failures,
+      skipped: result.skipped,
+      providerFetchDegraded,
+    });
+    void recordSchedulerDuration(tickDurationMs, {
+      outcome: "ok",
+      total: result.total,
+      providerFetchDegraded,
+    });
+    if (providerFetchDegraded) {
+      // Sentry log only — never exposed on unauthenticated /api/ready.
+      const failingNames = result.errors
+        .slice(0, 5)
+        .map((entry) => `${entry.name}:${entry.code}`)
+        .join(",");
+      void logSchedulerDegraded({
+        total: result.total,
+        successes: result.successes,
+        failures: result.failures,
+        skipped: result.skipped,
+        tickBudgetExceeded: result.tickBudgetExceeded === true,
+        failingProviders: failingNames || undefined,
+      });
+    }
   } catch (error) {
+    const tickDurationMs = Date.now() - tickStartedAt;
     markTickCompleted(false, null);
+    void recordSentryCronHeartbeat("error");
+    void logSchedulerOutcome("error", {
+      reason: error instanceof Error ? error.name : "unknown",
+    });
+    void recordSchedulerDuration(tickDurationMs, {
+      outcome: "error",
+      reason: error instanceof Error ? error.name : "unknown",
+    });
     console.error("[usage-scheduler] tick failed", error);
   }
 }
@@ -684,6 +827,10 @@ export function startUsagePollingScheduler(
   tick: () => Promise<void> = runUsagePollingSchedulerTick
 ): void {
   if (schedulerStarted) return; // instrumentation.register() can fire more than once in some Next.js scenarios - guard against double-scheduling
+  // Assert before arming the interval.  A throw leaves schedulerStarted
+  // false so a misconfigured opt-in fails Next register() instead of
+  // leaving a half-started scheduler.  The default (flag unset) no-ops.
+  assertCursorAdminPollerConfigured();
   schedulerStarted = true;
   markSchedulerStarted();
   setInterval(() => void tick(), POLL_INTERVAL_MS);

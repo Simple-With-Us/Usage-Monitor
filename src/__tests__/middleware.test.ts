@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { buildContentSecurityPolicy, config, isPublicPath } from "@/middleware";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { NextRequest } from "next/server";
+import { buildContentSecurityPolicy, config, isPublicPath, middleware } from "@/middleware";
+import { SESSION_COOKIE_NAME, createSessionToken } from "@/lib/auth";
 
 // The session-cookie middleware runs on almost all paths now to enforce CSP nonces,
 // but it uses isPublicPath internally to determine if the route should be session-gated.
@@ -34,8 +36,20 @@ describe("middleware matcher — /api/budget-status exclusion (regression for th
       "/api/otlp/v1/metrics",
       "/api/health",
       "/api/ready",
+      "/api/openrouter-credits",
+      "/api/server-metrics",
+      "/api/b2-app-usage",
       "/api/cron",
       "/api/auth/login",
+      "/api/bills.ics",
+      "/api/datadog-public-config",
+      "/api/quota-windows",
+      "/api/agents-overview",
+      "/api/agent-turns",
+      // App Store Connect privacy/support URLs (public legal pages)
+      "/privacy",
+      "/privacy-policy",
+      "/support",
     ]) {
       expect(isSessionGated(p)).toBe(false);
     }
@@ -68,6 +82,18 @@ describe("CSP build (blank-page regression)", () => {
   it("allows unsafe-eval only outside production (Next dev)", () => {
     expect(buildContentSecurityPolicy("n", false)).toContain("'unsafe-eval'");
     expect(buildContentSecurityPolicy("n", true)).not.toContain("'unsafe-eval'");
+  });
+
+  it("adds Datadog US5 RUM intake to connect-src only when supplied", () => {
+    const withoutRum = buildContentSecurityPolicy("n", true);
+    expect(withoutRum).toContain("connect-src 'self'");
+    expect(withoutRum).not.toContain("browser-intake");
+    const withRum = buildContentSecurityPolicy("n", true, [
+      "https://browser-intake-us5-datadoghq.com",
+    ]);
+    expect(withRum).toContain(
+      "connect-src 'self' https://browser-intake-us5-datadoghq.com"
+    );
   });
 });
 
@@ -108,12 +134,43 @@ describe("middleware matcher — /api/export/daily-rollups exclusion (bearer rea
   });
 });
 
-describe("middleware public install assets", () => {  it("serves the PWA shell without a dashboard session", () => {
+describe("middleware matcher — /api/usage-events exclusion (bearer <redacted> access)", () => {
+  it("does NOT session-gate /api/usage-events, so the route's own token check runs", () => {
+    // Regression for the prod 401 bug: the route self-authenticates via
+    // isUsageReadAuthorized (session cookie OR USAGE_READ_TOKEN), but without
+    // this exclusion the session gate 401'd the expense poster's bearer
+    // snapshot reads before the route's own auth could run.
+    expect(isSessionGated("/api/usage-events")).toBe(false);
+    expect(isSessionGated("/api/usage-events/")).toBe(false);
+    expect(isSessionGated("/api/usage-events/anything")).toBe(false);
+  });
+
+  it("still session-gates prefix-collision paths (anchoring holds)", () => {
+    expect(isSessionGated("/api/usage-events-foo")).toBe(true);
+    expect(isSessionGated("/api/usage-eventsfoo")).toBe(true);
+  });
+});
+
+describe("middleware matcher — /api/workspace/export exclusion (bearer read-token access)", () => {
+  it("does NOT session-gate the exact export path", () => {
+    expect(isSessionGated("/api/workspace/export")).toBe(false);
+    expect(isSessionGated("/api/workspace/export/")).toBe(false);
+  });
+
+  it("still session-gates workspace import", () => {
+    expect(isSessionGated("/api/workspace/import")).toBe(true);
+  });
+});
+
+describe("middleware public install assets", () => {
+  it("serves the PWA shell without a dashboard session", () => {
     for (const path of [
       "/manifest.webmanifest",
       "/sw.js",
       "/pwa-icon/192",
       "/pwa-icon/512",
+      "/brand/icon-64.png",
+      "/brand/icon-192.png",
     ]) {
       expect(isSessionGated(path)).toBe(false);
     }
@@ -123,5 +180,125 @@ describe("middleware public install assets", () => {  it("serves the PWA shell w
     expect(isSessionGated("/manifest.webmanifest.backup")).toBe(true);
     expect(isSessionGated("/sw.js.map")).toBe(true);
     expect(isSessionGated("/pwa-icons/192")).toBe(true);
+    expect(isSessionGated("/branded/icon.png")).toBe(true);
+  });
+});
+
+describe("middleware CSRF choke point (cookie-authenticated mutators only)", () => {
+  const ORIGINAL_SESSION_SECRET = process.env.SESSION_SECRET;
+  const HOST = "usage.jays.services";
+
+  beforeEach(() => {
+    process.env.SESSION_SECRET = "middleware-csrf-test-secret";
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_SESSION_SECRET === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = ORIGINAL_SESSION_SECRET;
+  });
+
+  function mutatorRequest(
+    path: string,
+    headers: Record<string, string>,
+    { withSession = true, method = "POST" }: { withSession?: boolean; method?: string } = {}
+  ): NextRequest {
+    return new NextRequest(`https://${HOST}${path}`, {
+      method,
+      headers: {
+        host: HOST,
+        ...(withSession
+          ? { cookie: `${SESSION_COOKIE_NAME}=${createSessionToken()}` }
+          : {}),
+        ...headers,
+      },
+    });
+  }
+
+  function expectPassedThrough(response: Response) {
+    // NextResponse.next() marks the response so the request continues to the
+    // route handler; a 403 CSRF rejection never carries this marker.
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-middleware-next")).toBe("1");
+  }
+
+  it("allows a same-origin session-cookie POST", () => {
+    const response = middleware(
+      mutatorRequest("/api/providers", {
+        origin: `https://${HOST}`,
+        "sec-fetch-site": "same-origin",
+      })
+    );
+    expectPassedThrough(response);
+  });
+
+  it("403s a sibling-subdomain (same-site) POST carrying the session cookie", async () => {
+    // SameSite=Lax does NOT block this: a sibling *.jays.services origin is
+    // same-SITE, so the browser attaches the cookie to its cross-origin POST.
+    const response = middleware(
+      mutatorRequest("/api/providers", {
+        origin: "https://evil.jays.services",
+        "sec-fetch-site": "same-site",
+      })
+    );
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toBe("Cross-origin request rejected");
+  });
+
+  it("403s a cookie-carrying cross-origin POST even to a public (self-authenticating) path", () => {
+    // The CSRF check runs BEFORE the isPublicPath branch: the cookie-gated
+    // POST /api/subscriptions collection route is marked public for GET's
+    // token auth, but a cross-site cookie POST must still be rejected.
+    const response = middleware(
+      mutatorRequest("/api/subscriptions", {
+        origin: "https://evil.jays.services",
+        "sec-fetch-site": "same-site",
+      })
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("allows a cross-origin GET with the session cookie (safe method)", () => {
+    const response = middleware(
+      mutatorRequest(
+        "/api/providers",
+        { origin: "https://evil.jays.services", "sec-fetch-site": "same-site" },
+        { method: "GET" }
+      )
+    );
+    expectPassedThrough(response);
+  });
+
+  it("leaves cookieless token clients untouched, even with a cross-site Origin", () => {
+    // Chrome extension / OTLP collectors / bearer readers authenticate with
+    // headers, not the ambient cookie — the CSRF gate must not apply to them.
+    const response = middleware(
+      mutatorRequest(
+        "/api/ingest/usage",
+        {
+          origin: "chrome-extension://abcdefghijklmnop",
+          "sec-fetch-site": "cross-site",
+        },
+        { withSession: false }
+      )
+    );
+    expectPassedThrough(response);
+  });
+
+  it("leaves the cookieless login POST untouched", () => {
+    // No session cookie exists yet at login time, so the CSRF gate (scoped to
+    // ambient-cookie authority) must not interfere.
+    const response = middleware(
+      mutatorRequest(
+        "/api/auth/login",
+        { origin: `https://${HOST}` },
+        { withSession: false }
+      )
+    );
+    expectPassedThrough(response);
+  });
+
+  it("allows a header-absent session-cookie POST (iOS URLSession client)", () => {
+    const response = middleware(mutatorRequest("/api/providers", {}));
+    expectPassedThrough(response);
   });
 });

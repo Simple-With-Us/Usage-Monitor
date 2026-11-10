@@ -3,9 +3,6 @@ import AppCore
 import Models
 import OfflineCache
 import WidgetShared
-#if canImport(WidgetKit)
-import WidgetKit
-#endif
 
 /// Bridges the `OfflineCache` + `WidgetShared` integrations to
 /// `AppCore.BudgetSnapshotSink`. Lives in the app target because it is the one
@@ -21,23 +18,9 @@ struct OfflineCacheSnapshotSink: BudgetSnapshotSink {
     /// falls back to the app's Caches directory when unavailable.
     private var directory: URL? { AppGroup.containerURL }
 
-    /// the same throttle window.
-    private static var lastWidgetReload: Date = .distantPast
-    private static let minimumWidgetReloadInterval: TimeInterval = 60
-
     func store(_ response: BudgetStatusResponse) async {
         BudgetDiskCache(directory: directory).save(response)
-        SharedStore.shared.write(WidgetSnapshotBuilder.snapshot(from: response))
-        // Foreground pull-to-refresh should refresh the home-screen widget,
-        // but WidgetKit throttles aggressively and calling reload on every
-        // swipe wastes battery.  Guard to once per 60 s.
-        #if canImport(WidgetKit) && os(iOS)
-        let now = Date()
-        if now.timeIntervalSince(Self.lastWidgetReload) >= Self.minimumWidgetReloadInterval {
-            Self.lastWidgetReload = now
-            WidgetCenter.shared.reloadAllTimelines()
-        }
-        #endif
+        WidgetSnapshotStore.updateBudget(response)
     }
 
     func loadCached() async -> CachedBudgetSnapshot? {
@@ -61,8 +44,6 @@ struct OfflineCacheSnapshotSink: BudgetSnapshotSink {
     }
 
     private func reloadWidgets() {
-        #if canImport(WidgetKit) && os(iOS)
-        WidgetCenter.shared.reloadAllTimelines()
-        #endif
+        WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
     }
 }

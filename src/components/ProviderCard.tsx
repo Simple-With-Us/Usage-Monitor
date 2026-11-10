@@ -265,7 +265,7 @@ export default function ProviderCard({
                 geminiBillingStatus,
               }}
             />
-            <span className="rounded bg-gray-50 px-2 py-0.5 text-xs font-medium uppercase text-gray-400 dark:bg-gray-700 dark:text-gray-300">
+            <span className="rounded bg-gray-50 px-2 py-0.5 text-xs font-medium uppercase text-gray-600 dark:bg-gray-700 dark:text-gray-300">
               {type}
             </span>
           </div>
@@ -359,7 +359,7 @@ export default function ProviderCard({
             {resolvedSpendCoverage === "unknown" || resolvedSpendCoverage === "legacy_unknown" ? (
               <>
                 Cost not reported{" "}
-                <span className="font-normal text-gray-400 dark:text-gray-500">
+                <span className="font-normal text-gray-500 dark:text-gray-400">
                   / Projection unavailable
                 </span>
                 {unpricedEventCount > 0 && (
@@ -372,7 +372,7 @@ export default function ProviderCard({
               <>
                 {formatUsd(knownSpendUsd)}
                 {resolvedSpendCoverage === "partial" ? " known" : ""}{" "}
-                <span className="font-normal text-gray-400 dark:text-gray-500">
+                <span className="font-normal text-gray-500 dark:text-gray-400">
                   / {formatUsd(projectedEomUsd)}
                   {resolvedSpendCoverage === "partial" ? " from known costs" : ""}
                 </span>

@@ -49,7 +49,7 @@ struct FullAccessSection: View {
                 Button(role: .destructive) {
                     showSignOutConfirmation = true
                 } label: {
-                    Label("Sign out of full access", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label("Sign Out of Full Access", systemImage: "rectangle.portrait.and.arrow.right")
                 }
                 .disabled(store.isAuthenticating)
             } else {
@@ -102,16 +102,20 @@ struct FullAccessSection: View {
                 .accessibilityElement(children: .combine)
             }
         } header: {
-            Text("Full Access")
+            Text(store.capabilities.canManage ? "Full Access" : "2 · Dashboard password (full access)")
         } footer: {
-            Text("The dashboard password is sent once over HTTPS and never stored. Full access persists only as the monitor's HttpOnly session cookie. Complex provider credentials and subscription purchase/link flows remain server-validated on the web.")
+            if store.capabilities.canManage {
+                Text("The dashboard password is sent once over HTTPS and never stored. Full access persists only as the monitor's HttpOnly session cookie. Complex provider credentials and subscription purchase/link flows remain server-validated on the web.")
+            } else {
+                Text("Step 2 of connect: sign in with the dashboard password for history, budget edits, and native management. The password is sent once over HTTPS and never stored — only the monitor's HttpOnly session cookie persists. A read token (step 3) is optional for background refresh.")
+            }
         }
         .confirmationDialog(
-            "Sign out of full access?",
+            "Sign Out of Full Access?",
             isPresented: $showSignOutConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Sign out", role: .destructive, action: signOut)
+            Button("Sign Out", role: .destructive, action: signOut)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your read token, if configured, stays in the Keychain. Native management actions will require the dashboard password again.")
@@ -190,7 +194,7 @@ private struct AccessCapabilityRow: View {
 
     var body: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            Image(systemName: systemImage)
+            Image(safeSystemName: systemImage, fallback: "circle")
                 .foregroundStyle(status.tint)
                 .frame(width: 24)
                 .accessibilityHidden(true)

@@ -65,24 +65,18 @@ enum AppInfo {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
     }
 
+    /// Plain user-facing app name (Usage Monitor Client / Usage Monitor Local).
     static var displayName: String {
         (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String)
-            ?? "Usage Monitor"
+            ?? "App"
+    }
+
+    /// Last Settings footer.  Two spaces after the first sentence so the
+    /// line stays owner-copy-legal and testable without a running UI.
+    static var aboutFooter: String {
+        "\(displayName) shows your AI provider budgets at a glance.  Data stays on your device and the monitor you point it at."
     }
 }
 
-/// Format a server uptime (seconds) into a compact "3d 4h" / "5m" string.
-enum UptimeFormat {
-    static func string(fromSeconds seconds: Int) -> String {
-        guard seconds > 0 else { return "just started" }
-        let days = seconds / 86_400
-        let hours = (seconds % 86_400) / 3_600
-        let minutes = (seconds % 3_600) / 60
-
-        if days > 0 { return "\(days)d \(hours)h" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        if minutes > 0 { return "\(minutes)m" }
-        return "\(seconds)s"
-    }
-}
+// UptimeFormat / DiskFormat live in DesignSystem (shared with ServerStatus).

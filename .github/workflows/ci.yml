@@ -1,35 +1,183 @@
 name: CI
 
+# The `schedule:` trigger is a BACKSTOP, not a second CI cadence. A PR merged
+# by github-actions[bot] (auto-merge armed with GITHUB_TOKEN) produces a push
+# to main that GitHub's recursion guard suppresses entirely, so the post-merge
+# squash sha on main is never verified. Measured fleet-wide 2026-08-13: bot
+# merges dispatched zero runs, human merges dispatched the full set.
+# `schedule:` events are NOT subject to that guard.
+#
+# The schedule-gate job below makes every other tick a ~10-second no-op, so the
+# normal case costs one short hosted job per hour and nothing else. The
+# root-cause fix is in .github/workflows/auto-merge-prs.yml (stop merging as
+# github-actions[bot]); this stays as defence in depth for any bot merge that
+# still slips through, e.g. Dependabot.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch: {}
+  schedule:
+    # Hourly, off the top of the hour (GitHub throttles :00 stampedes).
+    - cron: '41 * * * *'
 
+# Keyed on the event as well as the ref so the scheduled backstop and a real
+# push to main cannot cancel each other; push-vs-push and PR-vs-PR still
+# supersede exactly as before.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  # Cheap decision job. Every non-schedule event votes "run" immediately and CI
+  # behaves exactly as it always has. A scheduled tick asks the Actions API
+  # whether main's current HEAD was already VERIFIED -- meaning some other run
+  # of this workflow ran the `verify` job itself to success, not merely that a
+  # run for that sha concluded green (a gate-skipped tick concludes green while
+  # verifying nothing). A run already in flight also suppresses this tick.
+  #
+  # Fail-closed on purpose: any API error, empty response, or unparseable
+  # result votes RUN. A backstop that silently stops backstopping is worse than
+  # one that occasionally re-runs.
+  schedule-gate:
+    name: scheduled backstop gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+    steps:
+      - name: Decide whether this run should proceed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" != "schedule" ]; then
+            echo "should_run=1" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT}: normal CI, gate does not apply."
+            exit 0
+          fi
+
+          resp="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100")" || resp=""
+          if [ -z "$resp" ]; then
+            echo "::warning::Could not read prior CI runs for ${SHA}; failing closed and running CI."
+            echo "should_run=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A run's own CONCLUSION is not proof that anything was verified.
+          # When this gate votes skip, every downstream job is `skipped`, and a
+          # workflow run whose jobs all skipped concludes as **success**. So a
+          # no-op scheduled tick looks identical to a real CI pass. Left
+          # unhandled that is self-latching: tick 1 sees a queued run and skips;
+          # that queued run then fails or is cancelled; tick 2 now counts tick
+          # 1's own no-op "success" as proof and skips forever, and the backstop
+          # silently stops backstopping -- the exact failure class this whole PR
+          # exists to fix. (Reported by the Codex reviewer on PR #1165.)
+          #
+          # So proof requires the VERIFICATION JOB itself to have succeeded, not
+          # merely the run wrapping it. in_progress/queued still short-circuit
+          # THIS tick (no point duplicating work already under way), and that is
+          # now safe precisely because such a tick no longer becomes proof for
+          # the next one.
+          active="$(printf '%s' "$resp" | jq -r --arg me "${GITHUB_RUN_ID}" '
+            [ .workflow_runs[]
+              | select((.id|tostring) != $me)
+              | select(.status == "in_progress" or .status == "queued")
+            ] | length')" || active=""
+          candidates="$(printf '%s' "$resp" | jq -r --arg me "${GITHUB_RUN_ID}" '
+            .workflow_runs[]
+            | select((.id|tostring) != $me)
+            | select(.conclusion == "success")
+            | .id')" || candidates=""
+          case "$active" in
+            ''|*[!0-9]*)
+              echo "::warning::Unparseable run list for ${SHA}; failing closed and running CI."
+              echo "should_run=1" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          verified=0
+          for run_id in $candidates; do
+            jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")" || jobs=""
+            if [ -z "$jobs" ]; then
+              # Cannot tell what that run actually did. Fail closed: treat it as
+              # NOT proof, so at worst the backstop re-runs.
+              echo "could not read jobs for run ${run_id}; not counting it as proof."
+              continue
+            fi
+            hit="$(printf '%s' "$jobs" | jq -r --arg n "verify" '
+              [ .jobs[] | select(.name == $n) | select(.conclusion == "success") ] | length')" || hit=""
+            case "$hit" in
+              ''|*[!0-9]*) hit=0 ;;
+            esac
+            if [ "$hit" -gt 0 ]; then
+              echo "run ${run_id} genuinely ran verify to success."
+              verified=$((verified + 1))
+            else
+              echo "run ${run_id} concluded success but verify did not run (a skipped no-op); not proof."
+            fi
+          done
+
+          if [ "$verified" -gt 0 ] || [ "$active" -gt 0 ]; then
+            echo "should_run=0" >> "$GITHUB_OUTPUT"
+            echo "CI already verified (${verified}) or is running (${active}) for ${SHA}; backstop skips."
+          else
+            echo "should_run=1" >> "$GITHUB_OUTPUT"
+            echo "::warning::No CI run exists for main sha ${SHA} -- a bot merge dispatched nothing. Running the backstop."
+            {
+              echo "### CI backstop engaged"
+              echo
+              echo "main sha \`${SHA}\` had no CI run. That is the bot-merge dispatch"
+              echo "dropout; see \`.github/workflows/auto-merge-prs.yml\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # `verify` is a REQUIRED check and now `needs:` this job, so this step
+          # must never be the reason a PR cannot merge.
+          exit 0
+
   verify:
-    # Self-hosted CI with automatic hosted fallback (fleet runner-offload).
-    # Resolves to the runner label in the repo variable UM_CI_RUNNER when it is
-    # set (e.g. usage-ci), otherwise to 'ubuntu-latest'. Dependabot PRs are
-    # forced back to hosted runners: their third-party install/build scripts
-    # must never run beside production containers and a repo-scoped runner PAT
-    # on the shared self-hosted box. While UM_CI_RUNNER is unset this workflow
-    # behaves exactly as before (hosted).
-    # Runbook — clearing the variable is an instant, global hosted fallback:
-    #   gh variable set UM_CI_RUNNER --repo jaywedgeworth22/Usage-Monitor --body ""
+    needs: [schedule-gate]
+    # `!cancelled()`, NOT the bare gate output. `needs:` alone would let a
+    # FAILED or timed-out schedule-gate job skip this one, and GitHub reports a
+    # skipped required check as SATISFIED -- so a gate outage would silently let
+    # a PR merge with the whole verify suite never having run. That is the exact
+    # inverse of what the backstop is for. Failing closed inside the step is not
+    # enough; the job-level condition has to fail closed too. `!= '0'` means an
+    # absent or unparseable output still RUNS; only an explicit "already
+    # verified" vote skips, and only on the scheduled path.
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'schedule' ||
+      needs.schedule-gate.outputs.should_run != '0')
+    # GitHub-hosted, deliberately and permanently. Fleet CI is hosted-only as
+    # of 2026-07-29 (bbf540a0 / #834, owner-authored); the self-hosted
+    # Oracle/Coolify Actions runners are retired.
+    #
+    # This comment used to describe a `UM_CI_RUNNER` repo-variable gate --
+    # `${{ (github.actor != 'dependabot[bot]' && vars.UM_CI_RUNNER) || 'ubuntu-latest' }}`
+    # -- landed dormant in #583. #834 removed that expression from all five
+    # workflows and left every comment behind, so for over a month five files
+    # documented a live runner-offload feature that no longer existed, and
+    # handed the reader a fallback runbook (`gh variable set UM_CI_RUNNER
+    # --body ""`) that could not do anything: the variable is read nowhere.
+    # Setting it has no effect. Do not reintroduce a self-hosted label or that
+    # expression without an explicit owner directive reversing the retirement.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CI: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -51,10 +199,23 @@ jobs:
       - name: Configure test database
         run: echo "DATABASE_URL=file:${RUNNER_TEMP}/api-usage-monitor-ci.db" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
+
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line.
+      #
+      # It runs BEFORE `npm ci`.  The script is plain Node with no
+      # dependencies, so a runner on the wrong runtime fails here, before it
+      # builds node_modules under the wrong ABI and leaves a poisoned install
+      # and npm cache behind for later steps to reuse.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
 
       - name: Install dependencies
         run: npm ci
@@ -68,8 +229,36 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Test
-        run: npm test
+      # Coverage-instrumented run of the same suite `npm test` executes; the
+      # thresholds in vitest.config.ts (ratcheted to measured reality) make
+      # this step fail on a genuine coverage regression.
+      - name: Test (with coverage gate)
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 14
+
+      # The root `npm test` deliberately excludes **/*.workers.test.* (see
+      # vitest.config.ts); this workerd suite is the only coverage of the
+      # receipt-inbox Durable Object alarms, storage-transaction serialization,
+      # and R2 crash-resume. It was in `npm run verify` but missing from CI.
+      # All bindings are inline stubs in workers/receipt-inbox/vitest.config.mjs
+      # (LIFECYCLE_AUDITOR stubbed as a local serviceBinding) — no secrets
+      # needed; workerd itself is installed by `npm ci` via
+      # @cloudflare/workerd-* in the lockfile.
+      - name: Test receipt-inbox worker
+        run: npm run test:receipt-inbox-worker
+
+      # Excluded from the root run for the same reason.  It pins what the expenses
+      # sync's daily write budget trusts: D1's own meta.rows_written.  Offline, with
+      # inline bindings in workers/expenses-site/vitest.config.mjs and no secrets.
+      - name: Test expenses worker
+        run: npm run test:expenses-worker
 
       - name: Test receipt-inbox worker
         run: npm run test:receipt-inbox-worker
@@ -80,6 +269,43 @@ jobs:
       - name: Test pre-migration SQLite backup
         run: npm run test:sqlite-backup
 
+      - name: Test concurrent startup partial cleanup
+        run: npm run test:backup-concurrent-startup
+
+      # Fourth instance of the drift class the two comments below/above describe
+      # -- in `npm run verify`, no CI step -- and the one flagged as out of scope
+      # by #1381. Placed here to match the order `npm run verify` chains these,
+      # right after test:sqlite-backup.
+      #
+      # It is fully offline: an in-memory S3 stub is injected as `fetchImpl`, so
+      # the whole upload -> verify -> prune flow runs without a socket, and every
+      # credential in the file is a fake literal passed through an explicit `env`
+      # object. `scripts/lib/s3-sigv4.mjs` is pure node:crypto with no
+      # module-level side effects. The two `runArchive` calls that omit
+      # `fetchImpl` are the ones asserting it fails closed, and both throw on the
+      # credential/kill-switch check before any request is built.
+      #
+      # This step could not be added until the guard bug it exposes was fixed.
+      # `scripts/ops/r2-weekly-archive.mjs` detected its CLI entrypoint with
+      # `process.argv[1].endsWith("r2-weekly-archive.mjs")`, and
+      # "test-r2-weekly-archive.mjs" satisfies that suffix -- so importing the
+      # module from the test ran a real archive against the ambient environment
+      # and set `process.exitCode = 1`. The script printed "18 passed, 0 failed"
+      # and exited 1. That was misread in 2026-08 as the test needing live R2
+      # credentials, which is why it sat outside CI. The guard now compares
+      # `import.meta.url`, matching the rest of scripts/. A regression in it
+      # re-breaks the exit code, so this step is also that fix's own guard.
+      - name: Test sentry-ci-report
+        run: npm run test:sentry-ci-report
+
+      # Fully offline: every subprocess is stubbed in the unittest, so no
+      # Mac, process table or credential is involved.
+      - name: Test security ancestry audit
+        run: npm run test:security-ancestry
+
+      - name: Test R2 weekly archive
+        run: npm run test:r2-archive
+
       - name: Test startup configuration
         run: npm run test:startup-config
 
@@ -89,8 +315,122 @@ jobs:
       - name: Verify Apple projects
         run: npm run test:apple-projects
 
+      # ios-ship.yml now runs on a cron, and a cron carries no `paths:` filter.
+      # scripts/ios-scheduled-ship-gate.sh is the only thing keeping a
+      # backend-only commit from becoming a TestFlight build. Hosted
+      # macos-latest is the ship host, so a defect in the gate would otherwise
+      # be invisible until testers were spammed (or until an iOS change
+      # silently never shipped). Fully offline: throwaway git repos in a
+      # scratch dir.
+      - name: Test the scheduled iOS ship gate
+        run: |
+          bash -n scripts/ios-scheduled-ship-gate.sh
+          bash -n scripts/test-ios-scheduled-ship-gate.sh
+          bash -n scripts/ios-ship-testflight.sh
+          bash -n scripts/ios-ship-testflight-local.sh
+          bash -n scripts/ios-appstore-gm-prepare.sh
+          bash -n scripts/ios-stage-asc-key.sh
+          bash -n scripts/test-ios-stage-asc-key.sh
+          bash -n scripts/ios-fleet-pin.sh
+          bash -n scripts/test-ios-fleet-appupdate-pin.sh
+          bash scripts/ios-fleet-pin.sh --check
+          bash scripts/test-ios-scheduled-ship-gate.sh
+          bash scripts/test-ios-stage-asc-key.sh
+          bash scripts/test-ios-fleet-appupdate-pin.sh
+
+      # The server's storage watch (deploy/server/vps-storage-watch):  a
+      # database past its growth threshold posts one alert tagging both
+      # Housekeepers and Jay, the cooldown holds, and a missing database path
+      # posts nothing.  Fully offline:  curl is replaced by a recorder.
+      - name: Test the server storage watch
+        run: |
+          bash -n deploy/server/vps-storage-watch/vps-storage-watch.sh
+          bash -n deploy/server/vps-storage-watch/install.sh
+          bash deploy/server/vps-storage-watch/test.sh
+
+      # The App Store Connect credential contract (AFC-459):  the private key
+      # comes from the environment or from Infisical, and a path on disk is
+      # not a credential source at all.  Fully offline:  the keys are
+      # generated at test time and the fleet reader is replaced by a fake.
+      - name: Test the App Store Connect credential contract
+        run: |
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          bash scripts/ios-fleet/test-asc-credentials.sh
+
+      # The fleet's version-numbering rules (AFC-517):  the marketing version
+      # is the next patch on the app's train and the build number is
+      # INDEPENDENT of it, so App Store Connect can no longer show "1.0.N (N)".
+      # The rules live in scripts/ios-fleet/version-plan.mjs (pure, no I/O);
+      # this is their unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet version-numbering rules
+        run: node --test scripts/ios-fleet/version-plan.node-test.mjs
+
+      # The shared merge-timestamp release build (owner, Oct 29 2026):  ONE
+      # build per app across iOS and macOS for a fixed marketing version,
+      # max(S, M + 1) as a plain integer, computed once per release.  The
+      # planner lives in scripts/ios-fleet/shared-build.mjs (pure, no I/O);
+      # this is its unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet shared release build
+        run: node --test scripts/ios-fleet/shared-build.test.mjs
+
+      # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
+      # installed on the Mac that runs Antigravity, so this is the only place
+      # a payload-shape regression in the collector can be caught before the
+      # launchd job starts silently failing.
+      - name: Test Antigravity collector parsing
+        run: npm run test:antigravity-collector
+
+      # The next three were in `npm run verify` but missing from CI -- the same
+      # drift class the receipt-inbox-worker comment above describes fixing
+      # once already. All three are fully offline (no secrets, no network):
+      #
+      #  * session-token-collectors: pure parser fixtures over inline JSONL
+      #    strings. It imports scripts/fleet-usage-collector.mjs, whose network
+      #    POST sits behind an `import.meta.url` / `process.argv[1]` main
+      #    guard, and the Codex ~/.codex path assertions are string math on
+      #    join() -- nothing is read off disk. Its one dependency is the pinned
+      #    @jaywedgeworth22/congress-trading-shared schema from `npm ci`, which
+      #    is the point: it catches a v2 wire-schema break at the collector.
+      #  * cf-token-map: `bash -n` plus greps over scripts/cf-token-map.sh. It
+      #    asserts that script's value-blind properties (never echoes $VAL, no
+      #    client secret on argv, auth header written only to a 0600 temp
+      #    file), so it never invokes the script and never reaches Infisical or
+      #    Cloudflare.
+      #  * replica-status-probe: `bash -n` + greps over the heartbeat and the
+      #    Coolify probe, a python3 self-test that execs the probe's level
+      #    escalation against a mocked subprocess.run, and the heartbeat's own
+      #    --self-test against a mock litestream binary in a mktemp dir. No B2
+      #    or Litestream credentials are read. Needs python3 and jq, both
+      #    preinstalled on ubuntu-latest (the heartbeat self-test skips green
+      #    without jq, so a runner image change degrades rather than breaks).
+      - name: Test session token collectors
+        run: npm run test:session-token-collectors
+      - name: Test collector telemetry and durable delivery
+        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs scripts/telemetry-native-followup.node-test.mjs
+      - name: Test detached collector runtime updates
+        run: npm run test:collector-runtime
+
+      - name: Test Claude Duplicate Cleanup
+        env:
+          VITEST: "true"
+        run: node --test scripts/__tests__/claude-duplicate-cleanup.test.mjs scripts/__tests__/claude-duplicate-stored-plan.test.mjs scripts/__tests__/claude-duplicate-sqlite.test.mjs
+
+      - name: Test CF token map
+        run: npm run test:cf-token-map
+
+      - name: Test replica-status probe
+        run: npm run test:replica-status-probe
+
+      # Offline: stub `security` and `node` in a mktemp dir, so the real
+      # Keychain, the network and every LaunchAgent are untouched (UM-1616).
+      - name: Test subscription-quota Keychain wrapper
+        run: npm run test:quota-wrapper
+
       - name: Audit high-severity dependencies
-        run: npm audit --audit-level=high
+        # Full lockfile via audit-ci; GHSA-vfj7-8cjw-p6xm is allowlisted in audit-ci.jsonc (2026-10-05).
+        run: npm run test:audit-ci
 
       - name: Production build
         run: npm run build

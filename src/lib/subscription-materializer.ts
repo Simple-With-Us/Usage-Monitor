@@ -34,6 +34,19 @@ import {
 // unbounded backfill in one pass.
 const MAX_PERIODS_PER_RUN = 240;
 
+function isReceiptBackedSubscriptionCharge(
+  subscription: Pick<
+    SubscriptionChargePlanInput,
+    "externalBillingManaged" | "externalBillingSource" | "externalBillingId"
+  >
+): boolean {
+  if (subscription.externalBillingManaged === true) return true;
+  return Boolean(
+    subscription.externalBillingSource?.trim() &&
+      subscription.externalBillingId?.trim()
+  );
+}
+
 export interface MaterializeSubscriptionsResult {
   examined: number;
   charged: number;
@@ -64,6 +77,11 @@ interface SubscriptionChargePlanInput {
   currentPeriodStart: Date;
   nextRenewalAt: Date;
   lastChargedPeriodStart: Date | null;
+  /** Provider-linked rows are receipt-backed.  Catalog/seeded rows are modeled. */
+  externalBillingManaged?: boolean;
+  /** Linked-but-unmanaged (Cloudflare legacy handoff) is also receipt-backed. */
+  externalBillingSource?: string | null;
+  externalBillingId?: string | null;
   provider: { name: string; refreshIntervalMin?: number };
 }
 
@@ -125,6 +143,7 @@ export function planSubscriptionCharges(
     const periodEnd = nextRenewalAt;
 
     if (!lastCharged || periodStart.getTime() > lastCharged.getTime()) {
+      const providerLinked = isReceiptBackedSubscriptionCharge(subscription);
       inputs.push({
         idempotencyKey: subscriptionChargeIdempotencyKey(
           subscription.id,
@@ -139,7 +158,11 @@ export function planSubscriptionCharges(
         metricType: "subscription",
         unit: "usd",
         costUsd: subscription.costUsd,
-        confidence: "actual",
+        // Only an authoritative provider period (or an already-linked
+        // Cloudflare legacy row waiting for handoff) is cash.  Seeded /
+        // owner-typed catalog rows stay estimated so the dashboard cannot
+        // call them paid.
+        confidence: providerLinked ? "actual" : "estimated",
         occurredAt: periodStart,
         windowStart: periodStart,
         windowEnd: periodEnd,
@@ -149,6 +172,11 @@ export function planSubscriptionCharges(
           interval,
           intervalCount,
           currency: subscription.currency,
+          // Extra keys stay off receipt-backed rows: Cloudflare handoff
+          // proof requires the exact 5-key metadata set.
+          ...(providerLinked
+            ? {}
+            : { modeled: true, chargeBasis: "modeled" }),
         },
       });
       lastCharged = periodStart;
@@ -422,4 +450,102 @@ export async function materializeDueSubscriptions(
     ambiguousPaused,
     nonUsdSkipped,
   };
+}
+
+const MANUAL_ADJUSTMENT_SOURCE_APP = "manual-billing-adjustment";
+
+function metadataString(
+  metadata: Prisma.JsonValue | null | undefined,
+  key: string
+): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function metadataFlag(
+  metadata: Prisma.JsonValue | null | undefined,
+  key: string
+): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return (metadata as Record<string, unknown>)[key] === true;
+}
+
+/** Catalog / seed charges.  Receipt-backed Cloudflare-legacy rows stay cash. */
+function isModeledSubscriptionCharge(
+  metadata: Prisma.JsonValue | null | undefined,
+  confidence: string
+): boolean {
+  return (
+    confidence === "estimated" ||
+    metadataFlag(metadata, "modeled") ||
+    metadataString(metadata, "chargeBasis") === "modeled"
+  );
+}
+
+export interface RetractSubscriptionChargesOptions {
+  /**
+   * One-time ghost repair may delete invented pre-#1307 `actual` seed
+   * charges.  Pause / delete must not: those paths keep receipt-backed
+   * 5-key Cloudflare handoff rows.
+   */
+  includeReceiptBacked?: boolean;
+}
+
+/**
+ * Remove modeled materializer rows (and matching owner void adjustments) for
+ * one subscription.  Pause / cancel / considering must not leave invented
+ * cash in month-to-date spend.  Caller decides the new status / watermark.
+ */
+export async function retractSubscriptionChargesInTransaction(
+  tx: Prisma.TransactionClient,
+  subscriptionId: string,
+  options: RetractSubscriptionChargesOptions = {}
+): Promise<{ deleted: number }> {
+  const includeReceiptBacked = options.includeReceiptBacked === true;
+  const candidates = await tx.externalUsageEvent.findMany({
+    where: {
+      sourceApp: { in: [SUBSCRIPTION_SOURCE_APP, MANUAL_ADJUSTMENT_SOURCE_APP] },
+    },
+    select: { id: true, sourceApp: true, confidence: true, metadata: true },
+  });
+  const ids = candidates
+    .filter((event) => {
+      if (event.sourceApp === SUBSCRIPTION_SOURCE_APP) {
+        if (metadataString(event.metadata, "subscriptionId") !== subscriptionId) {
+          return false;
+        }
+        return (
+          includeReceiptBacked ||
+          isModeledSubscriptionCharge(event.metadata, event.confidence)
+        );
+      }
+      if (metadataString(event.metadata, "voidsSubscriptionId") !== subscriptionId) {
+        return false;
+      }
+      return (
+        includeReceiptBacked ||
+        isModeledSubscriptionCharge(event.metadata, event.confidence) ||
+        metadataFlag(event.metadata, "estimate")
+      );
+    })
+    .map((event) => event.id);
+  if (ids.length === 0) return { deleted: 0 };
+  const deleted = await tx.externalUsageEvent.deleteMany({
+    where: { id: { in: ids } },
+  });
+  return { deleted: deleted.count };
+}
+
+export async function retractSubscriptionCharges(
+  subscriptionId: string,
+  options: RetractSubscriptionChargesOptions = {}
+): Promise<{ deleted: number }> {
+  return prisma.$transaction((tx) =>
+    retractSubscriptionChargesInTransaction(tx, subscriptionId, options)
+  );
 }

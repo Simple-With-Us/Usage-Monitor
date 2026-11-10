@@ -65,3 +65,24 @@ export async function readBoundedRequestBody(
   }
   return bytes;
 }
+
+// Default ceiling for the dashboard's JSON mutators, matching MAX_OTLP_BODY_BYTES.
+// Every one of them carries a handful of short scalar fields, so 1 MiB is orders
+// of magnitude above any legitimate payload while still bounding the buffer.
+export const MAX_JSON_BODY_BYTES = 1_048_576;
+
+/**
+ * `request.json()` with the byte ceiling applied during the read. Throws
+ * RequestBodyTooLargeError when over the cap and SyntaxError on malformed
+ * JSON, so callers' existing parse-error handling keeps working unchanged.
+ */
+export async function readBoundedJsonBody(
+  request: Request,
+  options: { maxBytes?: number; label: string }
+): Promise<unknown> {
+  const bytes = await readBoundedRequestBody(request, {
+    maxBytes: options.maxBytes ?? MAX_JSON_BODY_BYTES,
+    label: options.label,
+  });
+  return JSON.parse(new TextDecoder().decode(bytes));
+}

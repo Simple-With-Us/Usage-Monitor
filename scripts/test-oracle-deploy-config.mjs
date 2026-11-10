@@ -16,20 +16,20 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const read = (relativePath) =>
   readFileSync(path.join(repoRoot, relativePath), "utf8");
 
-const workflow = read(".github/workflows/oracle-production-deploy.yml");
+const workflow = read(".github/workflows/production-deploy-verify.yml");
 const uptimeWorkflow = read(".github/workflows/uptime-monitor.yml");
-const compose = read("deploy/oracle/compose.production.yaml");
-const composeDev = read("deploy/oracle/compose.yaml");
-const caddy = read("deploy/oracle/Caddyfile");
-const oracleReadme = read("deploy/oracle/README.md");
-const deploy = read("deploy/oracle/deploy-production.sh");
-const poller = read("deploy/oracle/auto-deploy.sh");
-const service = read("deploy/oracle/usage-monitor.service");
-const deployService = read("deploy/oracle/usage-monitor-auto-deploy.service");
-const timer = read("deploy/oracle/usage-monitor-auto-deploy.timer");
+const compose = read("deploy/retired/oracle/compose.production.yaml");
+const composeDev = read("deploy/retired/oracle/compose.yaml");
+const caddy = read("deploy/retired/oracle/Caddyfile");
+const oracleReadme = read("deploy/retired/oracle/README.md");
+const deploy = read("deploy/retired/oracle/deploy-production.sh");
+const poller = read("deploy/retired/oracle/auto-deploy.sh");
+const service = read("deploy/retired/oracle/usage-monitor.service");
+const deployService = read("deploy/retired/oracle/usage-monitor-auto-deploy.service");
+const timer = read("deploy/retired/oracle/usage-monitor-auto-deploy.timer");
 const ci = read(".github/workflows/ci.yml");
 const renderRetirement = JSON.parse(
-  read("deploy/oracle/render-retired.production.json"),
+  read("deploy/retired/oracle/render-retired.production.json"),
 );
 
 function requireText(body, pattern, message) {
@@ -54,12 +54,27 @@ requireText(workflow, /\.revision == \$revision/, "workflow must verify the exac
 requireText(workflow, /cancel-in-progress:\s*true/, "stale receipt observers should be cancelled");
 requireText(workflow, /timeout-minutes:\s*250/, "observer job must outlast the host transaction ceiling");
 requireText(workflow, /seq 1 1440/, "observer must cover the 240-minute host transaction ceiling");
-requireText(workflow, /ORACLE_ORIGIN_IPV4:\s*"141\.148\.182\.224"/, "observer must pin the reserved Oracle origin");
-requireText(workflow, /--resolve "usage\.jays\.services:443:\$\{ORACLE_ORIGIN_IPV4\}"/, "observer must bypass Cloudflare bot challenges without weakening TLS");
+requireText(workflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "observer must pin the Hetzner Coolify origin");
+requireText(workflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGIN_IPV4\}"/, "observer must bypass Cloudflare bot challenges without weakening TLS");
 forbidText(workflow, /secrets\./, "the observer workflow must not hold a production secret");
 forbidText(workflow, /ssh-keyscan|StrictHostKeyChecking=no/, "unsafe SSH bootstrap is forbidden");
-requireText(uptimeWorkflow, /ORACLE_ORIGIN_IPV4:\s*"141\.148\.182\.224"/, "GitHub uptime must pin the reserved Oracle origin");
-requireText(uptimeWorkflow, /--resolve "usage\.jays\.services:443:\$\{ORACLE_ORIGIN_IPV4\}"/, "GitHub uptime must avoid Cloudflare false failures while retaining TLS validation");
+requireText(uptimeWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "GitHub uptime must pin the Hetzner Coolify origin");
+requireText(uptimeWorkflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGIN_IPV4\}"/, "GitHub uptime must avoid Cloudflare false failures while retaining TLS validation");
+requireText(
+  uptimeWorkflow,
+  /INCIDENT_TITLE:\s*"\[Uptime\] Usage Monitor Hetzner origin readiness failure"/,
+  "uptime issue title must name the live Hetzner origin, not the retired Oracle host",
+);
+forbidText(
+  uptimeWorkflow,
+  /INCIDENT_TITLE:.*Oracle/,
+  "uptime issue title must not mention the retired Oracle host",
+);
+requireText(
+  uptimeWorkflow,
+  /PAGERDUTY_DEDUP_KEY:\s*"usage-monitor-oracle-origin-readiness"/,
+  "PagerDuty dedup key stays historical so open incidents do not fork",
+);
 requireText(ci, /npm run test:oracle-deploy/, "hosted CI must exercise deployment contracts");
 
 // Production uses the Cloudflare-proxied public hostname. The old sslip.io
@@ -114,22 +129,37 @@ for (const [pattern, message] of [
   [/flock -w 10/, "host deployment lock"],
   [/EXPECTED_DATA_UUID/, "pinned data-volume UUID"],
   [/USAGE_SCHEDULER_ENABLED/, "sole scheduler guard"],
-  [/usage-monitor-prod-v3/, "exact Garage lineage guard"],
+  [/jays-usage-monitor-eu/, "B2 primary bucket guard"],
   [/commit\.verification\.verified/, "verified GitHub commit guard"],
   [/merge_commit_sha/, "merged PR guard"],
   [/GITHUB_ACTIONS_APP_ID/, "trusted GitHub Actions app guard"],
   [/Analyze JavaScript and TypeScript/, "CodeQL check guard"],
   [/create_sqlite_backup/, "transaction-consistent backup"],
+  [/timeout --signal=TERM --kill-after=30s 1800 \\\s*\n\s*sqlite3/, "long SQLite Online Backup timeout for large prod DB"],
   [/PRAGMA integrity_check/, "SQLite integrity verification"],
   [/PRAGMA foreign_key_check/, "SQLite foreign-key verification"],
   [/--network none/, "offline scratch migration"],
   [/--no-deps --no-build --force-recreate app/, "single-app cutover"],
   [/lastTickSucceeded/, "fresh scheduler-tick acceptance"],
-  [/wait_for_backup_advancement/, "post-cutover Garage TXID advancement"],
-  [/capture_quiescent_backup_watermark/, "post-stop Garage watermark capture"],
+  [/refs\/deploy\//, "fetch exact deploy SHA into root-owned mirror"],
+  [/origin\/main advanced to/, "allow main tip to advance mid exact-SHA deploy"],
+  [/is not an ancestor of origin\/main/, "reject target SHAs that left main"],
+  [/continuing exact-SHA deploy of/, "cutover continues when main tip advances"],
+  [/committing exact-SHA/, "acceptance continues when main tip advances"],
+  [/still on main \(tip advanced to/, "require_current_main allows main ancestors"],
+
+  [/capture_pre_stop_backup_watermark/, "pre-stop online Garage watermark capture"],
+  [/capture_quiescent_backup_watermark/, "post-stop Garage watermark capture (uses pre-stop TXID)"],
+  [/r2-disabled-70pct\.flag/, "R2 free-tier kill-switch acceptance path"],
+  [/curl -sS --max-time 30/, "ready probes must keep JSON bodies on HTTP 503"],
+  [/for _ in \{1\.\.180\}/, "extended candidate readiness wait for large DB pre-migration backup"],
+  [/candidate image missing after backup; rebuilding/, "re-verify candidate image after long backup"],
   [/ltx -config \/app\/litestream\.yml -level "\$\{level\}"/, "per-level LTX tip listing (not full history)"],
   [/for level in 0 1 2 3 4 5/, "L0-then-L1..L5 fallback when tip is compacted"],
   [/list_garage_ltx_level/, "shared LTX level lister for online/offline paths"],
+  [/run_usage_monitor_oneshot/, "named one-shot docker runs (no random epic_jackson unmanaged names)"],
+  [/usage-monitor-\$\{kind\}-\$\$/, "one-shot container name prefix usage-monitor-<kind>-pid"],
+  [/docker run --name "\$\{name\}"/, "one-shots pass --name to docker run"],
   [/-integrity-check quick/, "post-cutover Garage restore structural check"],
   [/readonly GARAGE_RESTORE_TIMEOUT_SECONDS=900/, "bounded Garage restore"],
   [/readonly GARAGE_RESTORE_CLIENT_TIMEOUT_SECONDS=960/, "bounded Garage Docker client"],
@@ -153,7 +183,7 @@ for (const [pattern, message] of [
   [/--min-free-space="\$\{MIN_BUILD_CACHE_FREE\}"/, "BuildKit free-space target"],
   [/--reserved-space="\$\{RESERVED_BUILD_CACHE\}"/, "BuildKit retained-cache floor"],
   [/env-vars\/USAGE_SCHEDULER_ENABLED/, "exact Render scheduler lookup without pagination"],
-  [/--kill-after=60s 2700/, "bounded target-controlled image build"],
+  [/--kill-after=60s 5400/, "bounded target-controlled image build (shared-host ceiling)"],
   [/--kill-after=30s 900/, "bounded target-controlled scratch migration"],
   [/on_signal TERM 143/, "signal-safe rollback"],
   [/rolling code back.*without restoring SQLite/, "code-only rollback"],
@@ -177,6 +207,10 @@ requireText(poller, /mountpoint -q/, "writer recovery must require the data moun
 requireText(poller, /docker update --restart=no/, "the poller must retrofit mount-safe restart policy before honoring pause");
 requireText(poller, /flock -w 10 8/, "recovery must share the deployment transaction lock");
 requireText(poller, /flock -u 8/, "the poller must release its recovery lock before the child transaction");
+requireText(poller, /public_ready_matches_revision/, "poller readiness gate must be shared");
+requireText(poller, /r2-disabled-70pct\.flag/, "poller must accept intentional R2 free-tier not_ready");
+requireText(poller, /curl -sS --max-time 15/, "poller ready probes must keep JSON on HTTP 503");
+forbidText(poller, /curl -fsS.*PUBLIC_READY_URL/, "poller must not use curl -f against ready (discards 503 bodies)");
 requireText(deployService, /SuccessExitStatus=75/, "pending checks must not fail systemd");
 requireText(deployService, /TimeoutStartSec=240min/, "systemd must bound an unexpectedly wedged transaction");
 requireText(deployService, /TimeoutStopSec=45min/, "systemd must allow bounded signal rollback to finish");
@@ -221,6 +255,16 @@ const restoreEndMarker = "\n}\n\nverify_render_retirement()";
 const restoreEnd = deploy.indexOf(restoreEndMarker, restoreStart);
 assert.ok(restoreStart >= 0 && restoreEnd > restoreStart, "restore functions must be extractable for behavioral tests");
 const restoreFunctions = deploy.slice(restoreStart, restoreEnd + 2);
+const productionRestoreKillSwitch = "/data/r2-disabled-70pct.flag";
+assert.equal(
+  restoreFunctions.split(productionRestoreKillSwitch).length - 1,
+  1,
+  "restore fixture must contain exactly one production kill-switch path",
+);
+const isolatedRestoreFunctions = restoreFunctions.replace(
+  productionRestoreKillSwitch,
+  "$CASE_DIR_VALUE/r2-disabled-70pct.flag",
+);
 
 const retentionTemp = mkdtempSync(path.join(os.tmpdir(), "usage-monitor-image-retention-"));
 const receiptPath = path.join(retentionTemp, "current.json");
@@ -347,13 +391,16 @@ function runRestoreCase({
   foreignKeyStatus = 0,
   foreignKeyResult = "",
   orphanAfterRestore = false,
+  killSwitch = false,
 } = {}) {
   const caseDir = mkdtempSync(path.join(restoreTemp, "case-"));
   const commandLog = path.join(caseDir, "commands.log");
   const restoreMarker = path.join(caseDir, "restore-started");
+  writeFileSync(commandLog, "");
+  if (killSwitch) writeFileSync(path.join(caseDir, "r2-disabled-70pct.flag"), "enabled\n");
   const harness = `
 set -Eeuo pipefail
-APP_CONTAINER=oracle-app-1
+APP_CONTAINER=usage-monitor-app-1
 DATA_DIR="$CASE_DIR_VALUE"
 DB_PATH="$CASE_DIR_VALUE/prod.db"
 TARGET_SHA="${"a".repeat(40)}"
@@ -408,7 +455,7 @@ sqlite3() {
     *) return 2 ;;
   esac
 }
-${restoreFunctions}
+${isolatedRestoreFunctions}
 trap cleanup_restore_scratch EXIT
 verify_backup_restore
 `;
@@ -509,13 +556,18 @@ try {
 
   const successfulRestore = runRestoreCase();
   assert.equal(successfulRestore.result.status, 0, successfulRestore.result.stderr);
-  assert.match(successfulRestore.commands, /docker exec oracle-app-1 \/usr\/bin\/timeout --signal=TERM --kill-after=30s 900 \/app\/bin\/litestream restore/);
-  assert.match(successfulRestore.commands, /docker top oracle-app-1 -eo pid,args ww/);
+  assert.match(successfulRestore.commands, /docker exec usage-monitor-app-1 \/usr\/bin\/timeout --signal=TERM --kill-after=30s 900 \/app\/bin\/litestream restore/);
+  assert.match(successfulRestore.commands, /docker top usage-monitor-app-1 -eo pid,args ww/);
   assert.match(successfulRestore.commands, /-integrity-check quick/);
   assert.doesNotMatch(successfulRestore.commands, /-integrity-check full/);
   assert.equal((successfulRestore.commands.match(/PRAGMA integrity_check/g) ?? []).length, 1);
   assert.equal((successfulRestore.commands.match(/PRAGMA foreign_key_check/g) ?? []).length, 1);
   assert.deepEqual(successfulRestore.restoreFiles, [], "successful restore scratch must be removed");
+
+  const skippedRestore = runRestoreCase({ killSwitch: true });
+  assert.equal(skippedRestore.result.status, 0, skippedRestore.result.stderr);
+  assert.match(skippedRestore.result.stderr, /R2 free-tier kill switch engaged; skipping full Garage acceptance restore/);
+  assert.equal(skippedRestore.commands, "", "kill switch must skip all restore commands");
 
   const timedOutRestore = runRestoreCase({ restoreStatus: 124 });
   assert.notEqual(timedOutRestore.result.status, 0, "restore timeout must fail closed");
@@ -562,8 +614,8 @@ assert.deepEqual(
 );
 
 for (const relativePath of [
-  "deploy/oracle/deploy-production.sh",
-  "deploy/oracle/auto-deploy.sh",
+  "deploy/retired/oracle/deploy-production.sh",
+  "deploy/retired/oracle/auto-deploy.sh",
 ]) {
   const result = spawnSync("bash", ["-n", path.join(repoRoot, relativePath)], {
     encoding: "utf8",

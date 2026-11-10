@@ -1,6 +1,10 @@
 # Usage Monitor
 
-Tracks API usage and cost across providers via **poller snapshots**, **pushed telemetry**, and **Claude Code OTLP metrics**, with **per-project cost attribution** and **recurring-subscription tracking**. Deployed at `usage.jays.services`.
+Usage Monitor brings usage, cost, and subscription information into one dashboard.  It combines supported provider snapshots, telemetry sent by other apps, and OTLP metrics, with project attribution where that information is available.
+
+[App overview](https://simplewithus.com/usage-client/) · [Hosted dashboard](https://usage.jays.services) · [Local Monitor](https://simplewithus.com/usage-local/)
+
+The hosted dashboard requires access.  **Client Monitor** connects to a configured Usage Monitor server; **Local Monitor** provides an on-device workspace.  The app pages list the available builds and setup options.
 
 ## Key endpoints
 
@@ -18,12 +22,12 @@ Tracks API usage and cost across providers via **poller snapshots**, **pushed te
 
 ## Per-project attribution & subscriptions
 
-- **Per-project cost:** tag usage with a project so spend rolls up per project. Claude Code:
+- **Per-project cost:** tag usage with a project so spend rolls up per project.  Claude Code:
   `OTEL_RESOURCE_ATTRIBUTES=project=<name>` (per-repo via direnv). Other apps: a top-level `project`
-  field on the ingest contract. Names resolve case-insensitively to a `Project`; create the Project
+  field on the ingest contract.  Names resolve case-insensitively to a `Project`; create the Project
   (with a budget) in Settings → Projects.
 - **Subscriptions:** track recurring fixed fees (e.g. a Claude plan) with an interval and renewal
-  date in Settings → Subscriptions. A maintenance job materializes each billing period's fee as a
+  date in Settings → Subscriptions.  A maintenance job materializes each billing period's fee as a
   usage event, so subscriptions count toward provider and project budgets automatically.
 
 ## Quick start
@@ -36,7 +40,7 @@ npm run dev -- --turbopack
 ```
 
 The webpack `next dev` path is affected by an upstream instrumentation-bundling
-bug in this project. Turbopack is required for local development; production
+bug in this project.  Turbopack is required for local development; production
 `next build` / `next start` are unaffected.
 
 ## Verify
@@ -48,19 +52,21 @@ npm run verify
 `verify` runs lint, TypeScript, unit/integration tests, the real SQLite safe-
 migration reproduction, transaction-consistent pre-migration backup and
 retention tests, startup/backup configuration tests, and a production Next.js
-build. CI uses the same pinned Node version from `.node-version`.
+build.  CI uses the same pinned Node version from `.node-version`.
 
 ## Tech stack
 
 - **Next.js** (App Router) — web framework
-- **Prisma** (SQLite) — ORM + database (dedicated `/data` block volume on the production VM)
-- **Oracle Cloud A1 VM** (Docker + Caddy) — production deployment (see `DEPLOY.md` and `deploy/oracle/README.md`); Render is retired/suspended as a rollback host only
+- **Prisma** (SQLite) — ORM + database
+- **Coolify** — deployment tooling (see `DEPLOY.md`)
+- **Cloudflare** — public HTTPS proxy for `usage.jays.services`; also hosts the optional receipt-inbox Worker
+- **Backblaze B2** — Litestream replica; Cloudflare R2 is weekly archive only
 - **Sentry** — error monitoring (Sentry Health card)
 
 ## Docs
 
 - **[AGENTS.md](AGENTS.md)** — agent-facing guide (schema, auth, ingest flows, env vars)
-- **[DEPLOY.md](DEPLOY.md)** — deployment guide (Oracle production; Render runbook retired to `deploy/render/RETIRED-rollback.md`)
+- **[DEPLOY.md](DEPLOY.md)** — deployment runbook
 - **[docs/litestream.md](docs/litestream.md)** — backup and restore runbook
 - **[docs/release-maintenance.md](docs/release-maintenance.md)** — why one-time
   data repairs/seeds remain explicit and what safe marker automation requires

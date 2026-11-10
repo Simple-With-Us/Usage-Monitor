@@ -18,6 +18,8 @@ const fetchProviderUsage = vi.fn();
 const runUsageMaintenance = vi.fn();
 const bootstrapStGeminiCredentialToInfisical = vi.fn();
 const syncProviderCredentialsFromInfisical = vi.fn();
+const ensureRoicProviderSeeded = vi.fn();
+const ensureCloudflareFleetProvidersSeeded = vi.fn();
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -35,6 +37,15 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/lib/adapters", () => ({
   fetchProviderUsage: (provider: unknown) => fetchProviderUsage(provider),
+}));
+
+vi.mock("@/lib/ensure-roic-provider", () => ({
+  ensureRoicProviderSeeded: () => ensureRoicProviderSeeded(),
+}));
+
+vi.mock("@/lib/ensure-cloudflare-fleet-providers", () => ({
+  ensureCloudflareFleetProvidersSeeded: () =>
+    ensureCloudflareFleetProvidersSeeded(),
 }));
 
 vi.mock("@/lib/usage-maintenance", () => ({
@@ -139,6 +150,10 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     create.mockReset();
     fetchProviderUsage.mockReset();
     runUsageMaintenance.mockReset();
+    ensureRoicProviderSeeded.mockReset();
+    ensureRoicProviderSeeded.mockResolvedValue(undefined);
+    ensureCloudflareFleetProvidersSeeded.mockReset();
+    ensureCloudflareFleetProvidersSeeded.mockResolvedValue(undefined);
     bootstrapStGeminiCredentialToInfisical.mockReset();
     bootstrapStGeminiCredentialToInfisical.mockResolvedValue({
       enabled: false,
@@ -930,9 +945,8 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       markTickCompleted,
     });
 
-    // maintenanceHealthy (and therefore `succeeded`) stays true - a
-    // provider-fetch outage must not flip lastTickSucceeded/
-    // consecutiveFailures on its own.
+    // maintenanceHealthy stays true (consecutiveFailures unchanged), but the
+    // summary still records a total provider-poll outage for readiness.
     expect(markTickCompleted).toHaveBeenCalledWith(true, {
       total: 3,
       successes: 0,
@@ -975,5 +989,75 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       providerFetchDegraded: false,
       cloudflareLegacyHandoff: "disabled",
     });
+  });
+
+  it("keeps the tick healthy when the Cursor admin poller throws", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => {
+      throw new Error("cursor admin down");
+    });
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await expect(
+      runUsagePollingSchedulerTick({
+        fetchProviders,
+        runMaintenance,
+        markTickStarted,
+        markTickCompleted,
+        pollCursorAdmin,
+        cursorAdminEnabled: true,
+      })
+    ).resolves.toBeUndefined();
+
+    expect(pollCursorAdmin).toHaveBeenCalledOnce();
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      maintenanceHealthy: true,
+      providerFetchDegraded: false,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("does not call the Cursor admin poller when it is left off", async () => {
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => undefined);
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickCompleted,
+      pollCursorAdmin,
+    });
+
+    expect(pollCursorAdmin).not.toHaveBeenCalled();
+    expect(markTickCompleted).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ maintenanceHealthy: true })
+    );
   });
 });

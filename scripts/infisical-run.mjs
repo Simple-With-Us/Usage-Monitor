@@ -2,13 +2,15 @@
 // Launches a command with secrets injected from Infisical for Usage-Monitor,
 // then propagates the child's exit code. Sets SECRETS_SOURCE=infisical.
 //
-// Auth: Universal Auth Client ID + Client Secret (preferred), falling back to
-// INFISICAL_AUTOMATION_CLIENT_ID / INFISICAL_SHARED_CLIENT_ID or INFISICAL_TOKEN.
+// Auth: explicitly supplied app machine identity or project service token.
+// Fleet Automation and other projects' credentials are never borrowed.
 //
 // Usage: node scripts/infisical-run.mjs -- npm run start
 //        node scripts/infisical-run.mjs --check
 
 import { spawn, spawnSync } from "node:child_process";
+import { resolveUmInfisicalEnv } from "./lib/infisical-app-auth-env.mjs";
+import { verifyServiceToken } from "./lib/infisical-service-token.mjs";
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
@@ -30,26 +32,43 @@ if (probe.error?.code === "ENOENT") {
   process.exit(127);
 }
 
-const envName = process.env.INFISICAL_ENV || process.env.NODE_ENV || "dev";
-const secretsPath = process.env.INFISICAL_PATH || "/";
-const projectId =
-  process.env.INFISICAL_PROJECT_ID ||
-  process.env.INFISICAL_UM_PROJECT_ID ||
-  "86e35e51-91bc-4dfd-a045-4484726b9c40";
+// Owner directive 2026-10-10: Infisical prod is the only environment (dev and
+// staging are being retired).  The old NODE_ENV fallback produced slugs that
+// are not Infisical environments ("production", "development"), so it is gone.
+const requestedEnv = (process.env.INFISICAL_ENV || "").trim();
+if (requestedEnv && requestedEnv !== "prod") {
+  console.error(
+    "[infisical] Refusing non-prod INFISICAL_ENV: Usage-Monitor reads Infisical prod only."
+  );
+  process.exit(2);
+}
+const envName = "prod";
+const configuredBaseUrl = process.env.INFISICAL_BASE_URL || process.env.INFISICAL_API_URL;
+let verifiedOrigin;
+if (configuredBaseUrl) {
+  try {
+    const url = new URL(configuredBaseUrl);
+    if (url.protocol !== "https:" || !["app.infisical.com", "us.infisical.com", "eu.infisical.com"].includes(url.hostname) || url.username || url.password || url.port || url.search || url.hash || !["", "/", "/api"].includes(url.pathname)) throw new Error();
+    verifiedOrigin = url.origin;
+  } catch { console.error("[infisical] Refusing an unsupported Infisical base URL."); process.exit(2); }
+}
+const explicitAuth = resolveUmInfisicalEnv(process.env);
+const secretsPath = explicitAuth.secretPath;
+const projectId = explicitAuth.projectId;
+if (!/^\/(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)?$/.test(secretsPath) || secretsPath.split("/").some((part) => part === "." || part === "..")) {
+  console.error("[infisical] Refusing a non-exact secret folder."); process.exit(2);
+}
 
-const clientId =
-  process.env.INFISICAL_CLIENT_ID ||
-  process.env.INFISICAL_UM_CLIENT_ID ||
-  process.env.INFISICAL_AUTOMATION_CLIENT_ID ||
-  process.env.INFISICAL_SHARED_CLIENT_ID;
+if (!projectId) {
+  console.error(
+    "[infisical] Missing project id: set INFISICAL_UM_PROJECT_ID (or INFISICAL_PROJECT_ID)."
+  );
+  process.exit(2);
+}
 
-const clientSecret =
-  process.env.INFISICAL_CLIENT_SECRET ||
-  process.env.INFISICAL_UM_CLIENT_SECRET ||
-  process.env.INFISICAL_AUTOMATION_CLIENT_SECRET ||
-  process.env.INFISICAL_SHARED_CLIENT_SECRET;
-
-let token = process.env.INFISICAL_TOKEN || process.env.INFISICAL_SHARED_TOKEN;
+const clientId = explicitAuth.clientId;
+const clientSecret = explicitAuth.clientSecret;
+let token = explicitAuth.token;
 
 if (Boolean(clientId) !== Boolean(clientSecret)) {
   console.error(
@@ -74,7 +93,7 @@ if (clientId && clientSecret && !token) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (r.status !== 0) {
-    console.error(`[infisical] Universal-auth login failed (exit ${r.status}): ${r.stderr.trim()}`);
+    console.error(`[infisical] Universal-auth login failed (exit ${r.status}).`);
     process.exit(r.status ?? 1);
   }
   token = r.stdout.trim();
@@ -82,14 +101,29 @@ if (clientId && clientSecret && !token) {
 
 if (!token) {
   console.error(
-    "[infisical] Missing credentials: set INFISICAL_AUTOMATION_CLIENT_ID + INFISICAL_AUTOMATION_CLIENT_SECRET (or INFISICAL_TOKEN)."
+    "[infisical] Missing app credentials: set an app-specific client pair or INFISICAL_UM_READ_TOKEN."
   );
   process.exit(2);
+}
+
+if (token.startsWith("st.")) {
+  // A service token can return its own folder for arbitrary path queries.
+  // Verify its own project/environment/folder/permission metadata instead.
+  try {
+    await verifyServiceToken({ token, projectId, paths: [secretsPath], permissions: ["read"], baseUrl: verifiedOrigin });
+  } catch {
+    console.error("[infisical] Service token metadata does not verify the exact app read scope.");
+    process.exit(2);
+  }
 }
 
 const runEnv = {
   ...process.env,
   INFISICAL_TOKEN: token,
+  ...(token.startsWith("st.") ? { INFISICAL_UM_READ_TOKEN: token } : {}),
+  INFISICAL_UM_PROJECT_ID: projectId,
+  INFISICAL_UM_SECRET_PATH: secretsPath,
+  ...(verifiedOrigin ? { INFISICAL_BASE_URL: verifiedOrigin } : {}),
   SECRETS_SOURCE: "infisical",
 };
 
@@ -104,7 +138,7 @@ if (checkOnly) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (r.status !== 0) {
-    console.error(`[infisical] Check failed (exit ${r.status}): ${r.stderr.trim()}`);
+    console.error(`[infisical] Check failed (exit ${r.status}).`);
     process.exit(r.status ?? 1);
   }
   try {
@@ -113,7 +147,7 @@ if (checkOnly) {
     console.log(`[infisical] Verified usage-monitor project secret store (${envName}): ${count} keys accessible.`);
     process.exit(0);
   } catch (err) {
-    console.error(`[infisical] Check parse error: ${err.message}`);
+    console.error("[infisical] Check returned an invalid response.");
     process.exit(1);
   }
 }
@@ -124,12 +158,37 @@ if (process.env.INFISICAL_BASE_URL) {
 }
 execArgs.push("--", ...command);
 
-const child = spawn("infisical", execArgs, {
+const forwardSigint = () => child.kill("SIGINT");
+const forwardSigterm = () => child.kill("SIGTERM");
+let childSettled = false;
+let child;
+
+const removeSignalForwarders = () => {
+  process.off("SIGINT", forwardSigint);
+  process.off("SIGTERM", forwardSigterm);
+};
+
+process.on("SIGINT", forwardSigint);
+process.on("SIGTERM", forwardSigterm);
+
+child = spawn("infisical", execArgs, {
   stdio: "inherit",
   env: runEnv,
 });
 
-child.on("exit", (code, signal) => {
+child.once("error", (error) => {
+  if (childSettled) return;
+  childSettled = true;
+  removeSignalForwarders();
+  console.error(`[infisical] Failed to start Infisical CLI (${error.code ?? "unknown"}).`);
+  process.exit(127);
+});
+
+child.once("exit", (code, signal) => {
+  if (childSettled) return;
+  childSettled = true;
+  removeSignalForwarders();
+
   if (signal) {
     process.kill(process.pid, signal);
   } else {

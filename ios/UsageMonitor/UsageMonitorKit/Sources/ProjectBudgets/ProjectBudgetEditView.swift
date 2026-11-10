@@ -207,6 +207,7 @@ struct ProjectBudgetEditView: View {
 
 // MARK: - Previews
 
+#if DEBUG
 #Preview("Add") {
     ProjectBudgetEditView(
         existing: nil,
@@ -225,3 +226,4 @@ struct ProjectBudgetEditView: View {
     )
     .preferredColorScheme(.dark)
 }
+#endif

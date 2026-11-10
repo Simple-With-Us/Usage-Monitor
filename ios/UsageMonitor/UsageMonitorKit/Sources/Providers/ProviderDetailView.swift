@@ -2,6 +2,7 @@ import SwiftUI
 import AppCore
 import DesignSystem
 import Models
+import Networking
 
 /// Typed navigation value for pushing a provider detail. Carrying only the id
 /// keeps navigation state small and lets the detail re-resolve the *current*
@@ -23,6 +24,7 @@ struct ProviderDetailView: View {
     /// Optional so previews (store-only) don't trap; the app injects it.
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
     @State private var depthStore = ProviderDepthStore()
+    @State private var showBudgetEditor = false
 
     /// Always resolve from the live store so a pull-to-refresh updates the
     /// numbers in place.
@@ -46,6 +48,34 @@ struct ProviderDetailView: View {
         }
         .navigationTitle(provider?.title ?? "Provider")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if provider != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Edit Budget") {
+                        Haptics.tap()
+                        showBudgetEditor = true
+                    }
+                    .accessibilityHint("Opens the monthly budget editor. Requires full access.")
+                }
+            }
+        }
+        .sheet(isPresented: $showBudgetEditor) {
+            ProviderBudgetEditSheet(
+                providerID: route.id,
+                providerTitle: provider?.title ?? "Provider",
+                currentBudgetUsd: provider?.monthlyBudgetUsd,
+                client: env?.apiClient,
+                onSaved: {
+                    showBudgetEditor = false
+                    Task { await store.refresh() }
+                },
+                onRequestSignIn: {
+                    showBudgetEditor = false
+                    env?.selectTab?(.settings)
+                }
+            )
+            .presentationDetents([.medium, .large])
+        }
         .task { await store.loadIfNeeded() }
         .task(id: route.id) { [apiClient = env?.apiClient] in
             if let apiClient {
@@ -71,9 +101,16 @@ struct ProviderDetailView: View {
             if !provider.spendComponents.isEmpty {
                 compositionCard(provider)
             }
+            let billingRecords = !depthStore.billingRecords.isEmpty ? depthStore.billingRecords : (provider.externalBilling ?? [])
+            if !billingRecords.isEmpty {
+                ProviderUsageBreakdownCard(
+                    providerTitle: provider.title,
+                    records: billingRecords
+                )
+            }
             historySection(provider)
-            if !depthStore.billingRecords.isEmpty {
-                ExternalBillingCard(records: depthStore.billingRecords)
+            if !billingRecords.isEmpty {
+                ExternalBillingCard(records: billingRecords)
             }
             if provider.hasRenewalContext {
                 renewalCard(provider)
@@ -94,14 +131,11 @@ struct ProviderDetailView: View {
     private func header(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(spacing: Theme.Spacing.md) {
-                Text(provider.title.prefix(1).uppercased())
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(provider.semanticStatus == .neutral ? Theme.Colors.accent : provider.semanticStatus.tint)
-                    .frame(width: 52, height: 52)
-                    .background(
-                        (provider.semanticStatus == .neutral ? Theme.Colors.accentSoft : provider.semanticStatus.wash),
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
-                    )
+                ProviderMonogram(
+                    title: provider.title,
+                    status: provider.semanticStatus,
+                    size: 52
+                )
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     Text(provider.title)
                         .font(Theme.Typography.title)
@@ -146,7 +180,17 @@ struct ProviderDetailView: View {
     @ViewBuilder
     private func budgetCard(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionHeader("Budget", subtitle: provider.hasBudget ? "Month to date" : nil)
+            SectionHeader("Budget", subtitle: provider.hasBudget ? "Month to Date" : nil) {
+                Button {
+                    Haptics.tap()
+                    showBudgetEditor = true
+                } label: {
+                    Text(provider.hasBudget ? "Edit" : "Set budget")
+                        .font(Theme.Typography.captionEmphasis)
+                        .foregroundStyle(Theme.Colors.accent)
+                }
+                .accessibilityLabel(provider.hasBudget ? "Edit monthly budget" : "Set monthly budget")
+            }
             if provider.hasBudget, let budget = provider.monthlyBudgetUsd {
                 LabeledBudgetMeter(
                     title: provider.hasBudget ? "\(CurrencyFormat.percent(provider.budgetFraction)) used" : "Spend",
@@ -184,17 +228,25 @@ struct ProviderDetailView: View {
             StatTile(
                 label: "Projected",
                 value: CurrencyFormat.usd(provider.projectedEomUsd),
-                secondary: "end of month",
+                secondary: providerProjectionSecondary(provider),
                 systemImage: "chart.line.uptrend.xyaxis",
                 status: projectionStatus(provider)
             )
             if let remaining = provider.remainingUsd {
                 StatTile(
-                    label: remaining < 0 ? "Over by" : "Remaining",
+                    label: remaining < 0 ? "Over By" : "Remaining",
                     value: CurrencyFormat.usd(abs(remaining)),
-                    secondary: provider.hasBudget ? "of budget" : nil,
+                    secondary: "of budget",
                     systemImage: remaining < 0 ? "exclamationmark.triangle.fill" : "banknote",
                     status: remaining < 0 ? .danger : .ok
+                )
+            } else {
+                StatTile(
+                    label: "Budget",
+                    value: "no budget set",
+                    secondary: nil,
+                    systemImage: "banknote",
+                    status: .neutral
                 )
             }
             if provider.hasBudget, let percent = provider.percentUsed {
@@ -207,7 +259,7 @@ struct ProviderDetailView: View {
                 )
             } else if provider.estimatedApiEquivalentUsd > 0 {
                 StatTile(
-                    label: "API-equivalent",
+                    label: "API-Equivalent",
                     value: CurrencyFormat.usd(provider.estimatedApiEquivalentUsd),
                     secondary: "list-price value",
                     systemImage: "tag.fill"
@@ -234,7 +286,7 @@ struct ProviderDetailView: View {
 
     private func compositionCard(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionHeader("Spend breakdown", subtitle: "How this month's \(CurrencyFormat.usd(provider.spentUsd)) is made up")
+            SectionHeader("Spend Breakdown", subtitle: "How this month's \(CurrencyFormat.usd(provider.spentUsd)) is made up")
             SpendCompositionBar(components: provider.spendComponents)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -251,29 +303,42 @@ struct ProviderDetailView: View {
     @ViewBuilder
     private func historySection(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            // Range control only when full-access history is available or
-            // loading — without a session the pace estimate is not windowed.
             if showsHistoryRangeControl {
-                historyRangePicker
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    HStack {
+                        Text("Reported spend history")
+                            .font(Theme.Typography.sectionHeader)
+                            .foregroundStyle(Theme.Colors.primaryText)
+                        Spacer()
+                        if depthStore.isReloadingHistory {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    Picker("History range", selection: historyRangeBinding) {
+                        ForEach(SnapshotHistoryRange.allCases) { range in
+                            Text(range.shortLabel).tag(range)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(depthStore.isReloadingHistory)
+                    .accessibilityLabel("Snapshot history range")
+                    .accessibilityValue(depthStore.historyRange.displayLabel)
+                    .accessibilityHint("Does not change month-to-date budget totals.")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .dsCard()
             }
 
             if let points = depthStore.spendHistoryPoints,
                let latest = depthStore.latestRecordedSpend {
                 SparklineCard(
-                    title: "Reported spend history",
+                    title: showsHistoryRangeControl ? "" : "Reported spend history",
                     value: CurrencyFormat.usd(latest),
                     caption: depthStore.historyCaption,
                     points: points,
                     status: projectionStatus(provider)
                 )
                 .opacity(depthStore.isReloadingHistory ? 0.55 : 1)
-                .overlay(alignment: .topTrailing) {
-                    if depthStore.isReloadingHistory {
-                        ProgressView()
-                            .controlSize(.small)
-                            .padding(Theme.Spacing.sm)
-                    }
-                }
                 .accessibilityHint(
                     depthStore.isReloadingHistory
                         ? "Reloading history for \(depthStore.historyRange.displayLabel)"
@@ -283,15 +348,11 @@ struct ProviderDetailView: View {
                 SkeletonBlock(height: 120, radius: Theme.Radius.lg)
                     .accessibilityLabel("Loading reported spend history")
             } else {
-                // Estimated pace when history is unavailable (no session, empty
-                // window, or load failure). Session sign-in hint is separate.
                 paceCard(provider)
             }
         }
     }
 
-    /// True once a session-gated history read is in flight or has settled, so
-    /// the range control is not shown above the no-session pace fallback alone.
     private var showsHistoryRangeControl: Bool {
         if depthStore.isReloadingHistory { return true }
         switch depthStore.historyState {
@@ -300,27 +361,6 @@ struct ProviderDetailView: View {
         case .idle, .failed:
             return false
         }
-    }
-
-    /// Segmented control for the snapshot history window — same four options
-    /// as the website's Range select (7 days / 30 days / 90 days / 1 year).
-    private var historyRangePicker: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            Text("History range")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.secondaryText)
-            Picker("History range", selection: historyRangeBinding) {
-                ForEach(SnapshotHistoryRange.allCases) { range in
-                    Text(range.shortLabel).tag(range)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(depthStore.isReloadingHistory)
-            .accessibilityLabel("Snapshot history range")
-            .accessibilityValue(depthStore.historyRange.displayLabel)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .dsCard()
     }
 
     private var historyRangeBinding: Binding<SnapshotHistoryRange> {
@@ -384,48 +424,79 @@ struct ProviderDetailView: View {
 
     private func renewalCard(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionHeader("Subscriptions & renewals")
+            SectionHeader(
+                "EOM Projection Parts",
+                subtitle: "Usage pace + fixed accrued + known renewals"
+            )
+            DetailStatRow(
+                label: "Usage (Extrapolated)",
+                value: CurrencyFormat.usd(provider.resolvedProjectedVariableUsageUsd)
+            )
+            DetailStatRow(
+                label: "Fixed Accrued MTD",
+                value: CurrencyFormat.usd(provider.resolvedFixedAccruedUsd)
+            )
+            DetailStatRow(
+                label: "Known Renewals Remaining",
+                value: CurrencyFormat.usd(provider.resolvedForecastedSubscriptionRenewalsUsd)
+            )
             if provider.subscriptionMonthToDateUsd > 0.005 {
-                DetailStatRow(label: "Subscription this month", value: CurrencyFormat.usd(provider.subscriptionMonthToDateUsd))
-            }
-            if provider.forecastedSubscriptionRenewalsUsd > 0.005 {
-                DetailStatRow(label: "Forecast renewals", value: CurrencyFormat.usd(provider.forecastedSubscriptionRenewalsUsd))
+                DetailStatRow(label: "Subscription This Month", value: CurrencyFormat.usd(provider.subscriptionMonthToDateUsd))
             }
             if provider.fixedMonthlyCostUsd > 0.005 {
-                DetailStatRow(label: "Fixed monthly cost", value: CurrencyFormat.usd(provider.fixedMonthlyCostUsd))
+                DetailStatRow(label: "Plan Fixed Monthly", value: CurrencyFormat.usd(provider.fixedMonthlyCostUsd))
             }
+            Text("Projected \(CurrencyFormat.usd(provider.projectedEomUsd)) = usage + fixed + renewals. Subscriptions with a next bill this month appear under renewals even before they charge.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .dsCard()
+    }
+
+    private func providerProjectionSecondary(_ provider: ProviderBudgetStatus) -> String {
+        let renew = provider.resolvedForecastedSubscriptionRenewalsUsd
+        let fixed = provider.resolvedFixedAccruedUsd
+        // Secondary is a value → sentence case.
+        if renew > 0.005 || fixed > 0.005 {
+            return "usage + subs"
+        }
+        return "usage pace · eom"
     }
 
     // MARK: - Data quality
 
     private func dataQualityCard(_ provider: ProviderBudgetStatus) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionHeader("Data quality")
+            SectionHeader("Data Quality")
             DetailStatRow(
-                label: "Spend coverage",
+                label: "Spend Coverage",
                 value: provider.spendCoverage.label,
                 valueStatus: .init(coverage: provider.spendCoverage),
                 monospaced: false
             )
             if provider.pushedMonthToDateUsd > 0.005 {
-                DetailStatRow(label: "Reported (pushed)", value: CurrencyFormat.usd(provider.pushedMonthToDateUsd))
+                DetailStatRow(label: "Reported (Pushed)", value: CurrencyFormat.usd(provider.pushedMonthToDateUsd))
             }
             if provider.receiptCashPaidUsd > 0.005 {
-                DetailStatRow(label: "Cash paid (receipts)", value: CurrencyFormat.usd(provider.receiptCashPaidUsd))
+                DetailStatRow(label: "Cash Paid (Receipts)", value: CurrencyFormat.usd(provider.receiptCashPaidUsd))
             }
             if provider.estimatedApiEquivalentUsd > 0.005 {
-                DetailStatRow(label: "API-equivalent value", value: CurrencyFormat.usd(provider.estimatedApiEquivalentUsd))
+                DetailStatRow(label: "API-Equivalent Value", value: CurrencyFormat.usd(provider.estimatedApiEquivalentUsd))
             }
             if let fetched = provider.snapshotFetchedDate {
                 DetailStatRow(
-                    label: "Snapshot updated",
+                    label: "Snapshot Updated",
+                    // Relative times are values → keep lower/sentence from system formatter.
                     value: fetched.formatted(.relative(presentation: .named)),
                     monospaced: false
                 )
             }
+            Text("Most providers omit sales tax, VAT, and invoice-only fees from usage APIs. Partial coverage means the number is incomplete — set fixed monthly cost or a subscription when you know the real bill.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .dsCard()
@@ -492,7 +563,7 @@ struct ProviderDetailView: View {
             VStack(spacing: Theme.Spacing.sm) {
                 ForEach(alerts) { alert in
                     HStack(alignment: .top, spacing: Theme.Spacing.md) {
-                        Image(systemName: alert.symbolName)
+                        Image(safeSystemName: alert.symbolName, fallback: "bell.badge")
                             .font(.callout.weight(.semibold))
                             .foregroundStyle(Theme.SemanticStatus(alert.severity).tint)
                             .frame(width: 26)

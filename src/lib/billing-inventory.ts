@@ -4,6 +4,12 @@ import {
   externalBillingFreshnessWindowMs,
 } from "@/lib/external-billing-link";
 import { effectiveSubscriptionStatus } from "@/lib/subscriptions";
+import { providerPollSnapshotExpected } from "@/lib/anthropic-credentials";
+import { canonicalProviderKey } from "@/lib/provider-identity";
+import {
+  MAX_POLL_FRESHNESS_MS,
+  resolveProviderSyncMode,
+} from "@/lib/provider-sync-mode";
 
 export interface BillingInventoryExternalRecord {
   source: string;
@@ -218,6 +224,35 @@ function parseTime(value: string | null | undefined): number | null {
   if (!value) return null;
   const time = Date.parse(value);
   return Number.isFinite(time) ? time : null;
+}
+
+/**
+ * True only when this row can actually poll billing/usage. Push-only,
+ * health-only, and no-API built-ins must never look like they "need setup".
+ */
+export function billingCoverageCanPoll(provider: BillingInventoryProvider): boolean {
+  const profile = getProviderIntegrationProfile(provider.name, provider.type);
+  if (
+    profile.mode === "push-only" ||
+    profile.mode === "manual" ||
+    profile.mode === "health-only"
+  ) {
+    return false;
+  }
+  if (
+    profile.billing.visibility === "none" ||
+    profile.billing.visibility === "manual"
+  ) {
+    return false;
+  }
+  if (resolveProviderSyncMode(provider) !== "poll") return false;
+  if (canonicalProviderKey(provider.name) === "anthropic") {
+    return provider.anthropicAdminApiConfigured === true;
+  }
+  return providerPollSnapshotExpected({
+    name: provider.name,
+    type: provider.type,
+  });
 }
 
 function isRecordStale(
@@ -603,7 +638,31 @@ export function buildBillingInventory(
       const anthropicAdminConfigured =
         profile.name === "anthropic" &&
         (provider.anthropicAdminApiConfigured ?? false);
-      if (automaticBilling) {
+      const canPoll = billingCoverageCanPoll(provider);
+      const snapshotFetchedAt = parseTime(provider.latestSnapshot?.fetchedAt);
+      const snapshotFresh =
+        snapshotFetchedAt != null && now - snapshotFetchedAt < MAX_POLL_FRESHNESS_MS;
+      const manuallyOnlySummary =
+        "MANUALLY ONLY. This account cannot be fetched. Enter plan or receipt numbers yourself, or push telemetry. Adding a key will not unlock polling.";
+      if (!canPoll) {
+        if (profile.billing.visibility === "none") {
+          status = "not-applicable";
+          summary = profile.billing.summary;
+        } else if (locallyTracked) {
+          status = "tracked";
+          summary =
+            "MANUALLY ONLY for provider fetch. Local subscription or receipt tracking is what you see here.";
+        } else if (profile.name === "anthropic" && !anthropicAdminConfigured) {
+          status = "manual";
+          summary =
+            "MANUALLY ONLY for individual Anthropic accounts. No organization Admin API key is configured, and individual accounts cannot obtain one. Reconcile pushed telemetry with the Anthropic Console and track Claude plans through Subscription or receipt records.";
+        } else {
+          status = "manual";
+          summary = profile.billing.visibility === "manual"
+            ? `${manuallyOnlySummary} ${profile.billing.summary}`
+            : manuallyOnlySummary;
+        }
+      } else if (automaticBilling) {
         status = "automatic";
         summary = "Provider-reported billing or plan data is syncing.";
       } else if (
@@ -612,31 +671,24 @@ export function buildBillingInventory(
       ) {
         status = "automatic";
         summary = "Provider-reported plan or quota metadata is syncing; invoice cost may remain manual.";
-      } else if (
-        staleProviderConfirmation &&
-        !["none", "manual"].includes(profile.billing.visibility)
-      ) {
+      } else if (staleProviderConfirmation && snapshotFresh) {
+        status = locallyTracked ? "tracked" : "automatic";
+        summary =
+          "A billing confirmation is older than the freshness window. Usage Monitor is taking a new snapshot. This is not an alert.";
+      } else if (staleProviderConfirmation) {
         status = "stale";
-        summary = "Provider confirmation is stale; local tracking remains visible while the connection is checked.";
+        summary =
+          "The last usage snapshot is old. Usage Monitor is taking a new one on the next poll (at least hourly). This is not an alert.";
       } else if (locallyTracked) {
         status = "tracked";
         summary = "Billing is tracked locally; provider confirmation is not available.";
-      } else if (profile.billing.visibility === "none") {
-        status = "not-applicable";
-        summary = profile.billing.summary;
-      } else if (profile.billing.visibility === "manual") {
-        status = "manual";
-        summary = profile.billing.summary;
-      } else if (profile.name === "anthropic" && !anthropicAdminConfigured) {
-        status = "manual";
-        summary =
-          "No organization Admin API key is configured. Individual accounts cannot obtain one, so reconcile pushed producer telemetry with Anthropic Console totals and track Claude plans through Subscription or receipt records; organization accounts may add an Admin key.";
       } else if (provider.isActive === false) {
         status = "available";
         summary = "Connection is disabled; re-enable it to resume automatic billing sync.";
       } else {
         status = "available";
-        summary = "Automatic billing metadata is supported but no record has synced yet.";
+        summary =
+          "This connector can poll. No billing record has landed yet. The next successful fetch will fill it.";
       }
       return {
         providerId: provider.id,

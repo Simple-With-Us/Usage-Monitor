@@ -51,9 +51,23 @@ public final class BudgetStore {
         let task: Task<Void, Never>
     }
 
+    /// When true, ``load``/``refresh`` only paint the snapshot sink (no network).
+    /// Used for App Store screenshot capture (`-ScreenshotDemo`).
+    public var screenshotsOfflineOnly: Bool = false
+
     public init(apiClient: APIClient, sink: BudgetSnapshotSink = NullBudgetSnapshotSink()) {
         self.apiClient = apiClient
         self.sink = sink
+    }
+
+    /// Paint fixture budget data and freeze further loads (screenshot capture).
+    public func seedScreenshotFixture(_ response: BudgetStatusResponse) {
+        dataSourceGeneration &+= 1
+        state = .loaded(response)
+        lastUpdated = response.generatedAtDate ?? Date()
+        lastCachedAt = Date()
+        lastError = nil
+        screenshotsOfflineOnly = true
     }
 
     /// Swap in a new client after a host change (called by `AppEnvironment`).
@@ -150,10 +164,12 @@ public final class BudgetStore {
             }
         }
         guard generation == dataSourceGeneration else { return }
+        if screenshotsOfflineOnly { return }
         await performFetch()
     }
 
     private func performFetch() async {
+        if screenshotsOfflineOnly { return }
         await drainCacheOperations()
         let generation = dataSourceGeneration
         let client = apiClient

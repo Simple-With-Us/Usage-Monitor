@@ -86,25 +86,55 @@ final class SnapshotHistoryRangeTests: XCTestCase {
         XCTAssertEqual(SnapshotHistoryRange.allCases.map(\.days), [7, 30, 90, 365])
         XCTAssertEqual(SnapshotHistoryRange.default, .thirtyDays)
         XCTAssertEqual(SnapshotHistoryRange.sevenDays.shortLabel, "7d")
-        XCTAssertEqual(SnapshotHistoryRange.thirtyDays.displayLabel, "30 days")
+        XCTAssertEqual(SnapshotHistoryRange.thirtyDays.displayLabel, "Past 30 days")
         XCTAssertEqual(SnapshotHistoryRange.oneYear.shortLabel, "1y")
-        XCTAssertEqual(SnapshotHistoryRange.oneYear.displayLabel, "1 year")
+        XCTAssertEqual(SnapshotHistoryRange.oneYear.displayLabel, "Past year")
     }
 }
 
 final class ProviderPresentationTests: XCTestCase {
 
+    /// Incomplete spend coverage must be called out in the row caption
+    /// (#1013): APIs often omit tax, so an uncaveated percent would overstate
+    /// confidence. Complete coverage stays uncaveated.
     func testRowValueCaption() {
+        // Complete coverage → bare utilisation / bare "No budget".
         XCTAssertEqual(ProviderBudgetStatus.sampleOk.rowValueCaption, "48%")
-        XCTAssertEqual(ProviderBudgetStatus.sampleUnconfigured.rowValueCaption, "No budget")
+        XCTAssertEqual(Self.completeCoverageUnbudgeted.rowValueCaption, "No budget")
+
+        // Partial coverage → explicit cue in both the budgeted and the
+        // unbudgeted shape.
+        XCTAssertEqual(ProviderBudgetStatus.sampleWarning.rowValueCaption, "85% · partial")
+        XCTAssertEqual(ProviderBudgetStatus.sampleUnconfigured.rowValueCaption, "Partial · no budget")
     }
 
+    /// Row subtitles are *values*, so they are sentence/lower case rather than
+    /// Title Case headings (#1042, `docs/FLEET-UI-COPY.md`). The status chip
+    /// (`statusLabel`) is the Title Case one — asserted below so the two casing
+    /// registers cannot silently converge.
     func testRowSubtitleReflectsStatus() {
-        XCTAssertEqual(ProviderBudgetStatus.sampleExceeded.rowSubtitle, "Over by $14.90")
+        XCTAssertEqual(ProviderBudgetStatus.sampleExceeded.rowSubtitle, "over by $14.90")
         XCTAssertEqual(ProviderBudgetStatus.sampleWarning.rowSubtitle, "$37.60 left")
         XCTAssertEqual(ProviderBudgetStatus.sampleOk.rowSubtitle, "$103.80 left")
-        XCTAssertEqual(ProviderBudgetStatus.sampleUnconfigured.rowSubtitle, "Not budgeted · $18.05 spent")
+        XCTAssertEqual(ProviderBudgetStatus.sampleUnconfigured.rowSubtitle, "not budgeted · $18.05 spent")
     }
+
+    func testStatusLabelIsTitleCaseForTheChip() {
+        XCTAssertEqual(ProviderBudgetStatus.sampleExceeded.statusLabel, "Over Budget")
+        XCTAssertEqual(ProviderBudgetStatus.sampleWarning.statusLabel, "Approaching Budget")
+        XCTAssertEqual(ProviderBudgetStatus.sampleOk.statusLabel, "On Track")
+        XCTAssertEqual(ProviderBudgetStatus.sampleUnconfigured.statusLabel, "No Budget Set")
+    }
+
+    /// Same shape as `sampleUnconfigured` but with provably complete spend.
+    private static let completeCoverageUnbudgeted = ProviderBudgetStatus(
+        id: "prov_complete", name: "complete", displayName: "Complete",
+        monthlyBudgetUsd: nil,
+        observedVariableUsageUsd: 18.05,
+        spendCoverage: .complete,
+        spentUsd: 18.05,
+        status: .unconfigured
+    )
 
     func testSemanticStatusMapping() {
         XCTAssertEqual(ProviderBudgetStatus.sampleExceeded.semanticStatus, .danger)
@@ -146,41 +176,71 @@ final class ProviderPresentationTests: XCTestCase {
     func testHasRenewalContext() {
         let sub = ProviderBudgetStatus(
             id: "p", name: "p", displayName: "P",
-            subscriptionMonthToDateUsd: 30, spentUsd: 30
+            subscriptionMonthToDateUsd: 30, spentUsd: 30, projectedEomUsd: 30
         )
         XCTAssertTrue(sub.hasRenewalContext)
-        XCTAssertFalse(ProviderBudgetStatus.sampleOk.hasRenewalContext)
+        // Any non-zero projected EOM surfaces the usage+subscription parts card.
+        XCTAssertTrue(ProviderBudgetStatus.sampleOk.hasRenewalContext)
+        let empty = ProviderBudgetStatus(
+            id: "z", name: "z", displayName: "Z", spentUsd: 0, projectedEomUsd: 0
+        )
+        XCTAssertFalse(empty.hasRenewalContext)
     }
 }
 
 final class ProjectedStatusPreferenceTests: XCTestCase {
+    /// Every field `src/lib/budget-status.ts` declares non-nullable on
+    /// `ProviderBudgetStatus`, and that `ProviderBudgetStatus` therefore
+    /// decodes as required. `projectedStatus` is deliberately absent — each
+    /// test layers it (or not) on top.
+    private static func payload(
+        merging overrides: [String: Any] = [:]
+    ) -> [String: Any] {
+        var json: [String: Any] = [
+            "id": "p1", "name": "openai", "displayName": "OpenAI",
+            "fixedMonthlyCostUsd": 0,
+            "pushedMonthToDateUsd": 40,
+            "receiptCashPaidUsd": 0,
+            "observedVariableUsageUsd": 40,
+            "estimatedApiEquivalentUsd": 0,
+            "spendCoverage": "complete",
+            "subscriptionMonthToDateUsd": 0,
+            "fixedAccruedUsd": 0,
+            "forecastedSubscriptionRenewalsUsd": 0,
+            "spentUsd": 40, "projectedEomUsd": 95,
+            "status": "ok", "alerts": [],
+        ]
+        for (key, value) in overrides { json[key] = value }
+        return json
+    }
+
     /// The budget-detail projection badge must prefer the server's
     /// `projectedStatus` over locally recomputed thresholds (L5), so the two
     /// UIs can never disagree on the same payload.
     func testServerProjectedStatusDecodes() throws {
-        let json: [String: Any] = [
-            "id": "p1", "name": "openai", "displayName": "OpenAI",
-            "monthlyBudgetUsd": 100, "spentUsd": 40, "projectedEomUsd": 95,
-            "status": "ok", "projectedStatus": "warning", "alerts": [],
-        ]
+        let json = Self.payload(merging: [
+            "monthlyBudgetUsd": 100,
+            "projectedStatus": "warning",
+        ])
         let provider = try JSONDecoder().decode(
             ProviderBudgetStatus.self,
             from: JSONSerialization.data(withJSONObject: json)
         )
         XCTAssertEqual(provider.projectedStatus, .warning)
+        // The server's runway verdict must not be conflated with the
+        // month-to-date status it ships alongside.
+        XCTAssertEqual(provider.status, .ok)
     }
 
+    /// Payloads written before `projectedStatus` shipped (and cached snapshots
+    /// on disk) must still decode, with callers falling back to local math.
     func testMissingProjectedStatusDecodesToNil() throws {
-        let json: [String: Any] = [
-            "id": "p1", "name": "openai", "displayName": "OpenAI",
-            "spentUsd": 40, "projectedEomUsd": 95,
-            "status": "ok", "alerts": [],
-        ]
         let provider = try JSONDecoder().decode(
             ProviderBudgetStatus.self,
-            from: JSONSerialization.data(withJSONObject: json)
+            from: JSONSerialization.data(withJSONObject: Self.payload())
         )
         XCTAssertNil(provider.projectedStatus)
+        XCTAssertEqual(provider.status, .ok)
     }
 }
 

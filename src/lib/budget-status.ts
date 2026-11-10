@@ -37,10 +37,12 @@ import { deriveGeminiBillingStatus } from "@/lib/gemini-key-status";
 import { providerConfigForServer } from "@/lib/provider-secret-config";
 import { subscriptionChargeIdempotencyKey } from "@/lib/subscription-charge-identity";
 import { isLegacyMistralSpendLimitCostSnapshot } from "@/lib/mistral-snapshot-quarantine";
+import { excludeInternalSystemProvidersWhere } from "@/lib/system-providers";
 import {
   resolveOpenRouterVerifiedCash,
   resolveOpenRouterVerifiedCashConfig,
 } from "@/lib/openrouter-verified-cash";
+import { loadGlobalBudgetSnapshot } from "@/lib/global-budget";
 // Type-only import — erased at compile time, so it introduces NO runtime import
 // cycle with budget-controls.ts (which imports computeBudgetStatus from here).
 import type { BudgetBreachState } from "@/lib/budget-controls";
@@ -106,6 +108,13 @@ export interface ProviderBudgetStatus {
   linkedFixedDedupeUsd: number;
   fixedCostConflict: boolean;
   forecastedSubscriptionRenewalsUsd: number;
+  /**
+   * Remaining known subscription charges this UTC month (auto-renew walks +
+   * single next bill when autoRenew is false but nextRenewalAt is still ahead).
+   */
+  forecastedRenewals: ForecastedRenewalLine[];
+  /** Variable usage extrapolated to EOM (excludes fixed + known renewals). */
+  projectedVariableUsageUsd: number;
   spentUsd: number;
   projectedEomUsd: number;
   /**
@@ -134,6 +143,11 @@ export interface ProviderBudgetStatus {
   verifiedPreferredCashApplied: boolean;
   /** The verified period cost that replaced the self-reported estimate, or null. */
   verifiedPreferredCashUsd: number | null;
+  /**
+   * Provider-reported external billing / bucket inventory records synced from
+   * the provider's API. Populated for multi-service/bucket providers like Backblaze B2.
+   */
+  externalBilling?: ProviderExternalBillingDTO[];
   // Budget-breach automated-control observability (default-off). These reflect
   // the durable state written by src/lib/budget-controls.ts. keyDisableRecommended
   // is advisory only and never reflects a credential mutation.
@@ -146,6 +160,23 @@ export interface ProviderBudgetStatus {
     pauseObservedSpendUsd: number | null;
     keyDisableRecommended: boolean;
   };
+}
+
+export interface ProviderExternalBillingDTO {
+  source: string;
+  externalId: string | null;
+  kind: string;
+  serviceName: string | null;
+  planName: string | null;
+  status: string | null;
+  amountUsd: number | null;
+  currency: string | null;
+  billingInterval: string | null;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  usageQuantity: number | null;
+  usageUnit: string | null;
+  syncedAt: string;
 }
 
 export interface BudgetStatusResponse {
@@ -163,7 +194,23 @@ export interface BudgetStatusResponse {
     percentUsed: number | null;
     overBudget: boolean;
     warning: boolean;
+    /** Explicit Global Budget override (null = use suggestion). */
+    globalMonthlyBudgetUsd: number | null;
+    suggestedGlobalBudgetUsd: number | null;
+    effectiveGlobalBudgetUsd: number | null;
+    globalBudgetSource: "override" | "suggested" | "none";
+    projectBudgetCount: number;
   };
+}
+
+/** One known future charge remaining in the current UTC month. */
+export interface ForecastedRenewalLine {
+  subscriptionId: string;
+  providerId: string;
+  name: string;
+  chargeUsd: number;
+  chargeAt: string;
+  autoRenew: boolean;
 }
 
 function monthStartUtc(now: Date): Date {
@@ -187,8 +234,75 @@ function monthLabel(now: Date): string {
   return `${y}-${m}`;
 }
 
+/**
+ * Known remaining bills this UTC month for Overview projection.
+ * - autoRenew: walk every renewal in (now, monthEnd]
+ * - !autoRenew: still include the single nextRenewalAt if it falls in that window
+ *   (so Grok $99/mo etc. show even when managed rows force autoRenew=false)
+ */
+export function planSubscriptionRenewals(
+  subscriptions: Array<{
+    id: string;
+    providerId: string;
+    name: string;
+    costUsd: number;
+    currency: string;
+    interval: string;
+    intervalCount: number;
+    nextRenewalAt: Date;
+    autoRenew: boolean;
+  }>,
+  now: Date
+): ForecastedRenewalLine[] {
+  const monthEnd = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  );
+  const lines: ForecastedRenewalLine[] = [];
+  for (const subscription of subscriptions) {
+    if (
+      subscription.currency.toUpperCase() !== "USD" ||
+      !isSubscriptionInterval(subscription.interval) ||
+      !(subscription.costUsd > 0)
+    ) {
+      continue;
+    }
+    const intervalCount = Math.max(1, Math.trunc(subscription.intervalCount));
+    let renewal = subscription.nextRenewalAt;
+    if (subscription.autoRenew) {
+      let guard = 0;
+      while (renewal < monthEnd && guard < 240) {
+        if (renewal > now) {
+          lines.push({
+            subscriptionId: subscription.id,
+            providerId: subscription.providerId,
+            name: subscription.name,
+            chargeUsd: subscription.costUsd,
+            chargeAt: renewal.toISOString(),
+            autoRenew: true,
+          });
+        }
+        renewal = advancePeriod(renewal, subscription.interval, intervalCount);
+        guard += 1;
+      }
+    } else if (renewal > now && renewal < monthEnd) {
+      lines.push({
+        subscriptionId: subscription.id,
+        providerId: subscription.providerId,
+        name: subscription.name,
+        chargeUsd: subscription.costUsd,
+        chargeAt: renewal.toISOString(),
+        autoRenew: false,
+      });
+    }
+  }
+  return lines;
+}
+
 function forecastSubscriptionRenewals(
   subscriptions: Array<{
+    id: string;
+    providerId: string;
+    name: string;
     costUsd: number;
     currency: string;
     interval: string;
@@ -198,31 +312,10 @@ function forecastSubscriptionRenewals(
   }>,
   now: Date
 ): number {
-  const monthEnd = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  return planSubscriptionRenewals(subscriptions, now).reduce(
+    (sum, line) => sum + line.chargeUsd,
+    0
   );
-  let total = 0;
-  for (const subscription of subscriptions) {
-    if (
-      !subscription.autoRenew ||
-      subscription.currency.toUpperCase() !== "USD" ||
-      !isSubscriptionInterval(subscription.interval)
-    ) {
-      continue;
-    }
-    let renewal = subscription.nextRenewalAt;
-    let guard = 0;
-    while (renewal < monthEnd && guard < 240) {
-      if (renewal > now) total += subscription.costUsd;
-      renewal = advancePeriod(
-        renewal,
-        subscription.interval,
-        Math.max(1, Math.trunc(subscription.intervalCount))
-      );
-      guard += 1;
-    }
-  }
-  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +764,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     latestScopeCostTimes,
   ] = await Promise.all([
     prisma.provider.findMany({
+      where: excludeInternalSystemProvidersWhere(),
       orderBy: { name: "asc" },
       select: {
         id: true,
@@ -740,6 +834,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
           },
           select: {
             id: true,
+            name: true,
             costUsd: true,
             currency: true,
             interval: true,
@@ -773,12 +868,16 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
             source: true,
             externalId: true,
             kind: true,
+            serviceName: true,
+            planName: true,
             status: true,
             amountUsd: true,
             currency: true,
             billingInterval: true,
             currentPeriodStart: true,
             currentPeriodEnd: true,
+            usageQuantity: true,
+            usageUnit: true,
             rollupRole: true,
             syncedAt: true,
           },
@@ -790,7 +889,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         },
       },
     }),
-    sumMonthToDateExternalCostByProvider(monthStart, rawCutoff),
+    sumMonthToDateExternalCostByProvider(monthStart, rawCutoff, now),
     sumMonthToDateReceiptCashByProviderId(monthStart, rawCutoff, now),
     prisma.usageSnapshot.groupBy({
       by: ["providerId"],
@@ -1081,7 +1180,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
   const latestCostSnapshotIds = [...latestCostByProviderId.values()].map(
     (snapshot) => snapshot.id
   );
-  const costCoverageCaveatSnapshotIds = new Set<string>();
+  const costCoverageCaveatCodeBySnapshotId = new Map<string, string>();
   if (latestCostSnapshotIds.length > 0) {
     const rows = await prisma.$queryRaw<Array<{ id: string; version: unknown; code: unknown }>>(
       Prisma.sql`
@@ -1095,7 +1194,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     );
     for (const row of rows) {
       if (Number(row.version) === 1 && typeof row.code === "string") {
-        costCoverageCaveatSnapshotIds.add(row.id);
+        costCoverageCaveatCodeBySnapshotId.set(row.id, row.code);
       }
     }
   }
@@ -1175,7 +1274,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       anomaliesByProviderId = await loadSpendAnomaliesByProviderId(
         now,
         anomalyConfig,
-        providers.map((p) => ({ id: p.id, name: p.name }))
+        providers.map((p) => ({ id: p.id, name: p.name, type: p.type }))
       );
     } catch (error) {
       console.warn("[anomaly-detection] spend anomaly load failed; skipping", error);
@@ -1217,7 +1316,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     const latestCostSnapshot = latestCostByProviderId.get(p.id) ?? null;
     const snapshotCostCoverageIncomplete =
       latestCostSnapshot != null &&
-      costCoverageCaveatSnapshotIds.has(latestCostSnapshot.id);
+      costCoverageCaveatCodeBySnapshotId.has(latestCostSnapshot.id);
     const geminiCostIdentityStatus = deriveGeminiBillingStatus({
       providerName: p.name,
       providerType: p.type,
@@ -1367,9 +1466,28 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       providerCanonicalKey: canonicalProviderKey(p.name),
       geminiBillingIncomplete,
     });
-    const forecastedSubscriptionRenewalsUsd = forecastSubscriptionRenewals(
-      p.subscriptions,
+    // Only *active* rows forecast remaining charges. Managed/paused history
+    // stays in MTD accrual via materializer events; inventing future charges
+    // for non-active status overstates EOM (aligns with materializer filter).
+    const forecastedRenewals = planSubscriptionRenewals(
+      p.subscriptions
+        .filter((sub) => sub.status === "active")
+        .map((sub) => ({
+          id: sub.id,
+          providerId: p.id,
+          name: sub.name,
+          costUsd: sub.costUsd,
+          currency: sub.currency,
+          interval: sub.interval,
+          intervalCount: sub.intervalCount,
+          nextRenewalAt: sub.nextRenewalAt,
+          autoRenew: sub.autoRenew,
+        })),
       now
+    );
+    const forecastedSubscriptionRenewalsUsd = forecastedRenewals.reduce(
+      (sum, line) => sum + line.chargeUsd,
+      0
     );
     // Receipt funding is a lumpy cash event, not a consumption sample (S2).
     // Prepaid receipt cash is FUNDING COVERAGE for the observed usage — it
@@ -1444,6 +1562,9 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
           totalRequests: latestSnapshot?.totalRequests ?? null,
           credits: latestSnapshot?.credits ?? null,
           fetchedAt: latestSnapshot?.fetchedAt ?? now,
+          costCoverageCaveatCode: latestCostSnapshot
+            ? (costCoverageCaveatCodeBySnapshotId.get(latestCostSnapshot.id) ?? null)
+            : null,
         },
         trackedSpendUsd: spentUsd,
         fixedAccruedUsd: reconciled.fixedAccruedUsd,
@@ -1462,7 +1583,8 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         a.code === "budget_warning" ||
         a.code === "usage_reconciliation_discrepancy" ||
         a.code === "spend_anomaly" ||
-        a.code === "request_anomaly"
+        a.code === "request_anomaly" ||
+        a.code === "catalog_estimate"
     );
     if (reconciled.fixedCostConflict) {
       budgetAlerts.push({
@@ -1650,6 +1772,8 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       linkedFixedDedupeUsd: reconciled.linkedFixedDedupeUsd,
       fixedCostConflict: reconciled.fixedCostConflict,
       forecastedSubscriptionRenewalsUsd,
+      forecastedRenewals,
+      projectedVariableUsageUsd,
       spentUsd,
       projectedEomUsd,
       projectedRunoutDate: runout.runoutDate?.toISOString() ?? null,
@@ -1659,6 +1783,22 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       status,
       projectedStatus,
       alerts: budgetAlerts,
+      externalBilling: p.externalBilling.map((b) => ({
+        source: b.source,
+        externalId: b.externalId,
+        kind: b.kind,
+        serviceName: b.serviceName,
+        planName: b.planName,
+        status: b.status,
+        amountUsd: b.amountUsd,
+        currency: b.currency,
+        billingInterval: b.billingInterval,
+        currentPeriodStart: b.currentPeriodStart?.toISOString() ?? null,
+        currentPeriodEnd: b.currentPeriodEnd?.toISOString() ?? null,
+        usageQuantity: b.usageQuantity,
+        usageUnit: b.usageUnit,
+        syncedAt: b.syncedAt.toISOString(),
+      })),
       verifiedPreferredCashApplied: verifiedCashResult.verifiedPreferredCashApplied,
       verifiedPreferredCashUsd: verifiedCashResult.verifiedPreferredCashUsd,
       budgetControls: {
@@ -1681,6 +1821,9 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     (sum, provider) => sum + provider.estimatedApiEquivalentUsd,
     0
   );
+  // Global / portfolio budget for Overview hero — freeform override preferred
+  // over sum of project budgets; independent of per-provider plan budgets.
+  const globalBudget = await loadGlobalBudgetSnapshot();
 
   return {
     ok: true,
@@ -1697,6 +1840,11 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       percentUsed: totalBudgetUsd > 0 ? budgetedSpentUsd / totalBudgetUsd : null,
       overBudget: providerStatuses.some((p) => p.status === "exceeded"),
       warning: providerStatuses.some((p) => p.status === "warning"),
+      globalMonthlyBudgetUsd: globalBudget.globalMonthlyBudgetUsd,
+      suggestedGlobalBudgetUsd: globalBudget.suggestedGlobalBudgetUsd,
+      effectiveGlobalBudgetUsd: globalBudget.effectiveGlobalBudgetUsd,
+      globalBudgetSource: globalBudget.globalBudgetSource,
+      projectBudgetCount: globalBudget.projectBudgetCount,
     },
   };
 }
@@ -1804,6 +1952,10 @@ interface StaleWhileRevalidateCacheEntry<T> {
   computedAt: number;
 }
 
+type StaleWhileRevalidateRefreshResult<T> =
+  | { ok: true; value: T; generation: number }
+  | { ok: false; generation: number };
+
 /**
  * A small stale-while-revalidate memoization helper keyed by an arbitrary
  * string derived from the call's `now`. See the file comment above for the
@@ -1819,7 +1971,7 @@ function createStaleWhileRevalidateCache<T>(options: {
   // The key AND generation of the refresh that currently "owns"
   // refreshPromise. A refresh only writes to `entry` / clears these slots
   // while it still owns them at completion - see the file comment above.
-  let refreshPromise: Promise<void> | null = null;
+  let refreshPromise: Promise<StaleWhileRevalidateRefreshResult<T>> | null = null;
   let refreshKey: string | null = null;
   let refreshGeneration = -1;
   // Bumped by invalidate(). The cache key alone (a month-start string) cannot
@@ -1840,7 +1992,11 @@ function createStaleWhileRevalidateCache<T>(options: {
     return refreshKey === key && refreshGeneration === gen;
   }
 
-  async function refresh(now: Date, key: string, gen: number): Promise<void> {
+  async function refresh(
+    now: Date,
+    key: string,
+    gen: number
+  ): Promise<StaleWhileRevalidateRefreshResult<T>> {
     try {
       const value = await options.compute(now);
       // Only adopt this result if a newer request hasn't already taken over
@@ -1858,6 +2014,11 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (ownsSlot(key, gen) && generation === gen) {
         entry = { key, value, computedAt: Date.now() };
       }
+      // A cold caller owns this promise even if a different cache key has
+      // since taken the shared publication slot.  Return its own computation
+      // directly so alternating keys cannot livelock while waiting for an
+      // entry that only the current slot owner is allowed to publish.
+      return { ok: true, value, generation: gen };
     } catch (error) {
       // A background refresh (there IS a last-good value for this key) must
       // never crash the process or surface to the caller that triggered it -
@@ -1865,7 +2026,6 @@ function createStaleWhileRevalidateCache<T>(options: {
       // cold start (no cached value yet for this key) has nothing to fall
       // back to, so it rethrows and the caller sees the failure, exactly
       // like an uncached call would today.
-      // eslint-disable-next-line no-console -- intentional: surfaces cache-refresh failures for on-call visibility
       console.warn(
         `[${options.label}] refresh failed; serving last good value if available`,
         error
@@ -1873,6 +2033,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (!entry || entry.key !== key) {
         throw error;
       }
+      return { ok: false, generation: gen };
     } finally {
       // Only clear the slot if we still own it. Checking the generation too
       // stops a superseded pre-invalidation refresh from releasing the slot
@@ -1905,7 +2066,7 @@ function createStaleWhileRevalidateCache<T>(options: {
         const gen = generation;
         refreshKey = key;
         refreshGeneration = gen;
-        refreshPromise = refresh(now, key, gen).catch(() => {});
+        refreshPromise = refresh(now, key, gen).catch(() => ({ ok: false, generation: gen }));
       }
       return cached.value;
     }
@@ -1921,7 +2082,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       // we are awaiting must send us round the loop for a genuinely fresh
       // compute rather than letting us adopt pre-invalidation work.
       const gen = generation;
-      let inFlight: Promise<void>;
+      let inFlight: Promise<StaleWhileRevalidateRefreshResult<T>>;
       if (refreshPromise && ownsSlot(key, gen)) {
         inFlight = refreshPromise;
       } else {
@@ -1930,13 +2091,18 @@ function createStaleWhileRevalidateCache<T>(options: {
         inFlight = refresh(now, key, gen);
         refreshPromise = inFlight;
       }
-      await inFlight;
+      const result = await inFlight;
+      if (generation !== gen) {
+        continue;
+      }
       if (entry && entry.key === key) {
         return entry.value;
       }
-      // Extremely rare: something else moved the cache on again before we
-      // could read our own result back (e.g. a rapid double rollover).
-      // Loop and try again for our own key.
+      if (result.ok && result.generation === gen) {
+        return result.value;
+      }
+      // A failed background result has no value to return.  If it was a cold
+      // refresh, refresh() already rethrew; otherwise retry this key.
     }
   }
 
@@ -2095,6 +2261,16 @@ export interface ProjectBudgetStatusResponse {
     percentUsed: number | null;
     overBudget: boolean;
     warning: boolean;
+    // Global-budget snapshot, forwarded from computeBudgetStatus's summary.
+    // The dashboard (src/app/page.tsx) has parsed these from /api/budget-status
+    // since 146c9ca0, but this route never sent them — the hero fell back to
+    // the provider-plan sum on every first paint.  Bearer-token clients (iOS,
+    // widgets) also get their only global-budget read through this payload.
+    globalMonthlyBudgetUsd: number | null;
+    suggestedGlobalBudgetUsd: number | null;
+    effectiveGlobalBudgetUsd: number | null;
+    globalBudgetSource: "override" | "suggested" | "none";
+    projectBudgetCount: number;
   };
 }
 
@@ -2113,8 +2289,9 @@ async function computeProjectBudgetStatusUncached(now: Date): Promise<ProjectBud
       },
       orderBy: { name: "asc" }
     }),
-    sumMonthToDateExternalCostAttribution(monthStartUtc(now), getExternalEventRawCutoff(now)),
+    sumMonthToDateExternalCostAttribution(monthStartUtc(now), getExternalEventRawCutoff(now), now),
     prisma.provider.findMany({
+      where: excludeInternalSystemProvidersWhere(),
       select: {
         id: true,
         name: true,
@@ -2409,6 +2586,11 @@ async function computeProjectBudgetStatusUncached(now: Date): Promise<ProjectBud
       percentUsed: totalBudgetUsd > 0 ? budgetedSpentUsd / totalBudgetUsd : null,
       overBudget: projectStatuses.some((p) => p.status === "exceeded"),
       warning: projectStatuses.some((p) => p.status === "warning"),
+      globalMonthlyBudgetUsd: providerStatus.summary.globalMonthlyBudgetUsd,
+      suggestedGlobalBudgetUsd: providerStatus.summary.suggestedGlobalBudgetUsd,
+      effectiveGlobalBudgetUsd: providerStatus.summary.effectiveGlobalBudgetUsd,
+      globalBudgetSource: providerStatus.summary.globalBudgetSource,
+      projectBudgetCount: providerStatus.summary.projectBudgetCount,
     },
   };
 }

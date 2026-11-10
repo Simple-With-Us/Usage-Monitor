@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import StatusBadge from "@/components/StatusBadge";
 import {
   formatBudgetRunout,
   type ProviderBudgetIntel,
@@ -25,10 +26,26 @@ const ALERT_CODE_CHIPS: Record<string, string> = {
   unused_subscription: "Unused subscription",
   possible_duplicate_subscription: "Possible duplicate",
   price_change_detected: "Price change",
+  budget_control_paused: "Budget control",
+  key_disable_recommended: "Key action",
 };
 
 /** Rows rendered before the list collapses behind the "Show all" toggle. */
 const ATTENTION_PREVIEW_LIMIT = 8;
+
+function primaryAction(code?: string): { href: string; label: string } {
+  if (code?.startsWith("project_")) {
+    return { href: "/settings?tab=projects", label: "Edit project budget" };
+  }
+  if (
+    code === "unused_subscription" ||
+    code === "possible_duplicate_subscription" ||
+    code === "price_change_detected"
+  ) {
+    return { href: "/settings?tab=services", label: "Review subscriptions" };
+  }
+  return { href: "/settings?tab=connections", label: "Edit budget" };
+}
 
 export default function DashboardAttentionPanel({
   attentionItems,
@@ -46,22 +63,22 @@ export default function DashboardAttentionPanel({
   return (
     <div
       id="attention"
-      className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+      className="scroll-mt-20 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
     >
       <div className="px-4 py-3 sm:px-6 border-b border-gray-100 dark:border-gray-700 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
           Attention
         </h2>
         <Link
-          href="/settings"
-          className="text-xs font-medium text-blue-600 dark:text-blue-400"
+          href="/settings?tab=connections"
+          className="text-xs font-medium text-accent"
         >
           Manage budgets
         </Link>
       </div>
       {attentionItems.length === 0 ? (
         <div className="px-4 py-4 sm:px-6 text-sm text-gray-500 dark:text-gray-400">
-          No payment, budget, or limit alerts.
+          All clear — no payment, budget, or limit alerts.
         </div>
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -70,6 +87,8 @@ export default function DashboardAttentionPanel({
             const runoutLabel = budgetIntelByProviderId
               ? formatBudgetRunout(budgetIntelByProviderId[provider.id] ?? {})
               : null;
+            const action = primaryAction(alert.code);
+            const editBudgetHref = `/settings?tab=connections&edit=${encodeURIComponent(provider.id)}`;
             return (
               <div
                 key={`${provider.id}-${index}-${alert.message.slice(0, 24)}`}
@@ -80,7 +99,7 @@ export default function DashboardAttentionPanel({
                     {provider.displayName}
                     {provider.label ? ` - ${provider.label}` : ""}
                     {codeChip && (
-                      <span className="ml-2 inline-flex rounded bg-indigo-50 px-1.5 py-0.5 align-middle text-[10px] font-medium text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                      <span className="ml-2 inline-flex rounded bg-accent-soft px-1.5 py-0.5 align-middle text-[10px] font-medium text-gray-800 dark:text-gray-200">
                         {codeChip}
                       </span>
                     )}
@@ -89,34 +108,39 @@ export default function DashboardAttentionPanel({
                     {alert.message}
                   </p>
                   {runoutLabel && (
-                    <p className="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
+                    <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
                       {runoutLabel}
                     </p>
                   )}
-                  <div className="mt-1.5 flex flex-wrap gap-2">
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
                     <Link
                       href={`/providers/${provider.id}`}
-                      className="text-xs font-medium text-blue-600 dark:text-blue-400"
+                      className="text-xs font-semibold text-accent"
                     >
                       Open provider
                     </Link>
                     <Link
-                      href="/settings?tab=connections"
-                      className="text-xs font-medium text-blue-600 dark:text-blue-400"
+                      href={
+                        action.href.includes("connections")
+                          ? editBudgetHref
+                          : action.href
+                      }
+                      className="text-xs font-semibold text-accent"
                     >
-                      Edit budget in Settings
+                      {action.label}
+                    </Link>
+                    <Link
+                      href="/settings?tab=notifications"
+                      className="text-xs font-medium text-gray-500 dark:text-gray-400"
+                    >
+                      Alert settings
                     </Link>
                   </div>
                 </div>
-                <span
-                  className={`text-xs font-medium px-2 py-1 rounded-full shrink-0 ${
-                    alert.severity === "critical"
-                      ? "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
-                      : "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
-                  }`}
-                >
-                  {alert.severity}
-                </span>
+                <StatusBadge
+                  label={alert.severity}
+                  status={alert.severity === "critical" ? "danger" : "warning"}
+                />
               </div>
             );
           })}
@@ -126,7 +150,7 @@ export default function DashboardAttentionPanel({
                 type="button"
                 onClick={() => setShowAll((expanded) => !expanded)}
                 aria-expanded={showAll}
-                className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
+                className="min-h-11 text-xs font-medium text-accent hover:opacity-90"
               >
                 {showAll
                   ? "Show fewer alerts"

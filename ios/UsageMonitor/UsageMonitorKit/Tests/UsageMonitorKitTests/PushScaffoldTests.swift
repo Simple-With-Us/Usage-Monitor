@@ -126,18 +126,22 @@ final class PushScaffoldTests: XCTestCase {
         return try XCTUnwrap(parsed as? [String: Any], "\(name) is not a plist dictionary")
     }
 
-    /// There is no server device-enrollment endpoint and no APNs sender, so the
-    /// app must not request the APNs entitlement. Claiming `aps-environment`
-    /// without a sender is App Store review friction and reads as "push works".
-    func testAppDoesNotClaimAPNsEntitlement() throws {
+    /// Device enrollment shipped in #928: Settings registers for remote
+    /// notifications and uploads the token to `POST /api/apns/device-tokens`,
+    /// so the app now legitimately claims `aps-environment`. The checked-in
+    /// value stays `development` — App Store submission rewrites it to
+    /// `production` for distribution builds, so a hardcoded `production` here
+    /// would be the regression to catch.
+    ///
+    /// Alert pushes are visible notifications (not silent), so
+    /// ``testBackgroundModesDeclareFetchOnly`` keeps `remote-notification` out
+    /// of `UIBackgroundModes`. Background fetch still drives local fallback.
+    func testAppEntitlementsMatchShippedPushCapability() throws {
         let entitlements = try plist(named: "UsageMonitor.entitlements")
-        XCTAssertNil(
-            entitlements["aps-environment"],
-            "aps-environment must stay absent until a server APNs sender exists"
-        )
+        XCTAssertEqual(entitlements["aps-environment"] as? String, "development")
         // The app-group entitlement the widget shares must survive.
         let groups = entitlements["com.apple.security.application-groups"] as? [String]
-        XCTAssertEqual(groups, ["group.services.jays.usage.monitor"])
+        XCTAssertEqual(groups, ["group.com.simplewithus.usage"])
     }
 
     /// `remote-notification` background mode is only legitimate with a server

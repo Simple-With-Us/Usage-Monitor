@@ -24,6 +24,44 @@ final class OfflineCacheTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    /// Asserts a cache file carries `completeUntilFirstUserAuthentication`
+    /// Data Protection.
+    ///
+    /// The Simulator does not implement Data Protection: `setAttributes`
+    /// accepts `.protectionKey` (the `.posixPermissions` written in the *same*
+    /// call, and the backup exclusion written right after it, both land), but
+    /// `attributesOfItem` always reads the protection back as `nil`. So the
+    /// real assertion can only run on a device — it is kept intact there, and
+    /// the Simulator branch pins the known no-op so this fails loudly if the
+    /// platform ever starts reporting protection instead of silently passing.
+    private func assertProtectedUntilFirstUnlock(
+        _ attributes: [FileAttributeKey: Any],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        #if os(iOS)
+        let protection = attributes[.protectionKey] as? FileProtectionType
+        #if targetEnvironment(simulator)
+        XCTAssertNil(
+            protection,
+            """
+            The Simulator now reports Data Protection — delete this branch so \
+            the device assertion runs everywhere.
+            """,
+            file: file,
+            line: line
+        )
+        #else
+        XCTAssertEqual(
+            protection,
+            .completeUntilFirstUserAuthentication,
+            file: file,
+            line: line
+        )
+        #endif
+        #endif
+    }
+
     // MARK: - Disk cache round-trip
 
     func testSaveThenLoadRoundTripsResponse() {
@@ -163,12 +201,7 @@ final class OfflineCacheTests: XCTestCase {
         )
         XCTAssertEqual(values.isExcludedFromBackup, true)
 
-        #if os(iOS)
-        XCTAssertEqual(
-            attributes[.protectionKey] as? FileProtectionType,
-            .completeUntilFirstUserAuthentication
-        )
-        #endif
+        assertProtectedUntilFirstUnlock(attributes)
     }
 
     func testClearRemovesEveryScopeAndLegacyFile() throws {
@@ -242,22 +275,31 @@ final class OfflineCacheTests: XCTestCase {
         store.write(.placeholder)
         let fileURL = try XCTUnwrap(store.snapshotFileURL)
 
+        // Corrupt file falls back to defaults and cleans up corrupt file
+        try Data("not-json".utf8).write(to: fileURL)
+        XCTAssertEqual(store.read(), .placeholder)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+
+        // When defaults is also cleared, corrupt file read yields nil
+        defaults.removeObject(forKey: "widget-snapshot-v2")
         try Data("not-json".utf8).write(to: fileURL)
         XCTAssertNil(store.read())
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
 
+        // Oversized file falls back to defaults and removes file
         store.write(.placeholder)
         try Data(count: 2 * 1_024 * 1_024).write(to: fileURL)
-        XCTAssertNil(store.read())
+        XCTAssertEqual(store.read(), .placeholder)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
     func testWidgetStoreRejectsObsoleteSchema() throws {
         let dir = tempDirectory()
         defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-schema")
         let store = SharedStore(
             containerURL: dir,
-            defaults: isolatedDefaults("widget-schema")
+            defaults: defaults
         )
         store.write(.placeholder)
         let fileURL = try XCTUnwrap(store.snapshotFileURL)
@@ -267,8 +309,13 @@ final class OfflineCacheTests: XCTestCase {
         json["schemaVersion"] = 1
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
 
-        XCTAssertNil(store.read())
+        // Obsolete file schema falls back to defaults and deletes obsolete file
+        XCTAssertEqual(store.read(), .placeholder)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+
+        // When defaults is also cleared, returns nil
+        defaults.removeObject(forKey: "widget-snapshot-v2")
+        XCTAssertNil(store.read())
     }
 
     func testWidgetStoreUsesPrivatePermissionsAndNoBackup() throws {
@@ -288,12 +335,7 @@ final class OfflineCacheTests: XCTestCase {
         )
         XCTAssertEqual(values.isExcludedFromBackup, true)
 
-        #if os(iOS)
-        XCTAssertEqual(
-            attributes[.protectionKey] as? FileProtectionType,
-            .completeUntilFirstUserAuthentication
-        )
-        #endif
+        assertProtectedUntilFirstUnlock(attributes)
     }
 
     func testWidgetStoreFallbackRoundTripAndClear() {
@@ -305,6 +347,75 @@ final class OfflineCacheTests: XCTestCase {
 
         store.clear()
         XCTAssertNil(store.read())
+    }
+
+    func testWidgetStorePrefersNewerDefaultsWhenBudgetTimestampDidNotChange() throws {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-newer-defaults")
+        let fileStore = SharedStore(containerURL: dir, defaults: defaults)
+        let defaultsOnlyStore = SharedStore(containerURL: nil, defaults: defaults)
+        var budget = WidgetSnapshot.placeholder
+        budget.mac = nil
+        let mac = WidgetSnapshot.MacSection(
+            generatedAt: Date(timeIntervalSince1970: 1_760_000_000),
+            ok: true,
+            status: "online",
+            reported: true,
+            hostname: "test-mac"
+        )
+
+        fileStore.write(budget)
+        defaultsOnlyStore.update { $0 = $0.replacingMac(mac) }
+        let latestDefault = try XCTUnwrap(defaults.data(forKey: "widget-snapshot-v2"))
+        let latestEnvelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: latestDefault) as? [String: Any]
+        )
+        XCTAssertNotNil(latestEnvelope["revision"])
+
+        // A budget refresh preserves the Mac section from the newest stored
+        // copy even though the budget generatedAt is unchanged.
+        fileStore.update { $0 = budget.mergingPreservedSections(from: $0) }
+
+        XCTAssertEqual(fileStore.read()?.generatedAt, budget.generatedAt)
+        XCTAssertEqual(fileStore.read()?.mac, mac)
+    }
+
+    func testWidgetStorePrefersNewerFileOverOlderDefaults() throws {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-newer-file")
+        let defaultsOnlyStore = SharedStore(containerURL: nil, defaults: defaults)
+        let fileStore = SharedStore(containerURL: dir, defaults: defaults)
+        var budget = WidgetSnapshot.placeholder
+        budget.mac = nil
+        let mac = WidgetSnapshot.MacSection(
+            generatedAt: Date(timeIntervalSince1970: 1_760_000_000),
+            ok: true,
+            status: "online",
+            reported: true,
+            hostname: "new-file-mac"
+        )
+
+        defaultsOnlyStore.write(budget)
+        let olderDefaults = try XCTUnwrap(defaults.data(forKey: "widget-snapshot-v2"))
+        let newerFileSnapshot = budget.replacingMac(mac)
+        fileStore.write(newerFileSnapshot)
+        defaults.set(olderDefaults, forKey: "widget-snapshot-v2")
+
+        XCTAssertEqual(fileStore.read(), newerFileSnapshot)
+    }
+
+    func testWidgetStoreUsesValidFileWhenDefaultsCopyIsInvalid() {
+        let dir = tempDirectory()
+        defer { remove(dir) }
+        let defaults = isolatedDefaults("widget-invalid-defaults")
+        let store = SharedStore(containerURL: dir, defaults: defaults)
+        store.write(.placeholder)
+        defaults.set(Data("not-json".utf8), forKey: "widget-snapshot-v2")
+
+        XCTAssertEqual(store.read(), .placeholder)
+        XCTAssertNil(defaults.data(forKey: "widget-snapshot-v2"))
     }
 
     func testWidgetStoreClearRemovesProtectedAndLegacyData() throws {
@@ -346,8 +457,9 @@ final class OfflineCacheTests: XCTestCase {
 
         XCTAssertTrue(staleness.isStale(asOf: now))
         XCTAssertEqual(staleness.age(asOf: now), 30 * 60, accuracy: 1)
-        XCTAssertTrue(staleness.staleLabel(asOf: now).hasPrefix("Stale as of "))
-        XCTAssertTrue(staleness.shortLabel(asOf: now).hasPrefix("Stale · "))
+        XCTAssertTrue(staleness.staleLabel(asOf: now).hasPrefix("Updated"))
+        XCTAssertTrue(staleness.shortLabel(asOf: now).hasPrefix("Updated"))
+        XCTAssertTrue(staleness.isStale(asOf: now))
     }
 
     func testThresholdBoundaryIsStale() {
@@ -366,6 +478,206 @@ final class OfflineCacheTests: XCTestCase {
         let percents = snapshot.topMeters.map { $0.percentUsed ?? 0 }
         XCTAssertEqual(percents, percents.sorted(by: >))
         XCTAssertEqual(snapshot.month, BudgetStatusResponse.sample.month)
+    }
+
+    func testSnapshotIncludesProjectsForWidgetFocusPicker() {
+        let snapshot = WidgetSnapshotBuilder.snapshot(from: .sample, maxMeters: 3)
+        XCTAssertEqual(snapshot.projects.count, ProjectBudgetStatus.sampleList.count)
+        XCTAssertTrue(snapshot.projects.contains { $0.id == ProjectBudgetStatus.sampleTrade.id })
+        // Project rows carry projected EOM for the project-focused widget hero.
+        XCTAssertNotNil(snapshot.projects.first?.projectedEomUsd)
+    }
+
+    func testSnapshotDecodeOmitsProjectsDefaultsEmpty() throws {
+        // Older app-group payloads without `projects` must still load.
+        let legacy = WidgetSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1),
+            month: "2026-08",
+            totalSpentUsd: 10,
+            totalBudgetUsd: 100,
+            projectedEomUsd: 20,
+            percentUsed: 0.1,
+            overBudget: false,
+            warning: false,
+            topMeters: []
+            // projects defaults to []
+        )
+        let data = try JSONEncoder().encode(legacy)
+        let decoded = try JSONDecoder().decode(WidgetSnapshot.self, from: data)
+        XCTAssertEqual(decoded.projects, [])
+        XCTAssertNil(decoded.llm)
+        XCTAssertNil(decoded.servers)
+    }
+
+    func testSnapshotDecodeBudgetOnlyJSONLeavesLlmAndServersMissing() throws {
+        let json = """
+        {
+          "generatedAt": 1,
+          "month": "2026-08",
+          "totalSpentUsd": 10,
+          "totalBudgetUsd": 100,
+          "projectedEomUsd": 20,
+          "overBudget": false,
+          "warning": false,
+          "topMeters": []
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(WidgetSnapshot.self, from: json)
+        XCTAssertEqual(decoded.projects, [])
+        XCTAssertNil(decoded.llm)
+        XCTAssertNil(decoded.servers)
+        XCTAssertNil(decoded.mac)
+        XCTAssertNil(decoded.alerts)
+        XCTAssertEqual(decoded.spenders, [])
+        XCTAssertEqual(decoded.totalSpentUsd, 10)
+    }
+
+    func testSnapshotRoundTripsLlmAndServerSections() throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let data = try encoder.encode(WidgetSnapshot.placeholder)
+        let decoded = try decoder.decode(WidgetSnapshot.self, from: data)
+        XCTAssertEqual(decoded.llm?.providers.count, 3)
+        XCTAssertEqual(decoded.llm?.providers.first?.estimateUsd, 8.40)
+        XCTAssertEqual(decoded.servers?.service?.name, "usage-monitor")
+        XCTAssertEqual(decoded.servers?.apps.count, 3)
+        XCTAssertEqual(decoded.mac?.hostname, "jays-macbook-pro")
+        XCTAssertEqual(decoded.alerts?.openCount, 2)
+        XCTAssertEqual(decoded.spenders.count, 3)
+        XCTAssertEqual(decoded, .placeholder)
+    }
+
+    func testLlmSectionMapsKitFieldsAndKeepsMissingCostNil() {
+        let section = WidgetSnapshotBuilder.llmSection(from: .sample)
+        XCTAssertEqual(section?.windowHours, 5)
+        XCTAssertEqual(section?.providers.count, 2)
+        let anthropic = section?.providers.first { $0.id == "anthropic" }
+        XCTAssertEqual(anthropic?.tokensTotal, 184_200)
+        XCTAssertEqual(anthropic?.estimateUsd, 8.40)
+        XCTAssertEqual(anthropic?.budgetStatus, "watch")
+        XCTAssertEqual(anthropic?.quiet, false)
+        let voyage = section?.providers.first { $0.id == "voyage" }
+        XCTAssertEqual(voyage?.quiet, true)
+        XCTAssertNil(voyage?.estimateUsd)
+        XCTAssertNil(voyage?.derivedCostUsd)
+        XCTAssertNil(voyage?.reportedCostUsd)
+    }
+
+    func testLlmSectionNilWhenResponseNotOk() {
+        let failed = LlmBurnResponse(ok: false, providers: [])
+        XCTAssertNil(WidgetSnapshotBuilder.llmSection(from: failed))
+    }
+
+    func testServerServiceMapsHealthAndReadinessChecks() {
+        let service = WidgetSnapshotBuilder.serverService(
+            health: .sample,
+            readiness: .sample,
+            now: Date(timeIntervalSince1970: 1_720_000_000)
+        )
+        XCTAssertEqual(service.name, "usage-monitor")
+        XCTAssertTrue(service.ok)
+        XCTAssertEqual(service.readyOk, true)
+        XCTAssertEqual(service.uptimeSeconds, 84_213)
+        XCTAssertTrue(service.checks.contains { $0.name == "Database" && $0.ok })
+        XCTAssertTrue(service.checks.contains { $0.name == "Disk" && $0.freeBytes != nil })
+    }
+
+    func testServerHostOmitsMissingCpuAndKeepsServerCounts() {
+        let projected = WidgetSnapshotBuilder.serverHost(from: .sample)
+        XCTAssertEqual(projected.host.cpuPct, 18.5)
+        XCTAssertEqual(projected.host.name, "ubuntu-16gb-nbg1-cx43")
+        XCTAssertEqual(projected.apps.count, 3)
+        XCTAssertTrue(projected.apps.contains { $0.selfApp && $0.id == "um" })
+
+        var bare = ServerMetrics()
+        bare.host = .init(name: "only-name")
+        let missing = WidgetSnapshotBuilder.serverHost(from: bare)
+        XCTAssertNil(missing.host.cpuPct)
+        XCTAssertNil(missing.host.diskUsedPct)
+        XCTAssertEqual(missing.host.name, "only-name")
+        XCTAssertTrue(missing.apps.isEmpty)
+    }
+
+    func testBudgetSnapshotMergeKeepsLlmServerAndMacSections() {
+        let budget = WidgetSnapshotBuilder.snapshot(from: .sample)
+        XCTAssertNil(budget.llm)
+        XCTAssertNil(budget.servers)
+        XCTAssertNil(budget.mac)
+        XCTAssertNotNil(budget.alerts)
+        XCTAssertFalse(budget.spenders.isEmpty)
+        let merged = budget.mergingPreservedSections(from: .placeholder)
+        XCTAssertEqual(merged.totalSpentUsd, budget.totalSpentUsd)
+        XCTAssertEqual(merged.llm, WidgetSnapshot.placeholder.llm)
+        XCTAssertEqual(merged.servers, WidgetSnapshot.placeholder.servers)
+        XCTAssertEqual(merged.mac, WidgetSnapshot.placeholder.mac)
+        XCTAssertEqual(merged.alerts?.openCount, budget.alerts?.openCount)
+    }
+
+    func testSpendersAreHighestMonthToDateSpendIncludingUnbudgeted() {
+        let spenders = WidgetSnapshotBuilder.spenders(from: .sample)
+        XCTAssertEqual(spenders.map(\.name), ["Anthropic", "OpenRouter", "OpenAI", "Voyage AI"])
+        XCTAssertEqual(try XCTUnwrap(spenders.first?.spentUsd), 212.40, accuracy: 0.001)
+        XCTAssertEqual(spenders.last?.name, "Voyage AI")
+        XCTAssertNil(spenders.last?.budgetUsd)
+    }
+
+    func testAlertsSectionUsesKitTitlesAndSeverityOrder() {
+        let section = WidgetSnapshotBuilder.alertsSection(from: .sample)
+        XCTAssertEqual(section.openCount, 3)
+        XCTAssertEqual(section.needsAttentionCount, 2)
+        XCTAssertEqual(section.latestTitle, "Budget exceeded")
+        XCTAssertEqual(section.latestProvider, "OpenRouter")
+        XCTAssertEqual(section.latestSeverity, "critical")
+        XCTAssertEqual(section.items.map(\.title), [
+            "Budget exceeded",
+            "Approaching budget",
+            "Billing sync incomplete",
+        ])
+    }
+
+    func testAlertsSectionAllClearWhenNoAlerts() {
+        let section = WidgetSnapshotBuilder.alertsSection(from: .sampleEmpty)
+        XCTAssertEqual(section.openCount, 0)
+        XCTAssertEqual(section.needsAttentionCount, 0)
+        XCTAssertNil(section.latestTitle)
+        XCTAssertTrue(section.items.isEmpty)
+    }
+
+    func testMacSectionMapsHeartbeatAndDoesNotInventPercents() {
+        let online = MacHealthResponse(
+            ok: true,
+            status: "online",
+            lastHeartbeatAt: "2026-08-16T12:00:00.000Z",
+            secondsSinceHeartbeat: 12,
+            mac: MacHostTelemetry(
+                hostname: "jays-macbook-pro",
+                osVersion: "macOS 26.0",
+                arch: "arm64",
+                cpuUsagePct: 24,
+                memoryUsagePct: 61,
+                diskUsagePct: 47,
+                uptimeSeconds: 100,
+                processes: ["com.jay.agy-acp": "running", "com.jay.z-last": "stopped"],
+                lastHeartbeatAt: "2026-08-16T12:00:00.000Z"
+            )
+        )
+        let section = WidgetSnapshotBuilder.macSection(from: online)
+        XCTAssertTrue(section.reported)
+        XCTAssertEqual(section.hostname, "jays-macbook-pro")
+        XCTAssertEqual(section.cpuUsagePct, 24.0)
+        XCTAssertTrue(section.flags.contains("z-last is stopped."))
+
+        let offline = MacHealthResponse(ok: false, status: "offline")
+        let missing = WidgetSnapshotBuilder.macSection(from: offline)
+        XCTAssertFalse(missing.reported)
+        XCTAssertNil(missing.cpuUsagePct)
+        XCTAssertEqual(missing.status, "offline")
+        XCTAssertTrue(missing.flags.contains("Heartbeat stale — Mac looks offline."))
+
+        let sampleSection = WidgetSnapshotBuilder.macSection(from: .sample)
+        XCTAssertEqual(sampleSection.arch, "Apple M5")
     }
 }
 

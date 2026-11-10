@@ -319,7 +319,7 @@ describe("DashboardProviderWorkspace", () => {
     expect(html).toContain("Account identity unresolved");
     expect(html).toContain("$100.00 spent");
     expect(html).toContain("$47.25 receipt cash");
-    expect(html).toContain("$9,000.00 Claude estimate excluded");
+    expect(html).not.toContain("$9,000.00");
     expect(html).toContain("$200.00 spent");
     expect(html).toContain("$50.00 budget");
     expect(html).toContain("$75.00 budget");

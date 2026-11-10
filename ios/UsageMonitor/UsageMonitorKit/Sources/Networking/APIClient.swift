@@ -75,6 +75,14 @@ public actor APIClient {
         try await get("/api/subscriptions", authorization: .read)
     }
 
+    /// `GET /api/quota-windows` — latest remaining-percent quota windows per
+    /// provider (5h / 7d / 24h / monthly), bearer or dashboard-session
+    /// authorized like the other read routes. Powers the Overview
+    /// "Subscription Quotas" card.
+    public func fetchQuotaWindows() async throws -> QuotaWindowsResponse {
+        try await get("/api/quota-windows", authorization: .read)
+    }
+
     /// `GET /api/health` — public liveness probe.
     public func health() async throws -> ServerHealth {
         try await get("/api/health", authorization: .none)
@@ -83,6 +91,60 @@ public actor APIClient {
     /// `GET /api/ready` — public readiness probe with dependency detail.
     public func readiness() async throws -> ServerReadiness {
         try await get("/api/ready", authorization: .none)
+    }
+
+    /// Cold `/api/server-metrics` / `/api/operations` / `/api/platform-status`
+    /// fan out to Hetzner, Coolify, R2, and fleet backups.  A 20s default
+    /// aborts those before the server can answer; keep the short timeout for
+    /// ordinary reads.
+    private static let operationsTimeout: TimeInterval = 60
+
+    /// `GET /api/server-metrics` — Hetzner host + Coolify app inventory.
+    /// Bearer read token or dashboard session.
+    public func serverMetrics() async throws -> ServerMetrics {
+        try await get("/api/server-metrics", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
+    /// `GET /api/b2-app-usage` — fleet Backblaze B2 storage + daily usage breakdown.
+    public func b2AppUsage() async throws -> B2AppUsageBreakdown {
+        try await get("/api/b2-app-usage", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
+    /// `GET /api/platform-status` — one status card per external platform the
+    /// fleet runs on.  Bearer read token or dashboard session, same dual-auth
+    /// preamble as `/api/server-metrics`.
+    public func platformStatus() async throws -> PlatformStatusPayload {
+        try await get("/api/platform-status", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
+    /// `GET /api/operations` — fleet operations aggregator (receipt inbox,
+    /// peer app health, Coolify fleet, R2 free tier, backup layers).  Bearer
+    /// read token or dashboard session.
+    public func operations() async throws -> OperationsHealth {
+        try await get("/api/operations", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
+    /// `GET /api/health/mac` — latest Mac heartbeat (CPU, memory, disk,
+    /// process flags).  Bearer read token or dashboard session.
+    public func macHealth() async throws -> MacHealthResponse {
+        try await get("/api/health/mac", authorization: .read)
+    }
+
+    /// `GET /api/agents-overview?window=` — AI coding agent telemetry, live run
+    /// status, subscription quotas, and PAYG API-equivalent cost savings.
+    /// Bearer read token or dashboard session.
+    ///
+    /// Window is a query item, not a path suffix.  `endpoint(path:)` uses
+    /// `appendingPathComponent`, which percent-encodes `?` (`%3F`).  Inlining
+    /// `?window=` produced `/api/agents-overview%3Fwindow=30d`, a Next.js 404
+    /// that the Agents tab surfaces as "Request failed".
+    public func agentsOverview(window: String = "30d") async throws -> AgentsOverviewResponse {
+        try await get(
+            "/api/agents-overview",
+            queryItems: [URLQueryItem(name: "window", value: window)],
+            authorization: .read,
+            timeout: Self.operationsTimeout
+        )
     }
 
     /// Validate the currently stored bearer token without accepting a dashboard
@@ -372,6 +434,27 @@ public actor APIClient {
         )
     }
 
+    /// `DELETE /api/providers/:id` — remove a provider. Infisical-managed and
+    /// key-attribution-history providers return 409.
+    @discardableResult
+    public func deleteProvider(id: String) async throws -> ProviderDeleteReceipt {
+        try await sendWithoutBody(
+            "/api/providers/\(id)",
+            method: .delete,
+            authorization: .session
+        )
+    }
+
+    /// `DELETE /api/subscriptions/:id` — remove a tracked subscription row.
+    @discardableResult
+    public func deleteSubscription(id: String) async throws -> SubscriptionDeleteReceipt {
+        try await sendWithoutBody(
+            "/api/subscriptions/\(id)",
+            method: .delete,
+            authorization: .session
+        )
+    }
+
     // MARK: - Provider read depth (session-only)
 
     /// `GET /api/snapshots?providerId=&days=` — real recorded usage history
@@ -403,20 +486,107 @@ public actor APIClient {
         try await get("/api/providers/\(id)", authorization: .session)
     }
 
+    /// `POST /api/apns/device-tokens` — upload native APNs device token for push notifications.
+    
+    // MARK: - Intelligence (session-only analytics)
+
+    public func llmBurn(hours: Int = 5) async throws -> LlmBurnResponse {
+        let clamped = min(max(hours, 1), 24)
+        return try await get(
+            "/api/llm-burn",
+            queryItems: [URLQueryItem(name: "hours", value: String(clamped))],
+            authorization: .session
+        )
+    }
+
+    public func registerApnsDeviceToken(
+        deviceToken: String,
+        deviceModel: String? = nil,
+        osVersion: String? = nil,
+        environment: String? = nil
+    ) async throws {
+        struct RegisterPayload: Encodable {
+            let deviceToken: String
+            let deviceModel: String?
+            let osVersion: String?
+            let environment: String?
+        }
+        struct RegisterResponse: Decodable {
+            let ok: Bool
+        }
+        let _: RegisterResponse = try await send(
+            "/api/apns/device-tokens",
+            method: .post,
+            authorization: .session,
+            body: RegisterPayload(
+                deviceToken: deviceToken,
+                deviceModel: deviceModel,
+                osVersion: osVersion,
+                environment: environment
+            )
+        )
+    }
+
+
+    public func claudeCostCheck(days: Int = 30) async throws -> ClaudeCostCheckResponse {
+        let clamped = min(max(days, 1), 3650)
+        return try await get(
+            "/api/claude-cost-check",
+            queryItems: [URLQueryItem(name: "days", value: String(clamped))],
+            authorization: .session
+        )
+    }
+
+    public func keyAttribution() async throws -> KeyAttributionResponse {
+        try await get("/api/key-attribution", authorization: .session)
+    }
+
+    /// `GET /api/usage-events` summary for the Overview chart-range card.
+    /// Session-gated (dashboard password). Query items come from
+    /// `TimeframeOption.usageEventsQueryItems` so changing the range reloads.
+    public func usageEventsSummary(
+        queryItems: [URLQueryItem]
+    ) async throws -> UsageEventsSummary {
+        try await get(
+            "/api/usage-events",
+            queryItems: queryItems,
+            authorization: .session
+        )
+    }
+
+    /// `GET /api/export/daily-rollups` — the daily spend series behind the
+    /// Overview chart-range card for any selection other than "This month"
+    /// (which shows the month-to-date pace chart instead). Session-gated,
+    /// same as `usageEventsSummary`. `from`/`to` are inclusive UTC calendar
+    /// days (`yyyy-MM-dd`); the route rejects windows over 92 days, so
+    /// callers should pre-clamp (see `TimeframeOption.dailyRollupWindow`).
+    public func dailyRollups(from: String, to: String) async throws -> DailyRollupsResponse {
+        try await get(
+            "/api/export/daily-rollups",
+            queryItems: [
+                URLQueryItem(name: "from", value: from),
+                URLQueryItem(name: "to", value: to),
+            ],
+            authorization: .session
+        )
+    }
+
     // MARK: - Request plumbing
 
     private func get<T: Decodable>(
         _ path: String,
         queryItems: [URLQueryItem] = [],
         authorization: AuthorizationMode,
-        requireBearer: Bool = false
+        requireBearer: Bool = false,
+        timeout: TimeInterval? = nil
     ) async throws -> T {
         let request = try makeRequest(
             path: path,
             queryItems: queryItems,
             method: .get,
             authorization: authorization,
-            requireBearer: requireBearer
+            requireBearer: requireBearer,
+            timeout: timeout
         )
         return try await execute(request)
     }
@@ -503,13 +673,14 @@ public actor APIClient {
         queryItems: [URLQueryItem] = [],
         method: Method,
         authorization: AuthorizationMode,
-        requireBearer: Bool = false
+        requireBearer: Bool = false,
+        timeout: TimeInterval? = nil
     ) throws -> URLRequest {
         let url = try endpoint(path: path, queryItems: queryItems)
         var request = URLRequest(
             url: url,
             cachePolicy: .reloadIgnoringLocalCacheData,
-            timeoutInterval: configuration.timeout
+            timeoutInterval: timeout ?? configuration.timeout
         )
         request.httpMethod = method.rawValue
         request.setValue("application/json", forHTTPHeaderField: "Accept")

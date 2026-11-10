@@ -36,10 +36,10 @@ interface PaidServicesPanelProps {
 
 const COVERAGE_LABELS: Record<BillingCoverageStatus, string> = {
   automatic: "Syncing",
-  stale: "Stale sync",
+  stale: "Old snapshot",
   tracked: "Tracked",
-  available: "Needs sync",
-  manual: "Manual",
+  available: "Waiting for first fetch",
+  manual: "Manually only",
   "not-applicable": "Not applicable",
 };
 
@@ -49,7 +49,7 @@ const COVERAGE_STYLES: Record<BillingCoverageStatus, string> = {
   tracked: "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300",
   available: "bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
   manual: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
-  "not-applicable": "bg-gray-50 text-gray-500 dark:bg-gray-900 dark:text-gray-500",
+  "not-applicable": "bg-gray-50 text-gray-600 dark:bg-gray-900 dark:text-gray-400",
 };
 
 function formatMoney(amount: number, currency = "USD"): string {
@@ -211,7 +211,7 @@ export default function PaidServicesPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-700 sm:px-6">
         <div>
           <h2 id={titleId} className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            Paid services, plans & quotas
+            Paid Services, Plans & Quotas
           </h2>
           <p className="mt-1 max-w-3xl text-xs text-gray-500 dark:text-gray-400">
             Provider-reported billing, quotas, and locally tracked subscriptions in one deduplicated inventory.
@@ -416,7 +416,7 @@ export default function PaidServicesPanel({
                         {BILLING_PROVENANCE_LABELS[item.provenance]}
                       </span>
                       <p className="mt-1 break-words text-[11px] text-gray-500 dark:text-gray-400">{item.source || "local"}</p>
-                      <p className={`mt-1 text-[11px] ${item.stale ? "font-medium text-amber-700 dark:text-amber-300" : "text-gray-400 dark:text-gray-400"}`}>
+                      <p className={`mt-1 text-[11px] ${item.stale ? "font-medium text-amber-700 dark:text-amber-300" : "text-gray-500 dark:text-gray-400"}`}>
                         {item.stale ? "Sync is stale" : relativeSync(item.syncedAt)}
                       </p>
                     </td>
@@ -441,7 +441,7 @@ export default function PaidServicesPanel({
           <summary className="cursor-pointer px-4 py-4 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700/40 sm:px-6">
             Provider billing coverage
             <span className="ml-2 font-normal text-gray-500 dark:text-gray-400">
-              {coverageCounts.automatic} syncing · {coverageCounts.stale} stale · {coverageCounts.tracked} tracked · {coverageCounts.available} need setup · {coverageCounts.manual} manual · {coverageCounts["not-applicable"]} not applicable
+              {coverageCounts.automatic} syncing · {coverageCounts.stale} old snapshots · {coverageCounts.tracked} tracked · {coverageCounts.available} waiting for first fetch · {coverageCounts.manual} manually only · {coverageCounts["not-applicable"]} not applicable
             </span>
           </summary>
           <div className="border-t border-gray-100 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/50 sm:p-4">

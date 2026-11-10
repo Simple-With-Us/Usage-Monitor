@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import { SUBSCRIPTION_INTERVALS } from "@/lib/subscriptions";
 
 export interface ProviderInput {
@@ -51,6 +52,7 @@ const BILLING_MODES = new Set(["actual", "estimated", "manual"]);
 const BILLING_INTERVALS = new Set(SUBSCRIPTION_INTERVALS);
 const GOOGLE_SERVICE_ACCOUNT_SECRET_PATH = "serviceAccountJson";
 const MAX_BILLING_ACCOUNT_ID_LENGTH = 256;
+const MAX_PROVIDER_ALLOCATIONS = 100;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -302,14 +304,22 @@ function parseProviderPlanInput(value: unknown): ProviderPlanInput | undefined {
 function parseAllocationsInput(value: unknown): { projectId: string; percentage: number }[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) throw new Error("allocations must be an array");
+  if (value.length > MAX_PROVIDER_ALLOCATIONS) {
+    throw new Error(`allocations cannot contain more than ${MAX_PROVIDER_ALLOCATIONS} entries`);
+  }
 
   let totalPercentage = 0;
+  const seenProjectIds = new Set<string>();
   const allocations = value.map((a, index) => {
     if (!a || typeof a !== "object") throw new Error(`allocations[${index}] must be an object`);
-    
+
     const obj = a as Record<string, unknown>;
     const projectId = cleanOptionalString(obj.projectId);
     if (!projectId) throw new Error(`allocations[${index}].projectId must be a non-empty string`);
+    if (seenProjectIds.has(projectId)) {
+      throw new Error(`allocations[${index}].projectId is duplicated`);
+    }
+    seenProjectIds.add(projectId);
     
     const percentage = typeof obj.percentage === "number" ? obj.percentage : Number(obj.percentage);
     if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
@@ -329,7 +339,7 @@ function parseAllocationsInput(value: unknown): { projectId: string; percentage:
 
 export async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
   try {
-    const body = await request.json();
+    const body = await readBoundedJsonBody(request, { label: "Request body" });
     const record = asRecord(body);
     if (!record) throw new Error("Request body must be a JSON object");
     return record;

@@ -1,17 +1,23 @@
 # Deployment Guide
 
-**Production is the Oracle Cloud `VM.Standard.A1.Flex` host** running Docker +
-Caddy behind Cloudflare at `usage.jays.services`. The authoritative runbook —
-installation, the auto-deploy timer, preflight gates, deploy-transaction
-acceptance, backup monitoring, and rollback rules — is
-**[`deploy/oracle/README.md`](deploy/oracle/README.md)**. This file records the
-operational invariants every operator and agent must know, plus the
-environment variable reference.
+**Production (2026-08-07+):** Production fleet box running Coolify (see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`).
+SSH: `ssh coolify` (see `~/.ssh/config` Host `coolify` / `host.jays.services`).
+Public edge: Cloudflare → `usage.jays.services`.
+
+Fleet ops sheet: `/Users/jay/apps/COOLIFY.md` and Socratic
+`docs/rollouts/2026-08-07-hetzner-fleet-cutover.md`.
+
+**Legacy Oracle** runbook (auto-deploy timer, preflight, litestream host
+scripts) remains under **[`deploy/retired/oracle/`](deploy/retired/oracle/)**
+for history / emergency reference — **Oracle is not the live writer** after the
+Hetzner cutover.  See `deploy/README.md` for the canonical deploy index and
+the entry-point banner at `deploy/retired/oracle/RETIRED.md` for the explicit
+"Do not enable the Oracle auto-deploy timer on any host" warning.
 
 The former Render deployment is **retired and suspended as a rollback host
 only**; its historical runbook lives in
-[`deploy/render/RETIRED-rollback.md`](deploy/render/RETIRED-rollback.md) and
-`render.yaml` is kept functional solely so that host can be revived in a
+[`deploy/retired/render/RETIRED-rollback.md`](deploy/retired/render/RETIRED-rollback.md)
+and `render.yaml` is kept functional solely so that host can be revived in a
 deliberate rollback.
 
 ## Operational invariants
@@ -35,26 +41,90 @@ deliberate rollback.
    `/etc/usage-monitor/host.env` holds only deploy-written host state
    (`USAGE_MONITOR_REVISION`). No production SSH key or cloud credential is
    stored in GitHub; the deploy model is pull-based.
-3. **Backups replicate to the Garage bucket `usage-monitor-prod-v3`.**
-   Litestream continuously replicates `/data/prod.db` there; the deploy
-   preflight hard-fails if any other bucket is configured. Layered backup
-   story: same-disk pre-migration snapshots → deploy-time offline snapshots
-   (up to five retained) → Litestream/Garage PITR with 15-minute external
-   verification and weekly restore drills.
-4. **Deploys are automatic and gated.** The
-   `usage-monitor-auto-deploy.timer` polls GitHub once per minute and deploys
-   only when all preflight gates pass: exact `main` SHA with valid signature,
-   merged-PR provenance, green GitHub Actions (`verify`, `gitleaks`,
-   `Analyze JavaScript and TypeScript`), healthy current database / sole
-   scheduler / Garage replica / `/data` headroom / public readiness, and the
-   Render retirement proof (service user-suspended, auto-deploy disabled,
-   `USAGE_SCHEDULER_ENABLED=false`, verified live through Render's API).
-   `/etc/usage-monitor/auto-deploy.paused` freezes deployments while present.
+3. **Backups replicate to Backblaze B2** (bucket `jays-usage-monitor-eu`,
+   endpoint `https://s3.eu-central-003.backblazeb2.com`). Litestream continuously
+   replicates `/data/prod.db` there. **Cloudflare R2 is weekly archive only**
+   (`weekly/` on `usage-monitor-prod-v3`).  Historic Litestream LTX on that
+   bucket was deleted 2026-08-16. **Hetzner/Coolify Garage is
+   retired** (PR #869). Layered backup story: same-disk pre-migration snapshots
+   (retention 1) → deploy-time offline snapshots → Litestream/B2 DR with
+   external verification. R2 free-tier monitoring still watches the weekly
+   bucket; the 70% kill switch only stops litestream when the endpoint is R2, not B2.
+   See `docs/litestream.md`.
+4. **Deploys are automatic; the live Coolify path is not CI-gated (known
+   gap, board `d0f5f1db`).** The preflight-gated `usage-monitor-auto-deploy.timer`
+   (exact `main` SHA with valid signature, merged-PR provenance, green GitHub
+   Actions, healthy current database / sole scheduler / backup replica /
+   `/data` headroom / public readiness, Render retirement proof) was the
+   **retired Oracle host's** mechanism — see
+   [`deploy/retired/oracle/`](deploy/retired/oracle/) — and is **not** what
+   runs on the live Coolify host. Coolify's own GitHub auto-deploy fires on
+   every push to `main` via a per-app webhook (`/Users/jay/apps/COOLIFY.md`
+   "GitHub auto-deploy" row), independent of GitHub Actions outcome.
+   `production-deploy-verify.yml` only **observes** after the fact — it
+   confirms production reaches a SHA once CI on that SHA is green, but it
+   cannot block or delay the webhook-triggered deploy that already started.
+   A commit that lands on `main` with CI still red (or not yet dispatched)
+   can therefore reach production before anyone is paged. There is no
+   `/etc/usage-monitor/auto-deploy.paused`-equivalent freeze switch or
+   host-side eligibility check on this host today; restoring one (or gating
+   the Coolify trigger itself on a `workflow_run`-dispatched deploy call)
+   needs Coolify dashboard/API access to implement and verify — tracked on
+   the board rather than assumed fixed by this note. The historical
+   `usage-monitor-auto-deploy.timer` from the Oracle era is preserved under
+   [`deploy/retired/oracle/`](deploy/retired/oracle/) for forensic reference
+   only and must not be `enable --now`'d on any host — see
+   `deploy/retired/oracle/RETIRED.md`.
 5. **Rollback never restores an old database over new writes.** Automatic
    rollback changes code/image only. A full host rollback requires quiescing
-   Oracle and restoring the latest verified Garage lineage before
-   transferring writer authority — never just re-point DNS at Render's stale
-   database.
+   the writer and restoring the latest verified **B2** lineage (or the weekly
+   R2 archive if B2 is gone) before transferring writer authority — never just re-point
+   DNS at a stale host.
+
+## Sentry Build Release Prerequisite
+
+The production Docker build creates the Sentry bundler release and uploads its
+sourcemaps; the Sentry Deploy workflow only attaches deployment evidence to that
+existing release.  Its GitHub Actions token does not reach Coolify's separate
+Docker build.  Runtime Infisical injection also happens after compilation.
+
+Configure the production builder to supply `SENTRY_AUTH_TOKEN` as a BuildKit secret
+from the existing authorized Infisical source.  The Dockerfile mounts that secret
+only into the build command's environment.  Do not pass the token as a Docker
+build argument, persist it with `ENV`, or put it in the build context.
+
+An already-authorized build process with the token in its process environment can
+use `docker build --secret id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN` alongside
+`--build-arg SOURCE_COMMIT=<full-40-character-source-SHA>`.  Non-secret routing
+defaults to organization `simple-with-us` and project `usage-monitor`; override
+with the `SENTRY_ORG` and `SENTRY_SELF_PROJECT` build arguments only when the
+deployment reporter targets the same destination.  Keep
+`NEXT_PUBLIC_SENTRY_DSN` configured at build time for browser telemetry.
+Coolify's **Docker BuildKit secrets** mode supplies every build variable as a
+secret instead of a build argument.  Enable source-commit availability during
+build and supply the public secret IDs `SOURCE_COMMIT`, `GIT_COMMIT_SHA`,
+`NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ORG`, and `SENTRY_SELF_PROJECT` as applicable.
+The Dockerfile reads non-empty public secret files only; absent or empty files
+preserve its argument/environment defaults.  All mounts are explicitly optional.
+Coolify separately injects the deployed `SOURCE_COMMIT` into the runtime
+environment, which `/api/health` prefers for its revision.  A different builder
+using only a source-commit secret must also inject that SHA at runtime or pass
+the public `SOURCE_COMMIT` build argument to bake it into the runtime image;
+the builder's temporary secret export is not persisted in that image.
+
+With an upload token present, a missing or invalid source SHA fails configuration
+before the plugin loads, preventing a fallback to an automatically inferred release.
+Authenticated release creation or sourcemap upload failures also fail the build
+with a fixed message that excludes provider error details.
+
+Credential-free Docker/CI builds continue without upload.  This code path alone
+does not establish that Coolify supplies the secret, that its token can upload,
+or that a release exists.  After an authorized rebuild, verify the exact source
+SHA release and sourcemap upload in Sentry before rerunning the deployment
+reporter.  The reporter intentionally refuses to invent a parallel release.
+When enabling or replacing the secret for an already-built SHA, force the build
+stage to rerun (`--no-cache-filter build` with buildx, or `--no-cache` with
+`docker build`); secret contents do not invalidate Docker's layer cache.
 
 ## Verify a deployment
 
@@ -78,8 +148,12 @@ All production runtime config — secrets **and** non-secrets — lives in the
 Infisical `usage-monitor` project, environment `prod`, path `/`. The host
 never edits a runtime `.env` file; it materializes one:
 
-- `/usr/local/sbin/usage-monitor-env-sync` (source:
-  `deploy/oracle/infisical-env-sync.sh`) logs in with the `automation`
+- `/usr/local/sbin/usage-monitor-env-sync` is installed on the Hetzner box.
+  The reference implementation lives at
+  [`deploy/retired/oracle/infisical-env-sync.sh`](deploy/retired/oracle/infisical-env-sync.sh)
+  (Oracle-era, byte-identical to the Hetzner install); the historical
+  filename is preserved so anyone diffing against the retired Oracle stack
+  can see the script is unchanged.  The script logs in with the `automation`
   universal-auth machine identity, exports the project as JSON, validates the
   required keys, and atomically writes
   `/run/usage-monitor/usage-monitor.env` (tmpfs, root-owned, mode 0600, raw
@@ -158,7 +232,7 @@ defaults and valid values for local development.
 - `SENTRY_READ_TOKEN` (optional; enables the read-only Sentry Health dashboard card, an org-auth
   token or internal integration token with `project:read`/`event:read` scope — never sent to the
   client, absent by default)
-- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `jays-services`)
+- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `simple-with-us`)
 - `ALERT_SLACK_WEBHOOK_URL` / `ALERT_WEBHOOK_URL` / `ALERT_RESEND_API_KEY` +
   `ALERT_EMAIL_FROM` + `ALERT_EMAIL_TO` / `ALERT_PAGERDUTY_ROUTING_KEY` (optional delivery
   destinations; Resend needs all three email values)
@@ -214,11 +288,16 @@ defaults and valid values for local development.
   requests receive `429` with the same backoff. Generic `/api/ingest/usage`
   remains available. Restore `true` only after the database stays healthy and a
   controlled OTLP ingest/replay succeeds.
-- `LITESTREAM_S3_*` (Garage replica credentials; set all four required values
-  together or none—partial configuration fails startup. Production targets
-  bucket `usage-monitor-prod-v3`; see `litestream.yml` and `docs/litestream.md`)
+- `LITESTREAM_S3_*` (Backblaze B2 replica credentials; set all four required
+  values together or none—partial configuration fails startup. Production
+  targets bucket `jays-usage-monitor-eu` on
+  `https://s3.eu-central-003.backblazeb2.com`; see `litestream.yml` and
+  `docs/litestream.md`. Optional unified `AWS_*` names are normalized at startup.)
 - `LITESTREAM_REQUIRED` (production: `true`; readiness fails if replication
   is absent or the replica side-channel is unhealthy)
+- `R2_USAGE_ACCOUNT_ID` / `R2_USAGE_API_TOKEN` (optional; watches **historic** R2
+  free-tier; kill switch only stops litestream when endpoint is R2, not B2.
+  Fallbacks: `CLOUDFLARE_JAY_*` or `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`)
 
 ## SSL/TLS
 - Cloudflare proxy: enabled for `usage.jays.services`
@@ -243,16 +322,20 @@ Every deploy transaction additionally keeps the previous full-SHA image and
 up to five verified offline SQLite snapshots for automatic code rollback.
 
 [Litestream](https://litestream.io/) continuously replicates `/data/prod.db`
-to the Garage bucket `usage-monitor-prod-v3` with transaction-aware restore
-points (7-day snapshot retention, 24 h snapshot interval — see
-`litestream.yml`). The external singleton at
+to **Backblaze B2** (bucket `jays-usage-monitor-eu`) with disaster-recovery
+restore points (72 h snapshot retention, 24 h snapshot interval, 1 h
+sync-interval — not continuous second-scale PITR; see `litestream.yml`).
+**Cloudflare R2 remains historic** until the owner deletes it after B2 is
+proven. The external singleton at
 `/Users/jay/apps/fleet-sentry-monitor/monitor.py` verifies replica freshness
-and restorability every 15 minutes and runs a weekly full-integrity restore
-drill (see "Backup monitoring" in `deploy/oracle/README.md`). Full setup,
-verification, and disaster-recovery restore steps live in
-`docs/litestream.md`. Relevant files: `scripts/fetch-litestream.sh`
-(build-time binary download), `scripts/start-with-litestream.sh` (startup
-wrapper), `scripts/litestream-restore.sh` (manual restore).
+and restorability (see "Backup monitoring" in `deploy/README.md`'s
+"Live production" table — the script is machine-level, not per-app; the
+retired Oracle-era runbook lives under `deploy/retired/oracle/README.md`
+and is not the source of operational truth anymore). Full setup and
+disaster-recovery restore steps live in `docs/litestream.md`.
+Relevant files: `scripts/fetch-litestream.sh` (build-time binary download),
+`scripts/start-with-litestream.sh` (startup wrapper),
+`scripts/litestream-restore.sh` (manual restore).
 
 ## Release-time data maintenance
 

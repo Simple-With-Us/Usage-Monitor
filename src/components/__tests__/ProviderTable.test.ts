@@ -32,7 +32,10 @@ function provider(overrides: Partial<Provider>): Provider {
   };
 }
 
-function renderTable(providers: Provider[]) {
+function renderTable(
+  providers: Provider[],
+  extraProps: { loadError?: string | null; onRetryLoad?: () => void } = {}
+) {
   const noop = vi.fn();
   return renderToStaticMarkup(
     createElement(ProviderTable, {
@@ -46,6 +49,7 @@ function renderTable(providers: Provider[]) {
       onAddProvider: noop,
       onToggleActive: noop,
       onFetchNow: noop,
+      ...extraProps,
     })
   );
 }
@@ -86,7 +90,7 @@ describe("ProviderTable cost coverage", () => {
     expect(html).not.toContain("Cost not reported");
   });
 
-  it("hides Fetch Now when Anthropic has no organization Admin key", () => {
+  it("hides Fetch when Anthropic has no organization Admin key", () => {
     const individualHtml = renderTable([
       provider({ name: "anthropic", displayName: "Anthropic individual" }),
     ]);
@@ -103,13 +107,13 @@ describe("ProviderTable cost coverage", () => {
       }),
     ]);
 
-    expect(individualHtml).not.toContain("Fetch Now");
-    expect(individualHtml).toContain("Push / manual");
-    expect(organizationHtml).toContain("Fetch Now");
+    expect(individualHtml).not.toContain("Fetch");
+    expect(individualHtml).toContain("Manually only");
+    expect(organizationHtml).toContain("Fetch");
     expect(organizationHtml).toContain("Active");
   });
 
-  it("hides Fetch Now for generic and push-only providers", () => {
+  it("hides Fetch for generic and push-only providers", () => {
     const manualHtml = renderTable([
       provider({
         id: "manual",
@@ -143,14 +147,14 @@ describe("ProviderTable cost coverage", () => {
       }),
     ]);
 
-    expect(manualHtml).not.toContain("Fetch Now");
-    expect(manualHtml).toContain("Push / manual");
-    expect(pushHtml).not.toContain("Fetch Now");
-    expect(pushHtml).toContain("Push / manual");
-    expect(customHtml).toContain("Fetch Now");
+    expect(manualHtml).not.toContain("Fetch");
+    expect(manualHtml).toContain("Manually only");
+    expect(pushHtml).not.toContain("Fetch");
+    expect(pushHtml).toContain("Manually only");
+    expect(customHtml).toContain("Fetch");
     expect(customHtml).toContain(">Active<");
-    expect(manualProviderHtml).not.toContain("Fetch Now");
-    expect(manualProviderHtml).toContain("Push / manual");
+    expect(manualProviderHtml).not.toContain("Fetch");
+    expect(manualProviderHtml).toContain("Manually only");
   });
 
   it("shows Gemini key health separately from billing availability", () => {
@@ -184,7 +188,7 @@ describe("ProviderTable cost coverage", () => {
     ]);
 
     expect(rejectedHtml).toContain("Key rejected");
-    expect(rejectedHtml).toContain("Verify &amp; fetch");
+    expect(rejectedHtml).toContain("Verify");
     expect(rejectedHtml).toContain("Billing pending");
     expect(rejectedHtml).toContain("Usage permission denied");
     expect(rejectedHtml).toContain("Cost snapshot fetched");
@@ -206,7 +210,7 @@ describe("ProviderTable cost coverage", () => {
     ]);
 
     expect(unavailableHtml).toContain("Check unavailable");
-    expect(unavailableHtml).toContain("Verify &amp; fetch");
+    expect(unavailableHtml).toContain("Verify");
     expect(unavailableHtml).not.toContain("Key rejected");
     expect(unavailableHtml).toContain(">Active<");
   });
@@ -245,10 +249,10 @@ describe("ProviderTable cost coverage", () => {
       }),
     ]);
 
-    // Default density is compact: short label plus a touch/keyboard disclosure.
-    expect(html).toContain("Coverage gap");
+    // Coverage caveat is nested under Billing detail disclosure (compact spend cell).
     expect(html).toContain("Billing detail");
     expect(html).toContain("<details");
+    expect(html).toContain("Coverage:");
     expect(html).toContain(
       "Usage-based costs (D1, R2, Workers, Queues overage) are not visible"
     );
@@ -265,7 +269,33 @@ describe("ProviderTable cost coverage", () => {
       }),
     ]);
 
-    expect(html).not.toContain("Coverage gap");
+    expect(html).not.toContain("Coverage:");
     expect(html).not.toContain("Cost coverage gap");
+  });
+});
+
+describe("ProviderTable load error vs genuine empty", () => {
+  it("renders the explicit failure panel with a Retry button when the load failed", () => {
+    const html = renderTable([], {
+      loadError: "Failed to fetch providers",
+      onRetryLoad: vi.fn(),
+    });
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Providers couldn&#x27;t be loaded.");
+    expect(html).toContain("Failed to fetch providers");
+    expect(html).toContain("Retry");
+    // An outage must never masquerade as an empty account — no CTA to add a
+    // (potentially duplicate) provider.
+    expect(html).not.toContain("No providers configured yet.");
+    expect(html).not.toContain("Add your first provider");
+  });
+
+  it("renders the empty-state CTA only when the load succeeded with zero providers", () => {
+    const html = renderTable([]);
+
+    expect(html).toContain("No providers configured yet.");
+    expect(html).toContain("Add your first provider");
+    expect(html).not.toContain('role="alert"');
   });
 });

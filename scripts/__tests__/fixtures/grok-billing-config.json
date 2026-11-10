@@ -1,0 +1,14 @@
+{
+  "config": {
+    "currentPeriod": {
+      "type": "SUBSCRIPTION_PERIOD_WEEKLY",
+      "start": "2026-09-10T00:00:00Z",
+      "end": "2026-09-17T00:00:00Z"
+    },
+    "creditUsagePercent": 51,
+    "onDemandCap": { "val": 500 },
+    "onDemandUsed": { "val": 0 },
+    "productUsage": [{ "product": "grok-code", "usagePercent": 50 }],
+    "prepaidBalance": { "val": 300 }
+  }
+}

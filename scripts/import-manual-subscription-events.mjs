@@ -215,6 +215,13 @@ function requireRecord(record, index, now) {
   if (occurredAt.getTime() > now.getTime() + MAX_FUTURE_SKEW_MS) {
     throw new Error(`records[${index}].occurredAt is too far in the future`);
   }
+  const voidsSubscriptionId =
+    typeof record.voidsSubscriptionId === "string"
+      ? record.voidsSubscriptionId.trim()
+      : "";
+  if (voidsSubscriptionId && !UUID_PATTERN.test(voidsSubscriptionId)) {
+    throw new Error(`records[${index}].voidsSubscriptionId must be a UUID when provided`);
+  }
   return {
     externalId,
     description,
@@ -222,6 +229,7 @@ function requireRecord(record, index, now) {
     amountUsd,
     confidence: record.confidence,
     occurredAt,
+    ...(voidsSubscriptionId ? { voidsSubscriptionId } : {}),
   };
 }
 
@@ -270,6 +278,9 @@ export function buildManualAdjustmentEvents({
         description: record.description,
         estimate: record.confidence === "estimated",
         ...(providerId ? { providerId: providerId.toLowerCase() } : {}),
+        ...(record.voidsSubscriptionId
+          ? { voidsSubscriptionId: record.voidsSubscriptionId }
+          : {}),
       },
     };
   });

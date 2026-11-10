@@ -39,7 +39,7 @@ public struct KeychainTokenStore: TokenStoring {
     private let account: String
 
     public init(
-        service: String = "services.jays.usage.monitor",
+        service: String = "services.jays.usage.client.monitor",
         account: String = "usage-read-token"
     ) {
         self.service = service

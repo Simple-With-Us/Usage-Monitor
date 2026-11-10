@@ -15,6 +15,7 @@ import { decodeMetricsJson } from "@/lib/otlp/json-decode";
 import { decodeMetricsProtobuf } from "@/lib/otlp/protobuf-decode";
 import { BoundedLogOnce } from "@/lib/otlp/bounded-log-once";
 import { mapClaudeCodeMetrics } from "@/lib/otlp/claude-code-mapper";
+import { mapGenAiMetrics } from "@/lib/otlp/gen-ai-mapper";
 import { mapSystemMetrics } from "@/lib/otlp/system-mapper";
 import { ensureAnthropicProviderSeeded } from "@/lib/otlp/ensure-anthropic-provider";
 import { resolveProjectIdsByName } from "@/lib/project-resolver";
@@ -32,6 +33,7 @@ import {
   tryAcquireIngestAdmission,
 } from "@/lib/ingest-admission";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
+import { fanoutPersistedUsage } from "@/lib/usage-fanout";
 
 // OTLP-HTTP metrics ingest: POST /api/otlp/v1/metrics
 //
@@ -141,16 +143,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (
-    credential.allowedSourceApps &&
-    !credential.allowedSourceApps.has("claude-code") &&
-    !credential.allowedSourceApps.has("system-metrics")
-  ) {
-    return NextResponse.json(
-      { error: "Unauthorized producer for OTLP metrics" },
-      { status: 403 }
-    );
-  }
   const presentedToken = tokenFromRequest(request, "x-usage-ingest-token");
   if (!otlpMetricsIdentityRateLimiter.check(getIngestIdentityRateLimitKey(presentedToken))) {
     return rateLimitedResponse();
@@ -168,12 +160,20 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // NOTE: scoped-credential enforcement happens post-mapping below (per
+  // mapped sourceApp, covering claude_code.*, system.*, and generic gen_ai
+  // rows alike), so gen_ai-scoped producer tokens are honored without a
+  // pre-parse allowlist that would need to enumerate every platform.
+
   // Do not parse/map a potentially large exporter batch while another usage
   // write owns SQLite. Returning the producer-visible backpressure response
   // before body allocation is what prevents retry storms from recreating the
   // receiver's memory/CPU failure mode.
   const releaseAdmission = tryAcquireIngestAdmission();
   if (!releaseAdmission) {
+    void import("@/lib/sentry-ops").then(({ recordIngestAdmissionRejected }) =>
+      recordIngestAdmissionRejected({ route: "otlp/v1/metrics" })
+    );
     return NextResponse.json(
       { error: "Usage ingest is busy. Retry later." },
       {
@@ -215,11 +215,38 @@ export async function POST(request: NextRequest) {
     ? 0
     : systemResult.events.length;
 
-  const events = [...claudeResult.events, ...systemEvents];
+  // Generic gen_ai mapper (fleet-telemetry-relay path). Overlap platforms
+  // with an exact local JSONL collector are skipped inside the mapper
+  // unless OTLP_GEN_AI_ALLOW_OVERLAP=1 / allowlisted, so one turn cannot
+  // land twice in the ledger.
+  const genAiResult = mapGenAiMetrics(parsed);
 
-  // A metric is only truly "unknown" if neither mapper understood it
-  const unknownMetrics = claudeResult.unknownMetrics.filter((claudeUnknown) =>
-    systemResult.unknownMetrics.some((systemUnknown) => systemUnknown.name === claudeUnknown.name)
+  const events = [...claudeResult.events, ...systemEvents, ...genAiResult.events];
+
+  if (credential.allowedSourceApps) {
+    const unauthorizedEvent = events.find(
+      (e) => !credential.allowedSourceApps!.has(e.sourceApp)
+    );
+    if (unauthorizedEvent) {
+      void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+        recordIngestScopeRejected({
+          route: "otlp/v1/metrics",
+          dimension: "sourceApp",
+          value: unauthorizedEvent.sourceApp,
+        })
+      );
+      return NextResponse.json(
+        { error: `Credential is not authorized for sourceApp "${unauthorizedEvent.sourceApp}"` },
+        { status: 403 }
+      );
+    }
+  }
+
+  // A metric is only truly "unknown" if no mapper understood it.
+  const unknownMetrics = claudeResult.unknownMetrics.filter(
+    (claudeUnknown) =>
+      systemResult.unknownMetrics.some((systemUnknown) => systemUnknown.name === claudeUnknown.name) &&
+      genAiResult.unknownMetrics.some((genAiUnknown) => genAiUnknown.name === claudeUnknown.name)
   );
 
   for (const unknown of unknownMetrics) {
@@ -292,6 +319,15 @@ export async function POST(request: NextRequest) {
       // Wave F / E7: soft-stale budget SWR after newly persisted OTLP rows.
       if (persistResult.persisted > 0) {
         markBudgetStatusSoftStale();
+        void fanoutPersistedUsage(
+          persistResult.newEvents.map((event) => ({
+            provider: event.provider,
+            sourceApp: event.sourceApp,
+            model: event.keyRef,
+            costUsd: event.costUsd,
+          })),
+          "otlp/v1/metrics"
+        );
       }
 
       // Best-effort: give the owner a Provider row to attach a budget to (see
@@ -319,6 +355,9 @@ export async function POST(request: NextRequest) {
       idempotentRetries: idempotentRetries || undefined,
       // Dropped system.* points when OTLP_SYSTEM_METRICS_INGEST_ENABLED is off.
       ignoredSystemMetrics: ignoredSystemMetrics || undefined,
+      // gen_ai points skipped because the platform already has a JSONL collector
+      // (or is outside OTLP_GEN_AI_PLATFORM_ALLOWLIST).
+      ignoredOverlap: genAiResult.ignoredOverlap || undefined,
       unknownMetrics: unknownMetrics.length > 0 ? unknownMetrics : undefined,
     },
     { status: 202 }
@@ -330,6 +369,20 @@ export async function POST(request: NextRequest) {
       "[otlp/metrics] unhandled failure:",
       error instanceof Error ? error.message : error
     );
+    // Audit 2026-09-20 (board item c0fe8d9c): the ingest/usage sibling route
+    // emits ingest.failed via Sentry.logger + Sentry.metrics + the fleet-infra
+    // mirror. Mirror the same observability here so the OTLP path is not a
+    // silent failure sink (Codex re-review found the same gap on the
+    // beforeSend hooks; this is the same shape, different layer).
+    try {
+      const { logIngestFailed } = await import("@/lib/sentry-ops");
+      void logIngestFailed({
+        reason: error instanceof Error ? error.name : "unknown",
+        route: "otlp/v1/metrics",
+      });
+    } catch {
+      // Sentry is best-effort; never let observability break the response.
+    }
     return NextResponse.json(
       {
         ok: false,

@@ -5,7 +5,11 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import UsageChart from "@/components/UsageChart";
 import BalanceBadge from "@/components/BalanceBadge";
-import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import ExternalBillingDetails, {
+  type ExternalBillingRecord,
+} from "@/components/ExternalBillingDetails";
+import { SentryUsageTable } from "@/components/SentryUsageCard";
+import type { SentryCategoryTotal } from "@/lib/sentry-usage-categories";
 import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 import PaidServicesPanel from "@/components/PaidServicesPanel";
 import type { SubscriptionRow } from "@/components/SubscriptionsPanel";
@@ -106,6 +110,10 @@ interface Provider {
   linkedFixedDedupeUsd?: number;
   fixedCostConflict?: boolean;
   externalBilling?: ExternalBillingRecord[];
+  sentryUsage?: {
+    byCategory: SentryCategoryTotal[];
+    billingCost: false;
+  } | null;
   latestSnapshot?: {
     balance: number | null;
     totalCost: number | null;
@@ -419,6 +427,27 @@ export default function ProviderDetailPage() {
         variant="provider"
       />
 
+      {provider.sentryUsage && (
+        <section className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+          <div className="border-b border-gray-100 px-4 py-3 sm:px-6 dark:border-gray-700">
+            <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+              Sentry Usage
+            </h2>
+            <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Month-to-date accepted and rate-limited counts.&nbsp; Not invoice spend or prepaid credits.
+            </p>
+          </div>
+          <SentryUsageTable rows={provider.sentryUsage.byCategory} />
+        </section>
+      )}
+
+      {provider.externalBilling && provider.externalBilling.length > 0 && (
+        <ExternalBillingDetails
+          records={provider.externalBilling}
+          refreshIntervalMin={provider.refreshIntervalMin}
+        />
+      )}
+
       {/* Summary stats */}
       <div
         className={`grid grid-cols-1 sm:grid-cols-2 ${
@@ -530,7 +559,7 @@ export default function ProviderDetailPage() {
             <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">{runoutLabel}</p>
           )}
           {density === "comfortable" && (
-            <p className="text-[10px] uppercase text-gray-400 dark:text-gray-500">
+            <p className="text-[10px] uppercase text-gray-500 dark:text-gray-400">
               {spendCoverage === "partial" ? "excludes unpriced usage" : provider.billingMode}
             </p>
           )}
@@ -554,10 +583,10 @@ export default function ProviderDetailPage() {
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & alert policy</h2>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & Alert Policy</h2>
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Owner-defined guardrails; these are not provider-reported plan terms.</p>
           </div>
-          <Link href="/settings?tab=connections" className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+          <Link href={`/settings?tab=connections&edit=${encodeURIComponent(provider.id)}`} className="text-xs font-semibold text-accent hover:opacity-90">
             Edit connection
           </Link>
         </div>
@@ -623,7 +652,10 @@ export default function ProviderDetailPage() {
               {formatUsd(provider.receiptCashPaidUsd ?? 0)}
             </dd>
             <dd className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
-              {provider.receiptCashEventCount ?? 0} exact receipt{provider.receiptCashEventCount === 1 ? "" : "s"}
+              {provider.receiptCashEventCount ?? 0} exact receipt
+              {provider.receiptCashEventCount === 1 ? "" : "s"}
+              {" · "}
+              matches existing cash are evidence-only (no double-count)
             </dd>
           </div>
           <div>
@@ -705,7 +737,7 @@ export default function ProviderDetailPage() {
           </div>
         </div>
         {snapshots.length === 0 ? (
-          <div className="px-6 py-8 text-center text-sm text-gray-400 dark:text-gray-500">
+          <div className="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
             No snapshots recorded yet
           </div>
         ) : (

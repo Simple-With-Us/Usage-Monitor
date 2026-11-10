@@ -1,5 +1,9 @@
 import React from "react";
 import { formatCurrency } from "@/lib/format";
+import {
+  spendAmountClass,
+  type OverallAccountStatus,
+} from "@/lib/ui-status";
 
 interface DashboardSummaryCardsProps {
   totalProviderFunds: number;
@@ -9,7 +13,11 @@ interface DashboardSummaryCardsProps {
   ambiguousCostFamilyCount: number;
   attentionItemsCount: number;
   criticalCount: number;
+  /** Period name shown in the spend card header, e.g. "August 2026" or "Past 30 Days". */
+  spendPeriodLabel: string;
   onAlertsNavigate?: () => void;
+  /** When provided, spend amount uses status-based color (not always amber). */
+  accountStatus?: OverallAccountStatus;
 }
 
 export default function DashboardSummaryCards({
@@ -20,7 +28,9 @@ export default function DashboardSummaryCards({
   ambiguousCostFamilyCount,
   attentionItemsCount,
   criticalCount,
+  spendPeriodLabel,
   onAlertsNavigate,
+  accountStatus = "ok",
 }: DashboardSummaryCardsProps) {
   // Money-first KPI order (Wave D / D2): spend → projection → funds → alerts.
   // Zero open alerts use neutral gray so "0" is not amber-alarm coloring.
@@ -31,58 +41,61 @@ export default function DashboardSummaryCards({
         ? "text-amber-600 dark:text-amber-400"
         : "text-gray-900 dark:text-gray-100";
 
+  const incomplete = incompleteCostProviderCount > 0 || ambiguousCostFamilyCount > 0;
+  const spendTone = spendAmountClass(accountStatus, incomplete);
+
   return (
     <div
-      className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 sm:grid-cols-4 dark:border-gray-700 dark:bg-gray-700"
+      className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-gray-200 bg-gray-100 sm:grid-cols-4 dark:border-gray-700 dark:bg-gray-700"
     >
       <div className="bg-white p-4 dark:bg-gray-800">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-          {incompleteCostProviderCount > 0 || ambiguousCostFamilyCount > 0
-            ? "Known Spend This Month"
-            : "Tracked Spend This Month"}
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+          {incomplete
+            ? `Known ${spendPeriodLabel} Spend`
+            : `${spendPeriodLabel} Spend`}
         </p>
-        <p className="mt-1 text-lg font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+        <p className={`mt-1 text-lg font-semibold tabular-nums ${spendTone}`}>
           {formatCurrency(totalCost)}
         </p>
         {incompleteCostProviderCount > 0 && (
-          <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-300">
+          <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-300">
             {incompleteCostProviderCount} provider cost{incompleteCostProviderCount === 1 ? "" : "s"} incomplete
           </p>
         )}
         {ambiguousCostFamilyCount > 0 && (
-          <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-300">
+          <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-300">
             {ambiguousCostFamilyCount} multi-key famil{ambiguousCostFamilyCount === 1 ? "y" : "ies"} excluded
           </p>
         )}
       </div>
       <div className="bg-white p-4 dark:bg-gray-800">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-          {incompleteCostProviderCount > 0 || ambiguousCostFamilyCount > 0
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+          {incomplete
             ? "Known-Cost Projection"
             : "Projected Monthly Spend"}
         </p>
         <p className="mt-1 text-lg font-semibold tabular-nums text-gray-900 dark:text-gray-100">
           {formatCurrency(totalProjectedMonthlyCost)}
         </p>
-        {(incompleteCostProviderCount > 0 || ambiguousCostFamilyCount > 0) && (
-          <p className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+        {incomplete && (
+          <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
             Excludes unreported or ambiguous provider costs
           </p>
         )}
       </div>
       <div className="bg-white p-4 dark:bg-gray-800">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           Known Provider Funds
         </p>
         <p className="mt-1 text-lg font-semibold tabular-nums text-gray-900 dark:text-gray-100">
           {formatCurrency(totalProviderFunds)}
         </p>
-        <p className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+        <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
           Excludes ambiguous, brokerage, and merchant assets
         </p>
       </div>
       <div className="bg-white p-4 dark:bg-gray-800">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           Open Alerts
         </p>
         <a
@@ -94,13 +107,13 @@ export default function DashboardSummaryCards({
             {attentionItemsCount}
           </p>
           {criticalCount > 0 && (
-            <p className="mt-0.5 text-[11px] text-red-500 dark:text-red-400">{criticalCount} critical &rarr;</p>
+            <p className="mt-0.5 text-xs text-red-500 dark:text-red-400">{criticalCount} critical &rarr;</p>
           )}
           {criticalCount === 0 && attentionItemsCount > 0 && (
-            <p className="mt-0.5 text-[11px] text-amber-500 dark:text-amber-400">View details &rarr;</p>
+            <p className="mt-0.5 text-xs text-amber-500 dark:text-amber-400">View details &rarr;</p>
           )}
           {attentionItemsCount === 0 && (
-            <p className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">All clear</p>
+            <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">All clear</p>
           )}
         </a>
       </div>

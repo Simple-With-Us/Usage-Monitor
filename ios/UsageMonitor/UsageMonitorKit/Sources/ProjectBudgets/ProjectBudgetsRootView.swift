@@ -45,7 +45,7 @@ public struct ProjectBudgetsRootView: View {
                 onAdd: managementStore.canManage ? { editorContext = .add } : nil
             )
             .navigationTitle(AppTab.projects.title)
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $detailID) { id in
                 projectDetail(id: id)
             }
@@ -191,14 +191,19 @@ struct ProjectBudgetsContentView: View {
                 ProjectsRollupCard(rollup: rollup)
             }
 
-            SectionHeader(
-                "Projects",
-                subtitle: "Month to date"
-            ) {
+            // Do not repeat the tab title ("Projects") as an in-content header;
+            // the navigation bar already names the screen.
+            HStack {
+                Text("Month to Date")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.secondaryText)
+                Spacer()
                 Text("\(items.count)")
                     .font(Theme.Typography.captionEmphasis)
                     .foregroundStyle(Theme.Colors.secondaryText)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(items.count) projects, month to date")
 
             VStack(spacing: Theme.Spacing.md) {
                 ForEach(items) { item in
@@ -223,7 +228,7 @@ struct ProjectsRollupCard: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                    Text("All projects")
+                    Text("All Projects")
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.secondaryText)
                     Text(rollup.totalSpentDisplay)
@@ -379,6 +384,7 @@ struct ProjectBudgetCard: View {
             onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -391,6 +397,7 @@ struct ProjectBudgetCard: View {
             onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
     .preferredColorScheme(.dark)
 }
@@ -404,6 +411,7 @@ struct ProjectBudgetCard: View {
             onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -414,6 +422,7 @@ struct ProjectBudgetCard: View {
             lastError: nil, onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -424,6 +433,7 @@ struct ProjectBudgetCard: View {
             lastError: nil, onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
     .preferredColorScheme(.dark)
 }

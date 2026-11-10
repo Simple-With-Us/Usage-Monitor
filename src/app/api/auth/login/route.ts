@@ -5,6 +5,7 @@ import {
   createSessionToken,
   verifyPassword,
 } from "@/lib/auth";
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import {
   createRateLimiter,
   getLoginBackstopKey,
@@ -71,7 +72,17 @@ export async function POST(request: NextRequest) {
 
   let password: unknown;
   try {
-    const body = await request.json();
+    // Bounded because this is the one pre-auth body read in the app: the
+    // limiters above deliberately don't consume on isAllowed(), so without a
+    // ceiling N concurrent slow POSTs each buffer their whole body before any
+    // attempt is ever recorded. 4 KiB is generous for {"password":"..."}.
+    // Oversized bodies fall into the catch below, which returns the same
+    // uniform 401 AND records the attempt - so a body flood now burns
+    // rate-limit budget instead of being free, and adds no response oracle.
+    const body = (await readBoundedJsonBody(request, {
+      maxBytes: 4096,
+      label: "Login payload",
+    })) as { password?: unknown } | null;
     password = body?.password;
   } catch {
     loginRateLimiterByTuple.recordAttempt(tupleKey);

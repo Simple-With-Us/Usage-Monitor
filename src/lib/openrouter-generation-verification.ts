@@ -120,17 +120,35 @@ export function isCostWithinTolerance(
   return Math.abs(reported - verifiedCostUsd) <= allowed;
 }
 
+/**
+ * Prefer a true OpenRouter Management/Admin (Provisioning) key over a
+ * per-app inference key. GET /generation and account-wide reads return 403
+ * for non-management keys; picking the oldest openrouter Provider by
+ * createdAt often selected Congress.Trade/Socratic.Trade inference keys.
+ */
 async function resolveOpenRouterKey(): Promise<string | null> {
-  const fromEnv = process.env.OPENROUTER_MANAGEMENT_KEY;
-  if (fromEnv && fromEnv.trim() !== "") return fromEnv;
-  const provider = await prisma.provider.findFirst({
+  for (const envName of ["OPENROUTER_MANAGEMENT_KEY", "OPENROUTER_ADMIN_KEY"] as const) {
+    const fromEnv = process.env[envName]?.trim();
+    if (fromEnv) return fromEnv;
+  }
+
+  const providers = await prisma.provider.findMany({
     where: { name: "openrouter", isActive: true, apiKey: { not: null } },
     orderBy: { createdAt: "asc" },
-    select: { apiKey: true },
+    select: { apiKey: true, label: true, displayName: true },
   });
-  if (!provider?.apiKey) return null;
+  if (providers.length === 0) return null;
+
+  const preferred =
+    providers.find((provider) =>
+      /management|admin|provisioning/i.test(
+        `${provider.label ?? ""} ${provider.displayName ?? ""}`
+      )
+    ) ?? providers[0];
+
+  if (!preferred.apiKey) return null;
   try {
-    return decrypt(provider.apiKey);
+    return decrypt(preferred.apiKey);
   } catch {
     return null;
   }

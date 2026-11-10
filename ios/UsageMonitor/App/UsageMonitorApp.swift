@@ -3,12 +3,17 @@ import AppCore
 import Dashboard
 import Providers
 import Alerts
+import Platforms
 import ProjectBudgets
+import ServerStatus
+import Computers
 import Settings
 import AppLock
 import Networking
+import Models
 import OfflineCache
 import PushScaffold
+import WidgetShared
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -37,12 +42,40 @@ struct UsageMonitorApp: App {
     init() {
         // The shared BudgetStore transparently persists every successful
         // response to disk (offline-first) and to the widget app group.
-        _environment = State(
-            initialValue: AppEnvironment(
-                tokenStore: AccountChangeNotifyingTokenStore(),
-                snapshotSink: OfflineCacheSnapshotSink()
+        // `-ScreenshotDemo` paints fixture budget data (no live network) for ASC.
+        if ScreenshotDemo.isEnabled {
+            let settings = AppSettings(sharedDefaults: AppGroup.defaults)
+            settings.appLockEnabled = false
+            _environment = State(
+                initialValue: AppEnvironment(
+                    settings: settings,
+                    tokenStore: InMemoryTokenStore(token: "screenshot-demo-token"),
+                    snapshotSink: ScreenshotDemoSnapshotSink()
+                )
             )
-        )
+            if let tab = ScreenshotDemo.preferredTab {
+                _selection = State(initialValue: tab)
+            }
+        } else {
+            let tokenStore = AccountChangeNotifyingTokenStore()
+            if let token = ProcessInfo.processInfo.environment["USAGE_READ_TOKEN"] {
+                try? tokenStore.setToken(token)
+            }
+            let args = ProcessInfo.processInfo.arguments
+            if let idx = args.firstIndex(of: "-ReadToken"), args.indices.contains(idx + 1) {
+                try? tokenStore.setToken(args[idx + 1])
+            }
+            _environment = State(
+                initialValue: AppEnvironment(
+                    settings: AppSettings(sharedDefaults: AppGroup.defaults),
+                    tokenStore: tokenStore,
+                    snapshotSink: OfflineCacheSnapshotSink()
+                )
+            )
+            if let tab = ScreenshotDemo.preferredTab {
+                _selection = State(initialValue: tab)
+            }
+        }
     }
 
     var body: some Scene {
@@ -53,7 +86,7 @@ struct UsageMonitorApp: App {
             // AppLockGate sits outside RootView, so give it the environment too.
             .environment(environment)
             .environment(pushRouter)
-            // Widget deep link (usagemonitor://<tab>) → select that tab.
+            // Widget deep link (usageclientmonitor://<tab>) → select that tab.
             .onOpenURL { url in
                 if let tab = appTab(from: url) { selection = tab }
             }
@@ -64,9 +97,15 @@ struct UsageMonitorApp: App {
                 pushRouter.consume()
             }
             .task {
+                if ScreenshotDemo.isEnabled {
+                    environment.budgetStore.seedScreenshotFixture(.sample)
+                }
                 await AlertNotifier.activateAccountScope(
                     AlertNotifier.currentAccountScopeID(hostOverride: environment.settings.baseHost)
                 )
+                if !ScreenshotDemo.isEnabled {
+                    await WidgetSnapshotStore.refreshSecondarySections(using: environment.apiClient)
+                }
             }
             .task {
                 for await _ in NotificationCenter.default.notifications(
@@ -78,14 +117,29 @@ struct UsageMonitorApp: App {
             .onChange(of: environment.settings.baseHost) { _, _ in
                 Task { await activateCurrentAccountScope() }
             }
+            .frame(minWidth: 420, minHeight: 640)
+            .appUpdatePrompt()
         }
+        .defaultSize(width: 480, height: 860)
         .onChange(of: scenePhase) { _, phase in
             Task {
                 await activateCurrentAccountScope()
             }
-            // Queue the next background budget refresh when leaving foreground.
+            if phase == .active {
+                // Ensure budget status, secondary widget data (LLM, Mac, Servers), and alert notifications
+                // refresh when entering foreground.  Screenshot capture must stay on
+                // fixtures: a live refresh would stamp real spend into the app-group cache
+                // and the widget snapshot that ASC reads.
+                if !ScreenshotDemo.isEnabled {
+                    Task { await BackgroundRefreshManager.shared.performRefresh() }
+                }
+            }
+            // Force-reload widgets and queue background budget refresh when leaving foreground.
             if phase == .background {
-                BackgroundRefreshManager.shared.schedule()
+                WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
+                if PlatformRuntime.supportsBackgroundAppRefresh {
+                    BackgroundRefreshManager.shared.schedule()
+                }
             }
         }
     }
@@ -96,9 +150,9 @@ struct UsageMonitorApp: App {
         )
     }
 
-    /// Map a widget/app deep-link URL (`usagemonitor://dashboard`) to a tab.
+    /// Map a widget/app deep-link URL (`usageclientmonitor://dashboard`) to a tab.
     private func appTab(from url: URL) -> AppTab? {
-        guard url.scheme == "usagemonitor" else { return nil }
+        guard url.scheme == "usageclientmonitor" else { return nil }
         let key = url.host ?? url.pathComponents.last(where: { $0 != "/" }) ?? ""
         return AppTab(rawValue: key)
     }
@@ -112,6 +166,10 @@ private extension AppFeatures {
         dashboard: { AnyView(DashboardRootView()) },
         providers: { AnyView(ProvidersRootView()) },
         alerts: { AnyView(AlertsRootView()) },
+        serverStatus: { AnyView(ServerStatusRootView()) },
+        computers: { AnyView(ComputersRootView()) },
+        agents: { AnyView(AgentsRootView()) },
+        platforms: { AnyView(PlatformsRootView()) },
         projects: { AnyView(ProjectBudgetsRootView()) },
         settings: { AnyView(SettingsRootView()) }
     )
@@ -133,26 +191,51 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // the Lock Screen: every refresh diffs the alert set and posts a local
         // notification for newly-crossed thresholds (gated on the user's
         // "Budget alerts" toggle + minimum severity, deduped across runs).
-        BackgroundRefreshManager.shared.configure(
-            // Honour Settings host override (same UserDefaults key as AppSettings).
-            makeClient: {
-                let host = UserDefaults.standard.string(forKey: "settings.baseHost") ?? ""
-                let configuration =
-                    APIConfiguration.fromUserInput(host) ?? .production
-                return APIClient(
-                    configuration: configuration,
-                    tokenStore: KeychainTokenStore()
-                )
-            },
-            alertNotifier: { items in await AlertNotifier.deliver(for: items) }
-        )
-        BackgroundRefreshManager.shared.register()
+        // iOS-on-Mac: skip BGTask registration. Designed-for-iPhone Mac installs
+        // do not get reliable BGAppRefresh and registration has been observed to
+        // fail launch (open error -10671 / immediate exit) with minOS 26 + beta hosts.
+        if PlatformRuntime.supportsBackgroundAppRefresh {
+            BackgroundRefreshManager.shared.configure(
+                // Honour Settings host override (same UserDefaults key as AppSettings).
+                makeClient: {
+                    let host = UserDefaults.standard.string(forKey: "settings.baseHost") ?? ""
+                    let configuration =
+                        APIConfiguration.fromUserInput(host) ?? .production
+                    return APIClient(
+                        configuration: configuration,
+                        tokenStore: KeychainTokenStore()
+                    )
+                },
+                alertNotifier: { items in await AlertNotifier.deliver(for: items) }
+            )
+            BackgroundRefreshManager.shared.register()
+        }
 
         // Notification tap routing: install the UN delegate and the alert
         // category before any launch-time tap is delivered.
         PushRouter.shared.attachAsNotificationDelegate()
         PushScaffold.configureNotificationCategories()
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        let tokenString = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
+        Task {
+            let host = UserDefaults.standard.string(forKey: "settings.baseHost") ?? ""
+            let config = APIConfiguration.fromUserInput(host) ?? .production
+            let client = APIClient(configuration: config, tokenStore: KeychainTokenStore())
+            await PushScaffold.handleAPNsDeviceToken(tokenString, client: client)
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        print("[APNs] Failed to register for remote notifications: \(error)")
     }
 }
 #endif

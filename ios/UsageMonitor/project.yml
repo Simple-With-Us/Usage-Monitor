@@ -1,5 +1,14 @@
 name: UsageMonitor
 
+# Bundle identifiers (2026-09-23, owner ruling): every PRODUCT_BUNDLE_IDENTIFIER
+# below sits on the `com.simplewithus.usage.*` base - `.client` (Usage Monitor)
+# and `.local` (Local Monitor), with the widget and test bundles nested under
+# `.client`.  The Client, Local and Widget entitlements files declare
+# `com.apple.security.application-groups: [group.com.simplewithus.usage]`.
+# No target declares Associated Domains.  History: `services.jays.usage.*`
+# until 2026-09-22, then briefly `com.simplewithus.usagemonitor.*` (#1524).
+# See `docs/rollouts/2026-09-23-usage-identifier-fixes.md`.
+
 # ---------------------------------------------------------------------------
 # XcodeGen spec for the Usage Monitor iOS app.
 #
@@ -14,9 +23,9 @@ name: UsageMonitor
 # ---------------------------------------------------------------------------
 
 options:
-  bundleIdPrefix: services.jays.usage
+  bundleIdPrefix: com.simplewithus.usage
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "17.0"
   createIntermediateGroups: true
   groupSortPosition: top
   generateEmptyDirectories: true
@@ -36,9 +45,14 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"                 # Swift 5 language mode (compiled by the Swift 6 toolchain)
-    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    # Fixed-version apps (owner, Oct 29 2026): the marketing version is the
+    # fixedMarketingVersion from scripts/ios-fleet/apps.json (0.1.0) and the
+    # build is the merge-stamp value the release plans once.  The ship script
+    # passes both values on the xcodebuild command line and overrides whatever
+    # is here; CURRENT_PROJECT_VERSION below is only a same-shape placeholder.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "202610290000"
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: targeted
@@ -55,11 +69,16 @@ targets:
     platform: iOS
     sources:
       - path: App
+      - path: App/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: services.jays.usage.monitor
+        PRODUCT_NAME: UsageMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios
         DEVELOPMENT_TEAM: CC8UTF7ATG
         INFOPLIST_FILE: App/Resources/Info.plist
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_CFBundleDisplayName: "Usage Monitor"
         CODE_SIGN_ENTITLEMENTS: App/Resources/UsageMonitor.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
@@ -89,6 +108,12 @@ targets:
       - package: UsageMonitorKit
         product: ProjectBudgets
       - package: UsageMonitorKit
+        product: Platforms
+      - package: UsageMonitorKit
+        product: ServerStatus
+      - package: UsageMonitorKit
+        product: Computers
+      - package: UsageMonitorKit
         product: Settings
       - package: UsageMonitorKit
         product: AppLock
@@ -98,6 +123,51 @@ targets:
         product: PushScaffold
 
   # -------------------------------------------------------------------------
+  # Usage Monitor Local — on-device self-host product (separate App Store app).
+  # Does NOT embed the remote client widget or link Networking money paths.
+  # -------------------------------------------------------------------------
+  LocalUsageMonitor:
+    type: application
+    platform: iOS
+    sources:
+      - path: LocalApp
+      - path: LocalApp/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    settings:
+      base:
+        # Distinct product name + bundle ID so Xcode never overwrites the remote client.
+        PRODUCT_NAME: LocalUsageMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.local.ios
+        DEVELOPMENT_TEAM: CC8UTF7ATG
+        INFOPLIST_FILE: LocalApp/Resources/Info.plist
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        # Home-screen name (spaces allowed).
+        INFOPLIST_KEY_CFBundleDisplayName: "Local Monitor"
+        CODE_SIGN_ENTITLEMENTS: LocalApp/Resources/LocalUsageMonitor.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+    dependencies:
+      - package: UsageMonitorKit
+        product: DesignSystem
+      - package: UsageMonitorKit
+        product: AppCore
+      - package: UsageMonitorKit
+        product: AppLock
+      - package: UsageMonitorKit
+        product: LocalStore
+      - package: UsageMonitorKit
+        product: LocalSecrets
+      - package: UsageMonitorKit
+        product: LocalAdapters
+      - package: UsageMonitorKit
+        product: LocalBudget
+      - package: UsageMonitorKit
+        product: LocalDataPlane
+
+  # -------------------------------------------------------------------------
   # WidgetKit extension
   # -------------------------------------------------------------------------
   UsageMonitorWidgetExtension:
@@ -105,9 +175,11 @@ targets:
     platform: iOS
     sources:
       - path: UsageMonitorWidget
+      - path: UsageMonitorWidget/PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: services.jays.usage.monitor.widget
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.widget
         DEVELOPMENT_TEAM: CC8UTF7ATG
         INFOPLIST_FILE: UsageMonitorWidget/Info.plist
         CODE_SIGN_ENTITLEMENTS: UsageMonitorWidget/UsageMonitorWidget.entitlements
@@ -131,7 +203,7 @@ targets:
       - path: UsageMonitorTests
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: services.jays.usage.monitor.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.tests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: UsageMonitor
@@ -148,9 +220,14 @@ targets:
     sources:
       - path: UsageMonitorWidgetTests
       - path: UsageMonitorWidget/WidgetPresentation.swift
+      - path: UsageMonitorWidget/WidgetTimeline.swift
+      - path: UsageMonitorWidget/WidgetScreenViews.swift
+      - path: UsageMonitorWidget/TopicWidgets.swift
+      - path: UsageMonitorWidget/GlanceWidgets.swift
+      - path: UsageMonitorWidget/BudgetWidgetIntent.swift
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: services.jays.usage.monitor.widgettests
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.usage.client.ios.widgettests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: UsageMonitorKit
@@ -171,3 +248,14 @@ schemes:
       targets:
         - UsageMonitorTests
         - UsageMonitorWidgetTests
+
+  LocalUsageMonitor:
+    build:
+      targets:
+        LocalUsageMonitor: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - UsageMonitorTests

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
+import { SESSION_COOKIE_NAME, isCsrfSafeRequest, verifySessionToken } from "@/lib/auth";
+import { sentryConnectSrcOrigins } from "@/lib/sentry-options";
+import { datadogConnectSrcOrigins } from "@/lib/datadog-options";
 
 export const config = {
   runtime: "nodejs",
@@ -17,16 +19,74 @@ export const isPublicPath = (pathname: string) => {
   ];
   if (publicAssetPaths.includes(pathname)) return true;
   if (pathname === "/pwa-icon" || pathname.startsWith("/pwa-icon/")) return true;
+  // Brand mark used on the public login page (and optional offline shell).
+  if (pathname === "/brand" || pathname.startsWith("/brand/")) return true;
 
   const publicPaths = [
     "/login",
+    // App Store Connect + public legal pages (must not require dashboard login).
+    "/privacy",
+    "/privacy-policy",
+    "/support",
     "/api/auth/login",
     "/api/cron",
     "/api/ingest",
     "/api/otlp",
+    "/api/apns",
+    // Self-authenticates with the dedicated CodeCaps registration token or
+    // the existing scoped usage-ingest credential; no dashboard cookie.
+    "/api/codecaps/push",
+    "/api/settings",
     "/api/budget-status",
+    // Self-authenticates (session OR USAGE_READ_TOKEN) for BotFleet skip-model.
+    "/api/quota-windows",
     "/api/health",
     "/api/ready",
+    // Public OpenRouter money probe for a dedicated UptimeRobot keyword monitor
+    // (account credits + per-key limits via management key). See
+    // src/app/api/openrouter-credits/route.ts.
+    "/api/openrouter-credits",
+    // Self-authenticates (session OR USAGE_READ_TOKEN) for iOS Client Monitor
+    // host usage + Coolify app inventory. See src/app/api/server-metrics/route.ts.
+    "/api/server-metrics",
+    // Fleet B2 storage + daily download / Class C breakdown (iOS + bearer).
+    "/api/b2-app-usage",
+    // Same dual-auth pattern: per-platform status cards (hosting, edge,
+    // storage, observability, developer, messaging, payments, secrets) for the
+    // web Platforms page and the iOS Platforms tab.
+    // See src/app/api/platform-status/route.ts.
+    "/api/platform-status",
+    // Fleet operations aggregator (receipt inbox, peer app health, Coolify
+    // fleet, R2 free tier, backup layers). Read-only infrastructure status in
+    // the same class as server-metrics, exposed to the iOS client via the same
+    // dual-auth preamble. See src/app/api/operations/route.ts.
+    "/api/operations",
+    // Agents overview aggregator (live agent runs, token counts, quota burn,
+    // API-equivalent cost comparison). Self-authenticates via session or USAGE_READ_TOKEN.
+    "/api/agents-overview",
+    // Per-turn AgentTurn listing for the Agents tab. Same dual-auth as
+    // agents-overview (session cookie or USAGE_READ_TOKEN).
+    "/api/agent-turns",
+    // Per-request AI performance (AiRequest, UM-1590). Same dual-auth.
+    "/api/ai-requests",
+    // Owner-recorded expense ledger. GET self-authenticates via dashboard
+    // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
+    // own session/OWNER_EXPENSE_TOKEN check in the route.
+    // See src/app/api/owner-expenses/route.ts.
+    "/api/owner-expenses",
+    // Usage-events read model (dashboard telemetry + raw event reads).
+    // Self-authenticates via dashboard session or USAGE_READ_TOKEN, like
+    // /api/owner-expenses above — without this exclusion, bearer read
+    // tokens 401 at the session gate before the route's own auth runs.
+    // See src/app/api/usage-events/route.ts.
+    "/api/usage-events",
+    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
+    // budget-status / agents-overview.
+    "/api/quota-windows",
+    // Unlisted Apple Calendar subscribe URL; the route checks BILLS_CALENDAR_TOKEN.
+    "/api/bills.ics",
+    // Public RUM/browser-log config.  Returns only public intake fields.
+    "/api/datadog-public-config",
   ];
   if (publicPaths.includes(pathname)) return true;
   if (publicPaths.some((p) => pathname.startsWith(p + "/"))) return true;
@@ -35,6 +95,14 @@ export const isPublicPath = (pathname: string) => {
   // subscriptions collection exclusion above) — without this, bearer read
   // tokens 401 at the session gate before the route's own auth runs.
   if (pathname === "/api/export/daily-rollups" || pathname === "/api/export/daily-rollups/") return true;
+  if (pathname === "/api/workspace/export" || pathname === "/api/workspace/export/") return true;
+  // Self-authenticates via isUsageReadAuthorized (same pattern as the
+  // daily-rollups exclusion above) — without this, bearer read tokens 401 at
+  // the session gate before the route's own auth runs.
+  if (pathname === "/api/agent-model-mix" || pathname === "/api/agent-model-mix/") return true;
+  // Same self-auth pattern: /api/muse-code-burn verifies the dashboard
+  // session cookie or the USAGE_READ_TOKEN bearer itself.
+  if (pathname === "/api/muse-code-burn" || pathname === "/api/muse-code-burn/") return true;
   return false;
 };
 
@@ -53,15 +121,17 @@ export const isPublicPath = (pathname: string) => {
  */
 export function buildContentSecurityPolicy(
   nonce: string,
-  isProduction: boolean
+  isProduction: boolean,
+  extraConnectSrc: readonly string[] = []
 ): string {
+  const connectSrc = ["'self'", ...extraConnectSrc].join(" ");
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'${isProduction ? "" : " 'unsafe-eval'"}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    `connect-src ${connectSrc}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -75,7 +145,11 @@ export function middleware(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
 
   const isProduction = process.env.NODE_ENV === "production";
-  const cspHeader = buildContentSecurityPolicy(nonce, isProduction);
+  const cspHeader = buildContentSecurityPolicy(
+    nonce,
+    isProduction,
+    [...datadogConnectSrcOrigins(), ...sentryConnectSrcOrigins()]
+  );
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
@@ -86,7 +160,18 @@ export function middleware(request: NextRequest) {
   const isAuthenticated = verifySessionToken(token);
 
   let response: NextResponse;
-  if (isAuthenticated || isPublicPath(request.nextUrl.pathname)) {
+  // CSRF choke point. Gated on `token &&` so only ambient-cookie authority is
+  // covered: token-authed clients (chrome extension -> /api/ingest/usage, OTLP
+  // collectors, cron, the bearer readers) carry no cookie and are untouched,
+  // and POST /api/auth/login has no cookie yet so login still works. It runs
+  // before the isPublicPath branch so it still covers the cookie-gated
+  // /api/subscriptions collection POST, which isPublicPath marks public.
+  if (token && !isCsrfSafeRequest(request)) {
+    response = NextResponse.json(
+      { error: "Cross-origin request rejected" },
+      { status: 403, headers: requestHeaders }
+    );
+  } else if (isAuthenticated || isPublicPath(request.nextUrl.pathname)) {
     response = NextResponse.next({
       request: {
         headers: requestHeaders,

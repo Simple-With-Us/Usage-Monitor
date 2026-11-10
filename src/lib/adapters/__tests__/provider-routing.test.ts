@@ -7,12 +7,14 @@ const adapterMocks = vi.hoisted(() => ({
   googleAi: vi.fn(),
   openai: vi.fn(),
   stripe: vi.fn(),
+  cloudflare: vi.fn(),
 }));
 
 vi.mock("../custom", () => ({ fetchUsage: adapterMocks.custom }));
 vi.mock("../google-ai", () => ({ fetchUsage: adapterMocks.googleAi }));
 vi.mock("../openai", () => ({ fetchUsage: adapterMocks.openai }));
 vi.mock("../stripe", () => ({ fetchUsage: adapterMocks.stripe }));
+vi.mock("../cloudflare", () => ({ fetchUsage: adapterMocks.cloudflare }));
 
 import { fetchProviderUsage } from "../index";
 
@@ -66,6 +68,7 @@ describe("provider adapter credential routing", () => {
     adapterMocks.googleAi.mockResolvedValue(EMPTY_RESULT);
     adapterMocks.openai.mockResolvedValue(EMPTY_RESULT);
     adapterMocks.stripe.mockResolvedValue(EMPTY_RESULT);
+    adapterMocks.cloudflare.mockResolvedValue(EMPTY_RESULT);
   });
 
   afterEach(() => {
@@ -74,6 +77,7 @@ describe("provider adapter credential routing", () => {
     adapterMocks.googleAi.mockReset();
     adapterMocks.openai.mockReset();
     adapterMocks.stripe.mockReset();
+    adapterMocks.cloudflare.mockReset();
   });
 
   it.each([
@@ -104,6 +108,20 @@ describe("provider adapter credential routing", () => {
     await fetchProviderUsage(provider("openai", "builtin"));
 
     expect(adapterMocks.openai).toHaveBeenCalledWith("collision-secret", {});
+    expect(adapterMocks.custom).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "cloudflare",
+    "cloudflare-usage-jays",
+    "cloudflare-socratic",
+    "cloudflare-congress",
+    "cloudflare-jay-old",
+  ])("routes %s to the Cloudflare adapter", async (name) => {
+    await fetchProviderUsage(
+      provider(name, "builtin", { accountId: "acct", authMode: "api_token" })
+    );
+    expect(adapterMocks.cloudflare).toHaveBeenCalledOnce();
     expect(adapterMocks.custom).not.toHaveBeenCalled();
   });
 

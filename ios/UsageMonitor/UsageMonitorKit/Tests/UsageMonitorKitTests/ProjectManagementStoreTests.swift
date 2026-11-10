@@ -213,13 +213,34 @@ final class ProjectManagementStoreTests: XCTestCase {
         )
     }
 
+    /// The request body as seen by `URLProtocol`.
+    ///
+    /// `URLSession` moves an outgoing `httpBody` onto `httpBodyStream` before
+    /// the protocol sees the request, so `httpBody` is always `nil` here and a
+    /// naive read silently yields an empty object (making every body
+    /// assertion vacuous). Drain the stream instead.
     private static func jsonObject(_ request: URLRequest) -> [String: Any] {
-        guard let body = request.httpBody,
+        guard let body = request.httpBody ?? bodyStreamData(request),
               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
         else {
             return [:]
         }
         return object
+    }
+
+    private static func bodyStreamData(_ request: URLRequest) -> Data? {
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 4_096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data.isEmpty ? nil : data
     }
 
     private static let sessionProbeJSON: [String: Any] = [
@@ -238,6 +259,10 @@ final class ProjectManagementStoreTests: XCTestCase {
         "monthlyBudgetUsd": 250,
     ]
 
+    /// `summary` carries every key `BudgetSummary` decodes as required (the
+    /// server declares them non-nullable in `src/lib/budget-status.ts`).
+    /// Dropping one makes the whole refresh fail to decode, which is exactly
+    /// the "did the store actually reload?" signal these tests assert on.
     private static let budgetJSON: [String: Any] = [
         "ok": true,
         "generatedAt": "2026-07-29T12:00:00.000Z",
@@ -246,6 +271,8 @@ final class ProjectManagementStoreTests: XCTestCase {
         "projects": [],
         "summary": [
             "totalBudgetUsd": 0,
+            "budgetedSpentUsd": 0,
+            "unbudgetedSpentUsd": 0,
             "totalSpentUsd": 0,
             "remainingUsd": 0,
             "overBudget": false,
@@ -363,12 +390,14 @@ final class ProviderDepthStoreTests: XCTestCase {
         await store.loadIfNeeded(providerID: "provider-1", using: harness.client)
         XCTAssertEqual(store.historyRange, .thirtyDays)
         XCTAssertEqual(requestedDays, ["30"])
-        XCTAssertEqual(store.historyCaption, "2 readings · 30 days")
+        // Caption reads the range's `displayLabel`, which gained its explicit
+        // "Past …" framing in the timeframe redesign (#1020).
+        XCTAssertEqual(store.historyCaption, "2 readings · Past 30 days")
 
         await store.selectHistoryRange(.ninetyDays, providerID: "provider-1", using: harness.client)
         XCTAssertEqual(store.historyRange, .ninetyDays)
         XCTAssertEqual(requestedDays, ["30", "90"])
-        XCTAssertEqual(store.historyCaption, "2 readings · 90 days")
+        XCTAssertEqual(store.historyCaption, "2 readings · Past 90 days")
         XCTAssertFalse(store.isReloadingHistory)
 
         // Same range is a no-op (no extra network call).

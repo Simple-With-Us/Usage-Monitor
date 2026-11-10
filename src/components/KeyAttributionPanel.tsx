@@ -229,7 +229,7 @@ export default function KeyAttributionPanel() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">API key attribution</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">API Key Attribution</h1>
         <p className="mt-2 max-w-3xl text-sm text-gray-600 dark:text-gray-300">
           Map provider-reported key identities and app-local key references without storing API keys.
           Unknown or conflicting usage remains explicitly unattributed; mappings apply only from their effective date.
@@ -241,7 +241,7 @@ export default function KeyAttributionPanel() {
       {data ? (
         <>
           <section aria-labelledby="coverage-title" className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-            <h2 id="coverage-title" className="font-semibold text-gray-900 dark:text-gray-100">Current-month pushed v2 coverage</h2>
+            <h2 id="coverage-title" className="font-semibold text-gray-900 dark:text-gray-100">Current-Month Pushed V2 Coverage</h2>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <Metric label="Proven additive key cost" value={money(data.coverage.totalCostUsd)} />
               <Metric label="Identity matched" value={money(data.coverage.identityMatchedCostUsd)} />
@@ -253,7 +253,7 @@ export default function KeyAttributionPanel() {
 
           <div className="grid gap-6 lg:grid-cols-2">
             <form onSubmit={createIdentity} className="space-y-4 rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-              <h2 className="font-semibold text-gray-900 dark:text-gray-100">Register provider key identity</h2>
+              <h2 className="font-semibold text-gray-900 dark:text-gray-100">Register Provider Key Identity</h2>
               <Field label="Provider">
                 <select required value={providerId} onChange={(event) => setProviderId(event.target.value)} className={inputClass}>
                   <option value="">Select provider</option>
@@ -270,7 +270,7 @@ export default function KeyAttributionPanel() {
             </form>
 
             <form id="binding-form" onSubmit={createBinding} className="space-y-4 rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-              <h2 className="font-semibold text-gray-900 dark:text-gray-100">{replaceBindingId ? "Atomically reassign an app key reference" : "Bind an app key reference"}</h2>
+              <h2 className="font-semibold text-gray-900 dark:text-gray-100">{replaceBindingId ? "Atomically Reassign an App Key Reference" : "Bind an App Key Reference"}</h2>
               <Field label="Provider key identity">
                 <select required value={identityId} onChange={(event) => setIdentityId(event.target.value)} className={inputClass}>
                   <option value="">Select identity</option>
@@ -301,7 +301,7 @@ export default function KeyAttributionPanel() {
 
           {data.coverage.unattributedBuckets.length > 0 ? (
             <section aria-labelledby="unattributed-title" className="rounded-xl border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20">
-              <h2 id="unattributed-title" className="border-b border-amber-200 px-5 py-4 font-semibold text-gray-900 dark:border-amber-900 dark:text-gray-100">Unattributed key references</h2>
+              <h2 id="unattributed-title" className="border-b border-amber-200 px-5 py-4 font-semibold text-gray-900 dark:border-amber-900 dark:text-gray-100">Unattributed Key References</h2>
               <p className="px-5 pt-4 text-sm text-gray-600 dark:text-gray-300">These are exact non-secret producer references from api_key-scope v2 records. Select “Map reference” to prefill an effective binding; missing references remain explicitly unassignable.</p>
               <ul className="divide-y divide-amber-200 dark:divide-amber-900">
                 {data.coverage.unattributedBuckets.map((bucket) => (
@@ -318,7 +318,7 @@ export default function KeyAttributionPanel() {
           ) : null}
 
           <section aria-labelledby="identities-title" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
-            <h2 id="identities-title" className="border-b border-gray-200 px-5 py-4 font-semibold text-gray-900 dark:border-gray-700 dark:text-gray-100">Registered identities</h2>
+            <h2 id="identities-title" className="border-b border-gray-200 px-5 py-4 font-semibold text-gray-900 dark:border-gray-700 dark:text-gray-100">Registered Identities</h2>
             {data.identities.length === 0 ? <p className="px-5 py-6 text-sm text-gray-500 dark:text-gray-400">No key identities registered. Usage stays unattributed until an administrator confirms a mapping.</p> : (
               <ul className="divide-y divide-gray-200 dark:divide-gray-700">
                 {data.identities.map((identity) => (

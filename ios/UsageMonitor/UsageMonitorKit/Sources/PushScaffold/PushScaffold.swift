@@ -1,6 +1,10 @@
 import Foundation
 import UserNotifications
 import Models
+import Networking
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Public entry point for the **PushScaffold** lane: the client-side plumbing
 /// for `UserNotifications` so budget/alert notifications can be delivered and
@@ -14,12 +18,10 @@ import Models
 ///     `[ProviderAlert]`, posted by the background refresh via `AlertNotifier`.
 ///   - Tap routing lives in `PushRouter` + `PushNotificationDelegate`.
 ///
-/// **Remote (APNs) push is not implemented and is deliberately out of scope.**
-/// There is no server device-enrollment endpoint and no APNs sender, so the app
-/// neither registers for remote notifications nor claims the `aps-environment`
-/// entitlement. Every notification this app delivers is a *local* one scheduled
-/// on-device from a background refresh. Remote delivery can be added later
-/// against a real server contract instead of a guessed one.
+/// Remote APNs: Settings registers the device token at `POST /api/apns/device-tokens`.
+/// The server HTTP/2 sender delivers the same budget/alert pages as Pushover when
+/// `APNS_*` credentials are configured. Local notifications from background refresh
+/// remain the fallback when the sender is unconfigured or the device has no token.
 public enum PushScaffold {
 
     // MARK: Authorization
@@ -41,6 +43,45 @@ public enum PushScaffold {
     /// Current authorization status, for surfacing state in Settings.
     public static func authorizationStatus() async -> UNAuthorizationStatus {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
+    // MARK: Remote APNs Notifications
+
+    /// Register for remote APNs push notifications with iOS.
+    public static func registerForRemoteNotifications() {
+        #if canImport(UIKit)
+        Task { @MainActor in
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        #endif
+    }
+
+    /// Handle newly registered APNs device token and sync it to the Usage Monitor server.
+    public static func handleAPNsDeviceToken(_ tokenString: String, client: APIClient? = nil) async {
+        UserDefaults.standard.set(tokenString, forKey: "apns.deviceToken")
+        guard let client else { return }
+        do {
+            #if canImport(UIKit)
+            let model = await MainActor.run { UIDevice.current.model }
+            let systemVersion = await MainActor.run { UIDevice.current.systemVersion }
+            #else
+            let model: String? = nil
+            let systemVersion: String? = nil
+            #endif
+            #if DEBUG
+            let environment = "sandbox"
+            #else
+            let environment = "production"
+            #endif
+            try await client.registerApnsDeviceToken(
+                deviceToken: tokenString,
+                deviceModel: model,
+                osVersion: systemVersion,
+                environment: environment
+            )
+        } catch {
+            print("[PushScaffold] Failed to upload APNs device token: \(error)")
+        }
     }
 
     // MARK: Categories

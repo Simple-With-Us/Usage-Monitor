@@ -24,6 +24,7 @@ export interface SubscriptionRow {
   notes: string | null;
   externalBillingSource: string | null;
   externalBillingId: string | null;
+  externalBillingManaged?: boolean | null;
   // Effective knobEnv (this subscription's own override if set, else the
   // provider's free-tier ProviderPlan.knobEnv) and the provider's free-tier
   // map on its own (always present when the provider has one, regardless of
@@ -160,7 +161,7 @@ export default function SubscriptionsPanel({
               <td data-label="Name" className="px-6 py-4">
                 <p className="font-medium text-gray-900 dark:text-gray-100">{sub.name}</p>
                 {sub.description && <p className="mt-0.5 max-w-xs text-xs text-gray-500 dark:text-gray-400">{sub.description}</p>}
-                {!sub.autoRenew && <p className="text-[10px] text-gray-400 dark:text-gray-500">does not auto-renew</p>}
+                {!sub.autoRenew && <p className="text-[10px] text-gray-500 dark:text-gray-400">does not auto-renew</p>}
                 {sub.externalBillingSource && sub.externalBillingId && (
                   <p className="mt-1 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                     Linked to {sub.externalBillingSource}
@@ -174,12 +175,12 @@ export default function SubscriptionsPanel({
                     {sub.project.name}
                   </span>
                 ) : (
-                  <span className="text-xs text-gray-400 dark:text-gray-500">Unattributed</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Unattributed</span>
                 )}
               </td>
               <td data-label="Cost" className="px-6 py-4">
                 <p className="font-medium text-gray-900 dark:text-gray-100">{formatUsd(sub.costUsd, sub.currency)}</p>
-                <p className="text-xs text-gray-400 dark:text-gray-500">{formatCadence(sub.intervalCount, sub.interval)}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{formatCadence(sub.intervalCount, sub.interval)}</p>
                 {sub.currency !== "USD" && (
                   <p className="mt-1 text-[10px] font-medium text-red-600">Convert to USD before activation</p>
                 )}

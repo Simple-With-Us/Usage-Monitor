@@ -20,44 +20,49 @@ extension ProviderBudgetStatus {
     var rowValue: String { CurrencyFormat.usd(spentUsd) }
 
     /// The small caption under the row value: utilisation for budgeted
-    /// providers, otherwise a coverage/"no budget" note.
+    /// providers, otherwise a coverage/"no budget" note. Partial coverage
+    /// gets an explicit cue — APIs often omit tax.
     var rowValueCaption: String {
         if hasBudget, let percentUsed {
-            return CurrencyFormat.percent(percentUsed)
+            let pct = CurrencyFormat.percent(percentUsed)
+            if !spendCoverage.isComplete { return "\(pct) · partial" }
+            return pct
         }
+        if !spendCoverage.isComplete { return "Partial · no budget" }
         return "No budget"
     }
 
     /// A one-line human status used as the row subtitle.
     var rowSubtitle: String {
+        // List subtitles are values → sentence/lower case (not Title Case headings).
         switch status {
         case .exceeded:
             if let remainingUsd, remainingUsd < 0 {
-                return "Over by \(CurrencyFormat.usd(abs(remainingUsd)))"
+                return "over by \(CurrencyFormat.usd(abs(remainingUsd)))"
             }
-            return "Over budget"
+            return "over budget"
         case .warning:
             if let remainingUsd {
                 return "\(CurrencyFormat.usd(remainingUsd)) left"
             }
-            return "Approaching budget"
+            return "approaching budget"
         case .ok:
             if let remainingUsd {
                 return "\(CurrencyFormat.usd(remainingUsd)) left"
             }
-            return "On track"
+            return "on track"
         case .unconfigured:
-            return "Not budgeted · \(CurrencyFormat.usd(spentUsd)) spent"
+            return "not budgeted · \(CurrencyFormat.usd(spentUsd)) spent"
         }
     }
 
-    /// Short label for the header status badge.
+    /// Short label for the header status badge (chip → Title Case).
     var statusLabel: String {
         switch status {
-        case .exceeded: return "Over budget"
-        case .warning: return "Approaching budget"
-        case .ok: return "On track"
-        case .unconfigured: return "No budget set"
+        case .exceeded: return "Over Budget"
+        case .warning: return "Approaching Budget"
+        case .ok: return "On Track"
+        case .unconfigured: return "No Budget Set"
         }
     }
 
@@ -90,9 +95,15 @@ extension ProviderBudgetStatus {
         return raw.filter { $0.amount > 0.005 }.sorted { $0.amount > $1.amount }
     }
 
-    /// Whether a subscription/renewal context is worth surfacing.
+    /// Whether projection-part / subscription context is worth surfacing.
+    /// Always show when there is any projected EOM so usage-vs-subscription
+    /// composition is explicit (even when renewals are currently $0).
     var hasRenewalContext: Bool {
-        subscriptionMonthToDateUsd > 0.005 || forecastedSubscriptionRenewalsUsd > 0.005
+        projectedEomUsd > 0.005
+            || subscriptionMonthToDateUsd > 0.005
+            || forecastedSubscriptionRenewalsUsd > 0.005
+            || fixedAccruedUsd > 0.005
+            || fixedMonthlyCostUsd > 0.005
     }
 }
 

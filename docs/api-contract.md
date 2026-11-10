@@ -2,7 +2,7 @@
 
 Machine-checkable reference for the four public endpoints. The v2 ingest wire
 schema, canonical idempotency, and ACK semantics are owned byte-for-byte by
-`@jaywedgeworth22/congress-trading-shared` (currently pinned at `v2.3.0` in
+`@jaywedgeworth22/congress-trading-shared` (currently pinned at `v2.5.2` in
 `package.json`); this document describes the receiver side only. Do not loosen
 the v2 schema or change idempotency semantics here.
 
@@ -81,6 +81,36 @@ validated per event, so one poison event no longer fails the batch.
 }
 ```
 
+**Canonical AI usage (`ai` block, shared `v2.8.0`+, UM-1592):** an AI event may
+carry one optional, strict `ai` object:  `model.{requested,served}`, `harness`,
+`seat`, `tokens.{input,output,cacheRead,cacheWrite5m,cacheWrite1h,reasoning}`,
+`durationMs`, `ttftMs`, `billingMode` (`subscription`/`payg`/`free`) and
+`costSource` (`billed`/`estimated`).  `input` is uncached input only, `output`
+includes reasoning, and `reasoning` is an informational subset of `output`.
+Send `ai.tokens` on exactly one event per request.  Field semantics, SDK
+mappings and the per-producer migration live in the shared package's
+`docs/ai-usage-schema.md`.
+
+The monitor persists the block into metadata under reserved keys a producer
+cannot set:  `_aiModelRequested`, `_aiModelServed`, `_aiHarness`, `_aiSeat`,
+`_aiTokensInput`, `_aiTokensOutput`, `_aiTokensCacheRead`,
+`_aiTokensCacheWrite5m`, `_aiTokensCacheWrite1h`, `_aiTokensReasoning`,
+`_aiDurationMs`, `_aiTtftMs`, `_aiBillingMode`, `_aiCostSource` and `_aiSource`
+(`block` or `legacy`).  Events without the block are mapped onto the same keys
+from the pre-UM-1592 metadata (`promptTokens`, `completionTokens`,
+`cachedTokens`, `cacheWriteTokens`, `cacheWriteOneHourTokens`, `inputTokens`,
+`outputTokens`, `cachedInputTokens`, and `tokenType` / `label: token:<type>`
+slices, plus collector `harness`, `seat`, `billingMode`, `durationMs`, `ttftMs`
+and the output slice's `reasoningTokens`), so every producer aggregates the
+same way.  Ingest cost derivation prices the canonical tokens, 1-hour cache
+writes included, by served model, then requested model, then `producerKeyRef`.
+Each single-call event that carried the typed block (`requests` absent or `1`,
+no `windowStart` / `windowEnd`) also gets one `AiRequest` row (UM-1590
+per-request store, `sources: ingest`, dedupe key `ingest:<idempotencyKey>`).
+A run or window summary must set `requests` to its call count (or `0`) or give
+the window, so its total duration never reads as one request.  Legacy-mapped events do not, because collector
+rows are token slices or window totals rather than single requests.
+
 **Response `202` (v2 ACK):** counts satisfy
 `persisted + duplicates + pruned + rejected === received`.
 
@@ -122,8 +152,31 @@ validated per event, so one poison event no longer fails the batch.
 `accepted` is newly inserted rows; `received`/`duplicates` make full replays
 visible (additive fields; older receivers omit them).
 
-**Notable statuses:** `400 invalid_request` (malformed body or invalid v2
-envelope), `401 unauthorized`, `409 idempotency_conflict`, `413
+**Negative subscription adjustments (v1 only):** a negative `costUsd` is
+accepted solely for `metricType: "subscription"` (owner-directed manual
+corrections/refunds; the v2 schema rejects all negatives). Three inclusive
+bounds apply — exceeding any of them rejects the WHOLE batch with `400
+invalid_request`:
+
+| Bound | Limit | Scope |
+| --- | --- | --- |
+| Per event | `$1,000` magnitude | one event's `costUsd` |
+| Per batch | `$2,000` summed magnitude | all negative subscription events in one request |
+| Trailing 30 days | `$5,000` summed magnitude | already-persisted negative subscription events (by server receipt time, not producer-supplied `occurredAt`) plus the incoming batch's new ones |
+
+"Inclusive" means landing exactly on a limit is accepted. Positive amounts
+and other metricTypes never count toward any bound. Idempotent replays do
+not double-count against the 30-day window (replayed events insert no new
+rows). On a window rejection, submit smaller corrections or wait for older
+adjustments to age out of the trailing window. Constants:
+`MAX_NEGATIVE_SUBSCRIPTION_COST_USD` /
+`MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD` (`src/lib/usage-telemetry.ts`)
+and `MAX_NEGATIVE_SUBSCRIPTION_WINDOW_COST_USD` /
+`NEGATIVE_SUBSCRIPTION_WINDOW_DAYS` (`src/lib/external-usage-events.ts`).
+
+**Notable statuses:** `400 invalid_request` (malformed body, invalid v2
+envelope, or a negative-subscription-adjustment bound exceeded — see above),
+`401 unauthorized`, `409 idempotency_conflict`, `413
 payload_too_large` (body > 4 MiB), `429 rate_limited` (`Retry-After: 30`),
 `503 receiver_busy` (`Retry-After: 5` — single-writer admission; retry the
 batch), `503 not_configured`.
@@ -237,3 +290,38 @@ public contract.
   }
 ]
 ```
+
+## Boundary: `GET /api/usage-events` dual-auth (changed 2026-11-02)
+
+`GET /api/usage-events` (summary mode and `?raw=1` per-event mode)
+authenticates like `/api/budget-status` and `/api/export/daily-rollups`:
+**either** a dashboard session cookie, **or** a read token as
+
+```
+Authorization: <redacted>
+# or
+x-usage-read-token: <redacted>
+# legacy header-name alias, still accepted:
+x-usage-ingest-token: <redacted>
+```
+
+In production `USAGE_READ_TOKEN` is required (no silent ingest-token
+fallback); outside production it falls back to `USAGE_INGEST_TOKEN`. The
+route is listed in the middleware's public paths so the session gate does
+not `401` bearer requests before the route's own check
+(`hasValidDashboardSession` OR `isUsageReadAuthorized`) runs; requests with
+neither credential get a `401` from the route itself.
+
+History and rationale: this route was dashboard-session-only by design
+until 2026-11-02 — raw per-event telemetry (idempotency keys, per-request
+cost rows, verification status) stayed behind the interactive dashboard
+session, and `budget-status` (aggregates) plus the daily-rollups export
+were the intended external read paths. The boundary changed because the
+owner-expense restore poster is a sanctioned headless consumer: it
+snapshots existing events via `GET /api/usage-events?raw=1` with
+`USAGE_READ_TOKEN` to dedupe before posting, and the session gate made
+that read structurally impossible — the same failure mode previously fixed
+for `/api/export/daily-rollups`. The read token is read-only and already
+trusted with budget aggregates and the full daily-rollups export; raw
+event reads now sit in the same trust class. This section is the contract
+change the previous boundary text required before the code could move.

@@ -1,4 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/b2-app-usage", () => ({
+  runB2UsageCheck: vi.fn(async () => ({
+    assessment: { configured: false, apps: [], dailySeries: [], alerts: {} },
+    pushoverSent: false,
+  })),
+}));
+// Producer staleness has its own suite (producer-staleness.test.ts); keep it out
+// of the maintenance result shape asserted here.
+vi.mock("@/lib/producer-staleness", () => ({
+  runProducerStalenessCheck: vi.fn(async () => undefined),
+}));
 import {
   AlertNotificationSummaryPersistenceTimeout,
   type AlertDeliveryResult,
@@ -61,6 +73,7 @@ function dependencies(
       externalBillingQuarantined: 0,
       truncated: false,
     })),
+    pauseSeededGhosts: vi.fn(async () => ({ paused: 0, retracted: 0 })),
     adoptSubscriptions: vi.fn(async () => subscriptionAdoption),
     materializeSubscriptions: vi.fn(async () => subscriptions),
     rollForwardRenewals: vi.fn(async () => providerRenewals),
@@ -241,6 +254,7 @@ describe("runUsageMaintenance", () => {
         degraded: false,
       },
       r2UsageCheck: result.r2UsageCheck,
+      b2UsageCheck: result.b2UsageCheck,
     });
     expect(isUsageMaintenanceHealthy(result)).toBe(false);
     expect(deliverAlerts).toHaveBeenCalledOnce();

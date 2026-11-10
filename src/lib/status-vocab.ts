@@ -18,7 +18,9 @@ const AMBER = "bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-3
 const AMBER_STRONG =
   "bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300";
 const RED = "bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300";
-const GRAY = "bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400";
+// WCAG AA: gray-700 on gray-100 = 9.37:1, gray-200 on gray-700 = 8.33:1.
+// The previous gray-500/gray-400 text failed AA in both modes (4.39:1 / 4.06:1).
+const GRAY = "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200";
 
 export const STATUS_BADGE_STYLES: Record<string, string> = {
   // Live / good standing

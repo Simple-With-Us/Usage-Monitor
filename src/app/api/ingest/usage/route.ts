@@ -4,12 +4,14 @@ import type { UsageTelemetryErrorCode } from "@jaywedgeworth22/congress-trading-
 import { prisma } from "@/lib/prisma";
 import {
   ExternalUsageIdempotencyCollisionError,
+  NegativeSubscriptionWindowLimitExceededError,
   persistExternalUsageEvents,
 } from "@/lib/external-usage-events";
 import {
   MAX_USAGE_TELEMETRY_BODY_BYTES,
   parseUsageTelemetryBatch,
   parseUsageTelemetryV2Batch,
+  type ParsedUsageTelemetryEvent,
   type UsageTelemetryV2EventRejection,
 } from "@/lib/usage-telemetry";
 import { applyIngestCostDerivation } from "@/lib/pricing/derive-ingest-cost";
@@ -27,6 +29,7 @@ import {
 } from "@/lib/ingest-auth";
 import { resolveProjectIdsByName } from "@/lib/project-resolver";
 import { canonicalProjectKey } from "@/lib/provider-identity";
+import { fanoutPersistedUsage } from "@/lib/usage-fanout";
 import { canonicalProviderKey } from "@/lib/provider-identity";
 import {
   looksLikeReceiptCashEvent,
@@ -44,6 +47,9 @@ import {
 } from "@/lib/bounded-request-body";
 import { SUBSCRIPTION_SOURCE_APP } from "@/lib/subscription-charge-identity";
 import { markBudgetStatusSoftStale } from "@/lib/budget-status";
+import { dropEventsCoveredByNative } from "@/lib/native-telemetry-coverage";
+import { dropEventsCoveredByBotFleet, stampBotFleetReceiptCredential } from "@/lib/botfleet-coverage";
+import { sqliteWriteContentionCode } from "@/lib/sqlite-write-contention";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -165,13 +171,16 @@ export async function POST(request: NextRequest) {
   // remains the only request allowed to consume parsing/DB memory.
   const releaseAdmission = tryAcquireIngestAdmission();
   if (!releaseAdmission) {
+    void import("@/lib/sentry-ops").then(({ recordIngestAdmissionRejected }) =>
+      recordIngestAdmissionRejected({ route: "ingest/usage" })
+    );
     return respondError(503, "receiver_busy", "Usage ingest is busy. Retry later.", {
       retryAfterSeconds: INGEST_ADMISSION_RETRY_AFTER_SECONDS,
     });
   }
 
   try {
-    let events;
+    let events: ParsedUsageTelemetryEvent[];
     let v2Rejected = 0;
     let v2Rejections: UsageTelemetryV2EventRejection[] = [];
     try {
@@ -202,6 +211,12 @@ export async function POST(request: NextRequest) {
     // to persist — ACK it with rejected === received instead of the old
     // all-or-nothing 400.
     if (usageTelemetryV2 && events.length === 0) {
+      void import("@/lib/sentry-ops").then(({ recordIngestEventsRejected }) =>
+        recordIngestEventsRejected(v2Rejected, {
+          route: "ingest/usage",
+          outcome: "all_rejected",
+        })
+      ).catch(() => undefined);
       return NextResponse.json(
         {
           ok: true,
@@ -235,12 +250,40 @@ export async function POST(request: NextRequest) {
     credential?.allowedSourceApps &&
     events.some((e) => !credential.allowedSourceApps!.has(e.sourceApp))
   ) {
+    void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+      recordIngestScopeRejected({
+        route: "ingest/usage",
+        dimension: "sourceApp",
+        value: events.find((e) => !credential.allowedSourceApps!.has(e.sourceApp))?.sourceApp,
+      })
+    );
     return respondError(
       403,
       "unauthorized",
       "Credential is not authorized for this producer"
     );
   }
+
+  // Server-owned authority never comes from producer metadata or an unscoped token.
+  events = stampBotFleetReceiptCredential(events, credential);
+
+  // Aggregate native metrics cannot prove which transcript calls or token
+  // components they contain; unproven overlap stays additive.
+  const nativeCoverage = await dropEventsCoveredByNative(events);
+  if (nativeCoverage.skippedNativeCovered > 0) {
+    events = nativeCoverage.events;
+  }
+
+  // BotFleet-vs-child coverage: a child harness row the collector tagged as
+  // BotFleet-launched is dropped only against an authenticated, exactly
+  // reconciled single-call receipt; anything unproven is kept
+  // (duplicates over loss).  Counted as duplicates in the ACK, like above.
+  const botFleetCoverage = await dropEventsCoveredByBotFleet(events);
+  if (botFleetCoverage.skippedBotFleetCovered > 0) {
+    events = botFleetCoverage.events;
+  }
+  const skippedCoveredElsewhere =
+    nativeCoverage.skippedNativeCovered + botFleetCoverage.skippedBotFleetCovered;
 
   // Default-off LiteLLM cost derivation (INGEST_COST_DERIVATION_ENABLED):
   // stamps `_derivedCostUsd` into metadata for unpriced token events whose
@@ -341,6 +384,12 @@ export async function POST(request: NextRequest) {
           const projectId = event.project
             ? projectIdByName.get(canonicalProjectKey(event.project)) ?? null
             : null;
+          // Top-level `project` is authoritative: it is stamped into
+          // metadata.project (overwriting any producer-supplied value) AND
+          // carried separately as authoritativeProject so the persistence
+          // layer's existing-row branch can distinguish an authoritative
+          // attribution overwrite (pre-#887 rows stored the producer's raw
+          // metadata.project) from a genuine producer-metadata conflict.
           const metadata = event.project
             ? { ...(event.metadata ?? {}), project: event.project }
             : event.metadata;
@@ -369,6 +418,7 @@ export async function POST(request: NextRequest) {
             occurredAt: event.occurredAt,
             metadata: metadata as Prisma.InputJsonObject | undefined,
             providerRequestId: event.providerRequestId,
+            authoritativeProject: event.project,
           };
         })
       );
@@ -376,19 +426,51 @@ export async function POST(request: NextRequest) {
       if (error instanceof ExternalUsageIdempotencyCollisionError) {
         return respondError(409, "idempotency_conflict", error.message);
       }
+      if (error instanceof NegativeSubscriptionWindowLimitExceededError) {
+        // Cumulative negative-adjustment window bound (see
+        // external-usage-events.ts): a policy rejection of the whole batch,
+        // not a server fault — non-retryable 400 so producers don't loop.
+        return respondError(400, "invalid_request", error.message);
+      }
       throw error;
     }
+
+    // UM-1592: single-call events that carried the typed `ai` block also land
+    // one row each in the per-request AiRequest store (UM-1590).  Best effort:  the usage
+    // event above is the record of truth and is already persisted, so a store
+    // failure is logged rather than failing the ACK.  Replays are duplicates.
+    await persistIngestAiRequests(persistenceEvents);
 
     // Wave F / E7: soft-stale budget SWR after new rows (keep last-good; force
     // background refresh). Skip pure idempotent replays with zero inserts.
     if (persistResult.persisted > 0) {
       markBudgetStatusSoftStale();
+      void fanoutPersistedUsage(
+        persistResult.newEvents.map((event) => ({
+          provider: event.provider,
+          sourceApp: event.sourceApp,
+          model: event.keyRef,
+          costUsd: event.costUsd,
+        })),
+        "ingest/usage"
+      );
     }
 
     if (usageTelemetryV2) {
+      if (v2Rejected > 0) {
+        void import("@/lib/sentry-ops").then(({ recordIngestEventsRejected }) =>
+          recordIngestEventsRejected(v2Rejected, {
+            route: "ingest/usage",
+            outcome: "partial",
+          })
+        ).catch(() => undefined);
+      }
       const duplicates = Math.max(
         0,
-        persistResult.attempted - persistResult.persisted - persistResult.skippedPrunedDuplicates
+        persistResult.attempted -
+          persistResult.persisted -
+          persistResult.skippedPrunedDuplicates +
+          skippedCoveredElsewhere
       );
       return NextResponse.json(
         {
@@ -396,8 +478,11 @@ export async function POST(request: NextRequest) {
           schemaVersion: 2,
           // `received` counts every submitted event (valid + rejected), so the
           // shared ACK invariant holds: persisted + duplicates + pruned +
-          // rejected === received.
-          received: persistResult.attempted + v2Rejected,
+          // rejected === received.  The native-covered and BotFleet-covered
+          // events are counted as duplicates: they were not stored twice
+          // because another feed already carries that usage.
+          received:
+            persistResult.attempted + v2Rejected + skippedCoveredElsewhere,
           persisted: persistResult.persisted,
           duplicates,
           pruned: persistResult.skippedPrunedDuplicates,
@@ -427,12 +512,24 @@ export async function POST(request: NextRequest) {
       { status: 202 }
     );
   } catch (error) {
+    const contentionCode = sqliteWriteContentionCode(error);
+    if (contentionCode) {
+      console.warn("[ingest/usage] SQLite writer busy:", contentionCode);
+      return respondError(503, "receiver_busy", "Usage ingest is busy. Retry later.", {
+        retryAfterSeconds: INGEST_ADMISSION_RETRY_AFTER_SECONDS,
+      });
+    }
     // X6: any non-collision persistence/unexpected failure must surface as the
     // typed contract error, not an untyped HTML 500.
     console.error(
       "[ingest/usage] unhandled failure:",
       error instanceof Error ? error.message : error
     );
+    const { logIngestFailed } = await import("@/lib/sentry-ops");
+    void logIngestFailed({
+      reason: error instanceof Error ? error.name : "unknown",
+      route: "ingest/usage",
+    });
     return respondError(500, "internal_error", "Internal error", {
       retryAfterSeconds: 30,
     });
@@ -440,5 +537,38 @@ export async function POST(request: NextRequest) {
     // This lease starts before parsing, so it covers every early validation
     // response as well as all SQLite failures.
     releaseAdmission();
+  }
+}
+
+async function persistIngestAiRequests(
+  events: Array<{
+    idempotencyKey: string;
+    sourceApp: string;
+    project?: string;
+    costUsd?: number;
+    requests?: number;
+    windowStart?: Date;
+    windowEnd?: Date;
+    occurredAt: Date;
+    metadata?: Record<string, string | number | boolean | null>;
+  }>
+): Promise<void> {
+  const { aiRequestFromUsageEvent } = await import("@/lib/ai-usage-metadata");
+  const requests = events
+    .map((event) => aiRequestFromUsageEvent(event))
+    .filter((request): request is NonNullable<typeof request> => request !== null);
+  if (requests.length === 0) return;
+  try {
+    const { persistAiRequests } = await import("@/lib/ai-requests");
+    const result = await persistAiRequests(requests);
+    if (result.inserted + result.merged > 0) {
+      const { fanoutAiRequests } = await import("@/lib/usage-fanout");
+      void fanoutAiRequests(result.persistedInputs ?? requests, "ingest/usage");
+    }
+  } catch (error) {
+    console.error(
+      "[ingest/usage] failed to persist AI requests:",
+      error instanceof Error ? error.message : error
+    );
   }
 }

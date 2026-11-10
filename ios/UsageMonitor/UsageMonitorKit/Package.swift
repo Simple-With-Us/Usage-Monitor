@@ -2,32 +2,18 @@
 import PackageDescription
 
 // ---------------------------------------------------------------------------
-// UsageMonitorKit — the modular core of the Usage Monitor iOS app.
+// UsageMonitorKit — the modular core of the Usage Monitor iOS apps.
 //
-// Every target is declared UP FRONT here so that the ~9 parallel feature /
-// integration agents each own a single source directory (Sources/<Target>/)
-// and NEVER have to edit this manifest or Xcode's merge-hostile .pbxproj.
-// SPM auto-discovers every .swift file under a target's Sources directory,
-// so adding a screen is "drop a file in your folder" — zero manifest churn,
-// zero merge conflicts between lanes.
-//
-// Dependency layers (acyclic):
-//   Models          → (no deps)          Codable API types + date parsing
-//   DesignSystem     → (no deps)          tokens + reusable SwiftUI components
-//   Networking       → Models             APIClient actor + Keychain token store
-//   AppCore          → Models, Networking, DesignSystem   app state / routing / theme / tab scaffold
-//   WidgetShared     → DesignSystem       app<->widget snapshot bridge (app group)
-//   <Feature>        → AppCore, DesignSystem, Networking, Models
-//   AppLock          → AppCore, DesignSystem            LocalAuthentication gate
-//   OfflineCache     → Models, Networking, WidgetShared  disk cache + snapshot writer
-//   PushScaffold     → AppCore, Models                  UserNotifications / push scaffold
+// Remote client features: Models → Networking → AppCore → feature lanes.
+// Local on-device product: LocalStore → LocalSecrets → LocalAdapters →
+// LocalBudget → LocalDataPlane (no Networking money writes).
 // ---------------------------------------------------------------------------
 
 let package = Package(
     name: "UsageMonitorKit",
     defaultLocalization: "en",
     platforms: [
-        .iOS("26.0")
+        .iOS("17.0")
     ],
     products: [
         .library(name: "Models", targets: ["Models"]),
@@ -39,10 +25,19 @@ let package = Package(
         .library(name: "Providers", targets: ["Providers"]),
         .library(name: "Alerts", targets: ["Alerts"]),
         .library(name: "ProjectBudgets", targets: ["ProjectBudgets"]),
+        .library(name: "Platforms", targets: ["Platforms"]),
+        .library(name: "ServerStatus", targets: ["ServerStatus"]),
+        .library(name: "Computers", targets: ["Computers"]),
         .library(name: "Settings", targets: ["Settings"]),
         .library(name: "AppLock", targets: ["AppLock"]),
         .library(name: "OfflineCache", targets: ["OfflineCache"]),
         .library(name: "PushScaffold", targets: ["PushScaffold"]),
+        // Usage Monitor Local (on-device product) — not linked by the remote client app.
+        .library(name: "LocalStore", targets: ["LocalStore"]),
+        .library(name: "LocalSecrets", targets: ["LocalSecrets"]),
+        .library(name: "LocalAdapters", targets: ["LocalAdapters"]),
+        .library(name: "LocalBudget", targets: ["LocalBudget"]),
+        .library(name: "LocalDataPlane", targets: ["LocalDataPlane"]),
     ],
     targets: [
         // ---- Shared foundation ------------------------------------------
@@ -58,7 +53,7 @@ let package = Package(
         // ---- Features (one target each, one owner each) -----------------
         .target(
             name: "Dashboard",
-            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "OfflineCache"]
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "OfflineCache", "ProjectBudgets", "WidgetShared"]
         ),
         .target(
             name: "Providers",
@@ -73,6 +68,18 @@ let package = Package(
             dependencies: ["AppCore", "DesignSystem", "Networking", "Models"]
         ),
         .target(
+            name: "Platforms",
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models"]
+        ),
+        .target(
+            name: "ServerStatus",
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "OfflineCache", "Providers"]
+        ),
+        .target(
+            name: "Computers",
+            dependencies: ["AppCore", "Dashboard", "DesignSystem", "Networking", "Models", "OfflineCache"]
+        ),
+        .target(
             name: "Settings",
             dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "PushScaffold"]
         ),
@@ -85,14 +92,34 @@ let package = Package(
         ),
         .target(name: "PushScaffold", dependencies: ["AppCore", "Models", "Networking"]),
 
-        // ---- Tests (foundation-owned; feature agents add their own) -----
+        // ---- Usage Monitor Local (on-device self-host product) -----------
+        .target(name: "LocalStore"),
+        .target(name: "LocalSecrets"),
+        .target(name: "LocalAdapters", dependencies: ["LocalSecrets"]),
+        .target(name: "LocalBudget", dependencies: ["LocalStore"]),
+        .target(
+            name: "LocalDataPlane",
+            dependencies: [
+                "DesignSystem",
+                "AppCore",
+                "AppLock",
+                "WidgetShared",
+                "LocalStore",
+                "LocalSecrets",
+                "LocalAdapters",
+                "LocalBudget",
+            ]
+        ),
+
+        // ---- Tests ------------------------------------------------------
         .testTarget(
             name: "UsageMonitorKitTests",
             dependencies: [
                 "Models", "Networking", "AppCore", "DesignSystem",
                 "Dashboard", "Providers", "Alerts", "ProjectBudgets",
-                "Settings", "AppLock", "OfflineCache", "WidgetShared",
+                "Platforms", "ServerStatus", "Computers", "Settings", "AppLock", "OfflineCache", "WidgetShared",
                 "PushScaffold",
+                "LocalStore", "LocalSecrets", "LocalAdapters", "LocalBudget", "LocalDataPlane",
             ]
         ),
     ]

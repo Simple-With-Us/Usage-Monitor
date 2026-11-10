@@ -14,6 +14,16 @@ export const API_PREPAID_FUNDING_SERVICE = "api-prepaid-funding";
 export const RECEIPT_CASH_LABEL = "receipt_cash_paid";
 export const RECEIPT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 
+/**
+ * Owner-facing policy (receipt inbox + import):
+ * - Inbox stores **evidence only** until explicit review/import.
+ * - Prepaid API funding imports use durable receipt identity (provider + digest)
+ *   so replaying the same receipt never double-counts cash.
+ * - Subscription charges are modeled via Subscription / ProviderPlan rows —
+ *   if a receipt **matches existing cash**, keep it as evidence and do **not**
+ *   import the same amount again as receipt cash.
+ */
+
 export interface ReceiptCashEventLike {
   idempotencyKey?: string | null;
   sourceApp: string;

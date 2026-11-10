@@ -1,0 +1,44 @@
+name: Shared package pin check
+
+# Guards @jaywedgeworth22/congress-trading-shared across the three consumers:
+#   UM  = this repo (npm git tag in package.json + lock SHA)
+#   ST  = Socratic.Trade (public npm git tag)
+#   CT  = Congress.Trade vendor tree (VENDOR-PROVENANCE.md; no npm dep)
+#
+# A missing peer spec is NOT "skip and pass". The script fails if ST cannot
+# be read, if CT cannot be read, if versions diverge, or if CT reintroduces
+# an npm dependency. See scripts/check-shared-package-pin.mjs.
+#
+# NOTE: this workflow is intentionally NOT part of the branch-protection
+# ruleset. A red result flags divergence without hard-blocking the first
+# PR of a coordinated three-repo bump. Promote it to required after ST+UM+CT
+# land as a matched pair on the rewritten gate.
+#
+# Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near $VARs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 13 * * 1'
+  workflow_dispatch:
+
+jobs:
+  check-pin:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Compare UM / ST / CT shared-package pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: node scripts/check-shared-package-pin.mjs

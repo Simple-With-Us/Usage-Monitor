@@ -44,6 +44,8 @@ export interface SubscriptionFormValue {
   notes: string | null;
   externalBillingSource?: string | null;
   externalBillingId?: string | null;
+  /** When true, owner edits (including pause) permanently relinquish auto-management. */
+  externalBillingManaged?: boolean | null;
   activationMode?: "repurchase" | "resume";
 }
 
@@ -198,6 +200,18 @@ export default function AddSubscriptionModal({
   const canResumeExistingTerm =
     isActivating &&
     (editSubscription?.status === "paused" || editSubscription?.status === "canceled");
+  const pausingManaged =
+    Boolean(editSubscription?.externalBillingManaged) &&
+    status === "paused" &&
+    editSubscription?.status !== "paused";
+  const editingManagedLinked =
+    Boolean(editSubscription?.externalBillingManaged) ||
+    Boolean(
+      editSubscription?.externalBillingSource &&
+        editSubscription?.externalBillingId &&
+        (status === "paused" || status === "canceled") &&
+        editSubscription?.status === "active"
+    );
   const selectedProvider = providers.find((provider) => provider.id === providerId);
   const isLinkCandidate = (record: ExternalBillingRecord) =>
     isExternalBillingLinkCandidate(record, {
@@ -273,6 +287,20 @@ export default function AddSubscriptionModal({
           {editSubscription?.effectiveStatus === "expired" && (
             <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
               This term ended. Notes-only edits preserve its history. Enabling Auto-renews starts a new term now, anchored to current provider billing data when linked; for a one-term repurchase, unlink this record and track the new term separately.
+            </div>
+          )}
+
+          {pausingManaged && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+              This plan is auto-managed from the provider&apos;s billing records. Pausing
+              <strong> permanently converts it to owner-managed</strong>: the monitor will no longer
+              reconcile, pause, or reprice it from billing syncs. Future charges stop until you
+              reactivate it.
+            </div>
+          )}
+          {!pausingManaged && editingManagedLinked && editSubscription?.externalBillingManaged && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+              Auto-managed from provider billing. Any owner edit permanently relinquishes auto-management.
             </div>
           )}
 

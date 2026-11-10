@@ -3,6 +3,12 @@ import Observation
 import Models
 import Networking
 
+/// Programmatic Settings destinations for cross-tab deep links.
+public enum SettingsDestination: Sendable, Equatable {
+    /// Provider inventory where monthly budgets are edited.
+    case providerBudgets
+}
+
 /// The single dependency container the app injects into the SwiftUI
 /// environment. Feature roots read it with `@Environment(AppEnvironment.self)`
 /// and never construct an `APIClient`, `AppSettings`, or `BudgetStore`
@@ -41,6 +47,17 @@ public final class AppEnvironment {
     /// no screen is ever a dead end. `nil` in previews/tests (no shell attached).
     public var selectTab: ((AppTab) -> Void)?
 
+    /// Cross-tab provider deep link. Dashboard attention/top-provider rows (and
+    /// push payloads) set this then call ``selectTab``(.providers); the Providers
+    /// root consumes and clears it to push `ProviderDetailView` without coupling
+    /// Dashboard → Providers modules.
+    public var pendingProviderID: String?
+
+    /// Cross-tab Settings deep link. Overview budget affordances set this then
+    /// call ``selectTab``(.settings); Settings consumes and clears it to push
+    /// the requested management screen.
+    public var pendingSettingsDestination: SettingsDestination?
+
     private let tokenStore: TokenStoring
     private var activeConfiguration: APIConfiguration
 
@@ -72,6 +89,25 @@ public final class AppEnvironment {
 
     /// Whether an API token is currently stored (drives onboarding vs. data).
     public var hasToken: Bool { tokenStore.hasToken }
+
+    /// Jump to the Providers tab and request a push onto the provider detail
+    /// for `id`. Safe when `selectTab` is nil (previews); the pending id still
+    /// sticks for a later Providers root appear.
+    public func openProvider(id: String) {
+        pendingProviderID = id
+        selectTab?(.providers)
+    }
+
+    /// Jump to Settings and open provider budget management (inventory).
+    public func openSettingsForBudgetManagement() {
+        pendingSettingsDestination = .providerBudgets
+        selectTab?(.settings)
+    }
+
+    /// Jump to the Projects tab for project-scoped budget rollups.
+    public func openProjects() {
+        selectTab?(.projects)
+    }
 
     /// Persist (or clear, when `nil`/empty) the API token. Settings calls this
     /// after a successful `apiClient.verifyToken()`.

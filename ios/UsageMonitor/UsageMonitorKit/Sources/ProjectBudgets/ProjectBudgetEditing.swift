@@ -64,9 +64,20 @@ public struct ProjectBudgetDraft: Equatable, Sendable {
     }
 
     /// Cheap check for enabling the Save button without surfacing an error.
-    /// `try?` yields `.some(_)` on success (even for a blank/`nil` budget) and
-    /// `nil` when `validate()` throws — so this is `true` only when valid.
-    public var isValid: Bool { (try? validate()) != nil }
+    ///
+    /// Must catch rather than use `try?`: `validate()` returns `Double?`, and
+    /// Swift flattens `try?` on an optional-returning throwing call, so a
+    /// successful validation of a blank budget (`nil` = no cap) is
+    /// indistinguishable from a thrown error. Using `try?` here disabled Save
+    /// for every project without a monthly cap.
+    public var isValid: Bool {
+        do {
+            _ = try validate()
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 /// Typed, user-presentable validation failures.

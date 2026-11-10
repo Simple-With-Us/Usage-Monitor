@@ -13,6 +13,7 @@ import {
   type AttributionIdentity,
 } from "@/lib/provider-key-attribution";
 import { prisma } from "@/lib/prisma";
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 
 interface CoverageRow {
   producerId: string;
@@ -498,7 +499,7 @@ export async function POST(request: NextRequest) {
   if (denied) return denied;
   let body: Record<string, unknown>;
   try {
-    const value = await request.json();
+    const value = await readBoundedJsonBody(request, { label: "Key attribution body" });
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid request");
     body = value as Record<string, unknown>;
   } catch (error) {
@@ -785,7 +786,7 @@ export async function PATCH(request: NextRequest) {
   const denied = unauthorized(request);
   if (denied) return denied;
   try {
-    const value = await request.json();
+    const value = await readBoundedJsonBody(request, { label: "Key attribution body" });
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid request");
     const body = value as Record<string, unknown>;
     const effectiveTo = parseAttributionDate(body.effectiveTo, "effectiveTo");

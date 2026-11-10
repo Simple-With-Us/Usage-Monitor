@@ -19,7 +19,10 @@ import type {
 } from "@/components/ProviderCard";
 
 export type BillingMode = "actual" | "estimated" | "manual";
-type SettingsTab = "connections" | "services" | "projects";
+type SettingsTab = "connections" | "services" | "projects" | "notifications";
+import NotificationsSettingsPanel from "@/components/NotificationsSettingsPanel";
+import WorkspaceCopyCard from "@/components/WorkspaceCopyCard";
+import InfisicalSettingsPanel from "@/components/InfisicalSettingsPanel";
 
 export interface ProviderPlan {
   billingMode: BillingMode;
@@ -107,6 +110,7 @@ export interface Provider {
 }
 
 function parseSettingsTab(value: string | null): SettingsTab {
+  if (value === "notifications" || value === "alerts") return "notifications";
   if (value === "projects") return "projects";
   if (value === "services" || value === "billing") return "services";
   return "connections";
@@ -115,6 +119,7 @@ function parseSettingsTab(value: string | null): SettingsTab {
 function SettingsPageContent() {
   const searchParams = useSearchParams();
   const activeTab = parseSettingsTab(searchParams.get("tab"));
+  const editProviderId = searchParams.get("edit");
   const [providers, setProviders] = useState<Provider[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
@@ -136,6 +141,7 @@ function SettingsPageContent() {
   const providersLoaded = useRef(false);
   const projectsLoaded = useRef(false);
   const subscriptionsLoaded = useRef(false);
+  const deepLinkEditConsumed = useRef<string | null>(null);
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -210,6 +216,18 @@ function SettingsPageContent() {
     if (activeTab === "projects" && !projectsLoaded.current) void fetchProjects();
   }, [activeTab, fetchProviders, fetchProjects, fetchSubscriptions]);
 
+  // Deep-link: /settings?tab=connections&edit=<providerId> opens the edit modal.
+  useEffect(() => {
+    if (!editProviderId || activeTab !== "connections") return;
+    if (deepLinkEditConsumed.current === editProviderId) return;
+    if (providers.length === 0) return;
+    const match = providers.find((provider) => provider.id === editProviderId);
+    if (!match) return;
+    deepLinkEditConsumed.current = editProviderId;
+    setEditProvider(match);
+    setModalOpen(true);
+  }, [editProviderId, activeTab, providers]);
+
   // AddSubscriptionModal needs the project list for its allocation dropdown.
   useEffect(() => {
     if (subscriptionModalOpen && !projectsLoaded.current) void fetchProjects();
@@ -266,7 +284,15 @@ function SettingsPageContent() {
     setActionLoading(id);
     try {
       const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete");
+      if (!res.ok) {
+        // The refusals here are actionable (attribution history, Infisical
+        // ownership, an open PagerDuty incident that could not be closed), so
+        // show what the server actually said instead of "Failed to delete".
+        const body = await res.json().catch(() => null);
+        throw new Error(
+          typeof body?.error === "string" ? body.error : "Failed to delete"
+        );
+      }
       await fetchProviders();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete");
@@ -423,6 +449,8 @@ function SettingsPageContent() {
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
       </div>
 
+      <WorkspaceCopyCard />
+
       <div className="sticky top-16 z-30 bg-gray-50 dark:bg-gray-900 pt-2 pb-px border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-4">
         <nav aria-label="Settings sections" className="flex overflow-x-auto min-w-0 flex-1">
           <Link
@@ -447,7 +475,7 @@ function SettingsPageContent() {
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             }`}
           >
-            Paid services
+            Paid Services
           </Link>
           <Link
             href="/settings?tab=projects"
@@ -460,6 +488,18 @@ function SettingsPageContent() {
             }`}
           >
             Projects
+          </Link>
+          <Link
+            href="/settings?tab=notifications"
+            id="settings-tab-notifications"
+            aria-current={activeTab === "notifications" ? "page" : undefined}
+            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+              activeTab === "notifications"
+                ? "border-blue-500 text-blue-600 dark:text-blue-400"
+                : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            }`}
+          >
+            Notifications & Alerts
           </Link>
         </nav>
         <div className="flex-shrink-0 pb-2">
@@ -539,25 +579,26 @@ function SettingsPageContent() {
       <section id={`settings-panel-${activeTab}`} aria-label={`${activeTab} settings`}>
         {activeTab === "connections" ? (
           <div className="space-y-6">
+            <InfisicalSettingsPanel />
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-800 dark:bg-blue-900/30">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
-                How data gets here
+                How Data Gets Here
               </h2>
               <div className="grid gap-4 text-sm text-blue-800 dark:text-blue-200 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic account sync</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic Account Sync</p>
                   <p className="text-xs opacity-90">Read-only provider adapters fetch authoritative usage, billing, plan, and quota fields whenever the provider exposes them.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed telemetry</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed Telemetry</p>
                   <p className="text-xs opacity-90">Apps send metered usage and cost when a provider has no suitable account API or when project-level detail is needed.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">OTLP metrics</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">OTLP Metrics</p>
                   <p className="text-xs opacity-90">Claude Code and other OTLP exporters push usage metrics over standard OTLP/HTTP; they land alongside pushed telemetry as Anthropic (Claude Code) cost.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual plan tracking</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual Plan Tracking</p>
                   <p className="text-xs opacity-90">Dashboard-only subscriptions stay explicit instead of being inferred from API traffic, balances, or portfolio assets.</p>
                 </div>
               </div>
@@ -595,7 +636,7 @@ function SettingsPageContent() {
           <div className="space-y-8">
             <div className="space-y-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked recurring costs</h2>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked Recurring Costs</h2>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Edit dashboard-only subscriptions or link them to an automatically discovered provider record. Linked records render once and charge once.
                 </p>
@@ -625,6 +666,7 @@ function SettingsPageContent() {
                     notes: sub.notes,
                     externalBillingSource: sub.externalBillingSource,
                     externalBillingId: sub.externalBillingId,
+                    externalBillingManaged: sub.externalBillingManaged ?? false,
                   });
                   setSubscriptionModalOpen(true);
                 }}
@@ -665,25 +707,29 @@ function SettingsPageContent() {
               />
             )}
           </div>
+        ) : activeTab === "projects" ? (
+          <div className="space-y-4">
+            <ProjectTable
+              projects={projects}
+              actionLoading={actionLoading}
+              deleteProjectConfirm={deleteProjectConfirm}
+              onEdit={(project) => {
+                setEditProject(project);
+                setProjectModalOpen(true);
+              }}
+              onDeleteConfirmStart={setDeleteProjectConfirm}
+              onDeleteConfirmCancel={() => setDeleteProjectConfirm(null)}
+              onDelete={handleDeleteProject}
+              onAddProject={() => {
+                setEditProject(null);
+                setProjectModalOpen(true);
+              }}
+              loadError={loadErrors.projects ?? null}
+              onRetryLoad={() => void fetchProjects()}
+            />
+          </div>
         ) : (
-          <ProjectTable
-            projects={projects}
-            actionLoading={actionLoading}
-            deleteProjectConfirm={deleteProjectConfirm}
-            onEdit={(project) => {
-              setEditProject(project);
-              setProjectModalOpen(true);
-            }}
-            onDeleteConfirmStart={setDeleteProjectConfirm}
-            onDeleteConfirmCancel={() => setDeleteProjectConfirm(null)}
-            onDelete={handleDeleteProject}
-            onAddProject={() => {
-              setEditProject(null);
-              setProjectModalOpen(true);
-            }}
-            loadError={loadErrors.projects ?? null}
-            onRetryLoad={() => void fetchProjects()}
-          />
+          <NotificationsSettingsPanel />
         )}
       </section>
 

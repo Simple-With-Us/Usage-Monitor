@@ -131,7 +131,7 @@ export function ComplianceSummaryPanel({
     <section className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">
-          Usage compliance
+          Usage Compliance
         </h2>
         <ComplianceBadge state={state} />
       </div>
@@ -145,7 +145,7 @@ export function ComplianceSummaryPanel({
           <dt className="text-xs text-gray-500 dark:text-gray-400">Verified coverage</dt>
           <dd className="text-sm tabular-nums text-gray-900 dark:text-gray-100">
             {verifiedCoverage == null ? (
-              <span className="text-gray-400 dark:text-gray-500">n/a</span>
+              <span className="text-gray-500 dark:text-gray-400">n/a</span>
             ) : (
               <>
                 {formatPercent(verifiedCoverage)}{" "}

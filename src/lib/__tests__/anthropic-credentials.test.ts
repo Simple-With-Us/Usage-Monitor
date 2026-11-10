@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { encrypt, encryptJson } from "@/lib/crypto";
 import {
   hasStoredAnthropicAdminApiKey,
+  hasStoredNamecheapCredentials,
   providerPollSnapshotExpected,
 } from "@/lib/anthropic-credentials";
 
@@ -72,4 +73,52 @@ describe("Anthropic credential capability", () => {
     expect(providerPollSnapshotExpected({ name: "tiingo", type: "custom" })).toBe(true);
     expect(providerPollSnapshotExpected({ name: "voyage", type: "custom" })).toBe(true);
   });
+
+  describe("Namecheap credential capability", () => {
+    it("does not treat unconfigured Namecheap as polling capable", () => {
+      const provider = {
+        name: "namecheap",
+        type: "builtin",
+      };
+      expect(hasStoredNamecheapCredentials(provider)).toBe(false);
+      expect(providerPollSnapshotExpected(provider)).toBe(false);
+    });
+
+    it("rejects Namecheap if clientIp is missing or localhost", () => {
+      const provider = {
+        name: "namecheap",
+        type: "builtin",
+        apiKey: encrypt("nc-api-key"),
+        config: { apiUser: "myuser", clientIp: "127.0.0.1" },
+      };
+      expect(hasStoredNamecheapCredentials(provider)).toBe(false);
+      expect(providerPollSnapshotExpected(provider)).toBe(false);
+    });
+
+    it("accepts Namecheap when apiKey, apiUser, and valid clientIp are provided", () => {
+      const provider = {
+        name: "namecheap",
+        type: "builtin",
+        apiKey: encrypt("nc-api-key"),
+        config: { apiUser: "myuser", clientIp: "198.51.100.1" },
+      };
+      expect(hasStoredNamecheapCredentials(provider)).toBe(true);
+      expect(providerPollSnapshotExpected(provider)).toBe(true);
+    });
+
+    it("recognizes Namecheap credentials stored in secretConfig", () => {
+      const provider = {
+        name: "namecheap",
+        type: "builtin",
+        secretConfig: encryptJson({
+          apiKey: "nc-secret-api-key",
+          apiUser: "secretuser",
+          clientIp: "203.0.113.5",
+        }),
+      };
+      expect(hasStoredNamecheapCredentials(provider)).toBe(true);
+      expect(providerPollSnapshotExpected(provider)).toBe(true);
+    });
+  });
 });
+

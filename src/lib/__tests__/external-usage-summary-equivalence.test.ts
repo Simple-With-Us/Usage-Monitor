@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// E1 equivalence proof: summarizeExternalUsageEvents used to fold the whole
-// raw month in JS via cursor pagination; it now runs ONE SQL groupBy plus a
-// small receipt-candidate query. This test drives BOTH algorithms from a
-// single in-memory fixture:
+// Equivalence proof: summarizeExternalUsageEvents folds native SQLite
+// aggregate rows alongside the receipt-candidate query.  This test drives both the
+// current algorithm and its prior-fold reference from one in-memory fixture:
 //
-//   - the NEW implementation (real module code), with prisma mocks that
-//     compute the groupBy / findMany result shapes from the fixture exactly
-//     the way SQLite would, and
+//   - the current implementation (real module code), with aggregate-boundary
+//     and receipt-candidate mocks returning fixture data, and
 //   - a REFERENCE implementation below that is a line-for-line copy of the
 //     old JS fold (kept here, not in src/, so no dead code ships),
 //
@@ -16,14 +14,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const prismaMock = vi.hoisted(() => ({
   externalUsageEvent: { findMany: vi.fn(), groupBy: vi.fn() },
   externalUsageEventDailyRollup: { findMany: vi.fn() },
+  $queryRaw: vi.fn(),
 }));
+const aggregateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/sqlite-usage-aggregates", () => ({
+  querySqliteUsageAggregate: aggregateMock,
+}));
 
 import {
   STATUS_METRIC_TYPES,
   classifyCostCoverage,
-  isClaudeCodeAnalyticsTelemetry,
+  isSubscriptionAnalyticsTelemetry,
   summarizeExternalUsageEvents,
   type ExternalUsageEventSummaryGroup,
 } from "../external-usage-events";
@@ -251,7 +254,7 @@ const ROLLUPS = [
 // ---------------------------------------------------------------------------
 
 // The fixed-shape receipt-candidate superset, mirroring
-// rawReceiptCashCandidates' where clause (and, complemented, the groupBy's
+// rawReceiptCashCandidates' where clause (and, complemented, the raw scan's
 // NON_RECEIPT_CANDIDATE_WHERE exclusion).
 function isReceiptCandidateShape(event: {
   sourceApp: string;
@@ -274,6 +277,54 @@ function isReceiptCandidateShape(event: {
 type FixtureEvent = (typeof RAW_EVENTS)[number];
 
 function installFixtureMocks() {
+  aggregateMock.mockImplementation((mode: string, from: Date, through?: Date) => {
+    if (mode === "summary") {
+      const events = RAW_EVENTS
+        .filter((event) => (!from || event.occurredAt >= from) && (!through || event.occurredAt <= through))
+        .filter((event) => !["quota_sync", "credit_balance"].includes(event.metricType) && !isReceiptCandidateShape(event))
+        .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id));
+      const dimensions = ["sourceApp", "environment", "provider", "service", "label", "projectId", "metricType", "unit", "limit", "limitWindow"] as const;
+      const buckets = new Map<string, { dims: Record<string, unknown>; count: number; priced: number; cost: number | null; requests: number | null; quantity: number | null; latest: Date; lastId: string }>();
+      for (const event of events) {
+        const dims = Object.fromEntries(dimensions.map((field) => [field, event[field] ?? null]));
+        const key = JSON.stringify(dims);
+        let bucket = buckets.get(key);
+        if (!bucket) {
+          bucket = { dims, count: 0, priced: 0, cost: null, requests: null, quantity: null, latest: event.occurredAt, lastId: event.id };
+          buckets.set(key, bucket);
+        }
+        bucket.count += 1;
+        if (event.costUsd != null) { bucket.priced += 1; bucket.cost = (bucket.cost ?? 0) + event.costUsd; }
+        if (event.requests != null) bucket.requests = (bucket.requests ?? 0) + event.requests;
+        if (event.quantity != null) bucket.quantity = (bucket.quantity ?? 0) + event.quantity;
+        if (event.occurredAt > bucket.latest || (event.occurredAt.getTime() === bucket.latest.getTime() && event.id > bucket.lastId)) {
+          bucket.latest = event.occurredAt;
+          bucket.lastId = event.id;
+        }
+      }
+      return Promise.resolve(Array.from(buckets.values()).map((bucket) => ({
+        ...bucket.dims,
+        eventCount: bucket.count,
+        pricedEventCount: bucket.priced,
+        totalCostUsd: bucket.cost,
+        totalRequests: bucket.requests,
+        totalQuantity: bucket.quantity,
+        packedLatest: `${bucket.latest.toISOString().replace("Z", "+00:00")}\u0001${bucket.lastId}`,
+      })).sort((a, b) => {
+        return String(a.packedLatest) < String(b.packedLatest)
+          ? -1
+          : String(a.packedLatest) > String(b.packedLatest)
+            ? 1
+            : 0;
+      }));
+    }
+    if (mode === "derived") return Promise.resolve([{ totalUsd: 0, eventCount: 0 }]);
+    return Promise.resolve([]);
+  });
+  prismaMock.$queryRaw.mockImplementation(() => {
+    return Promise.resolve([]);
+  });
+
   prismaMock.externalUsageEvent.findMany.mockImplementation(
     (args?: { where?: { occurredAt?: { gte?: Date } } }) => {
       const gte = args?.where?.occurredAt?.gte;
@@ -281,83 +332,6 @@ function installFixtureMocks() {
         RAW_EVENTS.filter(
           (event) => isReceiptCandidateShape(event) && (!gte || event.occurredAt >= gte)
         )
-      );
-    }
-  );
-
-  prismaMock.externalUsageEvent.groupBy.mockImplementation(
-    (args: {
-      by: string[];
-      where: { occurredAt: { gte: Date }; metricType: { notIn: string[] } };
-    }) => {
-      const gte = args.where.occurredAt.gte;
-      const notIn = new Set(args.where.metricType.notIn);
-      const rows = RAW_EVENTS.filter(
-        (event) =>
-          event.occurredAt >= gte &&
-          !notIn.has(event.metricType) &&
-          !isReceiptCandidateShape(event)
-      );
-      const buckets = new Map<
-        string,
-        {
-          dims: unknown[];
-          countAll: number;
-          countCost: number;
-          sumCost: number | null;
-          sumRequests: number | null;
-          sumQuantity: number | null;
-          max: Date | null;
-        }
-      >();
-      for (const event of rows) {
-        const dims = args.by.map(
-          (field) => (event as unknown as Record<string, unknown>)[field] ?? null
-        );
-        const key = JSON.stringify(dims);
-        let bucket = buckets.get(key);
-        if (!bucket) {
-          bucket = {
-            dims,
-            countAll: 0,
-            countCost: 0,
-            sumCost: null,
-            sumRequests: null,
-            sumQuantity: null,
-            max: null,
-          };
-          buckets.set(key, bucket);
-        }
-        bucket.countAll += 1;
-        if (event.costUsd != null) {
-          bucket.countCost += 1;
-          bucket.sumCost = (bucket.sumCost ?? 0) + event.costUsd;
-        }
-        if (event.requests != null) {
-          bucket.sumRequests = (bucket.sumRequests ?? 0) + event.requests;
-        }
-        if (event.quantity != null) {
-          bucket.sumQuantity = (bucket.sumQuantity ?? 0) + event.quantity;
-        }
-        if (!bucket.max || event.occurredAt > bucket.max) {
-          bucket.max = event.occurredAt;
-        }
-      }
-      return Promise.resolve(
-        Array.from(buckets.values()).map((bucket) => {
-          const row: Record<string, unknown> = {};
-          args.by.forEach((field, index) => {
-            row[field] = bucket.dims[index];
-          });
-          row._sum = {
-            costUsd: bucket.sumCost,
-            requests: bucket.sumRequests,
-            quantity: bucket.sumQuantity,
-          };
-          row._count = { _all: bucket.countAll, costUsd: bucket.countCost };
-          row._max = { occurredAt: bucket.max };
-          return row;
-        })
       );
     }
   );
@@ -449,7 +423,7 @@ function referenceOldSummarize(
       event.occurredAt >= rawSince && !STATUS_METRIC_TYPES.has(event.metricType)
   );
   for (const event of page) {
-    const isClaudeCodeAnalytics = isClaudeCodeAnalyticsTelemetry(event);
+    const isClaudeCodeAnalytics = isSubscriptionAnalyticsTelemetry(event);
     const isReceiptCash = isReceiptCashEvent(event as FixtureEvent);
     mergeSummaryGroup(groups, {
       sourceApp: event.sourceApp,
@@ -497,7 +471,7 @@ function referenceOldSummarize(
       : [];
 
   for (const entry of rollups) {
-    const isClaudeCodeAnalytics = isClaudeCodeAnalyticsTelemetry(entry);
+    const isClaudeCodeAnalytics = isSubscriptionAnalyticsTelemetry(entry);
     const isReceiptCash = isReceiptCashEvent(entry as never);
     const hasCoverageCounts =
       entry.pricedEventCount != null ||
@@ -608,6 +582,8 @@ describe("summarizeExternalUsageEvents E1 equivalence", () => {
     installFixtureMocks();
     prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
     prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
+    aggregateMock.mockResolvedValueOnce([]);
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
 
     const actual = await summarizeExternalUsageEvents(since, rawCutoff);

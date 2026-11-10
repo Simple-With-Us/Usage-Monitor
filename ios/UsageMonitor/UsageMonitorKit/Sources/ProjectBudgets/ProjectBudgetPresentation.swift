@@ -129,10 +129,10 @@ public struct ProjectBudgetPresentation: Identifiable, Hashable, Sendable {
     /// A short one-line status suitable as a row subtitle when no description.
     public var statusSummary: String {
         switch project.status {
-        case .exceeded: return "Over budget"
-        case .warning: return "Approaching budget"
-        case .ok: return "On track"
-        case .unconfigured: return hasBudget ? "On track" : "No budget set"
+        case .exceeded: return "Over Budget"
+        case .warning: return "Approaching Budget"
+        case .ok: return "On Track"
+        case .unconfigured: return hasBudget ? "On Track" : "No Budget Set"
         }
     }
 

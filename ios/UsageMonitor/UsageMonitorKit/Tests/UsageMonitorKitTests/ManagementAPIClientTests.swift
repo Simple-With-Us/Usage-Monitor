@@ -442,6 +442,68 @@ final class ManagementAPIClientTests: XCTestCase {
         XCTAssertTrue(receipt.success)
     }
 
+    func testProviderDeleteIssuesSessionOnlyDelete() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/providers/provider-1")
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(["success": true])
+        }
+
+        let receipt = try await harness.client.deleteProvider(id: "provider-1")
+        XCTAssertTrue(receipt.success)
+    }
+
+    func testSubscriptionDeleteIssuesSessionOnlyDelete() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/subscriptions/subscription-1")
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(["ok": true])
+        }
+
+        let receipt = try await harness.client.deleteSubscription(id: "subscription-1")
+        XCTAssertTrue(receipt.ok)
+    }
+
+    func testProviderCanDeleteHidesManagedCredentials() {
+        let free = ProviderManagementItem(
+            id: "p1",
+            name: "openrouter",
+            displayName: "OpenRouter",
+            type: "openrouter",
+            isActive: true,
+            refreshIntervalMin: 15,
+            createdAt: "2026-08-01T00:00:00.000Z"
+        )
+        XCTAssertTrue(free.canDelete)
+
+        let managed = ProviderManagementItem(
+            id: "p2",
+            name: "anthropic",
+            displayName: "Anthropic",
+            type: "anthropic",
+            isActive: true,
+            refreshIntervalMin: 15,
+            credentialManagement: .init(
+                source: "infisical",
+                scope: "st",
+                label: "Primary",
+                status: "ok",
+                alias: false,
+                readOnlyFields: ["isActive"]
+            ),
+            createdAt: "2026-08-01T00:00:00.000Z"
+        )
+        XCTAssertFalse(managed.canDelete)
+    }
+
     func testUsageSnapshotsSendsBoundedQuerySessionOnly() async throws {
         let harness = makeHarness()
         installSessionCookie(in: harness)
@@ -476,6 +538,27 @@ final class ManagementAPIClientTests: XCTestCase {
             providerID: "provider-1",
             days: SnapshotHistoryRange.oneYear.days
         )
+    }
+
+    func testAgentsOverviewSendsWindowAsQueryItem() async throws {
+        let harness = makeHarness(token: "read-token")
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/agents-overview")
+            XCTAssertFalse(
+                (request.url?.absoluteString ?? "").contains("%3F"),
+                "window must be a query item; appendingPathComponent encodes an inlined ?"
+            )
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+            XCTAssertEqual(query, "window=5h")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer read-token")
+            return .json(Self.agentsOverviewJSON)
+        }
+
+        let response = try await harness.client.agentsOverview(window: "5h")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.windowDays, 0.2083, accuracy: 0.0001)
+        XCTAssertEqual(response.summary.totalAgentCount, 1)
     }
 
     func testProviderDetailDecodesExternalBilling() async throws {
@@ -695,6 +778,33 @@ final class ManagementAPIClientTests: XCTestCase {
         ]],
     ]
 
+    private static let agentsOverviewJSON: [String: Any] = [
+        "ok": true,
+        "windowDays": 0.2083,
+        "windowLabel": "Last 24 Hours",
+        "generatedAt": "2026-09-18T08:00:00.000Z",
+        "macHostname": "jays.services",
+        "macChip": "Apple M5",
+        "summary": [
+            "activeAgentCount": 0,
+            "totalAgentCount": 1,
+            "totalTokens": 0,
+            "totalApiEquivalentCostUsd": 0,
+            "totalSubscriptionCostUsd": 0,
+            "totalNetSavingsUsd": 0,
+            "savingsMultiplier": 1,
+            "topModel": NSNull(),
+        ],
+        "burn5h": [
+            "tokens5h": 0,
+            "costEstimate5hUsd": 0,
+            "burnRateTokensPerHour": 0,
+            "burnRateUsdPerHour": 0,
+        ],
+        "platforms": [],
+        "modelDistribution": [],
+    ]
+
     private static let subscriptionsJSON: [[String: Any]] = [[
         "id": "subscription-1",
         "name": "OpenAI Plus",
@@ -728,7 +838,7 @@ private final class ManagementURLProtocol: URLProtocol {
             guard let handler = Self.handler else {
                 throw URLError(.badServerResponse)
             }
-            let stub = try handler(request)
+            let stub = try handler(Self.materializingBody(of: request))
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: stub.status,
@@ -744,6 +854,35 @@ private final class ManagementURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// `URLSession` converts a request's `httpBody` into an `httpBodyStream`
+    /// before handing it to a custom `URLProtocol`, so `httpBody` reads back as
+    /// nil inside the stub and every payload assertion silently passes over an
+    /// empty dictionary. Drain the stream once here and give the handler a
+    /// request whose `httpBody` is populated, so body assertions are real and
+    /// can be made repeatedly without re-reading a consumed stream.
+    private static func materializingBody(of request: URLRequest) -> URLRequest {
+        guard request.httpBody == nil, let stream = request.httpBodyStream else {
+            return request
+        }
+
+        var body = Data()
+        let bufferSize = 4_096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        stream.open()
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            guard read > 0 else { break }
+            body.append(buffer, count: read)
+        }
+        stream.close()
+
+        guard !body.isEmpty else { return request }
+        var materialized = request
+        materialized.httpBodyStream = nil
+        materialized.httpBody = body
+        return materialized
+    }
 }
 
 private struct ManagementStubResponse {

@@ -62,11 +62,11 @@ describe("PaidServicesPanel", () => {
       })
     );
 
-    expect(html).toContain("Paid services, plans &amp; quotas");
+    expect(html).toContain("Paid Services, Plans &amp; Quotas");
     expect(html).toContain("Cloudflare Workers");
     expect(html).toContain("Workers Paid");
     expect(html).toContain("Verified + tracked");
-    expect(html).toContain("10M limit");
+    expect(html).toContain("10m limit");
     expect(html).toContain("paid-tier limit");
     expect(html).toContain("Provider billing coverage");
     expect(html).toContain("0 tracked");
@@ -138,7 +138,7 @@ describe("PaidServicesPanel", () => {
     expect(html).toContain("Breakdown");
     expect(html).toContain("Limit reached");
     expect(html).toContain("excluded from summaries");
-    expect(html).toContain("10K / month limit");
+    expect(html).toContain("10k / month limit");
     expect(html).toContain("reported through");
   });
 
@@ -269,7 +269,7 @@ describe("PaidServicesPanel", () => {
       })
     );
 
-    expect(html).toContain("2M limit");
+    expect(html).toContain("2m limit");
     expect(html).toContain("tokens / tokens per minute per project");
     expect(html).not.toContain("requests / tokens per minute per project");
   });

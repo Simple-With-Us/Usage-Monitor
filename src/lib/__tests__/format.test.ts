@@ -62,8 +62,8 @@ describe("formatNumber", () => {
 
 describe("formatCompactNumber", () => {
   it("uses compact notation with 1 fraction digit", () => {
-    expect(formatCompactNumber(10_000_000)).toBe("10M");
-    expect(formatCompactNumber(1_234)).toBe("1.2K");
+    expect(formatCompactNumber(10_000_000)).toBe("10m");
+    expect(formatCompactNumber(1_234)).toBe("1.2k");
   });
 });
 

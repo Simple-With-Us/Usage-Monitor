@@ -1,0 +1,756 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  ANTIGRAVITY_THIRD_PARTY_LABEL,
+  antigravityDisplayLabel,
+  projectQuotaWindows,
+  quotaProviderKey,
+  quotaProviderLabel,
+  quotaProviderVia,
+  quotaStatus,
+} from "../quota-windows";
+
+describe("quotaStatus", () => {
+  it("treats remaining 0 and isExhausted as a hit", () => {
+    expect(quotaStatus({ remainingPercent: 0, remainingUnknown: false, isExhausted: false })).toBe(
+      "exhausted",
+    );
+    expect(quotaStatus({ remainingPercent: null, remainingUnknown: true, isExhausted: true })).toBe(
+      "exhausted",
+    );
+  });
+
+  it("treats omitted remaining as unknown, not exhausted", () => {
+    expect(quotaStatus({ remainingPercent: null, remainingUnknown: true, isExhausted: false })).toBe(
+      "unknown",
+    );
+  });
+
+  it("keeps 30% remaining available", () => {
+    expect(quotaStatus({ remainingPercent: 29.75, remainingUnknown: false, isExhausted: false })).toBe(
+      "available",
+    );
+  });
+
+  it("treats remaining under 20% as near_cap", () => {
+    expect(quotaStatus({ remainingPercent: 19.9, remainingUnknown: false, isExhausted: false })).toBe(
+      "near_cap",
+    );
+  });
+
+  it("treats remainingPercent null without remainingUnknown as unknown", () => {
+    expect(quotaStatus({ remainingPercent: null, remainingUnknown: false, isExhausted: false })).toBe(
+      "unknown",
+    );
+  });
+});
+
+describe("projectQuotaWindows", () => {
+  it("keeps the submitting collector distinct from the service attribution", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        sourceApp: "subscription-quota-collector",
+        service: "claude-code",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T00:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", source: "api.anthropic.com" },
+      },
+    ]);
+
+    expect(result.windows[0]).toMatchObject({
+      collector: "subscription-quota-collector",
+      sourceApp: "claude-code",
+      source: "api.anthropic.com",
+      reportedAt: "2026-09-12T00:00:00.000Z",
+      occurredAt: "2026-09-12T00:00:00.000Z",
+      windowKey: "5h",
+    });
+  });
+
+  it("prefers metadata.reportedAt over occurredAt for freshness fields", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: {
+          bucketId: "anthropic:five_hour",
+          quotaWindow: "5h",
+          reportedAt: "2026-09-12T10:00:00.000Z",
+          windowKey: "5h",
+        },
+      },
+    ]);
+    expect(result.windows[0]?.reportedAt).toBe("2026-09-12T10:00:00.000Z");
+    expect(result.windows[0]?.occurredAt).toBe("2026-09-12T12:00:00.000Z");
+  });
+
+  it("includes reportedAt and windowKey on every windows[] row and providerGroups copy", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-09-12T00:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", quotaWindow: "5h", source: "api.anthropic.com" },
+      },
+      {
+        provider: "anthropic",
+        label: "7d window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-09-11T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:seven_day", quotaWindow: "7d" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    for (const row of result.windows) {
+      expect(row.reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(row.windowKey).toBeTruthy();
+    }
+    expect(result.windows.map((w) => w.windowKey).sort()).toEqual(["5h", "7d"]);
+
+    const anthropicGroup = result.providerGroups.find((g) => g.provider === "anthropic");
+    expect(anthropicGroup?.windows).toHaveLength(2);
+    for (const row of anthropicGroup?.windows ?? []) {
+      expect(row.reportedAt).toBe(row.occurredAt);
+      expect(["5h", "7d"]).toContain(row.windowKey);
+    }
+  });
+
+  it("projects per-model skip targets from antigravity-usage events", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Claude Opus 4.6 (Thinking)",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-04T04:20:02.182Z",
+        metadata: {
+          modelId: "claude-opus-4-6-thinking",
+          isExhausted: true,
+          source: "antigravity-usage",
+          resetAt: "2026-09-09T07:04:37Z",
+        },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Gemini 3.1 Pro (High)",
+        credits: null,
+        limit: 100,
+        occurredAt: "2026-09-04T04:20:02.182Z",
+        metadata: {
+          modelId: "gemini-3.1-pro-high",
+          remainingUnknown: true,
+          isExhausted: false,
+          source: "antigravity-usage",
+        },
+      },
+    ]);
+    expect(result.skipModelTypes.map((row) => row.model).sort()).toEqual([
+      "claude-opus-4-6-thinking",
+      "gemini-3.1-pro-high",
+    ]);
+    const gemini = result.windows.find((row) => row.modelId === "gemini-3.1-pro-high");
+    expect(gemini?.status).toBe("unknown");
+    expect(gemini?.skip).toBe(true);
+    expect(gemini?.remainingPercent).toBeNull();
+    expect(gemini?.remainingUnknown).toBe(true);
+  });
+
+  it("keeps the latest event per series", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Claude Opus 4.6 (Thinking)",
+        credits: 10,
+        limit: 100,
+        occurredAt: "2026-09-04T05:00:00.000Z",
+        metadata: { modelId: "claude-opus-4-6-thinking", isExhausted: false },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Claude Opus 4.6 (Thinking)",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-04T04:00:00.000Z",
+        metadata: { modelId: "claude-opus-4-6-thinking", isExhausted: true },
+      },
+    ]);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.remainingPercent).toBe(10);
+    expect(result.skipModelTypes).toEqual([]);
+  });
+
+  it("keeps the same bucket separate by producer identity and selects each machine's newest reading", () => {
+    const event = (
+      producerInstanceId: string,
+      machine: string,
+      credits: number,
+      occurredAt: string,
+    ) => ({
+      provider: "anthropic",
+      label: "5h window",
+      credits,
+      limit: 100,
+      occurredAt,
+      metadata: {
+        bucketId: "anthropic:five_hour",
+        _producerInstanceId: producerInstanceId,
+        machine,
+      },
+    });
+    const result = projectQuotaWindows([
+      event("machine-a", "Laptop", 80, "2026-10-03T12:00:00.000Z"),
+      event("machine-b", "Laptop", 30, "2026-10-03T11:00:00.000Z"),
+      event("machine-a", "Laptop", 10, "2026-10-03T10:00:00.000Z"),
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    expect(
+      result.windows.map((window) => [
+        window.producerInstanceId,
+        window.machine,
+        window.remainingPercent,
+      ]),
+    ).toEqual([
+      ["machine-a", "Laptop", 80],
+      ["machine-b", "Laptop", 30],
+    ]);
+    expect(new Set(result.windows.map((window) => window.id)).size).toBe(2);
+  });
+
+  it("serializes producer and series components without delimiter collisions", () => {
+    const event = (producerInstanceId: string, bucketId: string) => ({
+      provider: "anthropic",
+      label: "5h window",
+      credits: 50,
+      limit: 100,
+      occurredAt: "2026-10-03T12:00:00.000Z",
+      metadata: { bucketId, _producerInstanceId: producerInstanceId },
+    });
+    const result = projectQuotaWindows([
+      event("machine:a", "b:c"),
+      event("machine", "a:b:c"),
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    expect(result.windows.map((window) => window.id)).toEqual([
+      JSON.stringify(["producer", "machine:a", "b:c"]),
+      JSON.stringify(["producer", "machine", "a:b:c"]),
+    ]);
+  });
+
+  it("keeps attributed ids distinct from arbitrary legacy bucket ids", () => {
+    const legacyId = JSON.stringify(["machine", "bucket"]);
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
+      },
+      {
+        provider: "anthropic",
+        label: "legacy window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-10-03T11:00:00.000Z",
+        metadata: { bucketId: legacyId },
+      },
+    ]);
+
+    expect(result.windows.map((window) => window.id)).toEqual([
+      JSON.stringify(["producer", "machine", "bucket"]),
+      legacyId,
+    ]);
+    expect(new Set(result.windows.map((window) => window.id)).size).toBe(2);
+  });
+
+  it("retains legacy ids and omits provenance fields when metadata has no producer identity", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 50,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour", machine: "Unattributed Mac" },
+      },
+    ]);
+
+    expect(result.windows[0]?.id).toBe("anthropic:five_hour");
+    expect(result.windows[0]).not.toHaveProperty("producerInstanceId");
+    expect(result.windows[0]?.machine).toBe("Unattributed Mac");
+  });
+
+  it("drops an unattributed window when a fresher attributed reading of the same series exists", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: {
+          bucketId: "third-party",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: { bucketId: "third-party" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.producerInstanceId).toBe("macbook");
+  });
+
+  it("keeps a fresher unattributed window over a stale attributed reading of the same series", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 20,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: {
+          bucketId: "third-party",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: { bucketId: "third-party" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+    const unattributed = result.windows.find((window) => window.producerInstanceId === undefined);
+    expect(unattributed?.remainingPercent).toBe(80);
+    expect(unattributed?.occurredAt).toBe("2026-10-03T12:05:00.000Z");
+  });
+
+  it("does not drop an unattributed window from another provider that shares a series string", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 50,
+        limit: 100,
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        metadata: {
+          bucketId: "shared-series",
+          _producerInstanceId: "macbook",
+        },
+      },
+      {
+        provider: "anthropic",
+        label: "5h window",
+        credits: 70,
+        limit: 100,
+        occurredAt: "2026-10-03T12:05:00.000Z",
+        metadata: { bucketId: "shared-series" },
+      },
+    ]);
+
+    expect(result.windows).toHaveLength(2);
+  });
+
+  it("re-keys an attributed window when its id collides with a legacy bucket id", () => {
+    const collidingLegacyId = JSON.stringify(["producer", "machine", "bucket"]);
+    const legacy = {
+      provider: "anthropic",
+      label: "legacy window",
+      credits: 40,
+      limit: 100,
+      occurredAt: "2026-10-03T11:00:00.000Z",
+      metadata: { bucketId: collidingLegacyId },
+    };
+    const attributed = {
+      provider: "anthropic",
+      label: "5h window",
+      credits: 70,
+      limit: 100,
+      occurredAt: "2026-10-03T12:00:00.000Z",
+      metadata: { bucketId: "bucket", _producerInstanceId: "machine" },
+    };
+    const expectedIds = new Set([
+      collidingLegacyId,
+      JSON.stringify(["producer", "machine", "bucket", 0]),
+    ]);
+
+    for (const events of [
+      [legacy, attributed],
+      [attributed, legacy],
+    ]) {
+      const result = projectQuotaWindows(events);
+      expect(result.windows).toHaveLength(2);
+      expect(new Set(result.windows.map((window) => window.id))).toEqual(expectedIds);
+    }
+  });
+
+  it("builds skipModelTypes from the freshest reading per series, not every machine's", () => {
+    const event = (credits: number, occurredAt: string, machine: string) => ({
+      provider: "google-antigravity",
+      label: "Third-Party Models",
+      credits,
+      limit: 100,
+      occurredAt,
+      metadata: {
+        bucketId: "third-party",
+        _producerInstanceId: machine,
+        modelId: "claude-opus-4-6",
+      },
+    });
+    const result = projectQuotaWindows([
+      event(0, "2026-10-03T10:00:00.000Z", "machine-a"),
+      event(60, "2026-10-03T11:00:00.000Z", "machine-b"),
+    ]);
+
+    // machine-a is exhausted but machine-b (freshest) has 60% left: fleet
+    // routing must not treat the model as exhausted.
+    expect(result.windows).toHaveLength(2);
+    expect(result.skipModelTypes).toEqual([]);
+  });
+
+  it("keeps a producer window's id in the fixed namespace across unrelated rows", () => {
+    const event = (producerInstanceId: string, bucketId: string, label: string) => ({
+      provider: "anthropic",
+      label,
+      credits: 50,
+      limit: 100,
+      occurredAt: "2026-10-03T12:00:00.000Z",
+      metadata: { bucketId, _producerInstanceId: producerInstanceId },
+    });
+    const first = projectQuotaWindows([event("machine", "bucket", "5h window")]);
+    const withLegacy = projectQuotaWindows([
+      event("machine", "bucket", "5h window"),
+      {
+        provider: "anthropic",
+        label: "legacy window",
+        credits: 40,
+        limit: 100,
+        occurredAt: "2026-10-03T11:00:00.000Z",
+        metadata: { bucketId: "some-legacy-bucket" },
+      },
+    ]);
+
+    const id = JSON.stringify(["producer", "machine", "bucket"]);
+    expect(first.windows[0]?.id).toBe(id);
+    expect(withLegacy.windows.find((w) => w.producerInstanceId === "machine")?.id).toBe(id);
+  });
+});
+
+describe("provider grouping", () => {
+  const events = [
+    {
+      provider: "google-antigravity",
+      label: "Third-Party Models",
+      credits: 42,
+      limit: 100,
+      occurredAt: "2026-09-12T12:00:00.000Z",
+      metadata: { bucketId: "claude-gpt", quotaWindow: "5h", source: "antigravity-usage" },
+    },
+    {
+      provider: "anthropic",
+      service: "claude-code",
+      label: "5h window",
+      credits: 62.5,
+      limit: 100,
+      occurredAt: "2026-09-12T12:00:00.000Z",
+      metadata: {
+        bucketId: "anthropic:five_hour",
+        quotaWindow: "5h",
+        resetAt: "2026-09-12T18:00:00.000Z",
+        planType: "max_20x",
+        source: "api.anthropic.com",
+      },
+    },
+    {
+      provider: "xai",
+      service: "grok-cli",
+      label: "weekly window",
+      credits: 75,
+      limit: 100,
+      occurredAt: "2026-09-12T12:00:00.000Z",
+      metadata: { bucketId: "xai:weekly", quotaWindow: "weekly", source: "cli-chat-proxy.grok.com" },
+    },
+  ];
+
+  it("labels each provider and marks Antigravity buckets as via antigravity", () => {
+    const result = projectQuotaWindows(events);
+    const anthropic = result.windows.find((row) => row.provider === "anthropic");
+    expect(anthropic?.providerLabel).toBe("Claude");
+    expect(anthropic?.via).toBeNull();
+
+    const antigravity = result.windows.find((row) => row.provider === "google-antigravity");
+    // Antigravity's own routing bucket holds Claude and GPT models (shown as
+    // "Third-Party Models").  It is NOT the user's Claude plan, so it must be
+    // marked.
+    expect(antigravity?.providerLabel).toBe("Antigravity");
+    expect(antigravity?.via).toBe("antigravity");
+  });
+
+  it("returns a group for every expected provider, empty ones included", () => {
+    const result = projectQuotaWindows(events);
+    expect(result.providerGroups.map((group) => group.provider)).toEqual([
+      "anthropic",
+      "openai",
+      "google-antigravity",
+      "xai",
+      "minimax",
+      "moonshot",
+      "zcode",
+      "grok-bot",
+      "cursor",
+      "muse",
+    ]);
+    const byProvider = new Map(result.providerGroups.map((group) => [group.provider, group]));
+    expect(byProvider.get("anthropic")?.windows).toHaveLength(1);
+    expect(byProvider.get("xai")?.windows).toHaveLength(1);
+    // Never reported yet: visible as an empty group, not silently absent.
+    expect(byProvider.get("openai")?.windows).toEqual([]);
+    expect(byProvider.get("minimax")?.windows).toEqual([]);
+    expect(byProvider.get("minimax")?.providerLabel).toBe("MiniMax");
+    expect(byProvider.get("minimax")?.expected).toBe(true);
+    expect(byProvider.get("moonshot")?.providerLabel).toBe("Kimi");
+    expect(byProvider.get("moonshot")?.expected).toBe(true);
+    expect(byProvider.get("moonshot")?.windows).toEqual([]);
+    expect(byProvider.get("zcode")?.providerLabel).toBe("ZCode");
+    expect(byProvider.get("zcode")?.expected).toBe(true);
+    expect(byProvider.get("zcode")?.windows).toEqual([]);
+  });
+
+  it("collapses provider aliases onto one canonical group", () => {
+    expect(quotaProviderKey("google")).toBe("google-antigravity");
+    expect(quotaProviderKey("openai-codex")).toBe("openai");
+    expect(quotaProviderKey("moonshot-kimi")).toBe("moonshot");
+    expect(quotaProviderKey("kimi-code")).toBe("moonshot");
+    expect(quotaProviderKey("z.ai")).toBe("zcode");
+    expect(quotaProviderKey("glm")).toBe("zcode");
+    expect(quotaProviderKey("bigmodel.cn")).toBe("zcode");
+    expect(quotaProviderLabel("grok-build")).toBe("Grok");
+    expect(quotaProviderVia("google")).toBe("antigravity");
+    expect(quotaProviderVia("anthropic")).toBeNull();
+    // An unregistered provider still groups, it just has no friendly label.
+    const result = projectQuotaWindows([
+      {
+        provider: "acme",
+        label: "monthly window",
+        credits: 50,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "acme:monthly" },
+      },
+    ]);
+    const extra = result.providerGroups.find((group) => group.provider === "acme");
+    expect(extra?.expected).toBe(false);
+    expect(extra?.windows).toHaveLength(1);
+  });
+
+  it("never emits an antigravity skip target for another provider's exhausted window", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        label: "7d window (Opus)",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:seven_day_opus", modelId: "opus", isExhausted: true },
+      },
+    ]);
+    expect(result.windows[0]?.status).toBe("exhausted");
+    // skipModelTypes drives Antigravity instance routing only.
+    expect(result.skipModelTypes).toEqual([]);
+  });
+
+  it("emits group skip targets for Antigravity Third-Party and Gemini buckets without modelId", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Third-Party Models",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "claude-gpt", isExhausted: true, source: "antigravity-usage" },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Gemini models",
+        credits: 0,
+        limit: 0,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "gemini", isExhausted: true, source: "antigravity-usage" },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Other routing bucket",
+        credits: 0,
+        limit: 100,
+        occurredAt: new Date("2026-09-12T12:00:00.000Z"),
+        metadata: { bucketId: "other", isExhausted: true, source: "antigravity-usage" },
+      },
+    ]);
+    const models = result.skipModelTypes.map((row) => row.model);
+    expect(models).toContain("claude-opus-4-6-thinking");
+    expect(models).toContain("gemini-3.1-pro-high");
+    expect(models.some((model) => model.includes("other"))).toBe(false);
+  });
+
+  it("falls back labels and ignores invalid metadata, duplicate series, and empty provider", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "anthropic",
+        credits: 40,
+        occurredAt: "not-a-date",
+        metadata: ["not", "an", "object"],
+      },
+      {
+        provider: "anthropic",
+        credits: 10,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "anthropic:five_hour" },
+      },
+      {
+        provider: "   ",
+        label: "orphan",
+        credits: 50,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { bucketId: "blank" },
+      },
+    ]);
+    expect(result.windows.some((row) => row.label === "anthropic")).toBe(true);
+    expect(result.windows.filter((row) => row.provider === "anthropic")).toHaveLength(2);
+    expect(quotaProviderLabel("   ")).toBe("Unknown");
+    expect(quotaProviderKey(undefined as unknown as string)).toBe("");
+  });
+
+  it("dedupes identical Antigravity skip targets and leaves skipReason null when available", () => {
+    const result = projectQuotaWindows([
+      {
+        provider: "google-antigravity",
+        label: "Opus copy A",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { modelId: "claude-opus-4-6-thinking", isExhausted: true },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Opus copy B",
+        credits: 0,
+        limit: 100,
+        occurredAt: "2026-09-12T12:01:00.000Z",
+        metadata: { modelId: "claude-opus-4-6-thinking", isExhausted: true },
+      },
+      {
+        provider: "google-antigravity",
+        label: "Healthy Gemini",
+        credits: 80,
+        limit: 100,
+        occurredAt: "2026-09-12T12:00:00.000Z",
+        metadata: { modelId: "gemini-3.1-pro-high" },
+      },
+    ]);
+    expect(result.skipModelTypes.filter((row) => row.model === "claude-opus-4-6-thinking")).toHaveLength(1);
+    const healthy = result.windows.find((row) => row.modelId === "gemini-3.1-pro-high");
+    expect(healthy?.skip).toBe(false);
+    expect(healthy?.skipReason).toBeNull();
+  });
+});
+
+describe("Antigravity third-party pool display label", () => {
+  const base = {
+    provider: "google-antigravity",
+    credits: 40,
+    limit: 100,
+    occurredAt: "2026-09-12T12:00:00.000Z",
+  };
+
+  it("uses Third-Party as the display name", () => {
+    expect(ANTIGRAVITY_THIRD_PARTY_LABEL).toBe("Third-Party");
+  });
+
+  it("maps the legacy Claude and GPT label variants and keeps the window suffix", () => {
+    expect(antigravityDisplayLabel("Claude and GPT models")).toBe("Third-Party");
+    expect(antigravityDisplayLabel("Claude and GPT models (weekly)")).toBe("Third-Party (weekly)");
+    expect(antigravityDisplayLabel("Claude and GPT models (5h)")).toBe("Third-Party (5h)");
+    expect(antigravityDisplayLabel("Claude & GPT models (5h)")).toBe("Third-Party (5h)");
+    expect(antigravityDisplayLabel("claude/gpt")).toBe("Third-Party");
+    expect(antigravityDisplayLabel("Claude and GPT (weekly)")).toBe("Third-Party (weekly)");
+  });
+
+  it("passes every other label through untouched", () => {
+    expect(antigravityDisplayLabel("Third-Party (5h)")).toBe("Third-Party (5h)");
+    expect(antigravityDisplayLabel("Gemini Models (weekly)")).toBe("Gemini Models (weekly)");
+    expect(antigravityDisplayLabel("Claude Opus 4.6 (Thinking)")).toBe("Claude Opus 4.6 (Thinking)");
+    expect(antigravityDisplayLabel("Claude and GPT-OSS")).toBe("Claude and GPT-OSS");
+    expect(antigravityDisplayLabel(null)).toBeNull();
+    expect(antigravityDisplayLabel(undefined)).toBeUndefined();
+  });
+
+  it("shows already-ingested legacy labels as Third-Party without touching the stored event", () => {
+    const stored = {
+      ...base,
+      label: "Claude and GPT models (weekly)",
+      metadata: { bucketId: "3p-weekly", quotaWindow: "weekly", modelGroup: "Claude and GPT models" },
+    };
+    const result = projectQuotaWindows([stored]);
+    expect(result.windows[0]?.label).toBe("Third-Party (weekly)");
+    // The stored row and its raw group name are display-mapped, never rewritten.
+    expect(stored.label).toBe("Claude and GPT models (weekly)");
+    expect(stored.metadata.modelGroup).toBe("Claude and GPT models");
+    expect(result.windows[0]?.id).toBe("3p-weekly");
+  });
+
+  it("collapses a legacy and a new reading of one label-keyed series onto the newest", () => {
+    const result = projectQuotaWindows([
+      { ...base, label: "Third-Party (5h)", credits: 70, occurredAt: "2026-09-12T12:00:00.000Z" },
+      { ...base, label: "Claude and GPT models (5h)", credits: 10, occurredAt: "2026-09-12T08:00:00.000Z" },
+    ]);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0]?.label).toBe("Third-Party (5h)");
+    expect(result.windows[0]?.remainingPercent).toBe(70);
+  });
+
+  it("uses the display label in skipReason and still emits Claude/GPT skip targets", () => {
+    for (const label of ["Claude and GPT models", "Third-Party"]) {
+      const result = projectQuotaWindows([{ ...base, label, credits: 0 }]);
+      expect(result.windows[0]?.label).toBe("Third-Party");
+      expect(result.windows[0]?.skipReason).toBe("Third-Party remaining 0%");
+      const models = result.skipModelTypes.map((row) => row.model);
+      expect(models).toContain("claude-opus-4-6-thinking");
+      expect(models).toContain("gpt-oss-120b-medium");
+      expect(models.some((model) => model.startsWith("gemini"))).toBe(false);
+    }
+  });
+
+  it("does not rewrite the same label on another provider's window", () => {
+    const result = projectQuotaWindows([
+      { ...base, provider: "anthropic", label: "Claude and GPT models", metadata: { bucketId: "x" } },
+    ]);
+    expect(result.windows[0]?.label).toBe("Claude and GPT models");
+  });
+});

@@ -50,6 +50,10 @@ export const PROVIDER_ALERT_CODES = [
   "unused_subscription",
   "possible_duplicate_subscription",
   "price_change_detected",
+  // Catalog-runrate providers (Backblaze B2 storage, Hetzner catalog)
+  // publish an estimated MTD, not an invoice: surface it as an estimate,
+  // never as confirmed cash.
+  "catalog_estimate",
 ] as const;
 
 export type ProviderAlertCode = (typeof PROVIDER_ALERT_CODES)[number];
@@ -87,6 +91,8 @@ export interface UsageSnapshotForAlerts {
   totalRequests: number | null;
   credits: number | null;
   fetchedAt: Date | string;
+  /** Adapter costCoverageCaveat code, read from the snapshot's rawData. */
+  costCoverageCaveatCode?: string | null;
 }
 
 export type BudgetAlertTier = "ok" | "warning" | "exceeded";
@@ -133,7 +139,19 @@ const WARNING_ENTER_RATIO = 0.8;
 const WARNING_CLEAR_RATIO = 0.75;
 /** Stay in exceeded until spend drops below this (hysteresis clear). */
 const EXCEEDED_CLEAR_RATIO = 0.95;
-const RENEWAL_WARNING_DAYS = 7;
+/**
+ * Distinct calendar-day milestones for upcoming subscription/plan charges.
+ * Each milestone uses `scope: renewal-{N}d` so alert delivery can fire a
+ * separate Pushover (and resolve between milestones) instead of one sticky
+ * 7-day window that never re-notifies at 3d/1d.
+ */
+export const RENEWAL_NOTICE_DAYS = [7, 3, 1] as const;
+export type RenewalNoticeDay = (typeof RENEWAL_NOTICE_DAYS)[number];
+
+/** True when remaining days (ceil) is an exact renewal notice milestone. */
+export function isRenewalNoticeDay(daysUntilRenewal: number): daysUntilRenewal is RenewalNoticeDay {
+  return (RENEWAL_NOTICE_DAYS as readonly number[]).includes(daysUntilRenewal);
+}
 
 /**
  * Map spend/budget ratio to a budget alert tier with optional hysteresis.
@@ -206,7 +224,24 @@ export function buildProviderAlertState(
     input.fixedAccruedUsd ?? fixedMonthlyCost,
     now
   );
-  const billingMode = normalizeBillingMode(plan?.billingMode);
+  let billingMode = normalizeBillingMode(plan?.billingMode);
+
+  // Catalog-runrate cost (Backblaze B2 storage estimate, Hetzner catalog
+  // run-rate) is a pro-rated estimate, not an invoice. Never let it read as
+  // confirmed cash: label it and force the billing-mode to "estimated".
+  const catalogEstimate =
+    latestSnapshot?.costCoverageCaveatCode === "backblaze_storage_catalog_prorated" ||
+    latestSnapshot?.costCoverageCaveatCode === "backblaze_storage_estimate_partial" ||
+    latestSnapshot?.costCoverageCaveatCode === "hetzner_catalog_runrate_prorated";
+  if (catalogEstimate) {
+    billingMode = "estimated";
+    alerts.push({
+      code: "catalog_estimate",
+      severity: "info",
+      message:
+        "Catalog-priced estimate (pro-rated by month elapsed) — not an invoice.",
+    });
+  }
 
   if (!input.isActive) {
     return { alerts, estimatedMonthlyCostUsd, projectedEomUsd, billingMode };
@@ -227,19 +262,12 @@ export function buildProviderAlertState(
         severity: "warning",
         message: "No usage snapshot has been fetched yet.",
       });
-    } else {
-      const fetchedAt = new Date(latestSnapshot.fetchedAt);
-      if (
-        now.getTime() >
-        providerSnapshotStaleAt(fetchedAt, input.refreshIntervalMin).getTime()
-      ) {
-        alerts.push({
-          code: "stale_snapshot",
-          severity: "warning",
-          message: "Latest usage snapshot is stale.",
-        });
-      }
     }
+    // Intentionally do NOT emit `stale_snapshot` user alerts. The poll loop
+    // should refresh quietly; nagging operators about age is noise when a
+    // blind/push provider is permanently "stale" by design, and when a live
+    // poller can simply fetch again. Keep the code in PROVIDER_ALERT_CODES
+    // for historical incidents / env routing docs.
   }
 
   if (plan?.monthlyBudgetUsd != null && plan.monthlyBudgetUsd > 0) {
@@ -348,15 +376,18 @@ export function buildProviderAlertState(
       alerts.push({
         code: "renewal_overdue",
         severity: "critical",
-        message: "Plan renewal date has passed.",
+        message: "Plan renewal date has passed — a subscription charge may already be overdue.",
       });
-    } else if (daysUntilRenewal <= RENEWAL_WARNING_DAYS) {
+    } else if (isRenewalNoticeDay(daysUntilRenewal)) {
+      // 7d / 3d / 1d only — separate scope so Pushover fires at each milestone.
       alerts.push({
         code: "renewal_due",
-        severity: "warning",
-        message: `Plan renews in ${daysUntilRenewal} day${
-          daysUntilRenewal === 1 ? "" : "s"
-        }.`,
+        severity: daysUntilRenewal === 1 ? "warning" : "info",
+        scope: `renewal-${daysUntilRenewal}d`,
+        message:
+          daysUntilRenewal === 1
+            ? "Plan renews in 1 day — possible subscription charge tomorrow."
+            : `Plan renews in ${daysUntilRenewal} days — possible subscription charge.`,
       });
     }
   }

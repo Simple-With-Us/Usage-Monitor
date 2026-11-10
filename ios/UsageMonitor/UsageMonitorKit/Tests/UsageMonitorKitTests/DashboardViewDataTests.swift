@@ -28,6 +28,8 @@ final class DashboardViewDataTests: XCTestCase {
         XCTAssertEqual(data.remaining, 570 - 461.55, accuracy: 0.001)
         XCTAssertTrue(data.hasBudget)
         XCTAssertEqual(data.spentFraction, 461.55 / 570, accuracy: 0.0001)
+        // Hero caption basis: "Across N provider budgets" uses this count.
+        XCTAssertEqual(data.configuredProviderCount, 3)
     }
 
     func testPercentUsedIsProviderDerived() {
@@ -77,6 +79,53 @@ final class DashboardViewDataTests: XCTestCase {
         XCTAssertTrue(data.projectedOverBudget)
         XCTAssertEqual(data.projectedDeltaVsBudget, 155.70, accuracy: 0.001)
         XCTAssertEqual(data.projectedOverageFraction!, 155.70 / 570, accuracy: 0.0001)
+    }
+
+    /// Without any provider budgets, remaining is 0 − spent (negative). UI must
+    /// not treat that as "Over Budget $X" — only `hasBudget` gates the dollar card.
+    func testNoBudgetDoesNotImplyConfiguredRemaining() {
+        let response = makeResponse(
+            budget: 0,
+            providers: [provider(spent: 42, projected: 80, budget: nil, status: .unconfigured)]
+        )
+        let data = DashboardViewData(response)
+        XCTAssertFalse(data.hasBudget)
+        XCTAssertEqual(data.totalBudget, 0, accuracy: 0.001)
+        XCTAssertEqual(data.remaining, -42, accuracy: 0.001) // raw math
+        // Presentation contract: only show currency remaining when hasBudget.
+    }
+
+    func testProjectedEomSplitsUsageAndSubscriptionParts() {
+        // Explicit two-part composition: paced usage + fixed accrued + known renewals.
+        let response = makeResponse(
+            budget: 500,
+            providers: [
+                provider(
+                    spent: 100,
+                    projected: 250,
+                    budget: 300,
+                    status: .ok,
+                    fixedAccrued: 40,
+                    renewals: 60,
+                    projectedVariable: 150
+                ),
+                provider(
+                    spent: 50,
+                    projected: 100,
+                    budget: 200,
+                    status: .ok,
+                    fixedAccrued: 0,
+                    renewals: 0,
+                    projectedVariable: 100
+                ),
+            ]
+        )
+        let data = DashboardViewData(response)
+        XCTAssertEqual(data.projectedEom, 350, accuracy: 0.001)
+        XCTAssertEqual(data.projectedVariableUsage, 250, accuracy: 0.001)
+        XCTAssertEqual(data.projectedFixedAccrued, 40, accuracy: 0.001)
+        XCTAssertEqual(data.projectedKnownRenewals, 60, accuracy: 0.001)
+        XCTAssertTrue(data.hasSubscriptionProjectionComponent)
     }
 
     // MARK: - Status
@@ -203,14 +252,16 @@ final class DashboardViewDataTests: XCTestCase {
         XCTAssertEqual(data.apiEquivalentSavings, 512.30 - 461.55, accuracy: 0.001)
         XCTAssertTrue(data.hasApiEquivalentSavings)
 
-        // Never negative.
-        var summary = BudgetSummary.sample
-        summary.estimatedApiEquivalentUsd = 10
-        summary.totalSpentUsd = 400
-        let response = BudgetStatusResponse(
-            ok: true, generatedAt: "2026-07-19T09:15:00.000Z", month: "2026-07",
-            providers: [], projects: nil, summary: summary
+        // Never negative. Spend is provider-derived (see `totalSpent`), and the
+        // server's `summary.estimatedApiEquivalentUsd` is the sum over the same
+        // providers, so the clamp is exercised with provider spend well above
+        // the API-equivalent value.
+        var response = makeResponse(
+            budget: 500,
+            providers: [provider(spent: 400, projected: 400, budget: 500, status: .ok)]
         )
+        response.summary.estimatedApiEquivalentUsd = 10
+        XCTAssertEqual(DashboardViewData(response).totalSpent, 400)
         XCTAssertEqual(DashboardViewData(response).apiEquivalentSavings, 0)
         XCTAssertFalse(DashboardViewData(response).hasApiEquivalentSavings)
     }
@@ -287,6 +338,37 @@ final class DashboardViewDataTests: XCTestCase {
         XCTAssertEqual(pace?.projected, 300) // clamped up to spent
     }
 
+    // MARK: - TimeframeOption tests
+
+    func testTimeframeOptionLabels() {
+        XCTAssertEqual(TimeframeOption.rolling(days: 1).displayLabel, "Past 24 hours")
+        XCTAssertEqual(TimeframeOption.rolling(days: 7).displayLabel, "Past 7 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 30).displayLabel, "Past 30 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 90).displayLabel, "Past 90 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 180).displayLabel, "Past 180 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 365).displayLabel, "Past 12 months")
+        XCTAssertEqual(TimeframeOption.rolling(days: 3650).displayLabel, "All time")
+        XCTAssertEqual(TimeframeOption.currentMonth.displayLabel, "This month")
+        XCTAssertEqual(TimeframeOption.calendarYear(year: 2026).displayLabel, "2026")
+    }
+
+    func testTimeframeOptionQueryItems() {
+        let rolling365 = TimeframeOption.rolling(days: 365)
+        XCTAssertEqual(rolling365.usageEventsQueryItems, [URLQueryItem(name: "days", value: "365")])
+
+        let month = TimeframeOption.calendarMonth(year: 2026, month: 8)
+        XCTAssertEqual(month.usageEventsQueryItems, [
+            URLQueryItem(name: "from", value: "2026-08-01"),
+            URLQueryItem(name: "to", value: "2026-08-31"),
+        ])
+    }
+
+    func testTimeframeRecentMonths() {
+        let months = TimeframeOption.recentMonths(count: 13)
+        XCTAssertEqual(months.count, 13)
+        XCTAssertEqual(months.first, TimeframeOption.currentMonth)
+    }
+
     // MARK: - Fixture helpers
 
     private func makeResponse(budget: Double, providers: [ProviderBudgetStatus]) -> BudgetStatusResponse {
@@ -315,12 +397,18 @@ final class DashboardViewDataTests: XCTestCase {
         budget: Double?,
         status: BudgetLevel,
         coverage: CostCoverage = .complete,
-        projectedStatus: BudgetLevel? = nil
+        projectedStatus: BudgetLevel? = nil,
+        fixedAccrued: Double = 0,
+        renewals: Double = 0,
+        projectedVariable: Double? = nil
     ) -> ProviderBudgetStatus {
         ProviderBudgetStatus(
             id: id, name: name, displayName: name,
             monthlyBudgetUsd: budget,
             spendCoverage: coverage,
+            fixedAccruedUsd: fixedAccrued,
+            forecastedSubscriptionRenewalsUsd: renewals,
+            projectedVariableUsageUsd: projectedVariable,
             spentUsd: spent,
             projectedEomUsd: projected,
             remainingUsd: budget.map { $0 - spent },

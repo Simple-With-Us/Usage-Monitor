@@ -18,20 +18,44 @@ public struct ProvidersRootView: View {
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model = ProvidersListModel()
+    /// Owned path so cross-tab deep links (Dashboard attention rows, push) can
+    /// push a provider detail without Dashboard importing this module.
+    @State private var path = NavigationPath()
 
     public init() {}
 
     public var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             content
                 .navigationTitle(AppTab.providers.title)
-                .navigationBarTitleDisplayMode(.large)
+                // Inline (centered compact) title — avoid large left-aligned title at rest.
+                .navigationBarTitleDisplayMode(.inline)
                 .navigationDestination(for: ProviderRoute.self) { route in
                     ProviderDetailView(route: route)
                 }
+                .navigationDestination(for: ProvidersExtraRoute.self) { route in
+                    switch route {
+                    case .money: MoneyScreen()
+                    case .keysAndApps: KeysAndAppsScreen()
+                    }
+                }
                 .toolbar { sortMenu }
+                .toolbar { moreMenu }
                 .task { await store.loadIfNeeded() }
+                // Re-run when a cross-tab deep link lands a new pending id.
+                .task(id: env?.pendingProviderID) {
+                    consumePendingProviderRoute()
+                }
         }
+    }
+
+    /// Drain `AppEnvironment.pendingProviderID` into the local navigation path.
+    private func consumePendingProviderRoute() {
+        guard let env, let id = env.pendingProviderID, !id.isEmpty else { return }
+        env.pendingProviderID = nil
+        // Avoid stacking the same provider if already on top.
+        path.append(ProviderRoute(id: id))
+        Haptics.tap()
     }
 
     // MARK: - Phase routing
@@ -102,71 +126,101 @@ public struct ProvidersRootView: View {
     }
 
     private var loadedList: some View {
-        List {
-            if let lastError = store.lastError {
-                Section { staleBanner(lastError) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: Theme.Spacing.lg, bottom: 0, trailing: Theme.Spacing.lg))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+        ScrollViewReader { proxy in
+            List {
+                if let lastError = store.lastError {
+                    Section { staleBanner(lastError) }
+                        .listRowInsets(EdgeInsets(top: 0, leading: Theme.Spacing.lg, bottom: 0, trailing: Theme.Spacing.lg))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
 
-            Section {
-                summaryHeader
-            }
-            .listRowInsets(EdgeInsets(top: Theme.Spacing.xs, leading: Theme.Spacing.lg, bottom: Theme.Spacing.xs, trailing: Theme.Spacing.lg))
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
-
-            Section {
-                StatusFilterBar(
-                    selection: $model.filter,
-                    counts: filterCounts,
-                    onChange: { Haptics.selection() }
-                )
-                .listRowInsets(EdgeInsets())
-            }
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
-
-            if results.isEmpty {
-                Section { filteredEmptyRow }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            } else {
                 Section {
-                    ForEach(results) { provider in
-                        NavigationLink(value: ProviderRoute(id: provider.id)) {
-                            ProviderRow(
-                                title: provider.title,
-                                subtitle: provider.rowSubtitle,
-                                value: provider.rowValue,
-                                valueCaption: provider.rowValueCaption,
-                                status: provider.semanticStatus,
-                                showsChevron: false
-                            )
+                    summaryHeader
+                }
+                .listRowInsets(EdgeInsets(top: Theme.Spacing.xs, leading: Theme.Spacing.lg, bottom: Theme.Spacing.xs, trailing: Theme.Spacing.lg))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+                Section {
+                    StatusFilterBar(
+                        selection: $model.filter,
+                        counts: filterCounts,
+                        onChange: { Haptics.selection() }
+                    )
+                    .listRowInsets(EdgeInsets())
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+                if results.isEmpty {
+                    Section { filteredEmptyRow }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                } else {
+                    Section {
+                        ForEach(results) { provider in
+                            Button {
+                                Haptics.tap()
+                                path.append(ProviderRoute(id: provider.id))
+                            } label: {
+                                ProviderRow(
+                                    title: provider.title,
+                                    subtitle: provider.rowSubtitle,
+                                    value: provider.rowValue,
+                                    valueCaption: provider.rowValueCaption,
+                                    status: provider.semanticStatus,
+                                    showsChevron: true
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(Rectangle())
+                            .id(provider.id)
+                            .contextMenu {
+                                Button {
+                                    Haptics.tap()
+                                    path.append(ProviderRoute(id: provider.id))
+                                } label: {
+                                    Label("Open details", systemImage: "doc.text")
+                                }
+                                Button {
+                                    Haptics.tap()
+                                    path.append(ProviderRoute(id: provider.id))
+                                } label: {
+                                    Label("Edit Budget / Plan", systemImage: "slider.horizontal.3")
+                                }
+                                if !provider.spendCoverage.isComplete {
+                                    Text("Spend may omit tax & invoice fees")
+                                }
+                            }
                         }
-                        .simultaneousGesture(TapGesture().onEnded {
-                            Haptics.tap()
-                        })
+                    } header: {
+                        Text(resultsHeaderText)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.secondaryText)
                     }
-                } header: {
-                    Text(resultsHeaderText)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.secondaryText)
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Theme.Colors.background)
+            .searchable(
+                text: $model.searchText,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: "Search providers"
+            )
+            .refreshable { await store.refresh() }
+            .animation(reduceMotion ? nil : .default, value: model.filter)
+            .animation(reduceMotion ? nil : .default, value: results.count)
+            .task(id: results.last?.id) {
+                if ProcessInfo.processInfo.arguments.contains("-ScreenshotScrollBottom"), let lastId = results.last?.id {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    withAnimation {
+                        proxy.scrollTo(lastId, anchor: .bottom)
+                    }
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Theme.Colors.background)
-        .searchable(
-            text: $model.searchText,
-            placement: .navigationBarDrawer(displayMode: .automatic),
-            prompt: "Search providers"
-        )
-        .refreshable { await store.refresh() }
-        .animation(reduceMotion ? nil : .default, value: model.filter)
-        .animation(reduceMotion ? nil : .default, value: results.count)
     }
 
     // MARK: - Pieces
@@ -195,13 +249,13 @@ public struct ProvidersRootView: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.secondaryText)
                 if overCount > 0 {
-                    StatusBadge("\(overCount) over", status: .danger, systemImage: "exclamationmark.octagon.fill")
+                    StatusBadge("\(overCount) Over", status: .danger, systemImage: "exclamationmark.octagon.fill")
                 }
                 if warnCount > 0 {
-                    StatusBadge("\(warnCount) warning", status: .warning, systemImage: "gauge.with.dots.needle.67percent")
+                    StatusBadge("\(warnCount) Warning", status: .warning, systemImage: "gauge.with.dots.needle.67percent")
                 }
                 if overCount == 0 && warnCount == 0 {
-                    StatusBadge("All on track", status: .ok, systemImage: "checkmark.circle.fill")
+                    StatusBadge("All on Track", status: .ok, systemImage: "checkmark.circle.fill")
                 }
             }
         }
@@ -247,6 +301,31 @@ public struct ProvidersRootView: View {
         .background(Theme.Colors.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Refresh failed. Showing last loaded data. \(error.message)")
+    }
+
+    /// The two web surfaces that have no tab of their own.  The tab bar is
+    /// already at its iPhone limit, so Money and Keys & Apps live here — one
+    /// tap from Providers, which is the lane both of them are about.
+    private var moreMenu: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Menu {
+                Button {
+                    Haptics.tap()
+                    path.append(ProvidersExtraRoute.money)
+                } label: {
+                    Label("Money", systemImage: "creditcard.fill")
+                }
+                Button {
+                    Haptics.tap()
+                    path.append(ProvidersExtraRoute.keysAndApps)
+                } label: {
+                    Label("Keys & Apps", systemImage: "key.horizontal.fill")
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .accessibilityLabel("More provider views")
+        }
     }
 
     private var sortMenu: some ToolbarContent {
@@ -296,3 +375,10 @@ private struct ProvidersListPreviewHost: View {
     }
 }
 #endif
+
+/// Routes for the two web surfaces that have no tab of their own.
+/// Kept separate from `ProviderRoute` so provider deep links stay unambiguous.
+enum ProvidersExtraRoute: Hashable {
+    case money
+    case keysAndApps
+}

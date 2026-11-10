@@ -34,6 +34,7 @@ public enum AppTheme: String, CaseIterable, Sendable, Identifiable {
 @Observable
 public final class AppSettings {
     private let defaults: UserDefaults
+    private let sharedDefaults: UserDefaults?
     private enum Key {
         static let theme = "settings.appearance"
         static let host = "settings.baseHost"
@@ -54,13 +55,25 @@ public final class AppSettings {
     /// Whether the AppLock integration should require authentication on launch.
     /// AppCore only stores the flag; the AppLock target reads/enforces it.
     public var appLockEnabled: Bool {
-        didSet { defaults.set(appLockEnabled, forKey: Key.appLockEnabled) }
+        didSet {
+            defaults.set(appLockEnabled, forKey: Key.appLockEnabled)
+            mirrorAppLockToSharedDefaults()
+        }
     }
 
-    public init(defaults: UserDefaults = .standard) {
+    public init(defaults: UserDefaults = .standard, sharedDefaults: UserDefaults? = nil) {
         self.defaults = defaults
-        self.theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .system
+        self.sharedDefaults = sharedDefaults
+        // Owner 2026-08-10: light is the product default (not system/OS dark).
+        self.theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .light
         self.baseHost = defaults.string(forKey: Key.host) ?? ""
         self.appLockEnabled = defaults.bool(forKey: Key.appLockEnabled)
+        // didSet does not fire during init assignment — mirror explicitly.
+        mirrorAppLockToSharedDefaults()
+    }
+
+    /// Push lock preference into the widget-readable suite (no-op if unset).
+    public func mirrorAppLockToSharedDefaults() {
+        sharedDefaults?.set(appLockEnabled, forKey: Key.appLockEnabled)
     }
 }

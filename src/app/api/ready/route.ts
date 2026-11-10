@@ -2,14 +2,19 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createRateLimiter, getClientIp } from "@/lib/rate-limit";
 import {
+  backupLayersGatesOk,
+  getBackupLayersStatus,
   getBackupRuntimeStatus,
+  getDatabaseFileStatus,
   getDiskRuntimeStatus,
   getRuntimeIdentity,
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
   getStartupRuntimeStatus,
+  isSchedulerEnabled,
 } from "@/lib/runtime-health";
 import { getIngestAdmissionMetrics } from "@/lib/ingest-admission";
+import { getDatadogReadiness } from "@/lib/datadog-options";
 import { getUsageReadTokenReadiness } from "@/lib/ingest-auth";
 
 export const dynamic = "force-dynamic";
@@ -246,33 +251,55 @@ export async function GET(request: Request) {
   // Budget-breach control observability runs inside the same Promise.all as
   // the other probes so it cannot serialize behind a stalled DB check and
   // bypass readiness timeout/cache shapes (owner review F5).
-  const [database, scheduler, backup, startup, disk, budgetControls] =
-    await Promise.all([
-      checkDatabase(),
-      Promise.resolve(getSchedulerRuntimeStatus()),
-      Promise.resolve(getBackupRuntimeStatus()),
-      Promise.resolve(getStartupRuntimeStatus()),
-      Promise.resolve(getDiskRuntimeStatus()),
-      budgetControlsReadiness(),
-    ]);
+  const [
+    database,
+    databaseFile,
+    scheduler,
+    backup,
+    backupLayers,
+    startup,
+    disk,
+    budgetControls,
+  ] = await Promise.all([
+    checkDatabase(),
+    Promise.resolve(getDatabaseFileStatus()),
+    Promise.resolve(getSchedulerRuntimeStatus()),
+    Promise.resolve(getBackupRuntimeStatus()),
+    Promise.resolve(getBackupLayersStatus()),
+    Promise.resolve(getStartupRuntimeStatus()),
+    Promise.resolve(getDiskRuntimeStatus()),
+    budgetControlsReadiness(),
+  ]);
   const schedulerReadiness = getSchedulerReadiness();
   // A preview/cold-standby host deliberately disables its scheduler to avoid
   // becoming a second SQLite writer. That intentional circuit breaker must not
   // make strict HTTP readiness fail; production keeps the default-required
   // behavior whenever the flag is unset or true.
-  const schedulerRequired =
-    process.env.USAGE_SCHEDULER_ENABLED?.trim().toLowerCase() !== "false";
+  // Resolved through the settings service (same as instrumentation.ts) so a
+  // knob that lives only in Infisical cannot split the two answers.
+  const schedulerRequired = isSchedulerEnabled();
   const schedulerReady = !schedulerRequired || schedulerReadiness.ok;
-  // Backup: required implies active env flag. When a replica side-channel is
-  // configured (Wave C / C4), replicaOk === false fails ready even if
-  // LITESTREAM_ACTIVE is true so Garage/R2 death is not silent.
-  const backupReady =
+  // Backup health is honest in checks.backup, but does NOT gate overall `ok`.
+  // This app's money-truth is the live SQLite on /data; R2 Litestream is
+  // disaster-recovery only and free-tier kill switches / replica lag must not
+  // mark the product "down" or trip uptime monitors (owner 2026-08-05).
+  // Local pre-migration snapshots still run at deploy time regardless.
+  const backupHealthy =
     !backup.required ||
-    (backup.active && backup.replicaOk !== false);
+    (backup.active &&
+      backup.replicaOk !== false &&
+      !(backup.envOnly && backup.verificationRequired));
   const startupReady = !startup.required || startup.active;
-  const ok = database.ok && schedulerReady && backupReady && startupReady;
+  const ok =
+    database.ok &&
+    databaseFile.ok &&
+    schedulerReady &&
+    startupReady;
   const databaseOnlyFailure =
-    !database.ok && schedulerReady && backupReady && startupReady;
+    !database.ok &&
+    databaseFile.ok &&
+    schedulerReady &&
+    startupReady;
   // A newly-started process gets a bounded window to finish opening a large
   // SQLite/Litestream database before reporting not_ready, so a dependency
   // probe cannot turn the normal open time into a restart loop. The grace
@@ -304,6 +331,12 @@ export async function GET(request: Request) {
         ...database,
         coldStartGraceActive: databaseColdStartGraceActive,
       },
+      // Part of `ok`, and deliberately excluded from the cold-start grace
+      // above: `SELECT 1` is answered happily by a descriptor on an unlinked
+      // or since-replaced inode, so file identity is the only signal that can
+      // see the pathname disappear underneath a live writer. Never reports the
+      // absolute path — this endpoint is public.
+      databaseFile,
       scheduler: {
         ok: schedulerReady,
         required: schedulerRequired,
@@ -321,10 +354,18 @@ export async function GET(request: Request) {
           schedulerReadiness.providerFetchDegradedTickThreshold,
         ...scheduler,
       },
+      // Observability only — never part of `ok` (see backupHealthy comment above).
+      // gatesOverallOk is the AND of local + primary + historic layer gates so
+      // Settings/iOS stop painting a hard-coded failure when every layer is green.
       backup: {
-        ok: backupReady,
+        ok: backupHealthy,
+        gatesOverallOk: backupLayersGatesOk(backupLayers),
         ...backup,
       },
+      // Layered backup picture for Settings/ops UIs: local pre-migration
+      // snapshots, primary Litestream off-site (B2 in production), and
+      // historic R2 freeze. Never gates overall ok.
+      backupLayers,
       startup: {
         ok: startupReady,
         ...startup,
@@ -346,6 +387,10 @@ export async function GET(request: Request) {
       // budget-status / subscriptions GET; before this, the only signal was
       // a boot-time console.warn on the host. Booleans only, no token value.
       usageReadToken: getUsageReadTokenReadiness(),
+      // Observability only — never part of `ok`.  Secret-free: service /
+      // site / missing key NAMES only.  Production without DD_SERVICE fails
+      // closed at process boot; this block is the public view of that state.
+      datadog: getDatadogReadiness(),
     },
   };
 

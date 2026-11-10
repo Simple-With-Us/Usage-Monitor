@@ -1,5 +1,6 @@
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 import { NextRequest, NextResponse } from "next/server";
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import {
   applyManualBudgetControl,
   ManualBudgetControlError,
@@ -31,7 +32,7 @@ export async function POST(
   const { id } = await params;
   let body: unknown;
   try {
-    body = await request.json();
+    body = await readBoundedJsonBody(request, { label: "Budget control body" });
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD,
   MAX_NEGATIVE_SUBSCRIPTION_COST_USD,
   MAX_V2_BATCH_REJECTIONS_REPORTED,
   parseUsageTelemetryBatch,
@@ -56,6 +57,35 @@ describe("usage telemetry v2 shared contract", () => {
       _coverageMode: "cumulative",
       _coverageRelationship: "supersedes",
     });
+  });
+
+  it("keys v2 idempotency and sourceApp on batch producerId, not eventId alone", async () => {
+    const event = {
+      eventId: "same-session-token",
+      provider: "xai",
+      service: "grok-cli",
+      metricType: "cost",
+      unit: "usd",
+      costUsd: 2,
+      billingMode: "estimated",
+      confidence: "estimated",
+      occurredAt: "2026-08-25T00:00:00.000Z",
+    };
+    const [fleet, seat] = await Promise.all([
+      parseUsageTelemetryV2Batch({
+        schemaVersion: 2,
+        producerId: "fleet-usage-collector",
+        events: [event],
+      }),
+      parseUsageTelemetryV2Batch({
+        schemaVersion: 2,
+        producerId: "grok-build",
+        events: [event],
+      }),
+    ]);
+    expect(fleet.events[0].sourceApp).toBe("fleet-usage-collector");
+    expect(seat.events[0].sourceApp).toBe("grok-build");
+    expect(fleet.events[0].idempotencyKey).not.toBe(seat.events[0].idempotencyKey);
   });
 
   it("reserves persisted coverage authority from arbitrary producer metadata", async () => {
@@ -817,6 +847,103 @@ describe("parseUsageTelemetryBatch negative subscription costUsd magnitude bound
   });
 });
 
+// ---------------------------------------------------------------------------
+// Aggregate companion to the per-event bound above (audit finding
+// "negative-adjustment-abuse": PR #884 claimed this bound but never shipped
+// it). A batch of MAX_EVENTS individually-legal -$1000 events must not be
+// able to erase $100,000 in one call. Boundary semantics match the per-event
+// bound: the batch's summed negative subscription magnitude may equal
+// MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD exactly (inclusive); anything
+// more negative rejects the WHOLE batch. Positive amounts and other
+// metricTypes never count toward the sum.
+// ---------------------------------------------------------------------------
+
+describe("parseUsageTelemetryBatch aggregate negative subscription bound", () => {
+  const negativeSubscriptionEvent = (costUsd: number, index: number) => ({
+    idempotencyKey: `aggregate-bound-${index}`,
+    sourceApp: "manual-billing-adjustment",
+    provider: "anthropic",
+    billingMode: "manual",
+    metricType: "subscription",
+    unit: "usd",
+    costUsd,
+    confidence: "estimated",
+    occurredAt: "2026-06-16T00:00:00.000Z",
+  });
+
+  it("rejects a batch of per-event-legal negatives whose magnitudes sum past the batch bound (3 x -700)", () => {
+    expect(() =>
+      parseUsageTelemetryBatch({
+        events: [
+          negativeSubscriptionEvent(-700, 1),
+          negativeSubscriptionEvent(-700, 2),
+          negativeSubscriptionEvent(-700, 3),
+        ],
+      })
+    ).toThrow(
+      `combined negative subscription costUsd magnitude must not exceed ` +
+        `${MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD} per batch`
+    );
+  });
+
+  it("accepts a batch whose negative magnitudes sum to exactly the batch bound (inclusive boundary)", () => {
+    const half = MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD / 2;
+    const events = parseUsageTelemetryBatch({
+      events: [
+        negativeSubscriptionEvent(-half, 1),
+        negativeSubscriptionEvent(-half, 2),
+      ],
+    });
+    expect(events.map((event) => event.costUsd)).toEqual([-half, -half]);
+  });
+
+  it("does not count positive subscription amounts toward the bound (no netting: positives cannot buy negative headroom, and large positive batches still parse)", () => {
+    // Sum of negatives is exactly at the bound (2 x the per-event max); the
+    // large positives must neither offset the negatives (netting would accept
+    // -2100 alongside +10000) nor count toward the bound themselves.
+    const events = parseUsageTelemetryBatch({
+      events: [
+        negativeSubscriptionEvent(10_000, 1),
+        negativeSubscriptionEvent(10_000, 2),
+        negativeSubscriptionEvent(-MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD / 2, 3),
+        negativeSubscriptionEvent(-MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD / 2, 4),
+      ],
+    });
+    expect(events).toHaveLength(4);
+  });
+
+  it("rejects the batch when positives are present but negatives alone exceed the bound (proof of no netting)", () => {
+    expect(() =>
+      parseUsageTelemetryBatch({
+        events: [
+          negativeSubscriptionEvent(10_000, 1),
+          negativeSubscriptionEvent(-700, 2),
+          negativeSubscriptionEvent(-700, 3),
+          negativeSubscriptionEvent(-700, 4),
+        ],
+      })
+    ).toThrow("combined negative subscription costUsd magnitude");
+  });
+
+  it("leaves batches of other metricTypes unaffected by the aggregate bound", () => {
+    // Non-subscription metricTypes cannot carry negatives at all (per-event
+    // rule), so a large batch of ordinary positive cost events far above the
+    // bound's dollar figure must parse untouched.
+    const events = parseUsageTelemetryBatch({
+      events: Array.from({ length: 5 }, (_, index) => ({
+        idempotencyKey: `ordinary-cost-${index}`,
+        sourceApp: "socratic-trade",
+        provider: "openai",
+        metricType: "cost",
+        unit: "usd",
+        costUsd: MAX_NEGATIVE_SUBSCRIPTION_BATCH_COST_USD,
+        occurredAt: "2026-06-16T00:00:00.000Z",
+      })),
+    });
+    expect(events).toHaveLength(5);
+  });
+});
+
 describe("parseUsageTelemetryBatch reserved sourceApp", () => {
   it("parses (does not itself reject) an event claiming the reserved subscription sourceApp — the ingest route is the enforcement point", () => {
     // usage-telemetry.ts is pure wire-format parsing; the reserved-sourceApp
@@ -834,6 +961,13 @@ describe("parseUsageTelemetryBatch reserved sourceApp", () => {
 });
 
 describe("reserved derived-cost metadata keys", () => {
+  it("strips producer-supplied receipt authority from legacy metadata", () => {
+    const [event] = parseUsageTelemetryBatch({
+      sourceApp: "botfleet", provider: "anthropic", metricType: "usage", unit: "token", quantity: 10,
+      metadata: { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64), legitimate: "kept" },
+    });
+    expect(event.metadata).toEqual({ legitimate: "kept" });
+  });
   it("strips producer-supplied _derivedCost* keys so a monitor-computed estimate cannot be forged (v1)", () => {
     const events = parseUsageTelemetryBatch({
       sourceApp: "evil-producer",
@@ -850,5 +984,120 @@ describe("reserved derived-cost metadata keys", () => {
       },
     });
     expect(events[0].metadata).toEqual({ legitimate: "kept" });
+  });
+});
+
+describe("canonical AI usage (UM-1592)", () => {
+  it("persists the v2 ai block under the reserved _ai* keys", async () => {
+    const { events: [event], rejected } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "botfleet",
+      events: [{
+        eventId: "turn-1",
+        provider: "anthropic",
+        metricType: "usage",
+        unit: "token",
+        quantity: 100,
+        ai: {
+          model: { requested: "sonnet", served: "claude-sonnet-4-5" },
+          harness: "botfleet",
+          seat: "CLAUDE",
+          tokens: { input: 10, output: 20, cacheRead: 30, cacheWrite5m: 15, cacheWrite1h: 25, reasoning: 5 },
+          durationMs: 900,
+          ttftMs: 120,
+          billingMode: "subscription",
+          costSource: "estimated",
+        },
+        occurredAt: "2026-10-17T01:00:00.000Z",
+      }],
+    });
+    expect(rejected).toBe(0);
+    expect(event.metadata).toMatchObject({
+      _aiModelRequested: "sonnet",
+      _aiModelServed: "claude-sonnet-4-5",
+      _aiHarness: "botfleet",
+      _aiSeat: "CLAUDE",
+      _aiTokensInput: 10,
+      _aiTokensOutput: 20,
+      _aiTokensCacheRead: 30,
+      _aiTokensCacheWrite5m: 15,
+      _aiTokensCacheWrite1h: 25,
+      _aiTokensReasoning: 5,
+      _aiDurationMs: 900,
+      _aiTtftMs: 120,
+      _aiBillingMode: "subscription",
+      _aiCostSource: "estimated",
+      _aiSource: "block",
+    });
+  });
+
+  it("rejects an invalid ai block per event", async () => {
+    const { events, rejected, rejections } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "botfleet",
+      events: [
+        { eventId: "ok", provider: "anthropic" },
+        { eventId: "bad", provider: "anthropic", ai: { tokens: { input: -1 } } },
+      ],
+    });
+    expect(events).toHaveLength(1);
+    expect(rejected).toBe(1);
+    expect(rejections[0]?.eventId).toBe("bad");
+  });
+
+  it("maps legacy v2 metadata keys onto the canonical keys", async () => {
+    const { events: [event] } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "congress-trade",
+      events: [{
+        eventId: "ct-1",
+        provider: "anthropic",
+        unit: "token",
+        quantity: 1050,
+        metadata: {
+          promptTokens: 1000,
+          completionTokens: 50,
+          cachedTokens: 600,
+          cacheWriteTokens: 100,
+          cacheWriteOneHourTokens: 200,
+        },
+      }],
+    });
+    expect(event.metadata).toMatchObject({
+      promptTokens: 1000,
+      _aiTokensInput: 100,
+      _aiTokensOutput: 50,
+      _aiTokensCacheRead: 600,
+      _aiTokensCacheWrite5m: 100,
+      _aiTokensCacheWrite1h: 200,
+      _aiSource: "legacy",
+    });
+  });
+
+  it("does not let producer metadata forge canonical keys", async () => {
+    const { events: [event] } = await parseUsageTelemetryV2Batch({
+      schemaVersion: 2,
+      producerId: "socratic-trade",
+      events: [{
+        eventId: "forge",
+        provider: "openai",
+        metadata: { _aiTokensOutput: 1_000_000_000, _aiSource: "block", _aiModelServed: "x" },
+      }],
+    });
+    expect(event.metadata?._aiTokensOutput).toBeUndefined();
+    expect(event.metadata?._aiSource).toBeUndefined();
+    expect(event.metadata?._aiModelServed).toBeUndefined();
+  });
+
+  it("maps legacy v1 token slices by label", () => {
+    const [event] = parseUsageTelemetryBatch({
+      sourceApp: "openai-codex",
+      provider: "openai",
+      unit: "token",
+      quantity: 42,
+      label: "token:cacheRead",
+      metadata: { session: "s1" },
+    });
+    expect(event.metadata).toMatchObject({ session: "s1", _aiTokensCacheRead: 42, _aiSource: "legacy" });
   });
 });

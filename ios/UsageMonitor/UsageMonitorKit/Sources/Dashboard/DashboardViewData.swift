@@ -55,8 +55,33 @@ struct DashboardViewData: Equatable, Sendable {
     /// Projected end-of-month spend for the whole account — the sum of each
     /// provider's own projection. The summary has no aggregate projection, so
     /// it is rolled up here.
+    ///
+    /// Server composition (per provider): paced variable usage + fixed accrued
+    /// MTD + known remaining subscription renewals this UTC month. The parts
+    /// below surface that split so subscription bills are never invisible.
     var projectedEom: Double {
         providers.reduce(0) { $0 + $1.projectedEomUsd }
+    }
+
+    /// Usage-based portion: extrapolated variable spend to month end.
+    var projectedVariableUsage: Double {
+        providers.reduce(0) { $0 + $1.resolvedProjectedVariableUsageUsd }
+    }
+
+    /// Fixed / subscription charges already on the books this month.
+    var projectedFixedAccrued: Double {
+        providers.reduce(0) { $0 + $1.resolvedFixedAccruedUsd }
+    }
+
+    /// Known remaining subscription renewals still due this UTC month.
+    var projectedKnownRenewals: Double {
+        providers.reduce(0) { $0 + $1.resolvedForecastedSubscriptionRenewalsUsd }
+    }
+
+    /// True when any subscription/fixed component contributes to the projection
+    /// (so the UI can call out that EOM is not pure usage pacing).
+    var hasSubscriptionProjectionComponent: Bool {
+        projectedFixedAccrued > 0.005 || projectedKnownRenewals > 0.005
     }
 
     var projectedFraction: Double {
