@@ -115,6 +115,7 @@ const PROVIDER_EXTRA_ALLOWLIST: Record<string, readonly string[]> = {
   hetzner: ["projects", "servers", "invoices"],
   sentry: ["stats", "categories"],
   resend: ["domains", "usage"],
+  namecheap: ["balances", "domains", "totalDomains", "apiUser", "fundsRequiredForAutoRenew"],
 };
 
 function allowlistForProvider(providerName: string): Set<string> {

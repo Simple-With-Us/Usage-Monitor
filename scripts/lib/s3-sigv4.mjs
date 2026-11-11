@@ -161,6 +161,23 @@ export function signS3Request({
   return { url, headers: requestHeaders };
 }
 
+const TRANSPORT_ERROR_CODES = new Set([
+  "ABORT_ERR", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE",
+  "EAI_AGAIN", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET", "UND_ERR_ABORTED", "UND_ERR_DESTROYED",
+]);
+
+function transportErrorCode(error) {
+  // Bound traversal even for cyclic causes; never copy arbitrary error text,
+  // URLs, headers, or unknown vendor codes into the operator's log.
+  for (let depth = 0; depth < 4 && error && typeof error === "object"; depth++) {
+    if (TRANSPORT_ERROR_CODES.has(error.code)) return error.code;
+    error = error.cause;
+  }
+  return "unknown";
+}
+
 /**
  * Sign and execute. Throws on non-2xx with a truncated body so callers get a
  * usable message without dumping an XML wall (or a signed URL) into a log.
@@ -168,11 +185,21 @@ export function signS3Request({
 export async function s3Request(options) {
   const { fetchImpl = fetch, expectStatuses, ...signOptions } = options;
   const { url, headers } = signS3Request(signOptions);
-  const response = await fetchImpl(url, {
-    method: signOptions.method.toUpperCase(),
-    headers,
-    body: signOptions.body ?? undefined,
-  });
+  const method = signOptions.method.toUpperCase();
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method,
+      headers,
+      body: signOptions.body ?? undefined,
+    });
+  } catch (error) {
+    const phase = ["PUT", "GET", "HEAD", "DELETE", "POST"].includes(method) ? method : "REQUEST";
+    // A transport rejection has no HTTP response to label below.
+    // Keep the operation so archive status distinguishes upload/download/prune;
+    // the original cause is deliberately excluded because it may hold secrets.
+    throw new Error(`S3 ${phase} transport failed (${transportErrorCode(error)})`);
+  }
   const allowed = expectStatuses ?? null;
   const ok = allowed ? allowed.includes(response.status) : response.ok;
   if (!ok) {

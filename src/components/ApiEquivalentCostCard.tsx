@@ -53,6 +53,11 @@ interface ApiEquivalentResponse {
 const usd = (amount: number) => formatCurrency(amount);
 const compact = (value: number) => formatCompactNumber(value);
 
+function knownCost(amount: number, unpricedModelCount: number): string {
+  if (unpricedModelCount === 0) return usd(amount);
+  return amount > 0 ? `${usd(amount)} known+` : "Unknown";
+}
+
 function totalTokens(model: ModelCostCheck): number {
   return (
     model.tokens.input +
@@ -106,6 +111,7 @@ function seatLabel(sourceApp: string): string {
     case "codex-cli":
       return "Codex CLI";
     case "antigravity-cli":
+    case "antigravity-statusline":
     case "antigravity-ide":
     case "google-antigravity":
       return "Google Antigravity";
@@ -190,7 +196,7 @@ export default function ApiEquivalentCostCard() {
             Combined estimate
           </p>
           <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            {usd(data.totals.estimateUsd)}
+            {knownCost(data.totals.estimateUsd, data.totals.unpricedModelCount)}
           </p>
         </div>
       </div>
@@ -206,7 +212,7 @@ export default function ApiEquivalentCostCard() {
                 </span>
               </p>
               <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                {usd(seat.estimateUsd)}
+                {knownCost(seat.estimateUsd, seat.totals.unpricedModelCount)}
               </p>
             </div>
             <div className="overflow-x-auto">
@@ -254,7 +260,11 @@ export default function ApiEquivalentCostCard() {
                         </td>
                         <td className="px-6 py-3 text-right" data-label="Derived">
                           <p className="text-sm text-gray-900 dark:text-gray-100">
-                            {usd(model.derivedCostUsd)}
+                            {model.derivationComplete
+                              ? usd(model.derivedCostUsd)
+                              : model.derivedCostUsd > 0
+                                ? `${usd(model.derivedCostUsd)} known+`
+                                : "Unknown"}
                           </p>
                         </td>
                         <td className="px-6 py-3 text-right" data-label="Reported">
@@ -286,11 +296,11 @@ export default function ApiEquivalentCostCard() {
       <div className="px-6 py-3 bg-gray-50/50 dark:bg-gray-900/20 border-t border-gray-100 dark:border-gray-700">
         <p className="text-[10px] text-gray-500 dark:text-gray-400">
           Estimates use the bundled LiteLLM catalog plus xAI list prices refreshed {snapshotDate}.
-          {SENTENCE_GAP}Includes Antigravity brain transcripts, Claude Code OTLP & session logs,
-          Codex CLI, Grok Build, Copilot CLI, and DeepSeek Harness.
+          {SENTENCE_GAP}Includes exact Antigravity CLI status-line counters, Claude Code OTLP,
+          Codex CLI, Grok Build, Copilot CLI, and DeepSeek Harness sessions.
           {SENTENCE_GAP}Excludes end-user production app traffic (routed through OpenRouter).
           {data.totals.unpricedModelCount > 0
-            ? `${SENTENCE_GAP}${data.totals.unpricedModelCount} unpriced model${data.totals.unpricedModelCount === 1 ? "" : "s"} under-count derivation.`
+            ? `${SENTENCE_GAP}${data.totals.unpricedModelCount} incompletely priced model${data.totals.unpricedModelCount === 1 ? "" : "s"} under-count derivation.`
             : ""}
         </p>
       </div>

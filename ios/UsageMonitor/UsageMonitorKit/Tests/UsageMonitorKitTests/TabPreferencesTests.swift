@@ -104,8 +104,8 @@ final class TabPreferencesTests: XCTestCase {
         )
         let needed = MoreSheetLayout.chromeHeight
             + MoreSheetLayout.rowHeight * CGFloat(AppTab.allCases.count)
-        XCTAssertEqual(AppTab.allCases.count, 8)
-        XCTAssertEqual(height, needed)
+        XCTAssertEqual(AppTab.allCases.count, 9)
+        XCTAssertEqual(height, min(needed, phone * MoreSheetLayout.maxScreenFraction))
         XCTAssertGreaterThan(height, phone * 0.5)
         XCTAssertLessThanOrEqual(height, phone * MoreSheetLayout.maxScreenFraction)
     }

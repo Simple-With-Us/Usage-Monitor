@@ -2,8 +2,13 @@
 //  AppUpdatePrompt.swift
 //
 //  Portable first-launch update check for every fleet iOS app.
-//  Canonical copy: /Users/jay/apps/ios-fleet/AppUpdatePrompt.swift
+//  In-repo pin: scripts/ios-fleet/AppUpdatePrompt.swift
 //  Copy this file into each app target.  Do not fork behavior.
+//  Do not put this file in a Swift package.
+//
+//  Apple IDs live in Simple-With-Us/AI-Fleet-Coordinator site/ios-versions.json
+//  (runtime manifest) and scripts/ios-fleet/apps.json (ship registry).
+//  Do not hardcode them here.  Live DealDex is net.dealdex (6802474288).
 //
 //  On the first scene of a cold launch the app:
 //    1. Detects Xcode / TestFlight / App Store (StoreKit AppTransaction).
@@ -23,18 +28,8 @@ import SwiftUI
 enum AppUpdatePrompt {
 
     static let defaultManifestURL = URL(
-        string: "https://raw.githubusercontent.com/jaywedgeworth22/ios-app-versions/main/versions.json"
+        string: "https://raw.githubusercontent.com/Simple-With-Us/AI-Fleet-Coordinator/main/site/ios-versions.json"
     )!
-
-    /// Numeric Apple IDs for TestFlight / App Store deep links.
-    /// Keep in sync with /Users/jay/apps/ios-fleet/apps.json.
-    static let knownAppleIds: [String: Int] = [
-        "trade.socratic.app": 6_799_238_379,
-        "trade.congress.ios": 6_798_076_688,
-        "services.jays.usage.client.monitor": 6_799_230_435,
-        "services.jays.usage.local.monitor": 6_799_230_729,
-        "online.dealdex": 6_802_474_288,
-    ]
 
     private static let skippedVersionKeyPrefix = "appUpdatePrompt.skippedVersion."
 
@@ -53,7 +48,7 @@ enum AppUpdatePrompt {
                 .flatMap(URL.init(string:)) ?? AppUpdatePrompt.defaultManifestURL
             return Config(
                 bundleId: bundleId,
-                appleId: plistAppleId ?? knownAppleIds[bundleId],
+                appleId: plistAppleId,
                 manifestURL: manifest,
                 currentMarketingVersion: (info["CFBundleShortVersionString"] as? String) ?? "0",
                 currentBuild: (info["CFBundleVersion"] as? String) ?? "0"
@@ -73,6 +68,10 @@ enum AppUpdatePrompt {
             self.parts = trimmed.split(separator: ".", omittingEmptySubsequences: true).map { segment in
                 Int(segment.filter(\.isNumber)) ?? 0
             }
+        }
+
+        static func == (lhs: Version, rhs: Version) -> Bool {
+            !(lhs < rhs) && !(rhs < lhs)
         }
 
         static func < (lhs: Version, rhs: Version) -> Bool {

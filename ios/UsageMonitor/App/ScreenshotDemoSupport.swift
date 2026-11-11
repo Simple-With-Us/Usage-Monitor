@@ -10,13 +10,15 @@ enum ScreenshotDemo {
         ProcessInfo.processInfo.arguments.contains("-ScreenshotDemo")
     }
 
-    /// Optional tab raw value (`dashboard`, `providers`, `alerts`, `projects`, `settings`).
+    /// Optional tab raw value (`dashboard`, `providers`, `alerts`, `computers`, `agents`, `platforms`, `projects`, `settings`).
     static var preferredTab: AppTab? {
         let args = ProcessInfo.processInfo.arguments
-        guard let idx = args.firstIndex(of: "-ScreenshotTab"), args.indices.contains(idx + 1) else {
-            return nil
+        for flag in ["-ScreenshotTab", "-Tab", "-PreferredTab"] {
+            if let idx = args.firstIndex(of: flag), args.indices.contains(idx + 1) {
+                return AppTab(rawValue: args[idx + 1])
+            }
         }
-        return AppTab(rawValue: args[idx + 1])
+        return nil
     }
 }
 

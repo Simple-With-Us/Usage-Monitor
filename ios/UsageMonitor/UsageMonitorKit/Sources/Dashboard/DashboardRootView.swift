@@ -24,6 +24,8 @@ public struct DashboardRootView: View {
 
     @State private var intelligenceStore = IntelligenceStore()
     @State private var portfolioHistoryStore = PortfolioHistoryStore()
+    @State private var quotaWindowsStore = QuotaWindowsStore()
+    @State private var showBudgetSheet = false
 
     public init() {}
 
@@ -71,10 +73,21 @@ public struct DashboardRootView: View {
                 .task(id: env?.accessIdentityRevision) { [apiClient = env?.apiClient] in
                     intelligenceStore.reset()
                     portfolioHistoryStore.reset()
+                    quotaWindowsStore.reset()
                     if let apiClient {
                         await intelligenceStore.loadIfNeeded(using: apiClient)
                         await portfolioHistoryStore.loadIfNeeded(using: apiClient)
+                        await quotaWindowsStore.loadIfNeeded(using: apiClient)
                     }
+                }
+                .sheet(isPresented: $showBudgetSheet) {
+                    BudgetConfigSheet(
+                        providers: store.state.value?.providers ?? [],
+                        client: env?.apiClient,
+                        onSaved: { Task { await refresh() } },
+                        onRequestSignIn: { env?.openSettingsForBudgetManagement() }
+                    )
+                    .presentationDetents([.medium, .large])
                 }
         }
     }
@@ -112,9 +125,17 @@ public struct DashboardRootView: View {
                 data: data,
                 generatedAt: store.state.value?.generatedAtDate,
                 onSelectProvider: { id in env?.openProvider(id: id) },
-                onManageBudgets: { env?.openSettingsForBudgetManagement() },
+                // Tap the budget card → in-place config sheet (owner 2026-08-31);
+                // the Settings deep link remains the signed-out fallback inside
+                // the sheet itself.
+                onManageBudgets: { showBudgetSheet = true },
                 projectRollup: ProjectBudgetsRollup(projects: store.projects),
                 onOpenProjects: { env?.openProjects() }
+            )
+
+            SubscriptionQuotasCard(
+                store: quotaWindowsStore,
+                onOpenSettings: { env?.selectTab?(.settings) }
             )
 
             PortfolioHistorySection(
@@ -193,7 +214,6 @@ public struct DashboardRootView: View {
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.vertical, Theme.Spacing.lg)
         }
-        .tabBarScrollClearance()
         .background(Theme.Colors.background)
         .accessibilityLabel("Loading overview")
     }
@@ -206,6 +226,7 @@ public struct DashboardRootView: View {
         if let apiClient = env?.apiClient {
             await intelligenceStore.refresh(using: apiClient)
             await portfolioHistoryStore.refresh(using: apiClient)
+            await quotaWindowsStore.refresh(using: apiClient)
         }
         if store.lastError == nil {
             Haptics.success()

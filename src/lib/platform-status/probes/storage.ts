@@ -201,8 +201,9 @@ const R2_SWEEP_DEADLINE_MS = 14_000;
 /**
  * Trusted Cloudflare GraphQL only.  The default probe cap is 256 KiB so a
  * status check cannot pull an unbounded dump; this query is compile-time
- * pinned and now asks for a 24h latest-per-bucket storage window.  1 MiB
- * leaves headroom if an account grows more buckets without failing the card.
+ * pinned.  A 24h latest-per-bucket window stays small; a second month-long
+ * group-by-bucketName field covers idle orphans.  1 MiB leaves headroom if
+ * an account grows more buckets without failing the card.
  */
 export const R2_GRAPHQL_MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -348,11 +349,21 @@ async function probeCloudflareR2(): Promise<PlatformProbeResult> {
       );
       continue;
     }
+    const peakHint =
+      account.monthPeakBytes != null &&
+      account.monthPeakBytes > account.storage.actual + 1024 * 1024
+        ? `month peak ${formatBytes(account.monthPeakBytes)}${
+            account.monthPeakDate ? ` ${account.monthPeakDate}` : ""
+          }`
+        : account.currentBytes != null &&
+            Math.abs(account.currentBytes - account.storage.actual) > 1024 * 1024
+          ? `now ${formatBytes(account.currentBytes)}`
+          : undefined;
     metrics.push(
       metric(
         account.label,
         `${formatBytes(account.storage.actual)} / ${formatBytesCompact(freeTierBytes)} Free Tier`,
-        undefined,
+        peakHint,
         account.storage.mtdPct
       )
     );

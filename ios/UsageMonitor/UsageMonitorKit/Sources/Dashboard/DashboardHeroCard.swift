@@ -43,6 +43,7 @@ struct DashboardHeroCard: View {
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
                 .contentTransition(reduceMotion ? .identity : .numericText())
+                .copyableValue(CurrencyFormat.usd(data.totalSpent), label: "Total Spent")
                 .accessibilityLabel("Total spent this month")
                 .accessibilityValue(CurrencyFormat.usd(data.totalSpent))
 

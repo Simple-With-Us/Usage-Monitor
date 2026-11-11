@@ -232,7 +232,7 @@ For **Claude Max, ChatGPT Plus/Pro, SuperGrok, Cursor, Apple-billed anything**:
 
 | Layer | Remote (Next.js / Oracle) | Local Usage Monitor (iOS) |
 |---|---|---|
-| **Catalog** | `PROVIDER_DEFINITIONS` (42 builtins) + lifecycle retired/dormant retained | `LocalProviderCatalog` = all 42 + Claude sub, Cursor, Agent Sync, custom |
+| **Catalog** | `PROVIDER_DEFINITIONS` (42 builtins) + lifecycle retired/dormant retained | `LocalProviderCatalog` = all 42 + Claude sub, Cursor, Ag*** S**c, custom |
 | **Seed** | DB rows from UI / Infisical / poll | `seedMissingCatalogProviders()` inserts inactive shells for every missing entry |
 | **Voyage** | Blind push/manual | Subscription shell |
 | **Oracle** | OCI Usage API cash (RSA) | Subscription shell (use remote for live $) |

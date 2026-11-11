@@ -36,7 +36,8 @@ public struct ComputersRootView: View {
                     env?.selectTab?(.settings)
                 }
             }
-            .tabBarScrollClearance()
+            // Tab-bar clearance comes from the tab shell (RootView) — a second
+            // application here doubled the bottom inset.
             .navigationTitle(AppTab.computers.title)
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {

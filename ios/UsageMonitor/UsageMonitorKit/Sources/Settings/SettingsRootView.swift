@@ -50,7 +50,6 @@ public struct SettingsRootView: View {
                     SecuritySection(settings: env.settings)
                     AboutSection(host: model.resolvedHostDisplay)
                 }
-                .tabBarScrollClearance()
                 .navigationTitle(AppTab.settings.title)
                 // Inline (centered compact) title — avoid large left-aligned title at rest.
                 .navigationBarTitleDisplayMode(.inline)
@@ -175,8 +174,11 @@ private struct AboutSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("App Version", value: "\(AppInfo.version) (\(AppInfo.build))")
+            let versionString = "\(AppInfo.version) (\(AppInfo.build))"
+            LabeledContent("App Version", value: versionString)
+                .copyableRow(label: "App Version", value: versionString)
             LabeledContent("Monitor", value: host)
+                .copyableRow(label: "Monitor", value: host)
             if let url = URL(string: "https://\(host)") {
                 Link(destination: url) {
                     Label("Open the monitor", systemImage: "safari")

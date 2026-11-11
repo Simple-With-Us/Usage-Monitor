@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 /**
  * Cloudflare R2 free-tier monitor + automatic shutoff.
@@ -11,12 +11,15 @@ import { createHash, createHmac } from "node:crypto";
  *   - Class A ops: 1,000,000 / month
  *   - Class B ops: 10,000,000 / month
  *
- * Hard policy at {@link R2_THRESHOLD_PCT} (70%):
- *   - **Storage (stock):** absolute MTD ≥ 70% of free tier → stop.
- *     No pace projection for storage (a steady 6 GiB all month is fine;
- *     7 GiB is not).
- *   - **Class A / Class B (flows):** absolute MTD ≥ 70% **or** linear
- *     month-end pace projects ≥ 70% → stop.
+ * Hard policy at {@link R2_THRESHOLD_PCT} (90%):
+ *   - **Storage:** max(current snapshot, GB-month so far) ≥ 90% of the
+ *     10 GiB free tier → stop.  Cloudflare bills GB-month, not the latest
+ *     ListObjects total.  A prune that drops the live card to a few hundred
+ *     MB does not erase a 20+ GiB day earlier in the month.  Month-peak
+ *     alone is not the kill input (that false-killed after the 2026-08-04
+ *     / 2026-08-12 prune).  No pace projection for storage.
+ *   - **Class A / Class B (flows):** absolute MTD ≥ 90% **or** linear
+ *     month-end pace projects ≥ 90% → stop.
  *
  * On trip we:
  *   1. Persist `/data/r2-disabled-70pct.flag` (and set env)
@@ -46,8 +49,10 @@ export const DEFAULT_R2_FREE_TIER_LIMITS: R2UsageLimits = {
   classBOps: 10_000_000,
 };
 
-export const R2_THRESHOLD_PCT = 70;
+export const R2_THRESHOLD_PCT = 90;
 
+// Keep this legacy filename shared with startup/runtime watchers so existing flags
+// remain readable and clearR2AutoDisable() can remove them after a policy change.
 export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
 /**
  * Durable record that auto-resume decided the kill switch should be off.
@@ -63,7 +68,7 @@ export const R2_DISABLED_FLAG_FILENAME = "r2-disabled-70pct.flag";
  * Precedence, and it must match `r2_kill_active()` in
  * scripts/start-with-litestream.sh exactly:
  *   1. the disable flag FILE wins — an explicit, persisted kill
- *   2. otherwise an env-set kill applies UNLESS this marker exists
+ *   2. otherwise an env-set kill applies UNLESS the auto-resume marker exists
  *   3. otherwise not killed
  * enforceR2AutoDisable() deletes this marker, so a fresh breach always
  * supersedes an older resume and the two can never both be live.
@@ -158,20 +163,25 @@ export const R2_PRODUCT_STATUS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const R2_GRAPHQL_STORAGE_MAX_AGE_MS = 90 * 60 * 1000;
 
 /**
- * Storage analytics are latest-per-bucket only (datetime_DESC, first win).
- * A month-long `limit: 10000` dump is 300–400 KiB for busy accounts and
- * overflows the Platforms probe's 256 KiB cap — that is why UM and Jay Old
- * rendered "Unavailable usage read failed" while ST/CT still fit.
+ * Fresh storage samples (datetime_DESC, first win).  Keep this window short so
+ * one busy bucket cannot crowd the group cap and hide idle orphans.  Account-
+ * wide orphan coverage comes from `r2StorageByBucket` (bucketName only).
  */
 export const R2_STORAGE_GRAPHQL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 export const R2_STORAGE_GRAPHQL_GROUP_LIMIT = 400;
+/** One row per bucket over the UTC month — idle orphans still bill. */
+export const R2_STORAGE_GRAPHQL_BUCKET_LIMIT = 80;
+/** One row per bucket per UTC date — used for GB-month and week/peak. */
+export const R2_STORAGE_GRAPHQL_DAY_LIMIT = 400;
+/** Rolling window for the digest "last 7 days" line. */
+export const R2_PREVIOUS_WEEK_DAYS = 7;
 
 /** Auto-resume hysteresis: clear kill switch when live storage is below this. */
-export const R2_RESUME_STORAGE_PCT = 65;
+export const R2_RESUME_STORAGE_PCT = 85;
 
 /**
  * Soft tip-prune threshold: when live storage reaches this absolute share of the
- * free tier, delete non-tip LTX per level (latest max-txid kept) before the 70%
+ * free tier, delete non-tip LTX per level (latest max-txid kept) before the 90%
  * kill. Disaster recovery only needs the tip chain; multi-level LTX history is
  * what re-breaches free tier every day (2026-08-04 / 2026-08-06).
  */
@@ -201,6 +211,7 @@ export interface R2UsageAssessment {
   exceededMetric?: "storage" | "classA" | "classB";
   metricsSource: R2MetricsSource;
   metricsError?: string;
+  checkpointTransitionError?: string;
   buckets?: R2BucketStorageSample[];
   litestreamUsesR2?: boolean;
   autoDisabled?: boolean;
@@ -208,6 +219,18 @@ export interface R2UsageAssessment {
   storageIsLive?: boolean;
   /** True when GraphQL storage samples were too old to trust for kill decisions. */
   storageSampleStale?: boolean;
+  /** Latest per-bucket snapshot (24h + live S3 overlay). */
+  currentBytes?: number;
+  /** Time-average of daily account totals this UTC month (Cloudflare GB-month). */
+  gbMonthBytes?: number | null;
+  /** Highest daily account total this UTC month. */
+  monthPeakBytes?: number;
+  /** UTC date (`YYYY-MM-DD`) of {@link monthPeakBytes}. */
+  monthPeakDate?: string | null;
+  /** Average daily total over the last {@link R2_PREVIOUS_WEEK_DAYS} UTC days. */
+  previousWeekGbMonthBytes?: number | null;
+  /** Highest daily total over that same rolling week. */
+  previousWeekPeakBytes?: number | null;
 }
 
 export interface R2UsageCredentials {
@@ -216,7 +239,20 @@ export interface R2UsageCredentials {
 }
 
 export interface FetchedR2UsageMetrics {
+  /**
+   * Free-tier stock used for kill / %: max(current snapshot, GB-month).
+   * Never month-peak (false 15 GiB kill after prune).
+   */
   storageBytes: number;
+  /** Latest per-bucket snapshot (24h overlay, including empty samples). */
+  currentBytes: number;
+  /** Time-average of daily account totals this UTC month, or null if no daily series. */
+  gbMonthBytes: number | null;
+  /** Highest daily account total this UTC month (or month-window bucket max fallback). */
+  monthPeakBytes: number;
+  monthPeakDate: string | null;
+  previousWeekGbMonthBytes: number | null;
+  previousWeekPeakBytes: number | null;
   classAOps: number;
   classBOps: number;
   buckets: R2BucketStorageSample[];
@@ -233,11 +269,14 @@ let liveS3ListCache: {
 } | null = null;
 let r2ProductStatusCache = new Map<
   string,
-  { atMs: number; status: "enabled" | "disabled" }
+  { atMs: number; status: "enabled" | "disabled"; bucketNames: string[] | null }
 >();
 
 function getFlagDir(): string {
-  if (fs.existsSync("/data")) return "/data";
+  // Unit tests must never observe or mutate a host's live guard files merely
+  // because the test runner happens to have a /data mount. Use Vitest's own
+  // marker because production-behavior tests intentionally replace NODE_ENV.
+  if (process.env.VITEST !== "true" && fs.existsSync("/data")) return "/data";
   // Fallback for environments without the persistent /data volume: use a
   // private per-process directory (mkdtemp creates it 0o700 with an
   // unpredictable suffix) instead of predictable paths directly inside the
@@ -265,6 +304,7 @@ export function __resetR2UsageStateForTests(): void {
   loggedResumeOverride = false;
   liveS3ListCache = null;
   r2ProductStatusCache = new Map();
+  setR2CheckpointHandoffPending(false);
   if (cachedFallbackFlagDir) {
     try {
       fs.rmSync(cachedFallbackFlagDir, { recursive: true, force: true });
@@ -305,6 +345,56 @@ export function isLitestreamR2Endpoint(
   } catch {
     return false;
   }
+}
+
+function r2SupervisorCanResume(): boolean {
+  const supervisorPid = Number(process.env.LITESTREAM_R2_SUPERVISOR_PID);
+  if (!Number.isSafeInteger(supervisorPid) || supervisorPid <= 0) return false;
+  try {
+    process.kill(supervisorPid, 0);
+  } catch {
+    return false;
+  }
+
+  return (
+    process.env.APP_STARTUP_WRAPPER === "start-with-litestream-v2" &&
+    process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE === "true" &&
+    isLitestreamR2Endpoint() &&
+    Boolean(
+      process.env.LITESTREAM_S3_BUCKET?.trim() &&
+        process.env.LITESTREAM_S3_ENDPOINT?.trim() &&
+        process.env.LITESTREAM_S3_ACCESS_KEY_ID?.trim() &&
+        process.env.LITESTREAM_S3_SECRET_ACCESS_KEY?.trim()
+    )
+  );
+}
+
+async function setWalAutocheckpointPages(pages: 0 | 1_000): Promise<void> {
+  const setWalAutocheckpoint = (globalThis as Record<string, unknown>)[
+    "__apiUsageMonitorSetWalAutocheckpoint"
+  ];
+  if (typeof setWalAutocheckpoint !== "function") {
+    throw new Error("SQLite WAL checkpoint ownership hook is unavailable");
+  }
+  await (setWalAutocheckpoint as (pages: 0 | 1_000) => Promise<void>)(pages);
+}
+
+async function handOffR2CheckpointToApp(): Promise<void> {
+  try {
+    await setWalAutocheckpointPages(1_000);
+    setR2CheckpointHandoffPending(false);
+  } catch (error) {
+    setR2CheckpointHandoffPending(true);
+    throw error;
+  }
+}
+
+async function retryPendingR2CheckpointHandoff(): Promise<void> {
+  if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+  await serializeR2Transition(async () => {
+    if (!isR2CheckpointHandoffPending() || !r2SupervisorCanResume()) return;
+    await handOffR2CheckpointToApp();
+  });
 }
 
 export function resolveR2UsageCredentials(
@@ -396,9 +486,15 @@ export function assessR2Usage(
     metricsSource?: R2MetricsSource;
     metricsError?: string;
     buckets?: R2BucketStorageSample[];
+    currentBytes?: number;
+    gbMonthBytes?: number | null;
+    monthPeakBytes?: number;
+    monthPeakDate?: string | null;
+    previousWeekGbMonthBytes?: number | null;
+    previousWeekPeakBytes?: number | null;
   } = {}
 ): R2UsageAssessment {
-  // Storage: absolute 70% of free tier only (stock). Ops: absolute or pace.
+  // Storage: absolute 90% of free tier only (stock). Ops: absolute or pace.
   const storage = calculatePaceProjection(
     actualStorageBytes,
     limits.storageBytes,
@@ -440,6 +536,12 @@ export function assessR2Usage(
     metricsError: extras.metricsError,
     buckets: extras.buckets,
     litestreamUsesR2: isLitestreamR2Endpoint(),
+    currentBytes: extras.currentBytes,
+    gbMonthBytes: extras.gbMonthBytes,
+    monthPeakBytes: extras.monthPeakBytes,
+    monthPeakDate: extras.monthPeakDate,
+    previousWeekGbMonthBytes: extras.previousWeekGbMonthBytes,
+    previousWeekPeakBytes: extras.previousWeekPeakBytes,
   };
 }
 
@@ -458,9 +560,63 @@ export function hasR2AutoResumeMarker(): boolean {
 
 let loggedResumeOverride = false;
 
+// Transitions mutate shared process flags and checkpoint ownership across
+// awaits.  Keep their effects ordered across duplicated Next module instances
+// so a slow resume cannot commit after a newer kill has already engaged.
+const r2TransitionLeaseKey = Symbol.for("usage-monitor.r2-transition-lease");
+const r2TransitionRegistry = globalThis as typeof globalThis & Record<symbol, unknown>;
+const r2CheckpointHandoffPendingKey = Symbol.for(
+  "usage-monitor.r2-checkpoint-handoff-pending"
+);
+
+function isR2CheckpointHandoffPending(): boolean {
+  return r2TransitionRegistry[r2CheckpointHandoffPendingKey] === true;
+}
+
+function setR2CheckpointHandoffPending(pending: boolean): void {
+  r2TransitionRegistry[r2CheckpointHandoffPendingKey] = pending;
+}
+
+function serializeR2Transition<T>(operation: () => Promise<T>): Promise<T> {
+  const tail = (r2TransitionRegistry[r2TransitionLeaseKey] as Promise<void> | undefined) ??
+    Promise.resolve();
+  const result = tail.then(operation, operation);
+  r2TransitionRegistry[r2TransitionLeaseKey] = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function writeR2AutoResumeMarkerAtomically(reason: string): void {
+  const markerPath = getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME);
+  const tempPath = `${markerPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  const contents =
+    `Auto-resumed at ${new Date().toISOString()}: ${reason}\n` +
+    "This overrides LITESTREAM_EMERGENCY_DISABLE / R2_WRITES_DISABLED if they\n" +
+    "are still set in the environment.  Delete this file to force the kill\n" +
+    "switch back on; a fresh free-tier breach deletes it automatically.\n";
+
+  try {
+    fs.writeFileSync(tempPath, contents, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(tempPath, markerPath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup; an uncommitted temp file is never a marker.
+    }
+    throw err;
+  }
+}
+
 export function isR2AutoDisabled(): boolean {
   // An explicit, persisted kill beats everything — including a resume marker,
-  // though enforceR2AutoDisable() deletes the marker so they never coexist.
+  // though enforceR2AutoDisable() deletes the marker first.
   if (flagFileExists(R2_DISABLED_FLAG_FILENAME)) return true;
 
   const envKill =
@@ -469,7 +625,7 @@ export function isR2AutoDisabled(): boolean {
   if (!envKill) return false;
 
   // See R2_AUTO_RESUMED_FLAG_FILENAME: an env-sourced kill is a default, not a
-  // verdict. Once auto-resume has confirmed usage is back under the resume
+  // verdict.  Once auto-resume has confirmed usage is back under the resume
   // threshold, that decision has to survive the restart that re-injects the
   // variable — otherwise the switch can never come off without a human.
   if (hasR2AutoResumeMarker()) {
@@ -494,33 +650,65 @@ export function isR2AutoDisabled(): boolean {
  * watcher stop R2-backed Litestream without needing a redeploy.
  */
 /** Clear free-tier kill switch so litestream can resume after prune/restart. */
-export function clearR2AutoDisable(reason = "usage back under the resume threshold"): void {
-  delete process.env.LITESTREAM_EMERGENCY_DISABLE;
-  delete process.env.R2_WRITES_DISABLED;
-  process.env.LITESTREAM_EMERGENCY_DISABLE = "false";
-  process.env.R2_WRITES_DISABLED = "false";
-  loggedResumeOverride = false;
-  try {
-    const flag = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
-    if (fs.existsSync(flag)) fs.unlinkSync(flag);
-  } catch (err) {
-    console.error("[r2-usage] Failed clearing emergency disable flag:", err);
+export async function clearR2AutoDisable(
+  reason = "usage back under the resume threshold"
+): Promise<void> {
+  return serializeR2Transition(() => clearR2AutoDisableSerialized(reason));
+}
+
+async function clearR2AutoDisableSerialized(reason: string): Promise<void> {
+  const r2Target = isLitestreamR2Endpoint();
+  if (r2Target && !isR2AutoDisabled()) return;
+  const canResumeSupervisor = r2Target && r2SupervisorCanResume();
+  if (r2Target) {
+    process.env.LITESTREAM_ACTIVE = "false";
+    if (canResumeSupervisor) {
+      // The supervisor must keep Litestream stopped until SQLite has given
+      // checkpoint ownership back to the replicator.
+      await setWalAutocheckpointPages(0);
+      setR2CheckpointHandoffPending(false);
+    }
   }
   // Persist the decision. Mutating process.env alone made this a no-op across
   // restarts whenever the switch came from deploy config — see the constant's
   // doc comment for the production incident that caused.
   try {
-    fs.writeFileSync(
-      getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME),
-      `Auto-resumed at ${new Date().toISOString()}: ${reason}\n` +
-        "This overrides LITESTREAM_EMERGENCY_DISABLE / R2_WRITES_DISABLED if they\n" +
-        "are still set in the environment. Delete this file to force the kill\n" +
-        "switch back on; a fresh free-tier breach deletes it automatically.\n",
-      { encoding: "utf8", mode: 0o600 }
-    );
+    // Publish a complete marker while the old kill flag remains authoritative;
+    // removing that flag below commits the prepared resume.
+    writeR2AutoResumeMarkerAtomically(reason);
   } catch (err) {
-    console.error("[r2-usage] Failed writing auto-resume marker:", err);
+    if (canResumeSupervisor) {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
+        console.error("[r2-usage] Failed restoring SQLite checkpoint policy after resume-marker failure:", rollbackError);
+      });
+    }
+    throw new Error("Failed writing R2 auto-resume marker", { cause: err });
   }
+  try {
+    const flag = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
+    if (fs.existsSync(flag)) fs.unlinkSync(flag);
+  } catch (err) {
+    // Removing the old kill flag is the commit point.  Until it succeeds, the
+    // flag wins over this marker, so roll checkpoints back and keep R2 inactive.
+    try {
+      const marker = getFlagFilePath(R2_AUTO_RESUMED_FLAG_FILENAME);
+      if (fs.existsSync(marker)) fs.unlinkSync(marker);
+    } catch (cleanupError) {
+      console.error("[r2-usage] Failed cleaning uncommitted auto-resume marker:", cleanupError);
+    }
+    if (canResumeSupervisor) {
+      await handOffR2CheckpointToApp().catch((rollbackError) => {
+        console.error("[r2-usage] Failed restoring SQLite checkpoint policy after kill-flag failure:", rollbackError);
+      });
+    }
+    throw new Error("Failed clearing R2 emergency disable flag", { cause: err });
+  }
+  delete process.env.LITESTREAM_EMERGENCY_DISABLE;
+  delete process.env.R2_WRITES_DISABLED;
+  process.env.LITESTREAM_EMERGENCY_DISABLE = "false";
+  process.env.R2_WRITES_DISABLED = "false";
+  if (r2Target) process.env.LITESTREAM_ACTIVE = canResumeSupervisor ? "true" : "false";
+  loggedResumeOverride = false;
   try {
     const alert = getFlagFilePath(R2_EMERGENCY_ALERT_FLAG_FILENAME);
     if (fs.existsSync(alert)) fs.unlinkSync(alert);
@@ -530,7 +718,13 @@ export function clearR2AutoDisable(reason = "usage back under the resume thresho
   inMemoryEmergencyAlertSent = false;
 }
 
-export function enforceR2AutoDisable(reason: string): void {
+export async function enforceR2AutoDisable(reason: string): Promise<void> {
+  return serializeR2Transition(() => enforceR2AutoDisableSerialized(reason));
+}
+
+async function enforceR2AutoDisableSerialized(reason: string): Promise<void> {
+  const r2Target = isLitestreamR2Endpoint();
+  let checkpointHandoffError: unknown;
   process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
   process.env.R2_WRITES_DISABLED = "true";
   // A fresh breach supersedes any earlier auto-resume, so drop the marker
@@ -541,9 +735,20 @@ export function enforceR2AutoDisable(reason: string): void {
   } catch (err) {
     console.error("[r2-usage] Failed clearing auto-resume marker:", err);
   }
-  // Also clear the "active" claim so readiness/runtime-health immediately
-  // report backup as stopped (start-with-litestream only sets this at boot).
-  process.env.LITESTREAM_ACTIVE = "false";
+  if (
+    r2Target &&
+    r2SupervisorCanResume() &&
+    (process.env.LITESTREAM_ACTIVE === "true" || isR2CheckpointHandoffPending())
+  ) {
+    try {
+      await handOffR2CheckpointToApp();
+    } catch (err) {
+      checkpointHandoffError = err;
+    }
+  }
+  // Keep B2 and unknown targets active; the R2 archival kill is independent
+  // of the primary replica destination.
+  if (r2Target) process.env.LITESTREAM_ACTIVE = "false";
   try {
     const filePath = getFlagFilePath(R2_DISABLED_FLAG_FILENAME);
     fs.writeFileSync(
@@ -559,8 +764,20 @@ export function enforceR2AutoDisable(reason: string): void {
     `[r2-usage] R2 free-tier auto-disable engaged: ${reason}` +
       (isLitestreamR2Endpoint()
         ? " (Litestream endpoint is R2 — replication will stop)"
-        : " (Litestream endpoint is not R2 — non-R2 replica left running; unexpected in production)")
+        : " (R2 archival writes disabled; non-R2 replica left running)")
   );
+  if (checkpointHandoffError) {
+    const errorName =
+      checkpointHandoffError instanceof Error
+        ? checkpointHandoffError.name.slice(0, 48)
+        : "unknown";
+    console.error(
+      `[r2-usage] R2 kill persisted but SQLite checkpoint handoff failed (error=${errorName})`
+    );
+    throw new Error("R2 kill persisted but SQLite checkpoint handoff failed", {
+      cause: checkpointHandoffError,
+    });
+  }
 }
 
 
@@ -718,15 +935,17 @@ export function formatDailyPushoverMessage(
   const storageGIB = (assessment.storage.actual / (1024 * 1024 * 1024)).toFixed(
     2
   );
+  const formatGiBLine = (bytes: number): string =>
+    `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
   const title = "📊 Cloudflare R2 Free Tier Status";
 
   const statusStr = disabled
-    ? "🛑 DISABLED (Auto-killed at 70% threshold)"
+    ? `🛑 DISABLED (Auto-killed at ${R2_THRESHOLD_PCT}% threshold)`
     : assessment.metricsSource === "unavailable"
       ? "❓ METRICS UNAVAILABLE (no auto-disable)"
       : assessment.overallOnTrackToExceed70Pct
-        ? "⚠️ WARNING (Pace/MTD >= 70%)"
-        : "✅ OK (Under 70% free-tier pace)";
+        ? `⚠️ WARNING (Pace/MTD >= ${R2_THRESHOLD_PCT}%)`
+        : `✅ OK (Under ${R2_THRESHOLD_PCT}% free-tier pace)`;
 
   const topBuckets = (assessment.buckets ?? [])
     .slice()
@@ -740,6 +959,23 @@ export function formatDailyPushoverMessage(
   const body = [
     `Usage Monitor account (UM Cloudflare free tier):`,
     `R2 Storage: ${storageGIB} GiB / 10.00 GiB (${assessment.storage.mtdPct}% MTD, ${assessment.storage.projectedPct}% proj)`,
+    assessment.currentBytes != null &&
+    assessment.currentBytes !== assessment.storage.actual
+      ? `  current snapshot: ${formatGiBLine(assessment.currentBytes)}`
+      : null,
+    assessment.monthPeakBytes != null &&
+    assessment.monthPeakBytes > assessment.storage.actual
+      ? `  month peak: ${formatGiBLine(assessment.monthPeakBytes)}${
+          assessment.monthPeakDate ? ` (${assessment.monthPeakDate})` : ""
+        }`
+      : null,
+    assessment.previousWeekGbMonthBytes != null
+      ? `  last 7 days: ${formatGiBLine(assessment.previousWeekGbMonthBytes)} avg${
+          assessment.previousWeekPeakBytes != null
+            ? ` (peak ${formatGiBLine(assessment.previousWeekPeakBytes)})`
+            : ""
+        }`
+      : null,
     `Class A Ops: ${assessment.classA.actual.toLocaleString()} / 1,000,000 (${assessment.classA.mtdPct}% MTD, ${assessment.classA.projectedPct}% proj)`,
     `Class B Ops: ${assessment.classB.actual.toLocaleString()} / 10,000,000 (${assessment.classB.mtdPct}% MTD, ${assessment.classB.projectedPct}% proj)`,
     `Threshold: ${R2_THRESHOLD_PCT}% max pace/MTD`,
@@ -813,6 +1049,35 @@ query R2FreeTierUsage(
           bucketName
         }
       }
+      r2StorageByBucket: r2StorageAdaptiveGroups(
+        limit: ${R2_STORAGE_GRAPHQL_BUCKET_LIMIT}
+        filter: { datetime_geq: $startDate, datetime_leq: $endDate }
+      ) {
+        max {
+          objectCount
+          uploadCount
+          payloadSize
+          metadataSize
+        }
+        dimensions {
+          bucketName
+        }
+      }
+      r2StorageByDay: r2StorageAdaptiveGroups(
+        limit: ${R2_STORAGE_GRAPHQL_DAY_LIMIT}
+        filter: { datetime_geq: $startDate, datetime_leq: $endDate }
+      ) {
+        max {
+          objectCount
+          uploadCount
+          payloadSize
+          metadataSize
+        }
+        dimensions {
+          date
+          bucketName
+        }
+      }
     }
   }
 }
@@ -824,19 +1089,163 @@ function utcMonthStartIso(now: Date): string {
   ).toISOString();
 }
 
-/** Newest of (month start, now − lookback).  Ops still use the full UTC month. */
+/** Fresh-sample window start (`now − lookback`).  Month coverage is a separate group. */
 export function utcStorageLookbackIso(now: Date): string {
-  const lookback = new Date(now.getTime() - R2_STORAGE_GRAPHQL_LOOKBACK_MS);
-  const monthStart = new Date(utcMonthStartIso(now));
-  return (lookback > monthStart ? lookback : monthStart).toISOString();
+  return new Date(now.getTime() - R2_STORAGE_GRAPHQL_LOOKBACK_MS).toISOString();
 }
 
 /**
  * Parse a Cloudflare GraphQL R2 analytics response into free-tier counters.
  * Exported for unit tests.
  */
+export type R2StorageGraphqlGroup = {
+  max?: {
+    objectCount?: number | null;
+    uploadCount?: number | null;
+    payloadSize?: number | null;
+    metadataSize?: number | null;
+  } | null;
+  dimensions?: {
+    datetime?: string | null;
+    date?: string | null;
+    bucketName?: string | null;
+  } | null;
+};
+
+function groupStoredBytes(group: R2StorageGraphqlGroup): number {
+  const payload = Number(group.max?.payloadSize ?? 0);
+  const metadata = Number(group.max?.metadataSize ?? 0);
+  return (
+    (Number.isFinite(payload) ? payload : 0) +
+    (Number.isFinite(metadata) ? metadata : 0)
+  );
+}
+
+function graphqlDateKey(value: unknown): string | null {
+  if (typeof value !== "string" || value.length < 10) return null;
+  const key = value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
+  return key;
+}
+
+function utcDateKey(now: Date): string {
+  return now.toISOString().slice(0, 10);
+}
+
+function addUtcDays(dateKey: string, days: number): string {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return utcDateKey(new Date(Date.UTC(year, month - 1, day + days)));
+}
+
+/** Inclusive UTC calendar dates from `startKey` through `endKey`. */
+export function eachUtcDateInclusive(startKey: string, endKey: string): string[] {
+  const out: string[] = [];
+  let current = startKey;
+  for (let i = 0; i < 40 && current <= endKey; i += 1) {
+    out.push(current);
+    current = addUtcDays(current, 1);
+  }
+  return out;
+}
+
+/**
+ * Free-tier storage stock: the larger of the live snapshot and GB-month.
+ * A post-prune 284 MB card must not hide a multi-GiB month; a 22 GiB peak
+ * day must not keep the kill switch on after the objects are gone.
+ */
+export function resolveBillingStorageBytes(
+  currentBytes: number,
+  gbMonthBytes: number | null | undefined
+): number {
+  if (gbMonthBytes == null || !Number.isFinite(gbMonthBytes) || gbMonthBytes < 0) {
+    return currentBytes;
+  }
+  return Math.max(currentBytes, gbMonthBytes);
+}
+
+export interface R2StoragePeriodSummary {
+  gbMonthBytes: number;
+  monthPeakBytes: number;
+  monthPeakDate: string | null;
+  previousWeekGbMonthBytes: number;
+  previousWeekPeakBytes: number;
+}
+
+/**
+ * Build GB-month / week / peak from one row per bucket per UTC date.
+ * Missing calendar days count as zero so a short peak does not look like
+ * the whole month.
+ */
+export function summarizeR2DailyStorage(
+  groups: R2StorageGraphqlGroup[],
+  now: Date
+): R2StoragePeriodSummary | null {
+  if (groups.length === 0) return null;
+
+  const perDay = new Map<string, number>();
+  for (const group of groups) {
+    const dateKey =
+      graphqlDateKey(group.dimensions?.date) ??
+      graphqlDateKey(group.dimensions?.datetime);
+    if (!dateKey) continue;
+    perDay.set(dateKey, (perDay.get(dateKey) ?? 0) + groupStoredBytes(group));
+  }
+  if (perDay.size === 0) return null;
+
+  const todayKey = utcDateKey(now);
+  const monthStartKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
+  const monthDays = eachUtcDateInclusive(monthStartKey, todayKey);
+  if (monthDays.length === 0) return null;
+
+  let monthSum = 0;
+  let monthPeakBytes = 0;
+  let monthPeakDate: string | null = null;
+  for (const day of monthDays) {
+    const total = perDay.get(day) ?? 0;
+    monthSum += total;
+    if (total >= monthPeakBytes) {
+      monthPeakBytes = total;
+      monthPeakDate = day;
+    }
+  }
+
+  const weekStartKey = addUtcDays(todayKey, -(R2_PREVIOUS_WEEK_DAYS - 1));
+  const weekDays = eachUtcDateInclusive(weekStartKey, todayKey);
+  let weekSum = 0;
+  let previousWeekPeakBytes = 0;
+  for (const day of weekDays) {
+    const total = perDay.get(day) ?? 0;
+    weekSum += total;
+    if (total > previousWeekPeakBytes) previousWeekPeakBytes = total;
+  }
+
+  return {
+    gbMonthBytes: monthSum / monthDays.length,
+    monthPeakBytes,
+    monthPeakDate,
+    previousWeekGbMonthBytes: weekSum / weekDays.length,
+    previousWeekPeakBytes,
+  };
+}
+
+function sampleFromStorageGroup(group: R2StorageGraphqlGroup): R2BucketStorageSample {
+  const bucketName = group.dimensions?.bucketName || "(unknown)";
+  const payload = Number(group.max?.payloadSize ?? 0);
+  const metadata = Number(group.max?.metadataSize ?? 0);
+  const objectCount = Number(group.max?.objectCount ?? 0);
+  return {
+    bucketName,
+    bytes:
+      (Number.isFinite(payload) ? payload : 0) +
+      (Number.isFinite(metadata) ? metadata : 0),
+    objectCount: Number.isFinite(objectCount) ? objectCount : 0,
+    asOf: group.dimensions?.datetime ?? null,
+  };
+}
+
 export function parseR2GraphqlUsage(
-  payload: unknown
+  payload: unknown,
+  now: Date = new Date()
 ): FetchedR2UsageMetrics {
   const root = payload as {
     data?: {
@@ -846,18 +1255,9 @@ export function parseR2GraphqlUsage(
             sum?: { requests?: number | null } | null;
             dimensions?: { actionType?: string | null } | null;
           }>;
-          r2StorageAdaptiveGroups?: Array<{
-            max?: {
-              objectCount?: number | null;
-              uploadCount?: number | null;
-              payloadSize?: number | null;
-              metadataSize?: number | null;
-            } | null;
-            dimensions?: {
-              datetime?: string | null;
-              bucketName?: string | null;
-            } | null;
-          }>;
+          r2StorageAdaptiveGroups?: R2StorageGraphqlGroup[];
+          r2StorageByBucket?: R2StorageGraphqlGroup[];
+          r2StorageByDay?: R2StorageGraphqlGroup[];
         }>;
       };
     };
@@ -891,31 +1291,42 @@ export function parseR2GraphqlUsage(
     else classAOps += n;
   }
 
-  // Latest sample per bucket (query is datetime_DESC).
+  // Month groups are one row per bucket (no datetime dimension) so idle
+  // orphans still appear.  Overlay 24h latest-per-bucket so a prune is not
+  // stuck on the month-window max.
   const latestByBucket = new Map<string, R2BucketStorageSample>();
+  for (const group of account.r2StorageByBucket ?? []) {
+    const sample = sampleFromStorageGroup(group);
+    latestByBucket.set(sample.bucketName, sample);
+  }
+  const seenFresh = new Set<string>();
   for (const group of account.r2StorageAdaptiveGroups ?? []) {
-    const bucketName = group.dimensions?.bucketName || "(unknown)";
-    const datetime = group.dimensions?.datetime ?? null;
-    if (latestByBucket.has(bucketName)) continue;
-    const payload = Number(group.max?.payloadSize ?? 0);
-    const metadata = Number(group.max?.metadataSize ?? 0);
-    const objectCount = Number(group.max?.objectCount ?? 0);
-    const bytes =
-      (Number.isFinite(payload) ? payload : 0) +
-      (Number.isFinite(metadata) ? metadata : 0);
-    latestByBucket.set(bucketName, {
-      bucketName,
-      bytes,
-      objectCount: Number.isFinite(objectCount) ? objectCount : 0,
-      asOf: datetime,
-    });
+    const sample = sampleFromStorageGroup(group);
+    if (seenFresh.has(sample.bucketName)) continue;
+    seenFresh.add(sample.bucketName);
+    latestByBucket.set(sample.bucketName, sample);
   }
 
   const buckets = [...latestByBucket.values()].sort((a, b) => b.bytes - a.bytes);
-  const storageBytes = buckets.reduce((sum, b) => sum + b.bytes, 0);
+  const currentBytes = buckets.reduce((sum, b) => sum + b.bytes, 0);
+  const daily = summarizeR2DailyStorage(account.r2StorageByDay ?? [], now);
+  const monthPeakFromBuckets = (account.r2StorageByBucket ?? []).reduce(
+    (sum, group) => sum + groupStoredBytes(group),
+    0
+  );
+  const gbMonthBytes = daily?.gbMonthBytes ?? null;
+  const monthPeakBytes =
+    daily?.monthPeakBytes ??
+    (monthPeakFromBuckets > 0 ? monthPeakFromBuckets : currentBytes);
 
   return {
-    storageBytes,
+    storageBytes: resolveBillingStorageBytes(currentBytes, gbMonthBytes),
+    currentBytes,
+    gbMonthBytes,
+    monthPeakBytes,
+    monthPeakDate: daily?.monthPeakDate ?? null,
+    previousWeekGbMonthBytes: daily?.previousWeekGbMonthBytes ?? null,
+    previousWeekPeakBytes: daily?.previousWeekPeakBytes ?? null,
     classAOps,
     classBOps,
     buckets,
@@ -953,18 +1364,50 @@ export type R2ProductStatus = "enabled" | "disabled" | "unknown";
  * REST ListBuckets is Class A.  Call only when GraphQL storage would trip the
  * guard (or for the retired `old` slot).  Cache the verdict for 24h.
  */
-export async function probeR2ProductStatus(
+export interface R2BucketInventory {
+  status: R2ProductStatus;
+  /** Live bucket names from REST ListBuckets, or null when unknown/unlistable. */
+  bucketNames: string[] | null;
+}
+
+/** Bucket names from a Cloudflare REST ListBuckets payload, or null if unparseable. */
+export function parseR2BucketNames(payload: unknown): string[] | null {
+  const root = payload as {
+    result?: { buckets?: Array<{ name?: unknown }> } | Array<{ name?: unknown }>;
+    buckets?: Array<{ name?: unknown }>;
+  };
+  const list = Array.isArray(root.result)
+    ? root.result
+    : Array.isArray(root.result?.buckets)
+      ? root.result.buckets
+      : Array.isArray(root.buckets)
+        ? root.buckets
+        : null;
+  if (!list) return null;
+  const names: string[] = [];
+  for (const entry of list) {
+    if (typeof entry?.name === "string" && entry.name.length > 0) {
+      names.push(entry.name);
+    }
+  }
+  return names;
+}
+
+export async function probeR2BucketInventory(
   credentials: R2UsageCredentials,
   fetchImpl: typeof fetch = fetch,
   now: Date = new Date(),
-  cache: Map<string, { atMs: number; status: "enabled" | "disabled" }> = r2ProductStatusCache
-): Promise<R2ProductStatus> {
+  cache: Map<
+    string,
+    { atMs: number; status: "enabled" | "disabled"; bucketNames: string[] | null }
+  > = r2ProductStatusCache
+): Promise<R2BucketInventory> {
   const cached = cache.get(credentials.accountId);
   if (
     cached &&
     now.getTime() - cached.atMs < R2_PRODUCT_STATUS_CACHE_TTL_MS
   ) {
-    return cached.status;
+    return { status: cached.status, bucketNames: cached.bucketNames };
   }
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(credentials.accountId)}/r2/buckets`;
@@ -981,19 +1424,40 @@ export async function probeR2ProductStatus(
       payload = { errors: [{ message: text.slice(0, 200) }] };
     }
     if (isR2ProductDisabledPayload(payload)) {
-      cache.set(credentials.accountId, { atMs: now.getTime(), status: "disabled" });
-      return "disabled";
+      cache.set(credentials.accountId, {
+        atMs: now.getTime(),
+        status: "disabled",
+        bucketNames: null,
+      });
+      return { status: "disabled", bucketNames: null };
     }
     if (res.ok) {
-      cache.set(credentials.accountId, { atMs: now.getTime(), status: "enabled" });
-      return "enabled";
+      const bucketNames = parseR2BucketNames(payload);
+      cache.set(credentials.accountId, {
+        atMs: now.getTime(),
+        status: "enabled",
+        bucketNames,
+      });
+      return { status: "enabled", bucketNames };
     }
     // 403/10000 = token cannot list.  Do not treat that as disabled — UM's
     // JAY token GraphQL-reads Usage.Jays.Services but REST-lists 403.
-    return "unknown";
+    return { status: "unknown", bucketNames: null };
   } catch {
-    return "unknown";
+    return { status: "unknown", bucketNames: null };
   }
+}
+
+export async function probeR2ProductStatus(
+  credentials: R2UsageCredentials,
+  fetchImpl: typeof fetch = fetch,
+  now: Date = new Date(),
+  cache: Map<
+    string,
+    { atMs: number; status: "enabled" | "disabled"; bucketNames: string[] | null }
+  > = r2ProductStatusCache
+): Promise<R2ProductStatus> {
+  return (await probeR2BucketInventory(credentials, fetchImpl, now, cache)).status;
 }
 
 function r2NotEnabledSnapshot(
@@ -1622,9 +2086,14 @@ export function graphqlStorageSamplesAreFresh(
   maxAgeMs: number = R2_GRAPHQL_STORAGE_MAX_AGE_MS
 ): boolean {
   if (buckets.length === 0) return false;
-  return buckets.every((b) => {
-    if (!b.asOf) return false;
-    const t = Date.parse(b.asOf);
+  // Orphan buckets (deleted or renamed) can linger in the month-window
+  // r2StorageByBucket series with no 24-hour sample (asOf null).  They must
+  // not poison the freshness check and block GraphQL-based auto-resume.
+  // Only buckets with a current sample count; zero sampled buckets is stale.
+  const sampled = buckets.filter((b) => b.asOf);
+  if (sampled.length === 0) return false;
+  return sampled.every((b) => {
+    const t = Date.parse(b.asOf as string);
     return Number.isFinite(t) && now.getTime() - t <= maxAgeMs;
   });
 }
@@ -1673,6 +2142,33 @@ export function mergeGraphqlStorageWithLiveOverlay(
   };
 }
 
+/**
+ * Live S3 may replace configured-bucket snapshots.  Recompute billing after
+ * that overlay so a 284 MB weekly archive cannot hide a multi-GiB GB-month.
+ */
+export function applyStorageOverlay(
+  metrics: FetchedR2UsageMetrics,
+  live: { buckets: R2BucketStorageSample[] } | null
+): {
+  currentBytes: number;
+  billingBytes: number;
+  buckets: R2BucketStorageSample[];
+  storageIsLive: boolean;
+  metricsSource: R2MetricsSource;
+} {
+  const merged = mergeGraphqlStorageWithLiveOverlay(metrics.buckets, live);
+  return {
+    currentBytes: merged.storageBytes,
+    billingBytes: resolveBillingStorageBytes(
+      merged.storageBytes,
+      metrics.gbMonthBytes
+    ),
+    buckets: merged.buckets,
+    storageIsLive: merged.storageIsLive,
+    metricsSource: merged.metricsSource,
+  };
+}
+
 /** Short fleet rollup lines for the UM daily Pushover digest. */
 export function formatFleetR2DigestLines(
   fleet: R2FleetSummary
@@ -1694,8 +2190,31 @@ export function formatFleetR2DigestLines(
     const storageGiB = (account.storage?.actual ?? 0) / (1024 * 1024 * 1024);
     const mtdPct = account.storage?.mtdPct ?? 0;
     const flag = account.overallOnTrackToExceed70Pct ? " ⚠️" : "";
+    const details: string[] = [];
+    if (
+      account.currentBytes != null &&
+      Math.abs(account.currentBytes - (account.storage?.actual ?? 0)) > 1024 * 1024
+    ) {
+      details.push(
+        `now ${(account.currentBytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`
+      );
+    }
+    if (
+      account.monthPeakBytes != null &&
+      account.monthPeakBytes > (account.storage?.actual ?? 0) + 1024 * 1024
+    ) {
+      const peakGiB = (account.monthPeakBytes / (1024 * 1024 * 1024)).toFixed(2);
+      const peakWhen = account.monthPeakDate ? ` ${account.monthPeakDate}` : "";
+      details.push(`peak ${peakGiB} GiB${peakWhen}`);
+    }
+    if (account.previousWeekGbMonthBytes != null) {
+      details.push(
+        `last 7d ${(account.previousWeekGbMonthBytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`
+      );
+    }
+    const extra = details.length > 0 ? `; ${details.join("; ")}` : "";
     lines.push(
-      `  ${account.label}: ${storageGiB.toFixed(2)} GiB (${mtdPct.toFixed(1)}% MTD)${flag}`
+      `  ${account.label}: ${storageGiB.toFixed(2)} GiB (${mtdPct.toFixed(1)}% MTD)${extra}${flag}`
     );
   }
   return lines;
@@ -1747,7 +2266,7 @@ export async function fetchR2UsageMetrics(
     );
   }
 
-  return parseR2GraphqlUsage(payload);
+  return parseR2GraphqlUsage(payload, now);
 }
 
 // ── Fleet (4 Cloudflare accounts = 4 free tiers) ─────────────────────────────
@@ -1785,9 +2304,21 @@ export interface R2FleetAccountSnapshot {
   overallOnTrackToExceed70Pct: boolean;
   metricsSource: R2MetricsSource | "unconfigured";
   buckets: Array<{ bucketName: string; bytes: number }>;
+  /**
+   * Buckets GraphQL still reports for this month but REST ListBuckets says no
+   * longer exist — excluded from `currentBytes`/`buckets` (deleted buckets
+   * linger in month-window analytics until the UTC month rolls over).
+   */
+  ghostBuckets?: string[];
   /** True only for the Usage Monitor (Jay) account when this host's kill flag is set. */
   autoDisabled?: boolean;
   litestreamUsesR2?: boolean;
+  currentBytes?: number;
+  gbMonthBytes?: number | null;
+  monthPeakBytes?: number;
+  monthPeakDate?: string | null;
+  previousWeekGbMonthBytes?: number | null;
+  previousWeekPeakBytes?: number | null;
 }
 
 export interface R2FleetSummary {
@@ -1932,16 +2463,11 @@ export async function fetchR2FleetSummary(
         now,
         fetchImpl
       );
-      let storageBytes = metrics.storageBytes;
-      let buckets = metrics.buckets;
-      let source: R2MetricsSource = "cloudflare_graphql";
+      let overlaid = applyStorageOverlay(metrics, null);
       if (slot.id === "um") {
         try {
           const live = await fetchLiveR2StorageViaS3(fetchImpl, now, env);
-          const merged = mergeGraphqlStorageWithLiveOverlay(metrics.buckets, live);
-          storageBytes = merged.storageBytes;
-          buckets = merged.buckets;
-          source = merged.metricsSource;
+          overlaid = applyStorageOverlay(metrics, live);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           console.warn(
@@ -1949,27 +2475,73 @@ export async function fetchR2FleetSummary(
           );
         }
       }
-      const assessment = assessR2Usage(
-        storageBytes,
+      let assessment = assessR2Usage(
+        overlaid.billingBytes,
         metrics.classAOps,
         metrics.classBOps,
         DEFAULT_R2_FREE_TIER_LIMITS,
         now,
-        { metricsSource: source, buckets }
+        {
+          metricsSource: overlaid.metricsSource,
+          buckets: overlaid.buckets,
+          currentBytes: overlaid.currentBytes,
+          gbMonthBytes: metrics.gbMonthBytes,
+          monthPeakBytes: metrics.monthPeakBytes,
+          monthPeakDate: metrics.monthPeakDate,
+          previousWeekGbMonthBytes: metrics.previousWeekGbMonthBytes,
+          previousWeekPeakBytes: metrics.previousWeekPeakBytes,
+        }
       );
       // GraphQL keeps serving leftover analytics after R2 is turned off
       // (Jay Old 2026-08-15: 116 GiB, REST 10042).  ListBuckets is Class A,
       // so only confirm when storage would trip the guard or this is the
       // retired `old` slot.
+      let ghostBuckets: string[] | undefined;
       const storageWouldTrip = assessment.storage.onTrackToExceed;
       if (storageWouldTrip || slot.id === "old") {
-        const product = await probeR2ProductStatus(
+        const inventory = await probeR2BucketInventory(
           { accountId: cfg.accountId, apiToken: cfg.apiToken },
           fetchImpl,
           now
         );
-        if (product === "disabled") {
+        if (inventory.status === "disabled") {
           return r2NotEnabledSnapshot(slot.id, slot.label, cfg.accountId);
+        }
+        // A DELETED bucket keeps its month-window GraphQL row until the UTC
+        // month rolls over (usage-monitor-bucket 2026-08: 15 GiB ghost weeks
+        // after deletion).  Drop non-existent buckets from the CURRENT
+        // snapshot; GB-month stays untouched — the bucket's earlier residency
+        // this month really does bill.
+        if (inventory.status === "enabled" && inventory.bucketNames) {
+          const liveNames = new Set(inventory.bucketNames);
+          const ghosts = overlaid.buckets.filter(
+            (b) => !liveNames.has(b.bucketName)
+          );
+          if (ghosts.length > 0) {
+            ghostBuckets = ghosts.map((b) => b.bucketName);
+            const kept = overlaid.buckets.filter((b) =>
+              liveNames.has(b.bucketName)
+            );
+            const keptBytes = kept.reduce((sum, b) => sum + b.bytes, 0);
+            overlaid = { ...overlaid, buckets: kept, currentBytes: keptBytes };
+            assessment = assessR2Usage(
+              resolveBillingStorageBytes(keptBytes, metrics.gbMonthBytes),
+              metrics.classAOps,
+              metrics.classBOps,
+              DEFAULT_R2_FREE_TIER_LIMITS,
+              now,
+              {
+                metricsSource: overlaid.metricsSource,
+                buckets: kept,
+                currentBytes: keptBytes,
+                gbMonthBytes: metrics.gbMonthBytes,
+                monthPeakBytes: metrics.monthPeakBytes,
+                monthPeakDate: metrics.monthPeakDate,
+                previousWeekGbMonthBytes: metrics.previousWeekGbMonthBytes,
+                previousWeekPeakBytes: metrics.previousWeekPeakBytes,
+              }
+            );
+          }
         }
       }
       return {
@@ -1982,14 +2554,21 @@ export async function fetchR2FleetSummary(
         classA: assessment.classA,
         classB: assessment.classB,
         overallOnTrackToExceed70Pct: assessment.overallOnTrackToExceed70Pct,
-        metricsSource: source,
-        buckets: buckets.map((b) => ({
+        metricsSource: overlaid.metricsSource,
+        buckets: overlaid.buckets.map((b) => ({
           bucketName: b.bucketName,
           bytes: b.bytes,
         })),
+        ghostBuckets,
         autoDisabled: slot.id === "um" ? isR2AutoDisabled() : undefined,
         litestreamUsesR2:
           slot.id === "um" ? isLitestreamR2Endpoint() : undefined,
+        currentBytes: overlaid.currentBytes,
+        gbMonthBytes: metrics.gbMonthBytes,
+        monthPeakBytes: metrics.monthPeakBytes,
+        monthPeakDate: metrics.monthPeakDate,
+        previousWeekGbMonthBytes: metrics.previousWeekGbMonthBytes,
+        previousWeekPeakBytes: metrics.previousWeekPeakBytes,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2033,6 +2612,22 @@ export async function runR2UsageCheck(
   fetchImpl: typeof fetch = fetch,
   now: Date = new Date()
 ): Promise<R2UsageAssessment> {
+  let checkpointTransitionError: string | undefined;
+  const recordCheckpointTransitionError = (message: string, error: unknown) => {
+    checkpointTransitionError ??= message;
+    const errorName = error instanceof Error ? error.name.slice(0, 48) : "unknown";
+    console.error(`[r2-usage] ${message} (error=${errorName})`);
+  };
+
+  // Retry prior checkpoint transfers before cached inventory or other paths.
+  try {
+    await retryPendingR2CheckpointHandoff();
+  } catch (error) {
+    recordCheckpointTransitionError(
+      "SQLite checkpoint handoff retry failed; the R2 kill remains active",
+      error
+    );
+  }
   const credentials = resolveR2UsageCredentials();
   let assessment: R2UsageAssessment;
   const failClosed = r2FreeTierFailClosedRequired();
@@ -2059,7 +2654,7 @@ export async function runR2UsageCheck(
           buckets: liveStorage.buckets,
         }
       );
-      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 70%.
+      // Zero ops will not trip ops thresholds; storage will if absolute ≥ 90%.
       storageIsLive = true;
       console.warn(
         "[r2-usage] GraphQL credentials missing; enforcing storage from live S3 list only"
@@ -2076,9 +2671,16 @@ export async function runR2UsageCheck(
           "[r2-usage] FAIL CLOSED: cannot measure R2 free tier with R2 Litestream in production — disabling R2 writes"
         );
         if (!isR2AutoDisabled()) {
-          enforceR2AutoDisable(
-            `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: ${errMsg} (cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind)`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       } else {
         console.warn(
@@ -2089,31 +2691,54 @@ export async function runR2UsageCheck(
   } else {
     try {
       const metrics = await fetchR2UsageMetrics(credentials, now, fetchImpl);
-      let storageBytes = metrics.storageBytes;
-      let buckets = metrics.buckets;
-      let source: R2MetricsSource = "cloudflare_graphql";
+      const overlaid = applyStorageOverlay(metrics, liveStorage);
+      let billingBytes = overlaid.billingBytes;
+      let buckets = overlaid.buckets;
+      let source: R2MetricsSource = overlaid.metricsSource;
+      let currentBytes = overlaid.currentBytes;
+      storageIsLive = overlaid.storageIsLive;
 
-      if (liveStorage) {
-        const merged = mergeGraphqlStorageWithLiveOverlay(
-          metrics.buckets,
-          liveStorage
-        );
-        storageBytes = merged.storageBytes;
-        buckets = merged.buckets;
-        source = merged.metricsSource;
-        storageIsLive = merged.storageIsLive;
-      } else if (!graphqlStorageSamplesAreFresh(metrics.buckets, now)) {
+      if (
+        !liveStorage &&
+        !graphqlStorageSamplesAreFresh(metrics.buckets, now)
+      ) {
         // Stale GraphQL storage caused a delayed false 15 GiB alert after prune.
         // Refuse to kill on storage when samples are old; still enforce ops.
+        // Exclude the stale current snapshot while preserving the GB-month series.
         storageSampleStale = true;
-        storageBytes = 0;
+        currentBytes = 0;
+        billingBytes =
+          metrics.gbMonthBytes != null && Number.isFinite(metrics.gbMonthBytes)
+            ? metrics.gbMonthBytes
+            : 0;
         console.warn(
           "[r2-usage] GraphQL storage samples are stale; ignoring storage for kill decisions (ops still enforced)"
         );
+      } else if (!liveStorage) {
+        // Samples are fresh, but an orphan bucket (deleted/renamed, asOf null)
+        // can still carry its stale month-max size into currentBytes and trip a
+        // false kill or block auto-resume.  Drop orphans from the CURRENT
+        // snapshot; GB-month stays untouched — the bucket's earlier residency
+        // this month really does bill (same rule as the fleet rollup).
+        const liveSamples = buckets.filter((b) => b.asOf);
+        if (liveSamples.length !== buckets.length) {
+          const orphans = buckets
+            .filter((b) => !b.asOf)
+            .map((b) => b.bucketName);
+          console.warn(
+            `[r2-usage] dropping ${orphans.length} orphan bucket(s) from current storage: ${orphans.join(", ")}`
+          );
+          buckets = liveSamples;
+          currentBytes = liveSamples.reduce((sum, b) => sum + b.bytes, 0);
+          billingBytes = resolveBillingStorageBytes(
+            currentBytes,
+            metrics.gbMonthBytes
+          );
+        }
       }
 
       assessment = assessR2Usage(
-        storageBytes,
+        billingBytes,
         metrics.classAOps,
         metrics.classBOps,
         DEFAULT_R2_FREE_TIER_LIMITS,
@@ -2121,6 +2746,12 @@ export async function runR2UsageCheck(
         {
           metricsSource: source,
           buckets,
+          currentBytes,
+          gbMonthBytes: metrics.gbMonthBytes,
+          monthPeakBytes: metrics.monthPeakBytes,
+          monthPeakDate: metrics.monthPeakDate,
+          previousWeekGbMonthBytes: metrics.previousWeekGbMonthBytes,
+          previousWeekPeakBytes: metrics.previousWeekPeakBytes,
           metricsError: storageSampleStale
             ? "GraphQL storage samples stale; storage kill deferred until live list or fresh sample"
             : undefined,
@@ -2163,9 +2794,16 @@ export async function runR2UsageCheck(
           metricsError: message,
         });
         if (failClosed && !isR2AutoDisabled()) {
-          enforceR2AutoDisable(
-            `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
-          );
+          try {
+            await enforceR2AutoDisable(
+              `fail-closed: R2 metrics unavailable (${message}) — cannot enforce ${R2_THRESHOLD_PCT}% free-tier policy blind`
+            );
+          } catch (error) {
+            recordCheckpointTransitionError(
+              "R2 fail-closed kill persisted; checkpoint handoff is pending",
+              error
+            );
+          }
         }
       }
     }
@@ -2176,13 +2814,22 @@ export async function runR2UsageCheck(
 
   // Soft tip-prune before kill: multi-level LTX history is DR-optional; free
   // tier is not. Re-list after a successful prune so kill/resume use new bytes.
+  const currentStorageBytes =
+    assessment.currentBytes != null && Number.isFinite(assessment.currentBytes)
+      ? assessment.currentBytes
+      : assessment.storage.actual;
+  const currentStoragePct =
+    assessment.storage.limit > 0
+      ? (currentStorageBytes / assessment.storage.limit) * 100
+      : 0;
+
   if (
     storageIsLive &&
-    assessment.storage.mtdPct >= R2_SOFT_PRUNE_STORAGE_PCT &&
+    currentStoragePct >= R2_SOFT_PRUNE_STORAGE_PCT &&
     isLitestreamR2Endpoint()
   ) {
     const prune = await pruneR2LtxTipsIfNeeded(
-      assessment.storage.actual,
+      currentStorageBytes,
       fetchImpl,
       now
     );
@@ -2192,7 +2839,10 @@ export async function runR2UsageCheck(
         const opsA = assessment.classA.actual;
         const opsB = assessment.classB.actual;
         assessment = assessR2Usage(
-          refreshed.storageBytes,
+          resolveBillingStorageBytes(
+            refreshed.storageBytes,
+            assessment.gbMonthBytes
+          ),
           opsA,
           opsB,
           DEFAULT_R2_FREE_TIER_LIMITS,
@@ -2201,6 +2851,12 @@ export async function runR2UsageCheck(
             metricsSource: "live_s3_storage+graphql_ops",
             buckets: refreshed.buckets,
             metricsError: assessment.metricsError,
+            currentBytes: refreshed.storageBytes,
+            gbMonthBytes: assessment.gbMonthBytes,
+            monthPeakBytes: assessment.monthPeakBytes,
+            monthPeakDate: assessment.monthPeakDate,
+            previousWeekGbMonthBytes: assessment.previousWeekGbMonthBytes,
+            previousWeekPeakBytes: assessment.previousWeekPeakBytes,
           }
         );
         assessment.storageIsLive = true;
@@ -2230,26 +2886,53 @@ export async function runR2UsageCheck(
       metric === "storage"
         ? `R2 free-tier absolute storage ≥ ${R2_THRESHOLD_PCT}% (live MTD ${status.mtdPct}%)`
         : `R2 free-tier ${metric} ≥ ${R2_THRESHOLD_PCT}% absolute or projected (MTD ${status.mtdPct}%, projected ${status.projectedPct}%)`;
-    enforceR2AutoDisable(reason);
+    try {
+      await enforceR2AutoDisable(reason);
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 kill persisted; checkpoint handoff is pending",
+        error
+      );
+    }
   }
 
-  // Auto-resume when live storage is healthy (hysteresis) and ops are fine.
+  // Auto-resume when storage is healthy (hysteresis) and ops are fine.
   // Fixes sticky kill from stale GraphQL after a successful prune.
+  // UM-1609: after the litestream B2 cutover, deploy env carries no S3-list
+  // creds, so a live list can be impossible on every tick and the kill flag
+  // would stick forever. Accept a fresh GraphQL storage sample in that case -
+  // but never stale or unavailable metrics, the same trust bar kill
+  // decisions use.
+  const storageResumeSource = storageIsLive
+    ? "live"
+    : assessment.metricsSource === "cloudflare_graphql" && !storageSampleStale
+      ? "graphql"
+      : null;
   if (
     isR2AutoDisabled() &&
-    storageIsLive &&
+    storageResumeSource &&
     assessment.storage.mtdPct < R2_RESUME_STORAGE_PCT &&
     !assessment.classA.onTrackToExceed &&
     !assessment.classB.onTrackToExceed
   ) {
     console.warn(
-      `[r2-usage] auto-resume: live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
+      `[r2-usage] auto-resume: ${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold; clearing kill switch`
     );
-    clearR2AutoDisable(
-      `live storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
-    );
+    try {
+      await clearR2AutoDisable(
+        `${storageResumeSource} storage ${assessment.storage.mtdPct}% < ${R2_RESUME_STORAGE_PCT}% resume threshold`
+      );
+    } catch (error) {
+      recordCheckpointTransitionError(
+        "R2 resume transition failed; the kill remains active",
+        error
+      );
+    }
   }
 
+  if (checkpointTransitionError) {
+    assessment.checkpointTransitionError = checkpointTransitionError.slice(0, 160);
+  }
   assessment.autoDisabled = isR2AutoDisabled();
   assessment.litestreamUsesR2 = isLitestreamR2Endpoint();
 

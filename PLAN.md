@@ -1,5 +1,12 @@
 # Plan
 
+## Current (2026-08-25) — hosted ios-ship ASC import
+
+`ios-ship.yml` on GitHub-hosted `macos-latest` imports the existing team
+ASC/P12 GitHub secrets and writes `~/.secrets/appstore-connect.env` the same
+way Socratic.Trade #3089 / Congress.Trade do.  LocalUsageMonitor stays skipped.
+See `docs/rollouts/2026-08-25-ios-hosted-asc-import.md`.
+
 ## Current (2026-08-20) — cross-app coordination follow-ups
 
 Usage-Monitor implements the UM slice of Socratic.Trade audit #2802 §7.  The

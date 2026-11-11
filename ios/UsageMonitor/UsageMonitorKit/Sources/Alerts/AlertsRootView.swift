@@ -73,7 +73,6 @@ public struct AlertsRootView: View {
             }
             .padding(Theme.Spacing.lg)
         }
-        .tabBarScrollClearance()
         .background(Theme.Colors.background)
         .accessibilityLabel("Loading alerts")
     }
@@ -252,7 +251,6 @@ public struct AlertsRootView: View {
                 inner()
                     .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
-            .tabBarScrollClearance()
             .refreshable { await manualRefresh() }
         }
         .background(Theme.Colors.background)

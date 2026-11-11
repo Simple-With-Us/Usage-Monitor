@@ -3,6 +3,7 @@ import Observation
 import AppCore
 import Models
 import Networking
+import OfflineCache
 
 @MainActor
 @Observable
@@ -50,7 +51,9 @@ public final class IntelligenceStore {
 
     private func fetchBurn(using client: APIClient) async {
         do {
-            burnState = .loaded(try await client.llmBurn())
+            let response = try await client.llmBurn()
+            burnState = .loaded(response)
+            WidgetSnapshotStore.updateLlm(response)
         } catch let error as APIError {
             handle(error, on: &burnState)
         } catch {

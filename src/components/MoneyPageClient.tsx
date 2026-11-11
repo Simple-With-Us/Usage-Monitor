@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import FleetBudgetCard from "@/components/FleetBudgetCard";
 import PaidServicesPanel from "@/components/PaidServicesPanel";
 import ListLoadErrorPanel from "@/components/ListLoadErrorPanel";
 import type { SubscriptionRow } from "@/components/SubscriptionsPanel";
@@ -80,6 +81,8 @@ export default function MoneyPageClient() {
           Manage subscriptions
         </Link>
       </div>
+
+      <FleetBudgetCard />
 
       {loading && providers.length === 0 && subscriptions.length === 0 ? (
         <div className="animate-pulse rounded-2xl border border-gray-200 bg-white h-64 dark:border-gray-700 dark:bg-gray-800" />

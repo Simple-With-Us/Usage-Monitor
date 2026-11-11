@@ -1,10 +1,11 @@
 /**
  * Observability probes — "is anything screaming at us right now".
  *
- * Three platforms answer three different questions:
+ * Four platforms answer four different questions:
  *  - Sentry: are there unresolved errors in any fleet project?
  *  - UptimeRobot: is every public endpoint answering?
  *  - PagerDuty: is anyone being paged right now?
+ *  - Datadog: are we still inside Infrastructure Free (hosts / logs / APM)?
  *
  * Sentry reuses `@/lib/sentry-health`, which already fetches per-project
  * unresolved counts for the dashboard's Sentry card — this probe renders that
@@ -28,6 +29,11 @@
  */
 
 import { fetchSentryHealth, isSentryHealthConfigured } from "@/lib/sentry-health";
+import {
+  DATADOG_HOST_CAP,
+  fetchDatadogUsage,
+  isDatadogUsageConfigured,
+} from "@/lib/datadog-usage";
 import {
   asArray,
   asRecord,
@@ -690,6 +696,49 @@ async function probePagerDuty(): Promise<PlatformProbeResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Datadog estimated usage (Infrastructure Free)
+// ---------------------------------------------------------------------------
+
+async function probeDatadog(): Promise<PlatformProbeResult> {
+  try {
+    const usage = await fetchDatadogUsage();
+    if (!usage.configured) {
+      return {
+        state: "unavailable",
+        headline: "Datadog credentials are no longer readable.",
+        metrics: [],
+        error: "not_configured",
+      };
+    }
+
+    const metrics: PlatformMetric[] = [
+      metric("Hosts", formatCount(usage.hosts ?? 0, "host"), `cap ${DATADOG_HOST_CAP}`),
+      metric("Containers", formatCount(usage.containers ?? 0, "container")),
+      metric("Log events (1h)", formatCount(Math.round(usage.logsIngestedEvents ?? 0), "event")),
+      metric("APM spans (1h)", formatCount(Math.round(usage.apmIngestedSpans ?? 0), "span")),
+    ];
+
+    const hosts = usage.hosts ?? 0;
+    if (hosts > DATADOG_HOST_CAP) {
+      return {
+        state: "degraded",
+        headline: `Estimated ${formatCount(hosts, "host")} — Free allows ${DATADOG_HOST_CAP}.`,
+        metrics,
+        error: "host_cap",
+      };
+    }
+
+    return {
+      state: "healthy",
+      headline: `Inside the ${DATADOG_HOST_CAP}-host Free cap.  Logs and APM are estimated usage, not a promise they are free.`,
+      metrics,
+    };
+  } catch (error) {
+    return failureResult(error, "Datadog estimated usage could not be read.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 export const OBSERVABILITY_PROBES: readonly PlatformProbe[] = [
   {
@@ -720,5 +769,14 @@ export const OBSERVABILITY_PROBES: readonly PlatformProbe[] = [
     consoleUrl: "https://app.pagerduty.com/incidents",
     isConfigured: () => hasEnv("PAGERDUTY_API_KEY"),
     probe: probePagerDuty,
+  },
+  {
+    id: "datadog",
+    name: "Datadog",
+    category: "observability",
+    requiredEnv: ["DD_API_KEY", "DD_APP_KEY"],
+    consoleUrl: "https://us5.datadoghq.com/",
+    isConfigured: () => isDatadogUsageConfigured(),
+    probe: probeDatadog,
   },
 ];

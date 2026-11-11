@@ -2,8 +2,8 @@
 # Coolify/Hetzner host probe: prove Litestream replica freshness for Usage Monitor.
 #
 # Install on fleet-hetzner-nbg1 as /usr/local/sbin/usage-monitor-replica-status
-# and drive with a 10-minute systemd timer. Writes into the Coolify volume that
-# is mounted at /data inside the app container so Next.js can read the verdict
+# and drive with a systemd timer. Writes into the Coolify volume that is
+# mounted at /data inside the app container so Next.js can read the verdict
 # at LITESTREAM_REPLICA_STATUS_PATH (default /data/.litestream-replica-status.json).
 #
 # Why not reuse deploy/oracle/replica-status-probe.sh?
@@ -12,6 +12,37 @@
 #     `docker exec litestream ltx` fails with "bucket required"
 #   - Container /proc/*/environ is ptrace-restricted; host root reads the
 #     litestream PID via `docker top` instead
+#
+# Secret safety: never pass LITESTREAM_S3_* (or any replica credential) on
+# docker exec argv — systemd journals capture argv. Host fallback injects env
+# via a mode-0600 --env-file that is deleted immediately after exec.
+#
+# Cost efficiency (2026-08-31): this probe used to try an in-container
+# `docker exec ... replica-status-heartbeat.sh --once` first and only fall
+# back to the host env-file path when that failed. On this infra it always
+# fails — Coolify injects the Infisical secrets into the entrypoint process's
+# environment only, and a bare `docker exec` never inherits that, so the
+# in-container attempt burned a docker-exec + bash spawn on every tick for a
+# guaranteed `replica_credentials_missing`. That attempt is removed; we go
+# straight to the host env-file LTX fallback below.
+#
+# The fallback itself was also trimmed from an unconditional 5
+# `litestream ltx -level {0,1,2,3,9}` LIST calls per tick to an adaptive
+# probe (see `probe_level`/escalation below): try level 0 alone first — the
+# common case (replication actively writing) resolves there in a single
+# call — and only escalate to levels 1-3, then 9 as a last resort, when
+# level 0 comes back empty/erroring/timed-out. Levels 1-3 are NOT redundant
+# with level 0: litestream's default L0 retention is brief, so a compaction
+# can legitimately leave L0 empty for a beat with no new writes since, while
+# the true continuous tip already lives at L1-L3 (the same edge case the
+# legacy Oracle deploy gate's `verify_backup_path` and the in-container
+# heartbeat's own `CONTINUOUS_LEVELS=(0 1 2 3)` already guard against — an
+# earlier draft of this trim queried only {0,9} unconditionally and would
+# have reintroduced that exact false-staleness bug; caught by review before
+# merge). Net cost: 1 call/tick in the steady state, up to 5 only in the
+# rare escalation — paired with widening the timer cadence 10min -> 30min,
+# this cuts the ~720 Backblaze Class C list calls/day this probe drove down
+# to roughly 48-96/day depending on how often escalation triggers.
 set -euo pipefail
 umask 022
 export LC_ALL=C
@@ -77,15 +108,21 @@ if [[ -z "${STATUS_FILE}" ]]; then
   exit 1
 fi
 
-# Prefer in-container heartbeat script when present (has Infisical env via
-# process re-export). Fall back to host-PID environ LTX listing.
-run_in_container_heartbeat() {
-  docker exec "${CONTAINER}" bash /app/scripts/replica-status-heartbeat.sh --once 2>/dev/null
-}
+# No in-container heartbeat attempt here (short-circuited, see header
+# comment) — a bare `docker exec` on this infra never carries the
+# Infisical-injected LITESTREAM_S3_* env, so it would always fail with
+# replica_credentials_missing before listing anything. Go straight to the
+# host env-file LTX fallback, which supplies that env itself.
+log "using host env-file LTX fallback on ${CONTAINER}"
 
 run_ltx_via_process_env() {
   python3 - <<'PY' "${CONTAINER}" "${MAX_LTX_AGE_SECONDS}"
-import datetime, re, subprocess, sys
+import datetime
+import json
+import os
+import subprocess
+import sys
+import tempfile
 
 container = sys.argv[1]
 max_age = int(sys.argv[2])
@@ -154,62 +191,145 @@ if any(not env_map.get(k) for k in required):
     print("CREDS_MISSING", file=sys.stderr)
     sys.exit(4)
 
-export_args = []
-for k in required + ["LITESTREAM_S3_REGION"]:
-    if env_map.get(k):
-        export_args.extend(["-e", f"{k}={env_map[k]}"])
+def classify(stderr: str, rc: int) -> str:
+    lower = stderr.lower()
+    if rc == 124:
+        return "list_timeout"
+    if "tls handshake timeout" in lower or "i/o timeout" in lower:
+        return "list_timeout"
+    if "timed out" in lower or "deadline exceeded" in lower:
+        return "list_timeout"
+    return "list_error"
 
-latest = None
-for level in range(0, 6):
-    r = subprocess.run(
-        ["docker", "exec", *export_args, container,
-         "/app/bin/litestream", "ltx",
-         "-config", "/app/litestream.yml",
-         "-level", str(level),
-         "/data/prod.db"],
-        capture_output=True, text=True, timeout=70,
-    )
-    if r.returncode != 0:
-        continue
-    times = []
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 5 and re.fullmatch(r"[0-9]+", parts[0]):
-            times.append(parts[4])
-    if times:
-        latest = sorted(times)[-1]
-        break
+def newest_timestamp(payload: str):
+    try:
+        rows = json.loads(payload or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    stamps = [row.get("timestamp") for row in rows if isinstance(row, dict) and row.get("timestamp")]
+    return sorted(stamps)[-1] if stamps else None
 
-if not latest:
-    print("NO_LTX", file=sys.stderr)
-    sys.exit(5)
-
+env_path = None
 try:
-    dt = datetime.datetime.fromisoformat(latest.replace("Z", "+00:00"))
-except Exception:
-    print(f"BAD_TS {latest}", file=sys.stderr)
-    sys.exit(6)
+    with tempfile.NamedTemporaryFile(
+        mode="w", prefix="litestream-env.", delete=False, dir="/tmp"
+    ) as env_file:
+        env_path = env_file.name
+        for key in required + ["LITESTREAM_S3_REGION"]:
+            value = env_map.get(key)
+            if value:
+                env_file.write(f"{key}={value}\n")
+    os.chmod(env_path, 0o600)
 
-age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
-ok = 0 <= age <= max_age
-print(f"LATEST={latest}")
-print(f"AGE={age}")
-print(f"OK={1 if ok else 0}")
-sys.exit(0 if ok else 10)
+    continuous_newest = None
+    snapshot_newest = None
+    saw_empty = False
+    saw_timeout = False
+    saw_error = False
+
+    def probe_level(level):
+        global saw_empty, saw_timeout, saw_error
+        try:
+            proc = subprocess.run(
+                [
+                    "docker", "exec", "--env-file", env_path, container,
+                    "/app/bin/litestream", "ltx", "-json",
+                    "-config", "/app/litestream.yml",
+                    "-level", str(level),
+                    "/data/prod.db",
+                ],
+                capture_output=True, text=True, timeout=70,
+            )
+        except subprocess.TimeoutExpired:
+            saw_timeout = True
+            return None
+        except Exception:
+            saw_error = True
+            return None
+
+        if proc.returncode == 0:
+            if proc.stdout.strip() in ("", "[]"):
+                saw_empty = True
+                return None
+            ts = newest_timestamp(proc.stdout)
+            if not ts:
+                saw_error = True
+                return None
+            return ts
+
+        kind = classify(proc.stderr, proc.returncode)
+        if kind == "list_timeout":
+            saw_timeout = True
+        else:
+            saw_error = True
+        return None
+
+    # Level 0 alone resolves the common case (replication actively writing) in
+    # a single call. Only escalate to levels 1-3 when level 0 comes back
+    # empty/timed-out/erroring: litestream's default L0 retention is brief, so
+    # a compaction can legitimately leave L0 empty for a beat with no new
+    # writes since, while the true continuous tip already lives at L1-L3 —
+    # the same edge case the legacy Oracle deploy gate's `verify_backup_path`
+    # and the in-container heartbeat's `CONTINUOUS_LEVELS=(0 1 2 3)` already
+    # guard against (flagged by review on this change — see the rollout note).
+    # Level 9 (snapshot) is only queried as a last resort, when no continuous
+    # tip was found at any level, since it is never used otherwise. Net cost:
+    # 1 call/tick in the steady state, up to 5 only in the rare escalation.
+    continuous_newest = probe_level(0)
+    if continuous_newest is None:
+        for level in (1, 2, 3):
+            ts = probe_level(level)
+            if ts and (continuous_newest is None or ts > continuous_newest):
+                continuous_newest = ts
+
+    if continuous_newest is None:
+        snapshot_newest = probe_level(9)
+
+    chosen = continuous_newest or snapshot_newest
+    probe_reason = ""
+    if continuous_newest:
+        probe_reason = ""
+    elif snapshot_newest:
+        probe_reason = "snapshot_only"
+
+    if not chosen:
+        if saw_timeout:
+            print("REASON=list_timeout", file=sys.stderr)
+            sys.exit(7)
+        if saw_empty and not saw_error:
+            print("REASON=empty_ltx", file=sys.stderr)
+            sys.exit(8)
+        if saw_error:
+            print("REASON=list_error", file=sys.stderr)
+            sys.exit(9)
+        print("REASON=no_parseable_ltx", file=sys.stderr)
+        sys.exit(5)
+
+    try:
+        dt = datetime.datetime.fromisoformat(chosen.replace("Z", "+00:00"))
+    except Exception:
+        print(f"BAD_TS {chosen}", file=sys.stderr)
+        sys.exit(6)
+
+    age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+    ok = 0 <= age <= max_age
+    print(f"LATEST={chosen}")
+    print(f"AGE={age}")
+    print(f"OK={1 if ok else 0}")
+    if probe_reason:
+        print(f"REASON={probe_reason}")
+    sys.exit(0 if ok else 10)
+finally:
+    if env_path:
+        try:
+            os.unlink(env_path)
+        except OSError:
+            pass
 PY
 }
 
-if run_in_container_heartbeat; then
-  if [[ -f "${STATUS_FILE}" ]]; then
-    # Reject a prior false verdict from an older probe if heartbeat rewrote ok.
-    if jq -e '.ok == true' "${STATUS_FILE}" >/dev/null 2>&1; then
-      log "in-container heartbeat OK → ${STATUS_FILE}"
-      exit 0
-    fi
-  fi
-fi
-
-log "using host-PID environ LTX listing on ${CONTAINER}"
 set +e
 out="$(run_ltx_via_process_env 2>&1)"
 rc=$?
@@ -219,7 +339,8 @@ log "ltx probe rc=${rc}"
 if [[ "${rc}" -eq 0 ]]; then
   age="$(printf '%s\n' "${out}" | awk -F= '/^AGE=/{print $2; exit}')"
   age="${age:-0}"
-  write_status_host "${STATUS_FILE}" true "${age}" ""
+  reason="$(printf '%s\n' "${out}" | awk -F= '/^REASON=/{print $2; exit}')"
+  write_status_host "${STATUS_FILE}" true "${age}" "${reason}"
   log "replica healthy: age=${age}s → ${STATUS_FILE}"
   exit 0
 fi
@@ -227,8 +348,12 @@ fi
 if [[ "${rc}" -eq 10 ]]; then
   age="$(printf '%s\n' "${out}" | awk -F= '/^AGE=/{print $2; exit}')"
   age="${age:-0}"
-  write_status_host "${STATUS_FILE}" false "${age}" "ltx_age_exceeds_budget"
-  log "LTX age ${age}s exceeds budget"
+  reason="$(printf '%s\n' "${out}" | awk -F= '/^REASON=/{print $2; exit}')"
+  if [[ -z "${reason}" ]]; then
+    reason="ltx_age_exceeds_budget"
+  fi
+  write_status_host "${STATUS_FILE}" false "${age}" "${reason}"
+  log "LTX age ${age}s exceeds budget (${reason})"
   exit 0
 fi
 
@@ -236,10 +361,13 @@ reason="no_parseable_ltx"
 case "${out}" in
   *NO_LITESTREAM_PID*) reason="litestream_not_running" ;;
   *CREDS_MISSING*) reason="replica_credentials_missing" ;;
-  *NO_LTX*) reason="no_parseable_ltx" ;;
+  *REASON=list_timeout*) reason="list_timeout" ;;
+  *REASON=empty_ltx*) reason="empty_ltx" ;;
+  *REASON=list_error*) reason="list_error" ;;
+  *REASON=no_parseable_ltx*) reason="no_parseable_ltx" ;;
   *BAD_TS*) reason="invalid_ltx_timestamp" ;;
   *ENV_READ_FAILED*) reason="replica_status_unreadable" ;;
 esac
 write_status_host "${STATUS_FILE}" false null "${reason}"
-log "ERROR: probe failed (${reason}): ${out}"
-exit 1
+log "ERROR: probe failed (${reason})"
+exit 0

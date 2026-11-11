@@ -20,13 +20,17 @@ import {
   getDiskRuntimeStatus,
   getLocalBackupRuntimeStatus,
   getLitestreamReplicaTarget,
+  getPublicR2WeeklyHealth,
   getR2HistoricBackupStatus,
   getR2WeeklyArchiveStatus,
   presentR2HistoricLayer,
   formatBackupAgeSeconds,
+  getAppliedSchedulerGate,
   getRuntimeIdentity,
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
+  isSchedulerEnabled,
+  recordSchedulerGate,
   getStartupRuntimeStatus,
   markSchedulerStarted,
   markSchedulerTickCompleted,
@@ -38,6 +42,18 @@ describe("runtime health state", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     resetRuntimeHealthForTests();
+  });
+
+  it("isSchedulerEnabled() reads live env until recordSchedulerGate pins boot value", () => {
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(false);
+
+    recordSchedulerGate(true);
+    expect(isSchedulerEnabled()).toBe(true);
+    expect(getAppliedSchedulerGate()).toBe(true);
+
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(true);
   });
 
   it("records scheduler lifecycle without exposing adapter errors", () => {
@@ -102,6 +118,47 @@ describe("runtime health state", () => {
       ].sort()
     );
     expect(JSON.stringify(runtime)).not.toContain("must-not-leak");
+  });
+
+  it("preserves scheduler summary fields in lastRun without attaching provider details (AGENTS.md L226-228)", () => {
+    const tickAt = new Date("2026-09-12T12:00:00.000Z");
+    const completedAt = new Date("2026-09-12T12:01:00.000Z");
+    markSchedulerStarted(tickAt);
+    markSchedulerTickStarted(tickAt);
+    const summary = {
+      total: 27,
+      successes: 0,
+      failures: 2,
+      skipped: 25,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled" as const,
+    };
+    markSchedulerTickCompleted(true, summary, completedAt);
+    const runtime = getSchedulerRuntimeStatus();
+    expect(runtime.lastRun).toEqual({
+      total: 27,
+      successes: 0,
+      failures: 2,
+      skipped: 25,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled",
+    });
+    expect(runtime.lastTickSucceeded).toBe(true);
+    expect(runtime.lastTickProviderPollHealthy).toBe(false);
+    expect(getSchedulerReadiness(completedAt)).toMatchObject({
+      ok: true,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
+      providerFetchDegradedTickThreshold: 3,
+    });
+    expect(getSchedulerRuntimeStatus().consecutiveProviderFetchDegradedTicks).toBe(
+      1
+    );
+    // AGENTS.md lines 226-228: /api/ready exposes the scheduler summary without
+    // attaching target/provider IDs, env values, billing payloads, or provider errors.
+    expect("failedProviders" in (runtime.lastRun ?? {})).toBe(false);
   });
 
   it("reports release identity and backup enforcement from non-secret env", () => {
@@ -245,7 +302,7 @@ describe("runtime health state", () => {
       vi.stubEnv("LITESTREAM_ACTIVE", "true");
       vi.stubEnv("LITESTREAM_REPLICA_STATUS_PATH", statusPath);
 
-      // Shape written by deploy/oracle/replica-status-probe.sh. It omits
+      // Shape written by deploy/retired/oracle/replica-status-probe.sh. It omits
       // `ageSeconds` ON PURPOSE: the parser prefers ageSeconds over
       // checkedAt, and a frozen ageSeconds in a file left behind by a dead
       // probe would pass forever. checkedAt must drive staleness.
@@ -499,6 +556,33 @@ describe("runtime health state", () => {
       expect(getR2WeeklyArchiveStatus()).toBeNull();
     });
 
+    it("re-reads the status file after it is rewritten (memo invalidation)", () => {
+      const path = writeArchiveStatus({
+        ok: true,
+        key: "weekly/first.db.gz",
+        completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        prunedCount: 1,
+      });
+      vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+      // Repeat read of the unchanged file (memo hit) agrees.
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ok: false,
+          reason: "verify_hash_mismatch",
+          checkedAt: new Date().toISOString(),
+        }),
+        "utf8"
+      );
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({
+        ok: false,
+        reason: "verify_hash_mismatch",
+      });
+    });
+
     it("reports a fresh successful archive as ok", () => {
       const path = writeArchiveStatus({
         ok: true,
@@ -652,6 +736,79 @@ describe("runtime health state", () => {
         reason: null,
       });
       expect(getR2HistoricBackupStatus().weeklyArchive?.ok).toBe(true);
+    });
+
+    describe("public health view (checks.storage.r2Weekly)", () => {
+      it("reports no_receipt when the job has never run", () => {
+        vi.stubEnv("R2_ARCHIVE_STATUS_PATH", join(tmpdir(), "definitely-absent.json"));
+        expect(getPublicR2WeeklyHealth()).toEqual({
+          ok: false,
+          key: null,
+          ageSeconds: null,
+          staleness: "unknown",
+          reason: "no_receipt",
+        });
+      });
+
+      it("reports no_receipt when the receipt file is unreadable", () => {
+        const dir = mkdtempSync(join(tmpdir(), "r2-archive-status-"));
+        const path = join(dir, "status.json");
+        writeFileSync(path, "not json", "utf8");
+        vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+        expect(getPublicR2WeeklyHealth()).toEqual({
+          ok: false,
+          key: null,
+          ageSeconds: null,
+          staleness: "unknown",
+          reason: "no_receipt",
+        });
+      });
+
+      it("reports fresh for a recent successful archive", () => {
+        const path = writeArchiveStatus({
+          ok: true,
+          key: "weekly/prod-2026-08-12T00-00-00Z.db.gz",
+          completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        });
+        vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+
+        const health = getPublicR2WeeklyHealth();
+        expect(health.ok).toBe(true);
+        expect(health.staleness).toBe("fresh");
+        expect(health.key).toBe("weekly/prod-2026-08-12T00-00-00Z.db.gz");
+        expect(health.reason).toBeNull();
+        expect(health.ageSeconds).toBeGreaterThanOrEqual(3_500);
+      });
+
+      it("reports stale when completedAt is outside the 8-day window", () => {
+        const path = writeArchiveStatus({
+          ok: true,
+          key: "weekly/old.db.gz",
+          completedAt: new Date(Date.now() - 9 * 24 * 3_600_000).toISOString(),
+        });
+        vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+
+        expect(getPublicR2WeeklyHealth()).toMatchObject({
+          ok: false,
+          staleness: "stale",
+          reason: "archive_stale",
+        });
+      });
+
+      it("reports stale (not no_receipt) when the job itself reported failure", () => {
+        const path = writeArchiveStatus({
+          ok: false,
+          reason: "verify_hash_mismatch",
+          checkedAt: new Date().toISOString(),
+        });
+        vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+
+        expect(getPublicR2WeeklyHealth()).toMatchObject({
+          ok: false,
+          staleness: "stale",
+          reason: "verify_hash_mismatch",
+        });
+      });
     });
   });
 
@@ -903,9 +1060,8 @@ describe("runtime health state", () => {
       providerFetchDegraded: false,
     };
 
-    // A single degraded tick must not flip readiness - only a sustained run
-    // does. `succeeded` here stays true throughout: provider-fetch health is
-    // deliberately independent of maintenanceHealthy/lastTickSucceeded.
+    // Partial degradation (some successes) still needs a sustained streak
+    // before readinessReason latches; maintenance stays healthy throughout.
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({ ok: true, reason: null });
     expect(
@@ -924,8 +1080,6 @@ describe("runtime health state", () => {
     });
     expect(getSchedulerRuntimeStatus()).toMatchObject({
       consecutiveProviderFetchDegradedTicks: 3,
-      // Never affects lastTickSucceeded/consecutiveFailures - the app itself
-      // is still serving; a provider-fetch outage is upstream.
       lastTickSucceeded: true,
       consecutiveFailures: 0,
     });
@@ -974,13 +1128,15 @@ describe("runtime health state", () => {
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
-      reason: null,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
       reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
   });

@@ -69,6 +69,11 @@ public struct LocalProvider: Identifiable, Equatable, Sendable, Hashable {
     public var canFetch: Bool {
         isPollable && keychainAccountId != nil
     }
+
+    /// Pollable shell with no Keychain credential — the restore/catalog gap.
+    public var needsKey: Bool {
+        isPollable && keychainAccountId == nil
+    }
 }
 
 public struct LocalProviderPlan: Equatable, Sendable {

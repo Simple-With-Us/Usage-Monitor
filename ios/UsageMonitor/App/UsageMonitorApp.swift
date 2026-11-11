@@ -57,13 +57,24 @@ struct UsageMonitorApp: App {
                 _selection = State(initialValue: tab)
             }
         } else {
+            let tokenStore = AccountChangeNotifyingTokenStore()
+            if let token = ProcessInfo.processInfo.environment["USAGE_READ_TOKEN"] {
+                try? tokenStore.setToken(token)
+            }
+            let args = ProcessInfo.processInfo.arguments
+            if let idx = args.firstIndex(of: "-ReadToken"), args.indices.contains(idx + 1) {
+                try? tokenStore.setToken(args[idx + 1])
+            }
             _environment = State(
                 initialValue: AppEnvironment(
                     settings: AppSettings(sharedDefaults: AppGroup.defaults),
-                    tokenStore: AccountChangeNotifyingTokenStore(),
+                    tokenStore: tokenStore,
                     snapshotSink: OfflineCacheSnapshotSink()
                 )
             )
+            if let tab = ScreenshotDemo.preferredTab {
+                _selection = State(initialValue: tab)
+            }
         }
     }
 
@@ -92,6 +103,9 @@ struct UsageMonitorApp: App {
                 await AlertNotifier.activateAccountScope(
                     AlertNotifier.currentAccountScopeID(hostOverride: environment.settings.baseHost)
                 )
+                if !ScreenshotDemo.isEnabled {
+                    await WidgetSnapshotStore.refreshSecondarySections(using: environment.apiClient)
+                }
             }
             .task {
                 for await _ in NotificationCenter.default.notifications(
@@ -111,9 +125,21 @@ struct UsageMonitorApp: App {
             Task {
                 await activateCurrentAccountScope()
             }
-            // Queue the next background budget refresh when leaving foreground.
-            if phase == .background, PlatformRuntime.supportsBackgroundAppRefresh {
-                BackgroundRefreshManager.shared.schedule()
+            if phase == .active {
+                // Ensure budget status, secondary widget data (LLM, Mac, Servers), and alert notifications
+                // refresh when entering foreground.  Screenshot capture must stay on
+                // fixtures: a live refresh would stamp real spend into the app-group cache
+                // and the widget snapshot that ASC reads.
+                if !ScreenshotDemo.isEnabled {
+                    Task { await BackgroundRefreshManager.shared.performRefresh() }
+                }
+            }
+            // Force-reload widgets and queue background budget refresh when leaving foreground.
+            if phase == .background {
+                WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
+                if PlatformRuntime.supportsBackgroundAppRefresh {
+                    BackgroundRefreshManager.shared.schedule()
+                }
             }
         }
     }
@@ -142,6 +168,7 @@ private extension AppFeatures {
         alerts: { AnyView(AlertsRootView()) },
         serverStatus: { AnyView(ServerStatusRootView()) },
         computers: { AnyView(ComputersRootView()) },
+        agents: { AnyView(AgentsRootView()) },
         platforms: { AnyView(PlatformsRootView()) },
         projects: { AnyView(ProjectBudgetsRootView()) },
         settings: { AnyView(SettingsRootView()) }

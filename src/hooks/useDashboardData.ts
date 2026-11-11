@@ -20,6 +20,7 @@ export type TimeframeOption =
   | "30d"
   | "90d"
   | "180d"
+  | "365d"
   | "all"
   | `month:${string}`  // e.g. "month:2026-08" — calendar month
   | `year:${string}`;  // e.g. "year:2026" — calendar year
@@ -105,6 +106,8 @@ export function timeframeDisplayLabel(tf: TimeframeOption): string {
       return "Past 90 days";
     case "180d":
       return "Past 180 days";
+    case "365d":
+      return "Past 12 months";
     case "all":
       return "All time";
   }
@@ -144,6 +147,8 @@ export function timeframeShortLabel(tf: TimeframeOption): string {
       return "90d";
     case "180d":
       return "180d";
+    case "365d":
+      return "12m";
     case "all":
       return "All";
   }
@@ -170,9 +175,9 @@ export function isCurrentCalendarMonth(tf: TimeframeOption): boolean {
   return isCalendarMonth(tf) && tf === currentMonthToken();
 }
 
-/** True when `tf` is one of the four primary chips (This month / 7d / 30d / 90d). */
+/** True when `tf` is one of the primary chips (This month / 30d / 90d / 180d / 365d / 7d). */
 export function isPrimaryHistoryChip(tf: TimeframeOption): boolean {
-  if (tf === "7d" || tf === "30d" || tf === "90d") return true;
+  if (tf === "30d" || tf === "90d" || tf === "180d" || tf === "365d" || tf === "7d") return true;
   return isCurrentCalendarMonth(tf);
 }
 
@@ -252,6 +257,8 @@ export function timeframeToDays(tf: TimeframeOption): number {
       return 90;
     case "180d":
       return 180;
+    case "365d":
+      return 365;
     case "all":
       return 3650;
     default:
@@ -346,7 +353,7 @@ const AUTO_REFRESH_INTERVAL_MS = 60_000;
 const FOCUS_REFRESH_THROTTLE_MS = 15_000;
 
 export function useDashboardData() {
-  const [timeframe, setTimeframe] = useState<TimeframeOption>(currentMonthToken());
+  const [timeframe, setTimeframe] = useState<TimeframeOption>("30d");
   const [providers, setProviders] = useState<any[]>([]);
   const [usageSummary, setUsageSummary] = useState<ExternalUsageSummary | null>(null);
   const [projects, setProjects] = useState<ProjectBudgetStatus[]>([]);
@@ -645,16 +652,26 @@ export function useDashboardData() {
     };
   }, [fetchProviders]);
 
-  // Portfolio auto-refresh when open
+  // Range-scoped fetch (usage events + project budgets) for the chart /
+  // telemetry section. Runs on mount and whenever `timeframe` changes
+  // (fetchPortfolioData's identity changes with it — see its useCallback
+  // deps above), regardless of whether the portfolio panel is expanded.
+  // The chart-range control sits above the chart unconditionally, so
+  // selecting a new range must never be a no-op just because the section
+  // happens to be collapsed. One grouped query + one project query — cheap
+  // enough to always run.
+  useEffect(() => {
+    void fetchPortfolioData();
+  }, [fetchPortfolioData]);
+
+  // Poll for fresher portfolio/chart data only while the section is open —
+  // no point refreshing data nobody can see. The fetch above already covers
+  // the initial load and every timeframe change.
   useEffect(() => {
     if (!portfolioOpen) return;
-    if (!document.hidden) void fetchPortfolioData();
-    const interval = window.setInterval(
-      () => {
-        if (!document.hidden) void fetchPortfolioData();
-      },
-      AUTO_REFRESH_INTERVAL_MS
-    );
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void fetchPortfolioData();
+    }, AUTO_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [fetchPortfolioData, portfolioOpen]);
 

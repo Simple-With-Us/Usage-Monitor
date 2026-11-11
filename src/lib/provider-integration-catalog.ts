@@ -24,7 +24,7 @@ export type IntegrationConfidence = "high" | "medium";
 
 export type CatalogProviderName =
   | BuiltInProviderName
-  | "agent-sync-relay"
+  | "simple-tools-relay"
   | "custom"
   | "generic";
 
@@ -182,6 +182,11 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     cannotAdd: ["A standard inference key without Management API access cannot read team billing.", "SuperGrok, Grok.com, and Grok Build CLI subscription quota are MANUALLY ONLY. They are a separate product from xAI Management API prepaid/postpaid billing."],
     limitations: ["Requires an exact team ID and billing-capable management credential.", "Do not treat a SuperGrok seat as a fetchable xAI connection."],
     source: "src/lib/adapters/xai.ts",
+  }),
+  minimax: defineBlindProfile({
+    name: "minimax", displayName: "MiniMax", category: "LLM/AI",
+    reason: "MiniMax exposes no documented account/billing API here; subscription quota is read by the Mac-side quota collector, or entered manually.",
+    source: "src/lib/provider-definitions.ts",
   }),
   mistral: defineProfile({
     name: "mistral", displayName: "Mistral AI", category: "LLM/AI", mode: "partial",
@@ -460,7 +465,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     ],
     limitations: [
       "totalCost is public storage price × billable GB × UTC month fraction only.",
-      "totalRequests is whole megabytes of storage so request-limit budgets can soft-cap footprint.",
+      "totalRequests is whole megabytes of storage so request-limit budgets can soft-cap footprint; as a storage gauge it is excluded from request-anomaly detection.",
       "Very large buckets may truncate inventory at a safety max file-version count.",
     ],
     source: "src/lib/adapters/backblaze.ts",
@@ -537,6 +542,18 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["Only USD fees are included in the normalized total."],
     source: "src/lib/adapters/stripe.ts",
   }),
+  namecheap: defineProfile({
+    name: "namecheap", displayName: "Namecheap", category: "Infrastructure", mode: "direct",
+    summary: "Reads prepaid account balance, funds required for auto-renewal, and active domain inventory with upcoming expiration dates from the official Namecheap XML API.",
+    reads: ["Account balance, available balance, earned/withdrawable funds, funds required for auto-renew, and active domains with expiration dates."],
+    stores: ["Prepaid balance, total active domain count, and domain renewal metadata; billing payment methods and registrar contact details are not requested."],
+    credentialInputs: ["Namecheap API key.", "Account username.", "Optional whitelisted client IP."],
+    billing: { visibility: "actual", summary: "Prepaid available balance is direct. Domain renewals and auto-renew required funds are visible in snapshot metadata." },
+    canAdd: ["Domain auto-renewal status, expiration timeline, and DNS host inspection."],
+    cannotAdd: ["Domains registered with third-party registrars are not visible through Namecheap API."],
+    limitations: ["Namecheap API requires IP address whitelisting in the account security settings."],
+    source: "src/lib/adapters/namecheap.ts",
+  }),
   robinhood: defineBlindProfile({ name: "robinhood", displayName: "Robinhood", category: "Brokerage", reason: "Robinhood has no supported public retail account usage or billing API for this monitor.", source: "src/lib/adapters/robinhood.ts", canAdd: ["The trading app can push operational usage/cost telemetry that does not expose brokerage credentials or holdings."], cannotAdd: ["Unofficial, reverse-engineered, or browser-session access is not suitable for unattended billing sync."] }),
   alpaca: defineProfile({
     name: "alpaca", displayName: "Alpaca", category: "Brokerage", mode: "partial",
@@ -550,8 +567,8 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["One row represents one credential/environment pair."],
     source: "src/lib/adapters/alpaca.ts",
   }),
-  "agent-sync-relay": defineProfile({
-    name: "agent-sync-relay", displayName: "Agent Sync Relay", category: "Operations", mode: "health-only",
+  "simple-tools-relay": defineProfile({
+    name: "simple-tools-relay", displayName: "Simple Tools Relay", category: "Operations", mode: "health-only",
     summary: "Checks the relay health endpoint; this is service availability monitoring, not a third-party billing account.",
     reads: ["Health response and HTTP availability."],
     stores: ["UP/error state and returned health metadata."],
@@ -561,7 +578,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     canAdd: ["Authenticated health or service-level metrics could be added if the relay exposes them safely."],
     cannotAdd: ["Slack message content and agent coordination data are not read by this adapter."],
     limitations: ["A custom endpoint is treated as untrusted and SSRF-checked."],
-    source: "src/lib/adapters/agent-sync-relay.ts",
+    source: "src/lib/adapters/simple-tools-relay.ts",
   }),
   custom: defineProfile({
     name: "custom", displayName: "Custom API", category: "Custom", mode: "configurable",
@@ -592,7 +609,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
 };
 
 const ALIASES: Readonly<Record<string, CatalogProviderName>> = {
-  agent_sync_relay: "agent-sync-relay",
+  simple_tools_relay: "simple-tools-relay",
 };
 
 // The connection catalog is intentionally narrower than CATALOG: CATALOG

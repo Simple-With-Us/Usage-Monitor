@@ -263,6 +263,29 @@ describe("GET /api/ready", () => {
     );
   });
 
+  it("exposes secret-free Datadog observability, never gating ok", async () => {
+    vi.stubEnv("DD_API_KEY", "dd-secret-must-not-leak");
+    vi.stubEnv("DD_AGENT_HOST", "127.0.0.1");
+
+    const response = await GET(READY_REQUEST);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.checks.datadog).toEqual({
+      required: false,
+      apmConfigured: false,
+      rumConfigured: false,
+      service: null,
+      env: null,
+      site: null,
+      missing: ["DD_SERVICE"],
+    });
+    expect(JSON.stringify(body.checks.datadog)).not.toContain(
+      "dd-secret-must-not-leak"
+    );
+  });
+
   it("keeps HTTP liveness-safe while reporting SQLite unavailable", async () => {
     vi.spyOn(process, "uptime").mockReturnValue(301);
     mocks.queryRawUnsafe.mockRejectedValue(new Error("database unavailable"));
@@ -568,6 +591,40 @@ describe("GET /api/ready", () => {
       readinessReason: null,
       providerFetchDegraded: false,
       consecutiveProviderFetchDegradedTicks: 1,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
+    });
+  });
+
+  it("surfaces a zero-success provider-fetch outage on the first tick (UM-1373)", async () => {
+    const degradedRun = {
+      total: 27,
+      successes: 0,
+      failures: 2,
+      skipped: 25,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled" as const,
+    };
+    markSchedulerTickCompleted(true, degradedRun);
+
+    const response = await GET(READY_REQUEST);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, status: "ready" });
+    expect(body.checks.scheduler).toMatchObject({
+      ok: true,
+      readinessReason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
+      consecutiveProviderFetchDegradedTicks: 1,
+      lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
+      lastRun: {
+        successes: 0,
+        failures: 2,
+        providerFetchDegraded: true,
+      },
     });
   });
 
@@ -601,6 +658,7 @@ describe("GET /api/ready", () => {
       providerFetchDegradedTickThreshold: 3,
       consecutiveProviderFetchDegradedTicks: 3,
       lastTickSucceeded: true,
+      lastTickProviderPollHealthy: false,
       consecutiveFailures: 0,
     });
   });

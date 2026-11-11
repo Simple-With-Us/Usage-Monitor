@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// Bottom scroll clearance for the floating glass tab bar.
+/// Bottom scroll clearance for the anchored tab bar.
 ///
-/// The Client shell draws a custom capsule bar.  On iOS 26, Form / List /
+/// The Client shell draws a custom full-width bar.  On iOS 26, Form / List /
 /// ScrollView still park the last rows and section footers inside the soft
 /// scroll-edge fade, so the end of every tab is only readable during
-/// rubber-band overscroll.  Apply this once at the tab shell (and on the
-/// Local system `TabView`) so every scrolling surface inherits it.
+/// rubber-band overscroll.  Apply this ONCE at the tab shell (RootView) and on
+/// the Local system `TabView` — never on individual feature views.  Stacked
+/// applications compound `safeAreaPadding` + `contentMargins` per call and
+/// blanked most of the Platforms tab (owner report, 2026-08-31).
 public struct TabBarScrollClearanceModifier: ViewModifier {
     public init() {}
 

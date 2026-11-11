@@ -1,10 +1,27 @@
 # Litestream WAL Replication (production → Backblaze B2)
 
 Continuous SQLite backup via [Litestream](https://litestream.io) **0.5.x**. Streams
-writes to `/data/prod.db` as LTX files. **Production** (Coolify/Hetzner or
-legacy Oracle compose path) replicates to **Backblaze B2** (bucket
-`jays-usage-monitor-eu`, S3 endpoint `https://s3.eu-central-003.backblazeb2.com`,
-object prefix `api-usage-monitor/prod.db` in `litestream.yml`).
+writes to `/data/prod.db` as LTX files. **Production** (Hetzner + Coolify +
+GitHub Actions, since the 2026-08-07 cutover) replicates to **Backblaze B2**
+(bucket `jays-usage-monitor-eu`, S3 endpoint
+`https://s3.eu-central-003.backblazeb2.com`, object prefix
+`api-usage-monitor/prod-recovery-v1.db` in `litestream.yml`).  The retired Oracle
+container path lives under `deploy/retired/oracle/`; do not redeploy it.
+
+The previous `api-usage-monitor/prod.db` chain failed an independent restore
+integrity check on 2026-10-29 while the live database passed its quick check.  It
+is retained for incident inspection and is not the active restore source.  The
+replacement prefix starts from a full snapshot of the checked live database;
+the old local Litestream metadata was preserved separately before initializing
+the new chain.  The explicit `meta-path` keeps this generation separate across
+deployments.  Never reuse the old metadata against an empty replica prefix.
+
+Coolify must use **Consistent name (no rolling updates)** for this application,
+with a 60-second stop grace period.  Two overlapping containers would otherwise
+run two Litestream processes against the same SQLite file and local metadata.  The
+Infisical wrapper forwards shutdown signals so Litestream can stop its child and
+close before Docker's kill deadline.  A recent-object heartbeat proves freshness;
+only an independent restore and SQLite integrity check prove recoverability.
 
 **Cloudflare R2 is weekly archive only** (bucket `usage-monitor-prod-v3`
 prefix `weekly/`).  Frequent replica is Backblaze B2.  Historic Litestream LTX
@@ -17,7 +34,7 @@ is a separate product store, not a database replica.
 production `LITESTREAM_S3_*` at Garage.
 
 The suspended Render service is a deliberate, owner-directed rollback host only
-(see `render.yaml` and `deploy/render/RETIRED-rollback.md`). If ever revived, it
+(see `render.yaml` and `deploy/retired/render/RETIRED-rollback.md`). If ever revived, it
 must use a **separate** R2 bucket/lineage so two hosts never write the same
 replica prefix.
 
@@ -65,19 +82,26 @@ Local pre-migration snapshots on `/data` still exist.
   to run even when replication is never enabled — the binary just sits unused.
 - `litestream.yml` — the replica config: `/data/prod.db`, single S3-type replica
   populated entirely from `LITESTREAM_S3_*` env vars. **Disaster recovery only**
-  for this app: `snapshot.interval: 24h`, `snapshot.retention: 24h`,
-  `sync-interval: 1h` (see `litestream.yml`). Not multi-day continuous PITR —
-  Backblaze B2 is the live host/disk-death replica, not “rewind to 3h42m ago.”
-  Cloudflare R2 is weekly archive only.  Historic multi-level LTX on R2
-  re-breached the 10 GiB free tier (2026-08-04 / 2026-08-06); maintenance
-  tip-prunes non-tip LTX at 50% storage before the 70% kill when the endpoint
-  is R2. Off-site backup health is observability only on `/api/ready` (does
-  not gate product readiness).
+  for this app: `snapshot.interval: 24h`, `snapshot.retention: 72h` (3 days, Jay 2026-10-29),
+  `sync-interval: 1h`, `part-size: 10MB`, `concurrency: 2` (see `litestream.yml`).
+  Product compaction is **L1-only**: a single top-level `levels:` entry
+  (`interval: 30s`) so `Config.Levels` `MaxLevel() == 1` and L2/L3 monitors
+  never start (same form as Socratic.Trade `litestream.coolify.yml`).  Omitting
+  `levels:` would restore DefaultConfig L1/L2/L3 on the next image bake.
+  Not multi-day continuous PITR — Backblaze B2 is the live host/disk-death
+  replica, not “rewind to 3h42m ago.”  Cloudflare R2 is weekly archive only.
+  Historic multi-level LTX on R2 re-breached the 10 GiB free tier
+  (2026-08-04 / 2026-08-06); maintenance tip-prunes non-tip LTX at 50% storage
+  before the 70% kill when the endpoint is R2. Off-site backup health is
+  observability only on `/api/ready` (does not gate product readiness).
 - `scripts/start-with-litestream.sh` — the container entrypoint. If all four
   required `LITESTREAM_S3_*` vars are set and `bin/litestream` exists: restores
   first if `/data/prod.db` doesn't exist yet (fresh disk or disaster recovery).
-  In both enabled and disabled modes it then runs
-  `backup-sqlite-before-migrate.mjs` and `migrate-safe.mjs` in that order.
+  In both enabled and disabled modes it then runs the schema-aware
+  `backup-sqlite-before-migrate.mjs` gate and `migrate-safe.mjs` in that order.
+  A read-only Prisma diff skips the snapshot only when the live database is
+  already in sync.  Schema drift or a failed diff still requires a verified
+  snapshot before any schema synchronization.
   **R2 endpoints:** litestream runs as a sibling of `npm start` so the free-tier
   kill switch can stop replication without taking down the app. **Non-R2 S3:**
   `exec litestream replicate -exec "npm start"` (litestream is PID 1).
@@ -86,23 +110,38 @@ Local pre-migration snapshots on `/data` still exist.
   preserve their exact schema and state; `migrate-safe.mjs` never retries with
   Prisma's broad `--accept-data-loss` flag.
 - `scripts/backup-sqlite-before-migrate.mjs` — transaction-consistent SQLite
-  Online Backup API snapshot plus `PRAGMA integrity_check`, private file modes,
-  atomic promotion, and bounded same-disk retention. It is the immediate schema
-  rollback layer; Litestream/B2 remains the off-disk disaster-recovery replica.
+  `VACUUM INTO` snapshot plus `PRAGMA integrity_check` inside a child process
+  with a bounded deadline, private file modes, atomic promotion, and bounded
+  same-disk retention when the read-only Prisma diff finds schema drift or
+  cannot prove the database is in sync.  `SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` is an Infisical
+  env-sync startup knob (default 300000 ms, maximum 900000 ms); timeout fails
+  startup closed.  It is the immediate schema rollback layer; Litestream/B2
+  remains the off-disk disaster-recovery replica.
 - `scripts/litestream-restore.sh` — manual disaster-recovery restore to a
   scratch path, run inside the production app container (see below).
 - `scripts/replica-status-heartbeat.sh` + `run-app-with-replica-heartbeat.sh` —
   in-container LTX tip probe under Infisical-injected env (Coolify-safe).
+  Lists `ltx -json` at continuous levels 0–3 plus snapshot level 9 so leftover
+  L2/L3 objects stay visible; product compaction itself is L1-only.
 - `deploy/coolify/replica-status-probe.sh` — **production Hetzner** host timer
-  (Coolify UUID container + host-PID environ for S3 creds).
-- `deploy/oracle/replica-status-probe.sh` — **legacy Oracle** timer. Without a
-  live heartbeat, backup reports `env_active_unverified`.
+  (Coolify UUID container).  Tries `docker exec --once`, then a host
+  `--env-file` fallback from the litestream PID environ.  Never puts
+  `LITESTREAM_S3_*` on `docker exec` argv.
+- `deploy/retired/oracle/replica-status-probe.sh` — **legacy Oracle** script.
+  The Hetzner box runs the byte-identical script from
+  `deploy/coolify/replica-status-probe.sh` via
+  `coolify/usage-monitor-replica-status.{service,timer}`.  Without a live
+  heartbeat, backup reports `env_active_unverified`.
+- Operator runbook: `docs/runbooks/replica-status-probe.md` (reasons, fallback
+  trust rules after #1354/#1355, Coolify verify commands).
 
 ## Production setup (host → Backblaze B2)
 
 Runtime config lives in the Infisical `usage-monitor` project (env `prod`) as
 the sole source of truth — see `DEPLOY.md` "Runtime env: Infisical is the
-source of truth" and `deploy/oracle/README.md`. Set there:
+source of truth" and `deploy/README.md` for the canonical deploy index.  The
+retired Oracle-era runbook is preserved under `deploy/retired/oracle/` for
+historical reference only. Set there:
 
 ```
 # Primary (B2) — write key fleet-usage-monitor-backup (not the read-only monitor key)
@@ -129,14 +168,15 @@ full configuration when the verified binary is unavailable.
 `LITESTREAM_S3_REGION` is optional for R2 (empty → Litestream falls back to
 `us-east-1`, which R2 accepts for SigV4). Prefer `auto` to be explicit.
 
-Deploy env preflight (`deploy/oracle/usage-monitor-sync-env.sh`) requires the
+Deploy env preflight (`deploy/retired/oracle/usage-monitor-sync-env.sh`, run on the
+Hetzner box — see `deploy/README.md` for the canonical install path) requires the
 B2 bucket name `jays-usage-monitor-eu` (or historic R2 `usage-monitor-prod-v3`
 during cutover only). **Account-wide free-tier analytics** still count every
 **R2** bucket on the Cloudflare account for the historic free-tier card; that
 does not apply to B2 storage.
 
-The S3 uploader is intentionally limited to one multipart part at a time in
-`litestream.yml` (`concurrency: 1`) for reliability on constrained links.
+Replica uploads use `part-size: 10MB` and `concurrency: 2` in
+`litestream.yml` (the 2026-08-27 B2 multipart checksum-mismatch fix).
 
 Changing any of these values: edit them in Infisical, run
 `sudo /usr/local/sbin/usage-monitor-env-sync` (or wait for the 15-minute
@@ -146,31 +186,44 @@ redeploy" on Oracle.
 
 ### Verify
 
-From the Oracle VM:
+From the host (or see `docs/runbooks/replica-status-probe.md`):
 
 ```bash
-# Config parses + replica is wired:
-sudo docker exec usage-monitor-app-1 /app/bin/litestream databases -config /app/litestream.yml
+# Refresh and verify the replica probe verdict via host script:
+sudo /usr/local/sbin/usage-monitor-replica-status
 
-# LTX files actually landed in R2 (tip listing; avoid `-level all`,
-# which lists thousands of compacted objects and can time out):
-sudo docker exec usage-monitor-app-1 /app/bin/litestream ltx -config /app/litestream.yml /data/prod.db
-
-# The readiness heartbeat is fresh (Coolify volume or inside container):
+# Status file (Coolify volume or inside the container):
 # host:
 cat /var/lib/docker/volumes/*usage-data*/_data/.litestream-replica-status.json
-# or inside the app container:
-#   cat /data/.litestream-replica-status.json
+# or:
+#   sudo docker exec "$UM_CONTAINER" cat /data/.litestream-replica-status.json
 curl -fsS https://usage.jays.services/api/ready | jq .checks.backup
-# Expect: active=true, envOnly=false, replicaOk=true, reason=null
 ```
+
+`checks.backup` is **observability only**.  It does not gate overall
+`/api/ready` `ok` (or `?strict=1` HTTP status).  Product readiness is
+database + databaseFile + scheduler + startup.  A replica listing timeout
+can leave `replicaOk=false` / `reason=list_timeout` while the app stays
+ready.
+
+Healthy side-channel: `active=true`, `envOnly=false`, `replicaOk=true`.
+`reason` may be `null` (continuous LTX) or `snapshot_only` (level-9 tip
+only).  Do not require `reason=null`.  `envOnly:true` means no status
+file path is configured (`LITESTREAM_REPLICA_STATUS_PATH` unset).
+
+Offline fixtures: `bash scripts/test-replica-status-probe.sh` and
+`bash scripts/replica-status-heartbeat.sh --self-test`.
 
 ### Coolify/Hetzner host timer install
 
 ```bash
 sudo install -o root -g root -m 0755 deploy/coolify/replica-status-probe.sh \
   /usr/local/sbin/usage-monitor-replica-status
-# units: same shape as deploy/oracle/usage-monitor-replica-status.{service,timer}
+sudo install -o root -g root -m 0644 deploy/coolify/usage-monitor-replica-status.service \
+  /etc/systemd/system/usage-monitor-replica-status.service
+sudo install -o root -g root -m 0644 deploy/coolify/usage-monitor-replica-status.timer \
+  /etc/systemd/system/usage-monitor-replica-status.timer
+sudo systemctl daemon-reload
 sudo systemctl enable --now usage-monitor-replica-status.timer
 sudo /usr/local/sbin/usage-monitor-replica-status
 ```
@@ -179,30 +232,54 @@ Infisical `usage-monitor` / `prod` must include
 `LITESTREAM_REPLICA_STATUS_PATH=/data/.litestream-replica-status.json` (also
 exported by `start-with-litestream.sh` after the next deploy).
 
-In `sudo docker logs usage-monitor-app-1`, look for the
+In `sudo docker logs "$UM_CONTAINER"`, look for the
 `[start-with-litestream] replication ENABLED` line and a
 `[sqlite-pre-migration-backup] verified ...` line at boot, followed by
 litestream's own `replicating to type=s3 bucket=...` and periodic
-`ltx file uploaded` / `replica sync` lines. If instead you see
+`ltx file uploaded` / `replica sync` lines.  If instead you see
 `[start-with-litestream] replication DISABLED`, all required `LITESTREAM_S3_*`
 vars are unset and the boot must be treated as misconfigured (production
-requires them). Partial values or a missing binary are startup errors; check
+requires them).  Partial values or a missing binary are startup errors; check
 `fetch-litestream.sh` and startup logs.
 
 Confirm `/api/ready` reports `checks.backup.required=true`,
 `checks.backup.active=true`, and `checks.backup.replicaOk=true` (the heartbeat
-side-channel; `envOnly:true` means the probe is not writing its status file
-and strict readiness will fail).
+side-channel).  `envOnly:true` means `LITESTREAM_REPLICA_STATUS_PATH` is
+unset so Next.js cannot read a probe verdict.  That is an ops gap, not a
+product-down signal: backup still does not gate overall `ok`.  Operator
+reasons and the Coolify `--once` vs `--env-file` fallback are in
+`docs/runbooks/replica-status-probe.md`.
+
+### Product compaction is L1-only (2026-09-04)
+
+Litestream 0.5.x has no disable-L2 flag.  `litestream.yml` sets a single
+top-level `levels:` entry (`interval: 30s` = L1), matching Socratic.Trade.
+`Config.Levels` is L1..N in list order (`cmd/litestream/main.go`
+`CompactionLevels()`).  One entry makes `MaxLevel() == 1` and `NextLevel(1)`
+the snapshot level.  DefaultConfig would otherwise start L2 at 5m and L3 at
+1h, so a bake without this key would re-enable L2/L3 even if Housekeeper's
+live overlay currently holds them off.
+
+There is also **no compaction-backoff yaml key**.  Removing L2/L3 is the
+backoff: remaining L1 retries every 30s against a small L0 window.  Snapshot
+stays `24h` interval / `72h` retention.  Replica `sync-interval: 1h`, `part-size: 10MB`, and
+`concurrency: 2` are unchanged.  Backup health-check wiring is unchanged
+(probes still list 0–3 + 9; leftover L2/L3 objects do not mean those
+monitors are running).  Do **not** add `verify-compaction: true`.
 
 ### Free-tier growth (what to expect)
 
-R2 storage is **not** “one copy of `prod.db`.” Litestream keeps multi-level LTX
-files for the retention window; a ~0.4 GiB DB can still fill ~9 GiB under a 24h
-window as L1/L2/L3 each hold large intermediates. Production uses
-`retention: 6h` + `sync-interval: 2h`, plus automatic tip-prune at 50% absolute
-storage (keep newest tip per level). Manual tip-prune (ops): delete non-tip
-`.ltx` under `api-usage-monitor/prod.db/{0000..0009}/`. Multi-day retention is
-what filled 15+ GiB in August 2026 — do not raise retention without measuring.
+R2 storage is **not** “one copy of `prod.db`.”  Litestream keeps LTX files for
+the retention window; a ~0.4 GiB DB can still fill ~9 GiB under a 24h window
+when L1/L2/L3 each hold large intermediates.  Product compaction is now
+L1-only (L2/L3 monitors off), so that growth mode should not return on B2.
+Historic R2 refill used `retention: 6h` + `sync-interval: 2h`, plus automatic
+tip-prune at 50% absolute storage (keep newest tip per level).  Manual
+tip-prune (ops): delete non-tip `.ltx` under
+`api-usage-monitor/prod.db/{0000..0009}/`.  Multi-day retention is what filled
+15+ GiB in August 2026 — do not raise retention without measuring.
+2026-10-29: Jay set retention to 72h (fleet 3-day short-term policy) on paid B2
+with L1-only compaction; watch the active B2 prefix in `litestream.yml` after rollout.
 
 
 ## Rollback host only (Render)
@@ -266,10 +343,10 @@ Restore is exercised continuously, not just at drills:
 - Every production deploy hard-gates LTX freshness (≤ 10800s / 3h) plus an
   authenticated restore dry-run, and acceptance performs a full authenticated
   replica restore with a complete SQLite integrity scan
-  (`deploy/oracle/deploy-production.sh`).
+  (`deploy/retired/oracle/deploy-production.sh`).
 - The fleet-sentry-monitor singleton runs an authenticated dry-run every 15
   minutes and a weekly full-integrity restore to a fixed Oracle scratch path
-  (`deploy/oracle/README.md` "Backup monitoring").
+  (`deploy/retired/oracle/README.md` "Backup monitoring").
 
 Still run a **manual** drill quarterly and after any Litestream version bump —
 a wrong `-config` path, a stale/incompatible LTX generation, or a
@@ -290,11 +367,12 @@ during an incident:
 ## Monitoring
 
 ```bash
-sudo docker exec usage-monitor-app-1 /app/bin/litestream ltx -config /app/litestream.yml /data/prod.db | tail
+sudo docker exec "$UM_CONTAINER" /app/bin/litestream ltx -json -config /app/litestream.yml -level 0 /data/prod.db | tail
 cat /data/.litestream-replica-status.json
 ```
 
-Or tail `sudo docker logs usage-monitor-app-1` and watch for repeated `replica sync`
-lines without errors. The strict readiness endpoint
-(`/api/ready?strict=1` → `checks.backup`) and the fleet-sentry-monitor Sentry
-cron check-in both alert on replica failure independently.
+Or tail `sudo docker logs "$UM_CONTAINER"` and watch for repeated `replica sync`
+lines without errors.  `/api/ready?strict=1` still does **not** fail HTTP
+on `checks.backup` (same `ok` as the default body).  Alert on
+`checks.backup.replicaOk` / `checks.backup.reason` independently, or via
+the fleet-sentry-monitor Sentry cron check-in.

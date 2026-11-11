@@ -84,20 +84,30 @@ public enum LocalAlertBuilder {
                     )
                 )
             }
+        }
 
-            if byId[row.providerId]?.isPollable == true,
-               byId[row.providerId]?.keychainAccountId == nil,
-               byId[row.providerId]?.isActive == true {
-                items.append(
-                    LocalAlertItem(
-                        id: "needs-key-\(row.providerId)",
-                        title: "\(row.displayName) needs API key",
-                        message: "This adapter can poll on-device but no Keychain credential is stored. Re-add with a key or deactivate.",
-                        severity: .info,
-                        providerId: row.providerId
-                    )
+        let needingKey = providers.filter(\.needsKey).sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        if needingKey.count == 1, let only = needingKey.first {
+            items.append(
+                LocalAlertItem(
+                    id: "needs-key-\(only.id)",
+                    title: "\(only.displayName) needs API key",
+                    message: "Open this provider and tap Connect Account to paste a key.",
+                    severity: .info,
+                    providerId: only.id
                 )
-            }
+            )
+        } else if needingKey.count > 1 {
+            items.append(
+                LocalAlertItem(
+                    id: "needs-key-many",
+                    title: "\(needingKey.count) accounts need an API key",
+                    message: "Restored cards start empty.  Open Providers, choose Needs Key, and tap Connect Account on each.",
+                    severity: .info
+                )
+            )
         }
 
         if summary.overBudget {

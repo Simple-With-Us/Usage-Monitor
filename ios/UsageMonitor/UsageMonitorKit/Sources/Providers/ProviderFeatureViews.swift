@@ -148,6 +148,8 @@ struct DetailStatRow: View {
                 .modifier(MonospacedDigitIf(enabled: monospaced))
                 .multilineTextAlignment(.trailing)
         }
+        .contentShape(Rectangle())
+        .copyableValue(value, label: label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label), \(value)")
     }

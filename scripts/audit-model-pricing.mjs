@@ -5,21 +5,34 @@
  * Double-checks the bundled LiteLLM snapshot against upstream and major provider list prices:
  * - Google Gemini (gemini-3.7-flash, gemini-3.6-flash, gemini-2.5-pro)
  * - Anthropic (claude-3-7-sonnet, claude-3-5-haiku, claude-opus-5)
- * - OpenAI (gpt-4o, gpt-4o-mini, o3-mini)
+ * - OpenAI (gpt-4o, gpt-4o-mini, gpt-5.6-sol)
  * - xAI (grok-4.6, grok-3)
  * - DeepSeek (deepseek-v4-pro, deepseek-chat)
  *
- * Compares input, output, cache-read, and cache-creation token pricing.
- * Supports `--update` flag to synchronize the bundled snapshot file directly.
+ * Detects input and output price changes, newly priced models, and outputs fleet model economics recommendations.
  *
  * Usage:
  *   node scripts/audit-model-pricing.mjs [--update]
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
+// Bundled snapshot is { meta, pricing }, not the flat LiteLLM catalog.
+const ModelPricingSchema = z
+  .object({
+    input_cost_per_token: z.number().finite().optional(),
+    output_cost_per_token: z.number().finite().optional(),
+  })
+  .passthrough();
+
+const SnapshotSchema = z.object({
+  meta: z.record(z.string(), z.unknown()).optional(),
+  pricing: z.record(z.string(), ModelPricingSchema),
+});
 
 const SNAPSHOT_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -48,33 +61,38 @@ const PROVIDER_BASELINES = {
   "claude-opus-5": { inputPerM: 15.00, outputPerM: 75.00, provider: "anthropic" },
   "gpt-4o": { inputPerM: 2.50, outputPerM: 10.00, provider: "openai" },
   "gpt-4o-mini": { inputPerM: 0.15, outputPerM: 0.60, provider: "openai" },
-  "o3-mini": { inputPerM: 1.10, outputPerM: 4.40, provider: "openai" },
+  // Matches GPT_56_SOL and the bundled snapshot (4e-6 / 20e-6 per token).
+  "gpt-5.6-sol": { inputPerM: 4.00, outputPerM: 20.00, provider: "openai" },
   "grok-4.6": { inputPerM: 2.00, outputPerM: 10.00, provider: "xai" },
   "deepseek-chat": { inputPerM: 0.14, outputPerM: 0.28, provider: "deepseek" },
 };
 
 async function runAudit() {
-  const shouldUpdate = process.argv.includes("--update");
-
-  if (shouldUpdate) {
-    console.log("🔄 --update flag provided: executing canonical pricing updater first...");
+  // --update refreshes the bundled snapshot through the canonical updater
+  // before the comparison.  The weekly workflow does not pass it.
+  if (process.argv.includes("--update")) {
+    console.log("--update: running the canonical pricing updater first.");
     execFileSync(process.execPath, [UPDATER_SCRIPT], { stdio: "inherit" });
-    console.log("");
   }
 
   console.log("=== Weekly Model Pricing Audit & Catalog Verification ===");
   console.log(`Checking snapshot at: ${SNAPSHOT_PATH}`);
 
-  let currentPricing = {};
+  let currentSnapshot = {};
   try {
-    const rawSnapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
-    currentPricing = rawSnapshot.pricing || rawSnapshot;
+    const parsed = SnapshotSchema.parse(JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")));
+    currentSnapshot = parsed.pricing;
   } catch (err) {
+    const name = err && typeof err === "object" && "name" in err ? err.name : "";
+    // A readable but malformed snapshot must fail the audit.  A missing file
+    // still starts empty so a fresh checkout can print the report.
+    if (name === "ZodError" || err instanceof SyntaxError) {
+      throw new Error(`Pricing snapshot failed validation: ${err.message}`);
+    }
     console.warn("Could not read current snapshot, starting fresh:", err.message);
   }
 
-  const modelCount = Object.keys(currentPricing).length;
-  console.log(`Current snapshot has ${modelCount} priced models.`);
+  console.log(`Current snapshot has ${Object.keys(currentSnapshot).length} priced models.`);
   console.log(`Fetching latest catalog from LiteLLM upstream...`);
 
   const res = await fetch(UPSTREAM_URL, {
@@ -86,47 +104,45 @@ async function runAudit() {
 
   const upstreamData = await res.json();
   const changes = [];
+  const newModels = [];
 
-  // Check key fleet models comparing input, output, and cache rates
+  // Check key fleet models
   for (const [modelKey, baseline] of Object.entries(PROVIDER_BASELINES)) {
     const upstreamEntry = upstreamData[modelKey];
-    const currentEntry = currentPricing[modelKey];
+    const currentEntry = currentSnapshot[modelKey];
 
-    if (!upstreamEntry && !currentEntry) {
+    if (!upstreamEntry) {
       console.log(`ℹ️ [Notice] ${modelKey} is managed via runtime override in model-pricing.ts.`);
       continue;
     }
 
-    const currentInput = (currentEntry?.input_cost_per_token || 0) * 1_000_000;
-    const upstreamInput = (upstreamEntry?.input_cost_per_token || 0) * 1_000_000;
-    const currentOutput = (currentEntry?.output_cost_per_token || 0) * 1_000_000;
-    const upstreamOutput = (upstreamEntry?.output_cost_per_token || 0) * 1_000_000;
+    const currentInputCost = (currentEntry?.input_cost_per_token || 0) * 1_000_000;
+    const upstreamInputCost = (upstreamEntry?.input_cost_per_token || 0) * 1_000_000;
+    const currentOutputCost = (currentEntry?.output_cost_per_token || 0) * 1_000_000;
+    const upstreamOutputCost = (upstreamEntry?.output_cost_per_token || 0) * 1_000_000;
 
-    const inputDiff = Math.abs(currentInput - upstreamInput) > 0.0001;
-    const outputDiff = Math.abs(currentOutput - upstreamOutput) > 0.0001;
-
-    if (inputDiff || outputDiff) {
+    const inputChanged = Math.abs(currentInputCost - upstreamInputCost) > 0.0001;
+    const outputChanged = Math.abs(currentOutputCost - upstreamOutputCost) > 0.0001;
+    if (inputChanged || outputChanged) {
       changes.push({
         model: modelKey,
         provider: baseline.provider,
-        oldInputPerM: currentInput,
-        newInputPerM: upstreamInput,
-        oldOutputPerM: currentOutput,
-        newOutputPerM: upstreamOutput,
+        oldInputPerM: currentInputCost,
+        newInputPerM: upstreamInputCost,
+        oldOutputPerM: currentOutputCost,
+        newOutputPerM: upstreamOutputCost,
       });
     }
   }
 
   console.log("\n--- Provider Baseline Check Results ---");
   if (changes.length === 0) {
-    console.log("✓ All tracked model input & output prices match current provider catalog.");
+    console.log("✓ All tracked model prices match current provider list rates.");
   } else {
     console.log(`⚠️ Detected ${changes.length} price modifications:`);
     for (const c of changes) {
       console.log(
-        `  • ${c.model} (${c.provider}):\n` +
-        `      Input:  $${c.oldInputPerM.toFixed(3)}/M -> $${c.newInputPerM.toFixed(3)}/M\n` +
-        `      Output: $${c.oldOutputPerM.toFixed(3)}/M -> $${c.newOutputPerM.toFixed(3)}/M`
+        `  • ${c.model} (${c.provider}): input $${c.oldInputPerM.toFixed(3)}/M -> $${c.newInputPerM.toFixed(3)}/M; output $${c.oldOutputPerM.toFixed(3)}/M -> $${c.newOutputPerM.toFixed(3)}/M`
       );
     }
   }

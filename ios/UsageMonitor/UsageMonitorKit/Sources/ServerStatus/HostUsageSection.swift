@@ -169,62 +169,87 @@ struct HostUsageSection: View {
         if let host = metrics.host {
             if let name = host.name {
                 LabeledContent("Name", value: name)
+                    .copyableRow(label: "Name", value: name)
             }
             if let type = host.serverType, let cpus = host.cpus {
-                LabeledContent("Type", value: "\(type) · \(cpus) vCPU")
+                let typeStr = "\(type) · \(cpus) vCPU"
+                LabeledContent("Type", value: typeStr)
+                    .copyableRow(label: "Type", value: typeStr)
             } else if let type = host.serverType {
                 LabeledContent("Type", value: type)
+                    .copyableRow(label: "Type", value: type)
             }
             if let mem = host.memoryTotalBytes {
-                LabeledContent("Memory", value: DiskFormat.byteString(mem))
+                let memStr = DiskFormat.byteString(mem)
+                LabeledContent("Memory", value: memStr)
+                    .copyableRow(label: "Memory", value: memStr)
             }
             if let status = host.status {
-                LabeledContent("Status", value: status.capitalized)
+                let statStr = status.capitalized
+                LabeledContent("Status", value: statStr)
+                    .copyableRow(label: "Status", value: statStr)
             }
             if let window = host.backupWindow {
-                LabeledContent("Hetzner Backups", value: "Daily \(window) UTC")
+                let bkpStr = "Daily \(window) UTC"
+                LabeledContent("Hetzner Backups", value: bkpStr)
+                    .copyableRow(label: "Hetzner Backups", value: bkpStr)
             }
         }
 
         if let usage = metrics.hostUsage {
             if let cpu = DiskFormat.cpuString(usage.cpuPct) {
                 LabeledContent("CPU", value: cpu)
+                    .copyableRow(label: "CPU", value: cpu)
             }
             if let rx = DiskFormat.rateString(usage.networkRxBytesPerSec),
                let tx = DiskFormat.rateString(usage.networkTxBytesPerSec) {
-                LabeledContent("Network", value: "↓ \(rx) · ↑ \(tx)")
+                let netStr = "↓ \(rx) · ↑ \(tx)"
+                LabeledContent("Network", value: netStr)
+                    .copyableRow(label: "Network", value: netStr)
             }
             if let read = DiskFormat.rateString(usage.diskReadBytesPerSec),
                let write = DiskFormat.rateString(usage.diskWriteBytesPerSec) {
-                LabeledContent("Disk I/O", value: "R \(read) · W \(write)")
+                let ioStr = "R \(read) · W \(write)"
+                LabeledContent("Disk I/O", value: ioStr)
+                    .copyableRow(label: "Disk I/O", value: ioStr)
             }
         }
     }
 
     @ViewBuilder
     private func riskRows(_ prevention: ServerMetrics.Prevention) -> some View {
+        let overallLabel = preventionOverallLabel(prevention)
         LabeledContent("Overall") {
             StatusBadge(
-                preventionOverallLabel(prevention),
+                overallLabel,
                 status: preventionOverallStatus(prevention.overall),
                 systemImage: prevention.overall == "ok"
                     ? "checkmark.shield.fill"
                     : "exclamationmark.shield.fill"
             )
         }
+        .copyableRow(label: "Overall", value: overallLabel)
 
         if let summary = prevention.summary {
             if let peak = summary.cpuPeakPct {
-                LabeledContent("CPU Peak (1h)", value: String(format: "%.0f%%", peak))
+                let peakStr = String(format: "%.0f%%", peak)
+                LabeledContent("CPU Peak (1h)", value: peakStr)
+                    .copyableRow(label: "CPU Peak (1h)", value: peakStr)
             }
             if let avg = summary.cpuAvgPct {
-                LabeledContent("CPU Avg (1h)", value: String(format: "%.0f%%", avg))
+                let avgStr = String(format: "%.0f%%", avg)
+                LabeledContent("CPU Avg (1h)", value: avgStr)
+                    .copyableRow(label: "CPU Avg (1h)", value: avgStr)
             }
             if let down = summary.appsDown, let total = summary.appsTotal {
-                LabeledContent("Apps", value: "\(total - down)/\(total) up")
+                let appsStr = "\(total - down)/\(total) up"
+                LabeledContent("Apps", value: appsStr)
+                    .copyableRow(label: "Apps", value: appsStr)
             }
             if let ok = summary.backupAppsOk, let total = summary.backupAppsTotal {
-                LabeledContent("Backups", value: "\(ok)/\(total) OK")
+                let bkpStr = "\(ok)/\(total) OK"
+                LabeledContent("Backups", value: bkpStr)
+                    .copyableRow(label: "Backups", value: bkpStr)
             }
         }
 

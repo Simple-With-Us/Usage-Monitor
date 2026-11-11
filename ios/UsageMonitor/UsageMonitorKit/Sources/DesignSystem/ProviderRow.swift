@@ -68,6 +68,7 @@ public struct ProviderRow: View {
         }
         .padding(.vertical, Theme.Spacing.xs)
         .contentShape(Rectangle())
+        .copyableValue(value, label: title)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title), \(value)\(valueCaption.map { ", \($0)" } ?? "")")
     }

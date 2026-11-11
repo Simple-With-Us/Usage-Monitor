@@ -19,6 +19,7 @@ struct HostPreventionDetailView: View {
                             : "exclamationmark.shield.fill"
                     )
                 }
+                .copyableRow(label: "Overall", value: overallLabel)
                 if let note = prevention.historyNote {
                     Text(note)
                         .font(Theme.Typography.caption)
@@ -31,31 +32,44 @@ struct HostPreventionDetailView: View {
             if let summary = prevention.summary {
                 Section("Stats") {
                     if let peak = summary.cpuPeakPct {
-                        LabeledContent("CPU Peak (1h)", value: String(format: "%.0f%%", peak))
+                        let peakStr = String(format: "%.0f%%", peak)
+                        LabeledContent("CPU Peak (1h)", value: peakStr)
+                            .copyableRow(label: "CPU Peak (1h)", value: peakStr)
                     }
                     if let avg = summary.cpuAvgPct {
-                        LabeledContent("CPU Avg (1h)", value: String(format: "%.0f%%", avg))
+                        let avgStr = String(format: "%.0f%%", avg)
+                        LabeledContent("CPU Avg (1h)", value: avgStr)
+                            .copyableRow(label: "CPU Avg (1h)", value: avgStr)
                     }
                     if let latest = summary.cpuLatestPct {
-                        LabeledContent("CPU Latest", value: String(format: "%.0f%%", latest))
+                        let latestStr = String(format: "%.0f%%", latest)
+                        LabeledContent("CPU Latest", value: latestStr)
+                            .copyableRow(label: "CPU Latest", value: latestStr)
                     }
                     if let used = summary.diskUsedPct {
-                        LabeledContent("Disk Used", value: "\(used)%")
+                        let usedStr = "\(used)%"
+                        LabeledContent("Disk Used", value: usedStr)
+                            .copyableRow(label: "Disk Used", value: usedStr)
                     }
                     if let free = summary.diskFreeBytes {
-                        LabeledContent("Disk Free", value: DiskFormat.byteString(free))
+                        let freeStr = DiskFormat.byteString(free)
+                        LabeledContent("Disk Free", value: freeStr)
+                            .copyableRow(label: "Disk Free", value: freeStr)
                     }
                     if let healthy = summary.appsHealthy, let total = summary.appsTotal {
-                        LabeledContent(
-                            "Apps Healthy",
-                            value: "\(healthy)/\(total)"
-                        )
+                        let healthyStr = "\(healthy)/\(total)"
+                        LabeledContent("Apps Healthy", value: healthyStr)
+                            .copyableRow(label: "Apps Healthy", value: healthyStr)
                     }
                     if let down = summary.appsDown, down > 0 {
-                        LabeledContent("Apps Down", value: "\(down)")
+                        let downStr = "\(down)"
+                        LabeledContent("Apps Down", value: downStr)
+                            .copyableRow(label: "Apps Down", value: downStr)
                     }
                     if let ok = summary.backupAppsOk, let total = summary.backupAppsTotal {
-                        LabeledContent("Backup Apps OK", value: "\(ok)/\(total)")
+                        let backupStr = "\(ok)/\(total)"
+                        LabeledContent("Backup Apps OK", value: backupStr)
+                            .copyableRow(label: "Backup Apps OK", value: backupStr)
                     }
                 }
             }
@@ -85,6 +99,8 @@ struct HostPreventionDetailView: View {
                                 .font(Theme.Typography.caption)
                                 .foregroundStyle(Theme.Colors.secondaryText)
                         }
+                        .contentShape(Rectangle())
+                        .copyableValue("\(indicator.label): \(indicator.detail)", label: indicator.label)
                         .accessibilityElement(children: .combine)
                     }
                 }
@@ -95,6 +111,7 @@ struct HostPreventionDetailView: View {
                     // Simple sparkline-ish text trail (newest last)
                     if let cpuTrail = cpuHistoryTrail {
                         LabeledContent("CPU Trail", value: cpuTrail)
+                            .copyableRow(label: "CPU Trail", value: cpuTrail)
                     }
                     ForEach(prevention.history.suffix(12).reversed()) { sample in
                         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {

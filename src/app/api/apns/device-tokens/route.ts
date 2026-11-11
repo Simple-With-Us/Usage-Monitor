@@ -6,17 +6,18 @@ import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth"
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function isAuthorized(request: NextRequest): boolean {
-  const hasDashboardSession = verifySessionToken(
-    request.cookies.get(SESSION_COOKIE_NAME)?.value
-  );
-  if (hasDashboardSession) return true;
+function isDashboardSession(request: NextRequest): boolean {
+  return verifySessionToken(request.cookies.get(SESSION_COOKIE_NAME)?.value);
+}
+
+function isReadAuthorized(request: NextRequest): boolean {
+  if (isDashboardSession(request)) return true;
   if (!resolveUsageReadToken()) return false;
   return isUsageReadAuthorized(request);
 }
 
 export async function GET(request: NextRequest) {
-  if (!isAuthorized(request)) {
+  if (!isReadAuthorized(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -36,17 +37,24 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     count: tokens.length,
-    tokens: tokens.map((t) => ({
-      ...t,
-      deviceTokenPreview: t.deviceToken.length > 12
-        ? `${t.deviceToken.slice(0, 6)}...${t.deviceToken.slice(-6)}`
-        : t.deviceToken,
+    tokens: tokens.map(({ deviceToken, ...rest }) => ({
+      ...rest,
+      deviceTokenPreview:
+        deviceToken.length > 12
+          ? `${deviceToken.slice(0, 6)}...${deviceToken.slice(-6)}`
+          : deviceToken,
     })),
   });
 }
 
 export async function POST(request: NextRequest) {
-  if (!isAuthorized(request)) {
+  // Registering a device token is a write (it changes which device receives
+  // push alerts), so it is dashboard-session only -- USAGE_READ_TOKEN must
+  // not be able to enroll a device, the same reasoning already applied to
+  // PUT /api/settings (board 154b622e).  The only real caller, the iOS app's
+  // APIClient.registerApnsDeviceToken, already authenticates with
+  // `.session`, so this tightens nothing a legitimate client relies on.
+  if (!isDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

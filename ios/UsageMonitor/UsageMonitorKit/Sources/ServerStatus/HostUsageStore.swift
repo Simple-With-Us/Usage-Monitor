@@ -3,6 +3,7 @@ import Observation
 import Models
 import Networking
 import AppCore
+import OfflineCache
 
 /// Owns the Server-tab host-usage panel. Requires a read token
 /// (`GET /api/server-metrics`).
@@ -36,7 +37,9 @@ final class HostUsageStore {
 
     private func fetch(using client: APIClient) async {
         do {
-            state = .loaded(try await probe(client))
+            let metrics = try await probe(client)
+            state = .loaded(metrics)
+            WidgetSnapshotStore.updateServerHost(metrics)
         } catch let error as APIError {
             handle(error)
         } catch {

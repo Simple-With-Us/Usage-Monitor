@@ -25,9 +25,13 @@ import {
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  canAdvanceCollectorCheckpoint,
   expandHome,
-  parseCollectorArgs,
+  fileMayContainEventsSince,
   readIfFresh,
+  recordCollectorSuccess,
+  resolveCollectorArgs,
+  resolveCollectorToken,
   sessionKeyFor,
   walkFiles,
 } from "./lib/run-session-token-collector.mjs";
@@ -51,12 +55,17 @@ function fail(message, code = 1) {
 export async function collectCopilotEvents({
   copilotHome = expandHome(process.env.COPILOT_HOME || join(homedir(), ".copilot")),
   since,
+  scanStatus,
 } = {}) {
+  const markIncomplete = () => {
+    if (scanStatus) scanStatus.complete = false;
+  };
   const root = join(copilotHome, "session-state");
-  const files = await walkFiles(root, { name: "events.jsonl" });
+  const files = await walkFiles(root, { name: "events.jsonl", onTraversalError: markIncomplete });
   const events = [];
   for (const file of files) {
-    const text = await readIfFresh(file);
+    if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
+    const text = await readIfFresh(file, { onReadError: markIncomplete });
     if (!text) continue;
     const parsed = parseCopilotEventsJsonl(text, {
       sessionKey: sessionKeyFor(copilotHome, file),
@@ -67,25 +76,31 @@ export async function collectCopilotEvents({
 }
 
 async function main() {
+  const passStartedAt = new Date();
   let args;
   try {
-    args = parseCollectorArgs(process.argv);
+    args = await resolveCollectorArgs(process.argv, PRODUCER_ID, { now: passStartedAt });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
-  const events = await collectCopilotEvents({ since: args.since });
-  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}`);
+  const scanStatus = { complete: true };
+  const events = await collectCopilotEvents({ since: args.since, scanStatus });
+  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`);
   if (DEBUG) {
     const models = new Set(events.map((e) => e.producerKeyRef).filter(Boolean));
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
     log("nothing to send");
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
     return;
   }
-  const token =
-    process.env.COPILOT_INGEST_TOKEN?.trim() ||
-    process.env.USAGE_INGEST_TOKEN?.trim();
+  const token = resolveCollectorToken([
+    "COPILOT_INGEST_TOKEN",
+    "USAGE_INGEST_TOKEN",
+  ]);
   try {
     const ack = await postUsageBatches({
       events,
@@ -97,11 +112,14 @@ async function main() {
     });
     log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);
     if (ack.rejected > 0) fail(`Ingest reported rejections: ${ack.rejected}`);
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

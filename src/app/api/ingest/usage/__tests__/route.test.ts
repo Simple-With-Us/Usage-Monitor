@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import botFleetReceipt from "@/lib/__tests__/fixtures/botfleet-singlecall-v2.json";
 
 const externalUsageMocks = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -7,12 +8,16 @@ const externalUsageMocks = vi.hoisted(() => ({
 }));
 const resolveProjects = vi.hoisted(() => vi.fn());
 const providerFindMany = vi.hoisted(() => vi.fn());
+const persistAiRequests = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/external-usage-events", () => ({
   ExternalUsageIdempotencyCollisionError: class extends Error {},
   NegativeSubscriptionWindowLimitExceededError: class extends Error {},
   persistExternalUsageEvents: externalUsageMocks.persist,
   syncStatusToUsageSnapshot: externalUsageMocks.syncStatus,
+}));
+vi.mock("@/lib/ai-requests", () => ({
+  persistAiRequests,
 }));
 vi.mock("@/lib/project-resolver", () => ({
   resolveProjectIdsByName: resolveProjects,
@@ -175,6 +180,20 @@ afterEach(() => {
 });
 
 describe("POST /api/ingest/usage admission", () => {
+  it("persists transcript cache reads without inferring native aggregate coverage", async () => {
+    const response = await POST(nextRequest({
+      sourceApp: "claude-code", provider: "anthropic", service: "claude-code",
+      metricType: "usage", unit: "token", quantity: 1000,
+      occurredAt: "2026-10-30T12:00:00Z",
+      metadata: { collector: "transcript", "host.name": "host-a", tokenType: "cacheRead" },
+    }, USAGE_TOKEN));
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist.mock.calls[0][0][0]).toMatchObject({
+      sourceApp: "claude-code", quantity: 1000, metadata: { tokenType: "cacheRead" },
+    });
+    expect(await response.json()).toMatchObject({ received: 1, accepted: 1 });
+  });
+
   it("accepts v2 through the shared schema and returns explicit persistence counts", async () => {
     externalUsageMocks.persist.mockResolvedValueOnce({
       attempted: 1,
@@ -491,6 +510,34 @@ describe("POST /api/ingest/usage admission", () => {
     const release = tryAcquireIngestAdmission();
     expect(release).not.toBeNull();
     release?.();
+  });
+
+  it.each(["SQLITE_BUSY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED_SHAREDCACHE"])(
+    "returns retryable receiver_busy for %s without acknowledging data",
+    async (originalCode) => {
+      externalUsageMocks.persist.mockRejectedValueOnce({
+        code: "P1008",
+        meta: { driverAdapterError: { cause: { originalCode } } },
+      });
+      const response = await POST(v2Request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(await response.json()).toMatchObject({
+        ok: false, error: { code: "receiver_busy", retryable: true, retryAfterSeconds: 5 },
+      });
+      const release = tryAcquireIngestAdmission();
+      expect(release).not.toBeNull();
+      release?.();
+    }
+  );
+
+  it("does not classify an unknown busy suffix as lock contention", async () => {
+    externalUsageMocks.persist.mockRejectedValueOnce({
+      code: "P1008", meta: { driverAdapterError: { cause: { originalCode: "SQLITE_BUSY_UNKNOWN" } } },
+    });
+    const response = await POST(v2Request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
   });
 
   it("accepts an exact signed receipt only for its dedicated token and provider ID", async () => {
@@ -1025,6 +1072,18 @@ describe("POST /api/ingest/usage producer scoping", () => {
     );
   });
 
+  it.each([false, true])("grants receipt authority only to a scoped BotFleet credential: scoped=%s", async (scoped) => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "botfleet:botfleet-test-scoped");
+    const payload = structuredClone(botFleetReceipt);
+    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64) });
+    const response = await POST(nextRequest(payload, scoped ? "botfleet-test-scoped" : USAGE_TOKEN, undefined, 2));
+    expect(response.status).toBe(202);
+    const persisted = externalUsageMocks.persist.mock.calls[0][0][0];
+    expect(persisted.metadata._botFleetReceiptCredential).toBe(scoped ? "botfleet-v1" : undefined);
+    if (scoped) expect(persisted.metadata._botFleetReceiptSignature).toMatch(/^[a-f0-9]{64}$/);
+    else expect(persisted.metadata._botFleetReceiptSignature).toBeUndefined();
+  });
+
   it("accepts a scoped token when events match allowedSourceApps", async () => {
     const response = await POST(
       nextRequest(
@@ -1109,5 +1168,88 @@ describe("POST /api/ingest/usage producer scoping", () => {
       )
     );
     expect(resB.status).toBe(202);
+  });
+});
+
+describe("POST /api/ingest/usage canonical AI block (UM-1592)", () => {
+  function aiRequest(ai?: Record<string, unknown>): NextRequest {
+    return nextRequest(
+      {
+        schemaVersion: 2,
+        producerId: "botfleet",
+        events: [{
+          eventId: "turn-1",
+          provider: "anthropic",
+          metricType: "usage",
+          unit: "token",
+          quantity: 60,
+          costUsd: 0.01,
+          occurredAt: "2026-10-17T00:00:00.000Z",
+          ...(ai ? { ai } : { metadata: { promptTokens: 40, completionTokens: 20 } }),
+        }],
+      },
+      USAGE_TOKEN,
+      "https://usage.jays.services/api/ingest/usage",
+      2
+    );
+  }
+
+  it("writes one AiRequest row per ai-block event", async () => {
+    persistAiRequests.mockResolvedValueOnce({ inserted: 1, merged: 0, duplicates: 0 });
+    const response = await POST(aiRequest({
+      model: { requested: "sonnet", served: "claude-sonnet-4-5" },
+      harness: "botfleet",
+      seat: "CLAUDE",
+      tokens: { input: 10, output: 20, cacheRead: 15, cacheWrite5m: 5, cacheWrite1h: 10, reasoning: 4 },
+      durationMs: 900.4,
+      ttftMs: 120,
+      billingMode: "payg",
+      costSource: "billed",
+    }));
+    expect(response.status).toBe(202);
+    expect(persistAiRequests).toHaveBeenCalledTimes(1);
+    const [[requests]] = persistAiRequests.mock.calls;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      kind: "complete",
+      source: "ingest",
+      harness: "botfleet",
+      seat: "CLAUDE",
+      requestedModel: "sonnet",
+      servedModel: "claude-sonnet-4-5",
+      durationMs: 900,
+      ttftMs: 120,
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 15,
+      cacheWriteTokens: 15,
+      cacheWrite5mTokens: 5,
+      cacheWrite1hTokens: 10,
+      reasoningTokens: 4,
+      costUsd: 0.01,
+      costSource: "billed",
+      billingMode: "payg",
+    });
+    expect(requests[0].dedupeKey).toMatch(/^ingest:[0-9a-f]{64}$/);
+  });
+
+  it("does not write AiRequest rows for legacy-mapped events", async () => {
+    const response = await POST(aiRequest());
+    expect(response.status).toBe(202);
+    expect(persistAiRequests).not.toHaveBeenCalled();
+    expect(externalUsageMocks.persist).toHaveBeenCalledWith([
+      expect.objectContaining({
+        metadata: expect.objectContaining({ _aiTokensInput: 40, _aiTokensOutput: 20, _aiSource: "legacy" }),
+      }),
+    ]);
+  });
+
+  it("still ACKs when the AiRequest store fails", async () => {
+    persistAiRequests.mockRejectedValueOnce(new Error("store down"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await POST(aiRequest({ tokens: { input: 1 } }));
+    expect(response.status).toBe(202);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

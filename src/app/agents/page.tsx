@@ -1,10 +1,14 @@
-import AgentsPageClient from "@/components/AgentsPageClient";
+import { AgentsDashboard } from "@/components/AgentsDashboard";
 
 export const metadata = {
-  title: "Agents & Quota Intelligence — Usage Monitor",
-  description: "Live subscription quota windows, local runtime health, and shadow API-equivalent cost calculations for fleet coding agents.",
+  title: "Coding Agents | Usage Monitor",
+  description: "Live process status, token telemetry, quota burn, and PAYG API-equivalent cost savings for AI coding agents.",
 };
 
 export default function AgentsPage() {
-  return <AgentsPageClient />;
+  return (
+    <main className="container mx-auto px-4 py-8 max-w-7xl">
+      <AgentsDashboard />
+    </main>
+  );
 }

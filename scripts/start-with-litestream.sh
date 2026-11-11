@@ -17,10 +17,10 @@
 # error. This prevents a deploy from silently running without its intended
 # backup path.
 #
-# backup-sqlite-before-migrate.mjs then migrate-safe.mjs run exactly once in
-# both paths, before the server starts, and always against the post-restore (or
-# existing) database file. An existing database cannot be migrated unless a
-# transaction-consistent local backup passes SQLite integrity verification.
+# A read-only Prisma schema diff skips the expensive pre-migration snapshot only
+# when the database is already in sync.  Schema drift or a failed diff still
+# requires the verified backup before migrate-safe.mjs can change the database.
+# Both checks run against the post-restore (or existing) database file.
 #
 # Uses `exec` for the final process in each branch so it becomes PID 1 (or
 # litestream's supervised child) and receives Render's SIGTERM directly for
@@ -33,6 +33,9 @@ LITESTREAM_BIN="${LITESTREAM_BIN_PATH:-${REPO_ROOT}/bin/litestream}"
 LITESTREAM_CONFIG="${REPO_ROOT}/litestream.yml"
 DB_PATH="/data/prod.db"
 export APP_STARTUP_WRAPPER="start-with-litestream-v2"
+# Never trust a deploy-provided supervisor claim.  It is set only below after
+# this wrapper starts the R2 watcher for this process.
+unset LITESTREAM_R2_SUPERVISOR_ACTIVE LITESTREAM_R2_SUPERVISOR_PID
 
 log() {
   echo "[start-with-litestream] $*"
@@ -133,6 +136,54 @@ if [[ "${STARTUP_PREFLIGHT_ONLY:-false}" == "true" ]]; then
   exit 0
 fi
 
+# Datadog APM is opt-in (existing fleet vars only).  A start with no DD_* vars
+# runs dark.  Partial keys, or DD_REQUIRE=1 without DD_SERVICE, refuse to boot
+# instead of running half-blind.  DD_TRACE_ENABLED=false is the
+# throwaway-container opt-out.
+dd_opted_out=false
+dd_required=false
+# Trim and lowercase guard inputs to match the TypeScript reference in
+# src/lib/datadog-options.ts (nonEmptyEnv, isTruthyEnv, isFalsyEnv).  Padded or
+# mixed-case values must behave identically in the entrypoint and at runtime,
+# and a whitespace-only value must count as unset.
+dd_trim() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+dd_trace_enabled_norm="$(dd_trim "${DD_TRACE_ENABLED:-}")"
+case "${dd_trace_enabled_norm,,}" in
+  0|false|off|no) dd_opted_out=true ;;
+esac
+dd_require_norm="$(dd_trim "${DD_REQUIRE:-}")"
+case "${dd_require_norm,,}" in
+  1|true|yes|on) dd_required=true ;;
+esac
+dd_service="$(dd_trim "${DD_SERVICE:-}")"
+dd_signaled=false
+for dd_key in DD_SERVICE DD_ENV DD_AGENT_HOST DD_TRACE_AGENT_PORT DD_API_KEY DD_SITE DD_TRACE_ENABLED DD_TRACE_SAMPLE_RATE; do
+  if [[ -n "$(dd_trim "${!dd_key:-}")" ]]; then
+    dd_signaled=true
+    break
+  fi
+done
+if [[ "${dd_opted_out}" != "true" ]]; then
+  if [[ -z "${dd_service}" && ( "${dd_signaled}" == "true" || "${dd_required}" == "true" ) ]]; then
+    log "ERROR: Datadog is required (DD_REQUIRE=1) or partially configured but DD_SERVICE is missing."
+    log "Reuse the existing fleet DD_* vars. Do not invent secrets. DD_REQUIRE=1 keeps the fail-closed guard; DD_TRACE_ENABLED=false opts a throwaway container out."
+    exit 1
+  fi
+  if [[ -n "${dd_service}" ]]; then
+    case " ${NODE_OPTIONS:-} " in
+      *" --require dd-trace/init "*|*" --require dd-trace/init") ;;
+      *)
+        export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--require dd-trace/init"
+        ;;
+    esac
+  fi
+fi
+
 if [[ "${litestream_enabled}" == "true" ]]; then
   export LITESTREAM_ACTIVE=true
   # Side-channel path consumed by getBackupRuntimeStatus. Coolify/Infisical
@@ -189,11 +240,23 @@ du -sh /data/* 2>/dev/null || true
 
 if [[ -d "/data/.pre-migration-backups" ]]; then
   log "cleaning up old partial pre-migration backups to prevent disk full errors."
-  rm -f /data/.pre-migration-backups/*.partial 2>/dev/null || true
+  # Only collect partials older than twice the resolved snapshot deadline: a
+  # partial being written by a live snapshot child (possibly in another
+  # container sharing this volume) is younger and must survive startup cleanup.
+  stale_guard_out=""
+  stale_guard_status=0
+  stale_guard_out="$(
+    node "${REPO_ROOT}/scripts/lib/sqlite-pre-migration-backup-timing.mjs" --guard-minutes
+  )" || stale_guard_status=$?
+  if (( stale_guard_status != 0 )) || [[ ! "${stale_guard_out}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: stale-partial guard could not be computed; stale .partial cleanup is SKIPPED this boot."
+  else
+    find /data/.pre-migration-backups -maxdepth 1 -type f -name '*.partial' -mmin +"${stale_guard_out}" -delete 2>/dev/null || true
+  fi
 fi
 
 log "creating and verifying pre-migration SQLite backup when a database exists."
-node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs"
+node "${REPO_ROOT}/scripts/backup-sqlite-before-migrate.mjs" --if-schema-changed
 
 
 log "checking provider billing links before enforcing uniqueness."
@@ -266,6 +329,12 @@ if [[ "${litestream_enabled}" == "true" && "${litestream_endpoint_is_r2}" == "tr
     done
   ) &
   R2_WATCH_PID=$!
+  if kill -0 "${R2_WATCH_PID}" 2>/dev/null; then
+    export LITESTREAM_R2_SUPERVISOR_ACTIVE=true
+    export LITESTREAM_R2_SUPERVISOR_PID="${R2_WATCH_PID}"
+  else
+    log "WARNING: R2 watcher did not start; runtime checkpoint handoff is disabled."
+  fi
   cleanup_r2_litestream() {
     log "shutting down R2 litestream sibling, watcher, and replica heartbeat."
     kill "${R2_WATCH_PID}" 2>/dev/null || true

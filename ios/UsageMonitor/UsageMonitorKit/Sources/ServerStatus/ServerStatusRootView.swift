@@ -16,18 +16,22 @@ import Networking
 /// through `@Environment(AppEnvironment.self)`.
 public struct ServerStatusRootView: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.scenePhase) private var scenePhase
     @State private var status: ServerStatusStore
     @State private var hostUsage: HostUsageStore
+    @State private var b2Usage: B2AppUsageStore
 
     public init() {
         _status = State(initialValue: ServerStatusStore())
         _hostUsage = State(initialValue: HostUsageStore())
+        _b2Usage = State(initialValue: B2AppUsageStore())
     }
 
     /// Preview/test seam — inject a stubbed status store.
     init(status: ServerStatusStore) {
         _status = State(initialValue: status)
         _hostUsage = State(initialValue: HostUsageStore())
+        _b2Usage = State(initialValue: B2AppUsageStore())
     }
 
     public var body: some View {
@@ -42,16 +46,40 @@ public struct ServerStatusRootView: View {
                 ) {
                     await hostUsage.refresh(using: env.apiClient)
                 }
+                if env.hasToken {
+                    B2AppUsageSection(
+                        store: b2Usage,
+                        hasCredential: env.hasToken
+                    ) {
+                        await b2Usage.refresh(using: env.apiClient)
+                    }
+                }
             }
-            .tabBarScrollClearance()
             .navigationTitle(AppTab.serverStatus.title)
             .navigationBarTitleDisplayMode(.inline)
             .task(id: env.accessIdentityRevision) {
                 await status.loadIfNeeded(using: env.apiClient)
                 hostUsage.reset()
+                b2Usage.reset()
                 if env.hasToken {
                     await hostUsage.loadIfNeeded(using: env.apiClient)
+                    await b2Usage.loadIfNeeded(using: env.apiClient)
                 }
+            }
+            // Tab views stay mounted (RootView keeps visited tabs alive), so
+            // `.task` never re-fires on tab switches — poll staleness instead.
+            // `loadIfNeeded` only refetches once the snapshot is >3m old, so a
+            // transient deploy-window "Database — Down" heals on its own.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(180))
+                    guard !Task.isCancelled else { return }
+                    await status.loadIfNeeded(using: env.apiClient)
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await status.loadIfNeeded(using: env.apiClient) }
             }
             .refreshable {
                 await status.refresh(using: env.apiClient)

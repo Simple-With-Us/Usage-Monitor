@@ -115,6 +115,12 @@ public final class PlatformsStore {
     }
 
     private func fetchAll(using client: APIClient) async {
+        if ProcessInfo.processInfo.arguments.contains("-ScreenshotDemo") {
+            platformState = .loaded(.sample)
+            hostState = .loaded(.sample)
+            operationsState = .loaded(.sample)
+            return
+        }
         // Concurrent, independent, and each failure is contained to its own
         // state so a single dead upstream cannot blank the screen.
         async let platforms: Void = fetchPlatforms(using: client)

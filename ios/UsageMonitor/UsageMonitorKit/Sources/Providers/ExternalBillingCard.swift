@@ -64,6 +64,12 @@ struct ExternalBillingCard: View {
                             .foregroundStyle(Theme.Colors.secondaryText)
                     }
                 }
+                if let qty = record.usageQuantity, qty > 0 {
+                    Text("· \(record.formattedUsage)")
+                        .font(Theme.Typography.callout.weight(.medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.Colors.accent)
+                }
                 Spacer(minLength: 0)
                 Text("\(record.source) · \(record.kind)")
                     .font(Theme.Typography.caption)

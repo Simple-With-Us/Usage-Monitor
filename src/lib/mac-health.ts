@@ -5,19 +5,27 @@ import type { NextRequest } from "next/server";
 
 export interface MacProcessStatus {
   name: string;
-  status: "running" | "stopped" | "degraded";
+  status: "running" | "stopped" | "degraded" | "not_enabled" | "disabled" | "ok" | string;
   pid?: number | null;
+  cpu?: number | null;
+  memory?: number | null;
 }
 
 export interface MacHostTelemetry {
   hostname: string;
+  username?: string;
+  tailscaleHostname?: string;
   osVersion?: string;
+  chipName?: string;
   arch?: string;
   cpuUsagePct: number;
   memoryUsagePct: number;
   diskUsagePct: number;
   uptimeSeconds: number;
-  processes?: Record<string, "running" | "stopped" | "degraded">;
+  processes?: Record<string, "running" | "stopped" | "degraded" | "not_enabled" | "disabled" | string>;
+  agentProcesses?: Record<string, "running" | "idle" | "stopped" | string>;
+  pm2Processes?: Array<{ name: string; status: string; pid?: number | null; cpu?: number; memory?: number }>;
+  launchdProcesses?: Array<{ name: string; status: string; pid?: number | null }>;
   lastHeartbeatAt: string;
 }
 
@@ -34,14 +42,20 @@ const ONLINE_THRESHOLD_SECONDS = 180; // 3 minutes
 export async function recordMacHeartbeat(data: Partial<MacHostTelemetry>): Promise<MacHostTelemetry> {
   const now = new Date();
   const telemetry: MacHostTelemetry = {
-    hostname: data.hostname || "MacBook",
+    hostname: data.hostname || "jays.services",
+    username: data.username || "jay",
+    tailscaleHostname: data.tailscaleHostname || "macbook.boa-roygbiv.ts.net",
     osVersion: data.osVersion || "macOS",
+    chipName: data.chipName || "Apple M5",
     arch: data.arch || "arm64",
     cpuUsagePct: Math.min(100, Math.max(0, Number(data.cpuUsagePct) || 0)),
     memoryUsagePct: Math.min(100, Math.max(0, Number(data.memoryUsagePct) || 0)),
     diskUsagePct: Math.min(100, Math.max(0, Number(data.diskUsagePct) || 0)),
     uptimeSeconds: Math.max(0, Math.floor(Number(data.uptimeSeconds) || 0)),
     processes: data.processes || {},
+    agentProcesses: data.agentProcesses || {},
+    pm2Processes: data.pm2Processes || [],
+    launchdProcesses: data.launchdProcesses || [],
     lastHeartbeatAt: now.toISOString(),
   };
 

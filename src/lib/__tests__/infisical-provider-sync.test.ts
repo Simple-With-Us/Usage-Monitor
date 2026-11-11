@@ -149,7 +149,7 @@ const ALLOWLIST: Record<Scope, readonly string[]> = {
     "XAI_TEAM_ID",
   ],
   "st-primary": ["BRIDGE_MANIFEST_V1", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
-  um: [],
+  um: ["NAMECHEAP_API_KEY", "NAMECHEAP_API_USER", "NAMECHEAP_CLIENT_IP"],
 };
 
 interface SecretRead {
@@ -216,6 +216,8 @@ function clearSyncEnvironment(): void {
     delete process.env[config.clientSecretEnv];
     delete process.env[config.projectIdEnv];
     delete process.env[config.pathEnv];
+    const prefix = config.clientIdEnv.replace(/_CLIENT_ID$/, "");
+    for (const suffix of ["READ_PATHS", "WRITE_PATHS", "READ_TOKEN", "WRITE_TOKEN"]) delete process.env[`${prefix}_${suffix}`];
   }
   delete process.env.INFISICAL_BASE_URL;
   delete process.env.INFISICAL_ENV;
@@ -609,6 +611,7 @@ beforeEach(async () => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
   await prisma.provider.deleteMany();
   await prisma.project.deleteMany();
+  await prisma.appSetting.deleteMany({ where: { key: { startsWith: "infisical.connection.v1." } } });
 });
 
 describe("Socratic primary-account bridge reader", () => {
@@ -949,20 +952,21 @@ afterAll(async () => {
 });
 
 describe("Infisical provider credential sync", () => {
-  it("reads only the functional allowlist and preserves three scopes", async () => {
-    configureSources("st", "ct", "shared");
+  it("reads only the functional allowlist and preserves four scopes", async () => {
+    configureSources("st", "ct", "shared", "um");
     const secrets = {
       st: valuesFor("st"),
       ct: valuesFor("ct"),
       shared: valuesFor("shared"),
+      um: valuesFor("um"),
     };
     const capture = installInfisicalMock(secrets);
 
     const result = await syncProviderCredentialsFromInfisical();
 
-    expect(capture.loginSources.sort()).toEqual(["ct", "shared", "st"]);
+    expect(capture.loginSources.sort()).toEqual(["ct", "shared", "st", "um"]);
     expect(new Set(capture.redirects)).toEqual(new Set(["error"]));
-    for (const source of ["st", "ct", "shared"] as const) {
+    for (const source of ["st", "ct", "shared", "um"] as const) {
       expect(capture.scopeReads.filter((read) => read.source === source)).toEqual([
         {
           source,
@@ -1060,14 +1064,118 @@ describe("Infisical provider credential sync", () => {
     expect(
       capture.secretReads.some((read) => read.name.startsWith("OCI_"))
     ).toBe(false);
+    // PD #79 regression coverage: the "um" scope populates namecheap's apiKey
+    // and public config (apiUser/clientIp) exactly like any other mapping.
+    const namecheap = providers.find((provider) => provider.name === "namecheap")!;
+    expect(namecheap).toBeDefined();
+    expect(decrypt(namecheap.apiKey!)).toBe(secrets.um.NAMECHEAP_API_KEY);
+    expect(namecheap.config).toMatchObject({
+      apiUser: secrets.um.NAMECHEAP_API_USER,
+      clientIp: secrets.um.NAMECHEAP_CLIENT_IP,
+    });
+    expect(decryptJson(namecheap.secretConfig!)).toMatchObject({
+      infisicalCredential: {
+        scope: "um",
+        source: "um",
+        providerName: "namecheap",
+      },
+    });
+  });
+
+  it("isolates an unreadable saved source while other project credentials still sync", async () => {
+    configureSources("st", "ct");
+    await prisma.appSetting.create({ data: { key: "infisical.connection.v1.st", value: "invalid-encrypted-row" } });
+    const capture = installInfisicalMock({ ct: { GEMINI_API_KEY: "ct-still-available" } });
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "st")).toMatchObject({ status: "error", errorCode: "source_configuration_unreadable" });
+    expect(capture.secretReads.some((read) => read.source === "ct" && read.name === "GEMINI_API_KEY")).toBe(true);
+    expect((await prisma.provider.findMany()).some((provider) => provider.apiKey && decrypt(provider.apiKey) === "ct-still-available")).toBe(true);
+  });
+  it("keeps fixed bootstrap configuration failures nonfatal and reports bridge failure separately", async () => {
+    process.env.INFISICAL_ST_GEMINI_BOOTSTRAP_ENABLED = "true";
+    process.env.INFISICAL_ST_PRIMARY_SYNC_ENABLED = "true";
+    await prisma.appSetting.createMany({ data: ["st", "st-primary"].map((source) => ({ key: `infisical.connection.v1.${source}`, value: "invalid-encrypted-row" })) });
+    await expect(bootstrapStGeminiCredentialToInfisical()).resolves.toMatchObject({ enabled: true, status: "error", attempted: false });
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "st-primary")).toMatchObject({ status: "error", errorCode: "source_configuration_unreadable" });
+  });
+  it("syncs a metadata-verified service-token source without machine-identity fallback and retains the key on scope mismatch", async () => {
+    configureSources("ct");
+    delete process.env.INFISICAL_CT_CLIENT_ID;
+    delete process.env.INFISICAL_CT_CLIENT_SECRET;
+    process.env.INFISICAL_CT_READ_TOKEN = "st.test-ct-read";
+    let wrongProject = false;
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      calls.push(url.pathname);
+      if (url.pathname === "/api/v2/service-token") return jsonResponse({ workspace: wrongProject ? "another-project" : SOURCE_ENV.ct.projectId, permissions: ["read"], scopes: [{ environment: "prod", secretPath: SOURCE_ENV.ct.secretPath }], expiresAt: null });
+      if (url.pathname.startsWith("/api/v3/secrets/raw")) {
+        expect(Object.fromEntries(url.searchParams)).toMatchObject({ workspaceId: SOURCE_ENV.ct.projectId, environment: "prod", secretPath: SOURCE_ENV.ct.secretPath, expandSecretReferences: "false", recursive: "false", include_imports: "false" });
+        expect(url.searchParams.has("includeImports")).toBe(false);
+      }
+      if (url.pathname === "/api/v3/secrets/raw") return jsonResponse({ secrets: [{ secretKey: "OPENROUTER_API_KEY" }] });
+      if (url.pathname === "/api/v3/secrets/raw/OPENROUTER_API_KEY") return jsonResponse({ secret: { secretKey: "OPENROUTER_API_KEY", type: "shared", secretValue: "ct-scoped-key" } });
+      return jsonResponse({}, 404);
+    }));
+    const first = await syncProviderCredentialsFromInfisical();
+    expect(first.sources.find((source) => source.source === "ct")).toMatchObject({ configured: true, status: "synced", available: 1 });
+    const provider = await prisma.provider.findFirstOrThrow({ where: { name: "openrouter" } });
+    expect(decrypt(provider.apiKey!)).toBe("ct-scoped-key");
+    expect(calls.some((url) => url.includes("universal-auth"))).toBe(false);
+    wrongProject = true; calls.length = 0;
+    const second = await syncProviderCredentialsFromInfisical();
+    expect(second.sources.find((source) => source.source === "ct")).toMatchObject({ status: "error", errorCode: "token_scope_mismatch" });
+    expect(calls).toEqual(["/api/v2/service-token"]);
+    expect(decrypt((await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })).apiKey!)).toBe("ct-scoped-key");
+    expect(JSON.stringify([first, second])).not.toContain("st.test-ct-read");
+    const { deleteInfisicalConnection } = await import("../infisical-connections");
+    await deleteInfisicalConnection("ct"); calls.length = 0;
+    const disabled = await syncProviderCredentialsFromInfisical();
+    expect(disabled.sources.find((source) => source.source === "ct")).toMatchObject({ configured: false, status: "unconfigured" });
+    expect(calls).toEqual([]);
+    expect(decrypt((await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })).apiKey!)).toBe("ct-scoped-key");
+  });
+
+  it("reads mapped credentials from every declared folder without mixing their paths", async () => {
+    configureSources("ct");
+    vi.stubEnv("INFISICAL_CT_READ_PATHS", `${SOURCE_ENV.ct.secretPath},/extra`);
+    const capture = installInfisicalMock({ ct: { GEMINI_API_KEY: "ct-gemini-value", OPENROUTER_API_KEY: "ct-openrouter-value" } });
+    const original = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await original(input, init);
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname !== "/api/v4/secrets") return response;
+      const body = await response.json();
+      const wanted = url.searchParams.get("secretPath") === "/extra" ? "OPENROUTER_API_KEY" : "GEMINI_API_KEY";
+      return jsonResponse({ secrets: body.secrets.filter((secret: { secretKey: string }) => secret.secretKey === wanted) });
+    }));
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "ct")).toMatchObject({ status: "synced", available: 2, failed: 0 });
+    expect(capture.scopeReads.map((read) => read.secretPath)).toEqual([SOURCE_ENV.ct.secretPath, "/extra"]);
+    expect(capture.loginSources).toEqual(["ct"]);
+    expect(capture.secretReads.find((read) => read.name === "OPENROUTER_API_KEY")?.secretPath).toBe("/extra");
+    expect(capture.secretReads.find((read) => read.name === "GEMINI_API_KEY")?.secretPath).toBe(SOURCE_ENV.ct.secretPath);
+    expect((await prisma.provider.findMany()).map((provider) => provider.name).sort()).toEqual(["google-ai", "openrouter"]);
+  });
+
+  it("rejects duplicate mapped names across folders before reading credential values", async () => {
+    configureSources("ct");
+    vi.stubEnv("INFISICAL_CT_READ_PATHS", `${SOURCE_ENV.ct.secretPath},/extra`);
+    const capture = installInfisicalMock({ ct: { OPENROUTER_API_KEY: "ambiguous-value" } });
+    const result = await syncProviderCredentialsFromInfisical();
+    expect(result.sources.find((source) => source.source === "ct")).toMatchObject({ status: "error", errorCode: "ambiguous_secret_folder" });
+    expect(capture.secretReads).toEqual([]);
+    expect(await prisma.provider.count()).toBe(0);
   });
 
   it("splits comma-delimited LlamaParse keys into stable, deduplicated managed rows", async () => {
-    configureSources("st", "ct", "shared");
+    configureSources("st", "ct", "shared", "um");
     const secrets = {
       st: valuesFor("st"),
       ct: valuesFor("ct"),
       shared: valuesFor("shared"),
+      um: valuesFor("um"),
     };
     const llamaKeys = ["llama-first-key", "llama-second-key", "llama-third-key"];
     secrets.ct.LLAMAPARSE_API_KEY = ` ${llamaKeys[0]},, ${llamaKeys[1]} , ${llamaKeys[0]} ,${llamaKeys[2]} `;
@@ -1137,13 +1245,14 @@ describe("Infisical provider credential sync", () => {
   });
 
   it("uses shared only after a definite miss, then promotes the app key", async () => {
-    configureSources("st", "ct", "shared");
+    configureSources("st", "ct", "shared", "um");
     const st = valuesFor("st");
     delete st.RESEND_API_KEY;
     const firstSecrets = {
       st,
       ct: valuesFor("ct"),
       shared: valuesFor("shared"),
+      um: valuesFor("um"),
     };
     installInfisicalMock(firstSecrets);
 
@@ -1316,11 +1425,12 @@ describe("Infisical provider credential sync", () => {
   });
 
   it("selects the exact current-key duplicate and never adopts an old label", async () => {
-    configureSources("st", "ct", "shared");
+    configureSources("st", "ct", "shared", "um");
     const secrets = {
       st: valuesFor("st"),
       ct: valuesFor("ct"),
       shared: valuesFor("shared"),
+      um: valuesFor("um"),
     };
     const oldCt = await prisma.provider.create({
       data: {
@@ -1456,11 +1566,12 @@ describe("Infisical provider credential sync", () => {
   });
 
   it("adopts an exact Resend domain row instead of creating a duplicate", async () => {
-    configureSources("st", "ct", "shared");
+    configureSources("st", "ct", "shared", "um");
     const secrets = {
       st: valuesFor("st"),
       ct: valuesFor("ct"),
       shared: valuesFor("shared"),
+      um: valuesFor("um"),
     };
     const existing = await prisma.provider.create({
       data: {
@@ -2145,7 +2256,7 @@ describe("one-time ST Gemini Infisical bootstrap", () => {
     expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(key);
   });
 
-  it("supports the um scope and falls back to INFISICAL_AUTOMATION_CLIENT_ID credentials", async () => {
+  it("does not borrow the fleet Automation identity for the um scope", async () => {
     vi.stubEnv("INFISICAL_PROVIDER_SYNC_ENABLED", "true");
     vi.stubEnv("INFISICAL_AUTOMATION_CLIENT_ID", SOURCE_ENV.um.clientId);
     vi.stubEnv("INFISICAL_AUTOMATION_CLIENT_SECRET", SOURCE_ENV.um.clientSecret);
@@ -2158,7 +2269,7 @@ describe("one-time ST Gemini Infisical bootstrap", () => {
     expect(result.enabled).toBe(true);
     const umSource = result.sources.find((s) => s.source === "um");
     expect(umSource).toBeDefined();
-    expect(umSource?.configured).toBe(true);
-    expect(capture.loginSources).toContain("um");
+    expect(umSource?.configured).toBe(false);
+    expect(capture.loginSources).not.toContain("um");
   });
 });

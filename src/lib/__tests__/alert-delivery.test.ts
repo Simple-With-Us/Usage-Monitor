@@ -727,8 +727,8 @@ describe("alert delivery", () => {
       maxAttempts: 1,
       retryBaseMs: 0,
     };
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     type AlertDb = NonNullable<
       NonNullable<Parameters<typeof deliverProviderAlerts>[0]>["db"]
     >;
@@ -832,8 +832,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     let observedResolvedReads = 0;
     let releaseBarrier: (() => void) | undefined;
     const bothObserved = new Promise<void>((resolve) => {
@@ -997,8 +997,8 @@ describe("alert delivery", () => {
         balance: 25,
       },
     });
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     const resolver = await deliverProviderAlerts({
       now: new Date("2026-07-20T13:00:02.000Z"),
       config,
@@ -1074,8 +1074,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     let signalResolverParent: (() => void) | undefined;
     let releaseResolverParent: (() => void) | undefined;
     const resolverParentReached = new Promise<void>((resolve) => {
@@ -1239,8 +1239,8 @@ describe("alert delivery", () => {
     });
     await staleChildReached;
 
-    const { PrismaClient } = await import("@prisma/client");
-    const freshPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const freshPrisma = createPrismaClient();
     try {
       await freshPrisma.usageSnapshot.create({
         data: {
@@ -1363,8 +1363,8 @@ describe("alert delivery", () => {
         balance: 25,
       },
     });
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     const resolved = await deliverProviderAlerts({
       now: new Date("2026-07-20T14:00:00.000Z"),
       config,
@@ -1739,8 +1739,8 @@ describe("alert delivery", () => {
     });
     await rev0ReadReached;
 
-    const { PrismaClient } = await import("@prisma/client");
-    const configClient = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const configClient = createPrismaClient();
     try {
       await configClient.provider.update({
         where: { id: provider.id },
@@ -2467,9 +2467,61 @@ describe("alert delivery", () => {
     });
     const params = new URLSearchParams(String(callArgs[1]?.body ?? ""));
     expect(params.get("token")).toBe("test-api-token");
+    expect(params.get("url")).toBe("https://usage.jays.services/alerts");
+  });
+
+  it("delivers spend and request spikes with rich details to Pushover", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "test_spike_pushover",
+        displayName: "OpenAI Platform",
+        type: "builtin",
+      },
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const config = {
+      channels: [
+        { kind: "pushover" as const, userKey: "test-user-key", apiToken: "test-api-token" },
+      ],
+      minSeverity: "warning" as const,
+      reminderHours: 24,
+    };
+
+    await prisma.providerPlan.create({
+      data: {
+        providerId: provider.id,
+        billingMode: "actual",
+        monthlyBudgetUsd: 50,
+      },
+    });
+
+    await prisma.usageSnapshot.create({
+      data: {
+        providerId: provider.id,
+        fetchedAt: new Date("2026-08-24T11:55:00.000Z"),
+        totalCost: 120,
+      },
+    });
+
+    const res = await deliverProviderAlerts({
+      now: new Date("2026-08-24T12:00:00.000Z"),
+      config,
+      fetchImpl: fetchMock,
+    });
+
+    expect(res.sent).toBeGreaterThanOrEqual(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const callArgs = fetchMock.mock.calls[0];
+    expect(callArgs[0]).toBe("https://api.pushover.net/1/messages.json");
+    const params = new URLSearchParams(String(callArgs[1]?.body ?? ""));
+    expect(params.get("token")).toBe("test-api-token");
     expect(params.get("user")).toBe("test-user-key");
-    expect(params.get("title")).toContain("Test Pushover");
-    expect(params.get("message")).toContain("low");
+    expect(params.get("title")).toBe("[CRITICAL] OpenAI Platform");
+    expect(params.get("message")).toContain("tracked against $50.00 monthly budget");
+    expect(params.get("priority")).toBe("1");
+    expect(params.get("url")).toBe("https://usage.jays.services/alerts");
   });
 
   it("fans budget alerts out over APNs with a mocked transport", async () => {
@@ -2517,7 +2569,7 @@ describe("alert delivery", () => {
             config: {
               keyId: "KEY123456",
               teamId: "CC8UTF7ATG",
-              bundleId: "services.jays.usage.client.monitor",
+              bundleId: "com.simplewithus.usage.client.ios",
               privateKeyPem,
             },
             transport: async (request) => {
@@ -3034,8 +3086,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     type AlertDb = NonNullable<
       NonNullable<Parameters<typeof deliverProviderAlerts>[0]>["db"]
     >;
@@ -3539,14 +3591,14 @@ describe("S12: per-code severity overrides and channel routing (env parsing)", (
     const config = readAlertDeliveryConfig({
       APNS_KEY_ID: "KEY123456",
       APNS_TEAM_ID: "CC8UTF7ATG",
-      APNS_BUNDLE_ID: "services.jays.usage.client.monitor",
+      APNS_BUNDLE_ID: "com.simplewithus.usage.client.ios",
       APNS_P8: pem,
     } as unknown as NodeJS.ProcessEnv);
     expect(config.channels).toHaveLength(1);
     expect(config.channels[0]?.kind).toBe("apns");
     if (config.channels[0]?.kind === "apns") {
       expect(config.channels[0].config.keyId).toBe("KEY123456");
-      expect(config.channels[0].config.bundleId).toBe("services.jays.usage.client.monitor");
+      expect(config.channels[0].config.bundleId).toBe("com.simplewithus.usage.client.ios");
     }
   });
 });

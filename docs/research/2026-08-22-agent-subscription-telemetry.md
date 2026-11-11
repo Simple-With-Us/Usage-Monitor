@@ -67,6 +67,29 @@ Order-of-magnitude (list prices move; treat as illustration, not a quote):
 
 If you want this number on the dashboard later: keep it as a **derived estimate from pushed telemetry**, never as a poll of SuperGrok/Codex/Antigravity. Those products still have no invoice API.
 
+## EasyCLIProxyAPI / CPA OAuth (2026-09-03)
+
+Apps like [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI)
+and [tokenuse](https://tokenuse.app/docs/development/tools/codex-subscription/)
+read ChatGPT / Codex quota by completing **consumer OAuth** or pasting a
+`chatgpt.com` session cookie, then calling unofficial hosts such as
+`/backend-api/wham/usage`.  That response includes `plan_type` (plus/pro)
+and 5h / 7d used-percent.  It is the same family of private product APIs
+this repo already labeled **MANUALLY ONLY**.
+
+Usage Monitor will:
+
+- Read `chatgpt_plan_type` from the **local** Codex `id_token` already on
+  disk (`~/.codex/auth.json`).  That is how we know Plus vs Pro without
+  guessing.
+- Keep billed cash on **receipts** / Subscription rows.
+- Not ship a server-side ChatGPT/Claude/xAI consumer OAuth connector that
+  impersonates the product website.
+
+A later Mac collector may add 5h/7d gauges from Codex `/status` or a
+user-triggered local quota probe.  That is still a laptop job, not a
+pollable Provider.
+
 ## What we will not do
 
 - Seed Provider rows for Grok Build, Codex, or Antigravity “because we use the seat.”

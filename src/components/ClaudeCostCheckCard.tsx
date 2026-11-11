@@ -239,7 +239,7 @@ export default function ClaudeCostCheckCard() {
           Both figures are API-equivalent analytics estimates, excluded from cash spend. Derived
           from the bundled LiteLLM catalog refreshed {snapshotDate}
           {data.totals.unpricedModelCount > 0
-            ? ` · ${data.totals.unpricedModelCount} unpriced model${data.totals.unpricedModelCount === 1 ? "" : "s"} under-counts derivation`
+            ? ` · ${data.totals.unpricedModelCount} incompletely priced model${data.totals.unpricedModelCount === 1 ? "" : "s"} under-counts derivation`
             : ""}
           {data.models.length > visibleModels.length
             ? ` · showing top ${visibleModels.length} of ${data.models.length} models`

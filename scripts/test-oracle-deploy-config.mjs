@@ -18,18 +18,18 @@ const read = (relativePath) =>
 
 const workflow = read(".github/workflows/production-deploy-verify.yml");
 const uptimeWorkflow = read(".github/workflows/uptime-monitor.yml");
-const compose = read("deploy/oracle/compose.production.yaml");
-const composeDev = read("deploy/oracle/compose.yaml");
-const caddy = read("deploy/oracle/Caddyfile");
-const oracleReadme = read("deploy/oracle/README.md");
-const deploy = read("deploy/oracle/deploy-production.sh");
-const poller = read("deploy/oracle/auto-deploy.sh");
-const service = read("deploy/oracle/usage-monitor.service");
-const deployService = read("deploy/oracle/usage-monitor-auto-deploy.service");
-const timer = read("deploy/oracle/usage-monitor-auto-deploy.timer");
+const compose = read("deploy/retired/oracle/compose.production.yaml");
+const composeDev = read("deploy/retired/oracle/compose.yaml");
+const caddy = read("deploy/retired/oracle/Caddyfile");
+const oracleReadme = read("deploy/retired/oracle/README.md");
+const deploy = read("deploy/retired/oracle/deploy-production.sh");
+const poller = read("deploy/retired/oracle/auto-deploy.sh");
+const service = read("deploy/retired/oracle/usage-monitor.service");
+const deployService = read("deploy/retired/oracle/usage-monitor-auto-deploy.service");
+const timer = read("deploy/retired/oracle/usage-monitor-auto-deploy.timer");
 const ci = read(".github/workflows/ci.yml");
 const renderRetirement = JSON.parse(
-  read("deploy/oracle/render-retired.production.json"),
+  read("deploy/retired/oracle/render-retired.production.json"),
 );
 
 function requireText(body, pattern, message) {
@@ -255,6 +255,16 @@ const restoreEndMarker = "\n}\n\nverify_render_retirement()";
 const restoreEnd = deploy.indexOf(restoreEndMarker, restoreStart);
 assert.ok(restoreStart >= 0 && restoreEnd > restoreStart, "restore functions must be extractable for behavioral tests");
 const restoreFunctions = deploy.slice(restoreStart, restoreEnd + 2);
+const productionRestoreKillSwitch = "/data/r2-disabled-70pct.flag";
+assert.equal(
+  restoreFunctions.split(productionRestoreKillSwitch).length - 1,
+  1,
+  "restore fixture must contain exactly one production kill-switch path",
+);
+const isolatedRestoreFunctions = restoreFunctions.replace(
+  productionRestoreKillSwitch,
+  "$CASE_DIR_VALUE/r2-disabled-70pct.flag",
+);
 
 const retentionTemp = mkdtempSync(path.join(os.tmpdir(), "usage-monitor-image-retention-"));
 const receiptPath = path.join(retentionTemp, "current.json");
@@ -381,10 +391,13 @@ function runRestoreCase({
   foreignKeyStatus = 0,
   foreignKeyResult = "",
   orphanAfterRestore = false,
+  killSwitch = false,
 } = {}) {
   const caseDir = mkdtempSync(path.join(restoreTemp, "case-"));
   const commandLog = path.join(caseDir, "commands.log");
   const restoreMarker = path.join(caseDir, "restore-started");
+  writeFileSync(commandLog, "");
+  if (killSwitch) writeFileSync(path.join(caseDir, "r2-disabled-70pct.flag"), "enabled\n");
   const harness = `
 set -Eeuo pipefail
 APP_CONTAINER=usage-monitor-app-1
@@ -442,7 +455,7 @@ sqlite3() {
     *) return 2 ;;
   esac
 }
-${restoreFunctions}
+${isolatedRestoreFunctions}
 trap cleanup_restore_scratch EXIT
 verify_backup_restore
 `;
@@ -551,6 +564,11 @@ try {
   assert.equal((successfulRestore.commands.match(/PRAGMA foreign_key_check/g) ?? []).length, 1);
   assert.deepEqual(successfulRestore.restoreFiles, [], "successful restore scratch must be removed");
 
+  const skippedRestore = runRestoreCase({ killSwitch: true });
+  assert.equal(skippedRestore.result.status, 0, skippedRestore.result.stderr);
+  assert.match(skippedRestore.result.stderr, /R2 free-tier kill switch engaged; skipping full Garage acceptance restore/);
+  assert.equal(skippedRestore.commands, "", "kill switch must skip all restore commands");
+
   const timedOutRestore = runRestoreCase({ restoreStatus: 124 });
   assert.notEqual(timedOutRestore.result.status, 0, "restore timeout must fail closed");
   assert.match(timedOutRestore.result.stderr, /restore did not complete \(exit 124\)/);
@@ -596,8 +614,8 @@ assert.deepEqual(
 );
 
 for (const relativePath of [
-  "deploy/oracle/deploy-production.sh",
-  "deploy/oracle/auto-deploy.sh",
+  "deploy/retired/oracle/deploy-production.sh",
+  "deploy/retired/oracle/auto-deploy.sh",
 ]) {
   const result = spawnSync("bash", ["-n", path.join(repoRoot, relativePath)], {
     encoding: "utf8",

@@ -7,11 +7,11 @@ import LocalAdapters
 /// Providers list with web/remote parity: search, status filter, sort, spend rows.
 struct LocalProvidersListContent: View {
     @Bindable var model: LocalAppModel
+    @Binding var filter: LocalProviderFilter
     var onAdd: () -> Void
     var onRequestDelete: (LocalProvider) -> Void
 
     @State private var search = ""
-    @State private var filter: LocalProviderFilter = .all
     @State private var sort: LocalProviderSort = .spendDesc
 
     private var spendById: [String: BudgetEngine.ProviderSpend] {
@@ -113,16 +113,16 @@ struct LocalProvidersListContent: View {
                                 } label: {
                                     Label("Fetch Now", systemImage: "arrow.triangle.2.circlepath")
                                 }
-                            }
-                            Button {
-                                Task {
-                                    try? await model.setActive(providerId: p.id, isActive: !p.isActive)
+                                Button {
+                                    Task {
+                                        try? await model.setActive(providerId: p.id, isActive: !p.isActive)
+                                    }
+                                } label: {
+                                    Label(
+                                        p.isActive ? "Pause Fetch" : "Resume Fetch",
+                                        systemImage: p.isActive ? "pause.circle" : "play.circle"
+                                    )
                                 }
-                            } label: {
-                                Label(
-                                    p.isActive ? "Deactivate" : "Activate",
-                                    systemImage: p.isActive ? "pause.circle" : "play.circle"
-                                )
                             }
                             Button(role: .destructive) {
                                 onRequestDelete(p)
@@ -162,7 +162,7 @@ struct LocalProvidersListContent: View {
                 EmptyState(
                     systemImage: "server.rack",
                     title: "No Providers Yet",
-                    message: "Add a pollable API or a recurring fee — same catalog families as the web.",
+                    message: "Add a provider with a key, or a Recurring Fee.",
                     actionTitle: "Add Provider",
                     action: onAdd
                 )
@@ -225,6 +225,10 @@ struct LocalProvidersListContent: View {
                         .font(Theme.Typography.caption)
                         .monospacedDigit()
                         .foregroundStyle(semantic(for: spend?.level ?? .unconfigured).tint)
+                } else if p.needsKey {
+                    Text("Connect")
+                        .font(Theme.Typography.captionEmphasis)
+                        .foregroundStyle(Theme.Colors.accent)
                 } else if !p.isActive {
                     Text("inactive")
                         .font(Theme.Typography.caption)
@@ -289,6 +293,7 @@ struct LocalProvidersListContent: View {
         case .noBudget: return spend?.level == .unconfigured || spend == nil
         case .inactive: return !p.isActive
         case .active: return p.isActive
+        case .needsKey: return p.needsKey
         }
     }
 
@@ -328,11 +333,12 @@ struct LocalProvidersListContent: View {
 }
 
 enum LocalProviderFilter: String, CaseIterable, Identifiable {
-    case all, over, warning, onTrack, noBudget, active, inactive
+    case all, needsKey, over, warning, onTrack, noBudget, active, inactive
     var id: String { rawValue }
     var label: String {
         switch self {
         case .all: return "All"
+        case .needsKey: return "Needs Key"
         case .over: return "Over"
         case .warning: return "Warning"
         case .onTrack: return "On Track"

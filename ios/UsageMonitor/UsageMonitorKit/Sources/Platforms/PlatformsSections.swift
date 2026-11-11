@@ -225,9 +225,10 @@ struct FleetAppsSection: View {
 
             ForEach(metrics.resources) { resource in
                 let status = FleetAppStatus.parse(resource.status)
+                let title = resource.fleetLabel ?? resource.name
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                        Text(resource.fleetLabel ?? resource.name)
+                        Text(title)
                             .font(Theme.Typography.body)
                             .foregroundStyle(Theme.Colors.primaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -239,6 +240,8 @@ struct FleetAppsSection: View {
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     StatusBadge(status.title, status: status.semantic)
                 }
+                .contentShape(Rectangle())
+                .copyableValue(resource.status, label: title)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -293,6 +296,7 @@ struct FleetBackupsSection: View {
     }
 
     private func locationTitle(_ location: ServerMetrics.FleetBackups.Location) -> String {
+        if location.unknown == true { return "Unknown" }
         if location.ok == true { return "OK" }
         if location.ok == false {
             return location.present == true ? "Lagging" : "Missing"
@@ -307,6 +311,7 @@ struct FleetBackupsSection: View {
     private func locationStatus(
         _ location: ServerMetrics.FleetBackups.Location
     ) -> Theme.SemanticStatus {
+        if location.unknown == true { return .neutral }
         if location.present == false { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }
@@ -416,27 +421,33 @@ struct FleetOperationsSection: View {
             SectionHeader("Operations")
 
             if let peer = operations.socraticInfrastructure {
+                let sha = peer.releaseSha.map { String($0.prefix(8)) } ?? "—"
                 row(
                     title: "Socratic.Trade",
-                    detail: peer.releaseSha.map { String($0.prefix(8)) } ?? "—",
+                    detail: sha,
                     state: peer.state
                 )
+                .copyableRow(label: "Socratic.Trade", value: sha)
             }
 
             if let congress = operations.congressInfrastructure {
+                let sha = congress.releaseSha.map { String($0.prefix(8)) } ?? "—"
                 row(
                     title: "Congress.Trade",
-                    detail: congress.releaseSha.map { String($0.prefix(8)) } ?? "—",
+                    detail: sha,
                     state: congress.state
                 )
+                .copyableRow(label: "Congress.Trade", value: sha)
             }
 
             if let inbox = operations.receiptInbox {
+                let countStr = inbox.needsReviewCount.map { "\($0) to review" } ?? "—"
                 row(
                     title: "Receipt Inbox",
-                    detail: inbox.needsReviewCount.map { "\($0) to review" } ?? "—",
+                    detail: countStr,
                     state: inbox.state
                 )
+                .copyableRow(label: "Receipt Inbox", value: countStr)
             }
 
             if let r2 = operations.r2Fleet, r2.configured {
@@ -468,19 +479,23 @@ struct FleetOperationsSection: View {
                         Text(r2UsageLabel(account))
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.secondaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                         if let pct = account.storage?.mtdPct {
                             BudgetMeter(
                                 fraction: pct / 100,
                                 status: PlatformFormat.usageBarStatus(pct),
                                 height: 6
                             )
-                            .frame(maxWidth: .infinity)
                             .accessibilityLabel("Free-tier storage used")
                         }
                     }
-                    .fixedSize(horizontal: true, vertical: false)
+                    // Bounded, compressible width — .fixedSize here pushed the
+                    // badge/meter off the card's right edge on narrow phones.
+                    .frame(maxWidth: 150, alignment: .trailing)
                 }
                 StatusBadge(health.title, status: health.semantic)
+                    .layoutPriority(1)
             }
 
             if let detail = health.detail(for: account) {
@@ -547,19 +562,28 @@ struct PlatformCardsSection: View {
 
 struct PlatformCardRow: View {
     let platform: PlatformStatusPayload.PlatformCard
+    @State private var showingDetailSheet = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(spacing: Theme.Spacing.sm) {
-                Text(platform.name)
-                    .font(Theme.Typography.body)
-                    .foregroundStyle(
-                        platform.configured
-                            ? Theme.Colors.primaryText : Theme.Colors.secondaryText
-                    )
-                Spacer(minLength: Theme.Spacing.sm)
-                StatusBadge(platform.state.title, status: semantic(platform.state))
+            Button {
+                showingDetailSheet = true
+            } label: {
+                HStack(spacing: Theme.Spacing.sm) {
+                    Text(platform.name)
+                        .font(Theme.Typography.body.weight(.medium))
+                        .foregroundStyle(
+                            platform.configured
+                                ? Theme.Colors.primaryText : Theme.Colors.secondaryText
+                        )
+                    Spacer(minLength: Theme.Spacing.sm)
+                    StatusBadge(platform.state.title, status: semantic(platform.state))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Colors.tertiaryText)
+                }
             }
+            .buttonStyle(.plain)
 
             if let headline = platform.headline, !headline.isEmpty {
                 Text(headline)
@@ -569,18 +593,21 @@ struct PlatformCardRow: View {
             }
 
             if platform.configured, !platform.metrics.isEmpty {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                     ForEach(platform.metrics) { entry in
-                        HStack(alignment: .center, spacing: Theme.Spacing.sm) {
+                        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                             Text(entry.label)
-                                .font(Theme.Typography.caption)
-                                .foregroundStyle(Theme.Colors.tertiaryText)
-                            Spacer(minLength: Theme.Spacing.sm)
+                                .font(Theme.Typography.caption.weight(.medium))
+                                .foregroundStyle(Theme.Colors.primaryText)
+                                .frame(minWidth: 70, alignment: .leading)
+                            Spacer(minLength: Theme.Spacing.xs)
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text(entry.hint.map { "\(entry.value) \($0)" } ?? entry.value)
+                                let formattedValue = entry.hint.map { "\(entry.value) \($0)" } ?? entry.value
+                                Text(formattedValue)
                                     .font(Theme.Typography.caption)
                                     .foregroundStyle(Theme.Colors.secondaryText)
                                     .multilineTextAlignment(.trailing)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 if let pct = entry.usagePct {
                                     BudgetMeter(
                                         fraction: pct / 100,
@@ -591,16 +618,163 @@ struct PlatformCardRow: View {
                                     .accessibilityLabel("Free-tier storage used")
                                 }
                             }
-                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
                         }
                     }
                 }
+                .padding(.top, Theme.Spacing.xxs)
             }
 
             if !platform.configured, let first = platform.requiredEnv.first {
                 Text("Set \(first) to enable.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.tertiaryText)
+            }
+        }
+        .sheet(isPresented: $showingDetailSheet) {
+            PlatformDetailSheet(platform: platform)
+        }
+    }
+
+    private func semantic(_ state: PlatformStatusPayload.State) -> Theme.SemanticStatus {
+        switch state {
+        case .healthy, .receiving: return .ok
+        case .degraded, .stale: return .warning
+        case .unavailable, .unreachable: return .danger
+        case .unconfigured: return .neutral
+        }
+    }
+}
+
+/// Full detail modal for a platform showing complete uncropped descriptions,
+/// metrics, and configuration keys with copy actions.
+struct PlatformDetailSheet: View {
+    let platform: PlatformStatusPayload.PlatformCard
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Status") {
+                        StatusBadge(platform.state.title, status: semantic(platform.state))
+                    }
+                    .copyableRow(label: "Status", value: platform.state.title)
+                    LabeledContent("Platform", value: platform.name)
+                        .copyableRow(label: "Platform", value: platform.name)
+                    LabeledContent("Category", value: platform.category.title)
+                        .copyableRow(label: "Category", value: platform.category.title)
+                    if let consoleUrl = platform.consoleUrl, let url = URL(string: consoleUrl) {
+                        Link(destination: url) {
+                            HStack {
+                                Text("Open Console")
+                                    .foregroundStyle(Theme.Colors.accent)
+                                Spacer()
+                                Image(systemName: "arrow.up.right.square")
+                                    .foregroundStyle(Theme.Colors.accent)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Overview")
+                }
+
+                if let error = platform.error, !error.isEmpty {
+                    Section {
+                        Text(error)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .copyableValue(error, label: "Error")
+                    } header: {
+                        Text("Error Details")
+                    }
+                }
+
+                if let headline = platform.headline, !headline.isEmpty {
+                    Section {
+                        Text(headline)
+                            .font(Theme.Typography.body)
+                            .foregroundStyle(Theme.Colors.primaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .copyableValue(headline, label: "Description")
+                    } header: {
+                        Text("Status Description")
+                    }
+                }
+
+                if !platform.metrics.isEmpty {
+                    Section {
+                        ForEach(platform.metrics) { entry in
+                            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                                HStack(alignment: .top) {
+                                    Text(entry.label)
+                                        .font(Theme.Typography.captionEmphasis)
+                                        .foregroundStyle(Theme.Colors.primaryText)
+                                    Spacer()
+                                    Text(entry.value)
+                                        .font(Theme.Typography.caption)
+                                        .foregroundStyle(Theme.Colors.secondaryText)
+                                        .multilineTextAlignment(.trailing)
+                                }
+                                if let hint = entry.hint {
+                                    Text(hint)
+                                        .font(Theme.Typography.caption)
+                                        .foregroundStyle(Theme.Colors.tertiaryText)
+                                }
+                                if let pct = entry.usagePct {
+                                    BudgetMeter(
+                                        fraction: pct / 100,
+                                        status: PlatformFormat.usageBarStatus(pct),
+                                        height: 8
+                                    )
+                                    .padding(.top, 2)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            .contentShape(Rectangle())
+                            .copyableValue(entry.value, label: entry.label)
+                        }
+                    } header: {
+                        Text("Metrics & Attributes")
+                    }
+                }
+
+                if !platform.requiredEnv.isEmpty {
+                    Section {
+                        ForEach(platform.requiredEnv, id: \.self) { envVar in
+                            HStack {
+                                Text(envVar)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(Theme.Colors.primaryText)
+                                Spacer()
+                                Button {
+                                    #if canImport(UIKit)
+                                    UIPasteboard.general.string = envVar
+                                    #endif
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Theme.Colors.accent)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    } header: {
+                        Text("Configuration Keys")
+                    } footer: {
+                        Text("Environment variable keys used by this integration.")
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle(platform.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
             }
         }
     }

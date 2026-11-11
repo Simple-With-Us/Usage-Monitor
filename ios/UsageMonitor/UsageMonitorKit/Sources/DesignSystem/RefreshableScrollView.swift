@@ -32,7 +32,9 @@ public struct RefreshableScrollView<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .containerRelativeFrame(.horizontal, alignment: .leading)
         }
-        .tabBarScrollClearance()
+        // Tab-bar clearance is applied ONCE at the tab shell (RootView).
+        // Applying it here too stacked ~2x(96pt padding + 96pt margins) of
+        // bottom inset and blanked most of the Platforms tab (owner 2026-08-31).
         .background(Theme.Colors.background)
         .refreshable { await onRefresh() }
     }

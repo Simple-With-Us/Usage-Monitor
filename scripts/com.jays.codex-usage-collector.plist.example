@@ -7,8 +7,10 @@
   Antigravity collector: copy to ~/Library/LaunchAgents, replace
   ABSOLUTE/PATH placeholders, infisical login once, then bootstrap.
 
-  StartInterval 900 = 15 minutes.  On-demand: run the node script with
-  --dry-run first.
+  StartInterval 900 = 15 minutes.  The first run defaults to a 180-day
+  bootstrap; later runs resume from a durable successful-through watermark
+  with a five-minute idempotent overlap.  On-demand: run the node script with
+  --dry-run first, or --days 400 to backfill.
 
   Uninstall:
     launchctl bootout gui/$(id -u)/com.jays.codex-usage-collector
@@ -19,13 +21,6 @@
   <string>com.jays.codex-usage-collector</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/ABSOLUTE/PATH/TO/infisical</string>
-    <string>run</string>
-    <string>--projectId</string>
-    <string>YOUR_UM_PROJECT_ID</string>
-    <string>--env</string>
-    <string>prod</string>
-    <string>--</string>
     <string>/ABSOLUTE/PATH/TO/node</string>
     <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/codex-usage-collector.mjs</string>
   </array>

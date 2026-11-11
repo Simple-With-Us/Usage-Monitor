@@ -28,7 +28,7 @@ export default function WorkspaceCopyCard() {
       a.click();
       URL.revokeObjectURL(url);
       setMessage(
-        `Saved a secret-free copy (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers). Import it on Local Usage Monitor or POST it to a local Usage Monitor.`
+        `Saved a secret-free package (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers).  In Usage Monitor Local: Settings → Import Package.  No bundle key.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Export failed");
@@ -91,11 +91,13 @@ export default function WorkspaceCopyCard() {
         Copy Workspace For Local Testing
       </h2>
       <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
-        Downloads projects, provider shells, plans, subscriptions, and recent snapshots
-        with no API keys.{SENTENCE_GAP}
-        Import the same file in Local Usage Monitor, or here on a local Usage Monitor
-        instance.{SENTENCE_GAP}
-        After import, re-enter credentials (or let Infisical fill them).
+        This JSON is the Usage Monitor Local package (projects, provider shells, plans,
+        subscriptions, recent snapshots).{SENTENCE_GAP}
+        There is no bundle key or passphrase.{SENTENCE_GAP}
+        In Usage Monitor Local: Settings → Import Package, then pick this file.{SENTENCE_GAP}
+        API keys are not included — re-enter them on the phone, or use Import Keys with a
+        separate Mac .umkeys file.{SENTENCE_GAP}
+        You can also import the same file here on a local Usage Monitor instance.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button

@@ -43,6 +43,8 @@ const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   backblazeb2: "backblaze",
   b2: "backblaze",
   b2cloud: "backblaze",
+  botfleet: "botfleet",
+  botfleetapp: "botfleet",
   llamacloud: "llamaindex",
   llamaindex: "llamaindex",
   llamaindexcloud: "llamaindex",
@@ -173,6 +175,9 @@ const PROJECT_ALIASES: Readonly<Record<string, string>> = {
   aifleetcoordinator: "fleet",
   fleetinfra: "fleet",
   fleet: "fleet",
+  fleetops: "fleet-ops",
+  botfleet: "botfleet",
+  botfleetapp: "botfleet",
 };
 
 /**

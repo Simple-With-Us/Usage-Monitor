@@ -4,16 +4,16 @@ Two shipped apps share one XcodeGen project and one Swift package:
 
 | App | Bundle ID | Scheme | Entry |
 |-----|-----------|--------|-------|
-| Usage Client Monitor | `services.jays.usage.client.monitor` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
-| Usage Local Monitor | `services.jays.usage.local.monitor` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
+| Usage Monitor Client | `com.simplewithus.usage.client.ios` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
+| Usage Monitor Local | `com.simplewithus.usage.local.ios` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
 
 **Project:** `ios/UsageMonitor/UsageMonitor.xcodeproj`
 **XcodeGen:** `ios/UsageMonitor/project.yml` — edit this, then `xcodegen generate`. Do not hand-edit `project.pbxproj`.
 **Shared code:** `ios/UsageMonitor/UsageMonitorKit` (Swift package — `Package.swift` is agent-editable).
 **Team:** `CC8UTF7ATG`
-**Ship:** `bash scripts/ios-ship-testflight.sh` — fleet: `/Users/jay/apps/ios-fleet/README.md`
+**Ship:** GitHub-hosted `macos-latest` via `.github/workflows/ios-ship.yml` (`scripts/ios-ship-testflight.sh` → in-repo `scripts/ios-fleet/`). LocalUsageMonitor stays skipped. Do not exec `/Users/jay/apps/ios-fleet` on a hosted runner. Do not mint a new ASC key.
 
-Binding fleet rule: `/Users/jay/apps/AGENT-SYNC.md` § iOS agent build loop. `xcodebuild` / `xcrun simctl` via bash are pre-approved. Do not ask. Do not stand up or narrate Xcode MCP.
+Binding fleet rule: `/Users/jay/apps/FLEET-PROTOCOL.md` § iOS agent build loop. `xcodebuild` / `xcrun simctl` via bash are pre-approved. Do not ask. Do not stand up or narrate Xcode MCP.
 
 ## Build & test
 
@@ -77,4 +77,4 @@ Put shared UI and models in `UsageMonitorKit`. Put only the `@main` entry in `Ap
 - Two spaces between sentences in user-visible copy.
 - Device-local timestamps are correct in product UI (fleet timestamp exception).
 - Never hand-edit `.pbxproj`, `.entitlements`, `.xib`, `.storyboard`.
-- Secrets stay in `~/.secrets/` / Infisical. Never print them.
+- Secrets live in Infisical Fleet-OPS (`fleet-secrets get NAME [--path /folder]`); nothing reads `~/.secrets` (AFC-359). Never print them.

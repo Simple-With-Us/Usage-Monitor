@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import DatadogRumInit from "@/components/DatadogRumInit";
 import Nav from "@/components/Nav";
 import PwaRegistration from "@/components/PwaRegistration";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -8,6 +9,14 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Usage Monitor",
   description: "Monitor usage and balance across multiple API providers",
+  icons: {
+    icon: [
+      { url: "/brand/icon-64.png", sizes: "64x64", type: "image/png" },
+      { url: "/icon.png", sizes: "32x32", type: "image/png" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    apple: "/brand/icon-192.png",
+  },
   robots: {
     index: false,
     follow: false,
@@ -70,6 +79,7 @@ export default async function RootLayout({
             {children}
           </main>
           <PwaRegistration />
+          <DatadogRumInit />
         </ThemeProvider>
       </body>
     </html>

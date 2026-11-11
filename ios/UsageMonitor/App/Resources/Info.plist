@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Usage Client Monitor</string>
+	<string>Usage Monitor</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Usage Client Monitor uses Face ID to unlock the app and keep your budget data private.</string>
+	<string>Usage Monitor uses Face ID to unlock the app and keep your budget data private.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
@@ -38,7 +38,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>services.jays.usage.client.monitor.deeplink</string>
+			<string>com.simplewithus.usage.client.deeplink</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>usageclientmonitor</string>
@@ -51,7 +51,7 @@
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>services.jays.usage.client.monitor.refresh</string>
+		<string>com.simplewithus.usage.client.refresh</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

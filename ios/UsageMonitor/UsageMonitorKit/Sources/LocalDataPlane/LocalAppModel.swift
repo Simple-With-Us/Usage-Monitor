@@ -33,6 +33,11 @@ public final class LocalAppModel {
 
     public func bootstrap() async {
         do {
+            // No carry-over from earlier bundle IDs: the pre-rename Local app
+            // kept `local.sqlite` in its own sandbox, which a renamed app
+            // cannot read, and its Keychain provider keys do not follow either.
+            // A renamed install starts fresh (testers re-add providers).  See
+            // `docs/rollouts/2026-09-23-usage-identifier-fixes.md`.
             try await store.open()
             schemaVersion = await store.schemaVersion
             // Heal seed-invented catalog-guess fees before materialize.
@@ -114,8 +119,20 @@ public final class LocalAppModel {
     ) async throws {
         let name = entry.name
         let existing = try await store.listProviders()
-        if existing.contains(where: { $0.name == name }) {
-            throw LocalWriteError.conflict("Provider '\(entry.displayName)' is already added.")
+        if var existingProvider = existing.first(where: { $0.name == name }) {
+            try await applyCatalogConnection(
+                to: &existingProvider,
+                entry: entry,
+                displayName: displayName,
+                apiKey: apiKey,
+                monthlyBudgetUsd: monthlyBudgetUsd,
+                subscriptionCostUsd: subscriptionCostUsd,
+                subscriptionName: subscriptionName,
+                teamId: teamId,
+                accountSid: accountSid,
+                apiKeySid: apiKeySid
+            )
+            return
         }
 
         let credentials = try Self.validatedCredentials(
@@ -245,18 +262,149 @@ public final class LocalAppModel {
         ) else {
             throw LocalWriteError.validation("\(entry.displayName) does not take an API key on this phone")
         }
+        let replaced = provider.keychainAccountId != nil
+        try await replaceKeychainAccount(
+            on: &provider,
+            credentials: credentials,
+            adapterKind: Self.storeAdapterKind(for: entry),
+            activate: true
+        )
+        try await reload()
+        return replaced
+    }
+
+    /// Attach or replace a credential on an existing provider card.
+    /// Activates fetch so the next refresh can run.
+    public func connectCredentials(
+        providerId: String,
+        apiKey: String,
+        teamId: String? = nil,
+        accountSid: String? = nil,
+        apiKeySid: String? = nil
+    ) async throws {
+        guard var provider = try await store.getProvider(id: providerId) else {
+            throw LocalWriteError.notFound("Provider not found")
+        }
+        guard let entry = LocalProviderCatalog.entry(name: provider.name) else {
+            throw LocalWriteError.validation("Unknown provider — cannot validate a key on this phone")
+        }
+        guard let credentials = try Self.validatedCredentials(
+            entry: entry,
+            apiKey: apiKey,
+            teamId: teamId,
+            accountSid: accountSid,
+            apiKeySid: apiKeySid
+        ) else {
+            throw LocalWriteError.validation("\(entry.displayName) does not take an API key on this phone")
+        }
+        try await replaceKeychainAccount(
+            on: &provider,
+            credentials: credentials,
+            adapterKind: Self.storeAdapterKind(for: entry),
+            activate: true
+        )
+        try await reload()
+    }
+
+    /// Remove the stored key. Deactivates polling so refresh does not fail-loop.
+    public func disconnectCredentials(providerId: String) async throws {
+        guard var provider = try await store.getProvider(id: providerId) else {
+            throw LocalWriteError.notFound("Provider not found")
+        }
+        if let superseded = provider.keychainAccountId {
+            try? secrets.delete(accountId: superseded)
+        }
+        provider.keychainAccountId = nil
+        provider.isActive = false
+        provider.updatedAt = Date()
+        try await store.upsertProvider(provider)
+        try await reload()
+    }
+
+    /// Pollable catalog rows that still have no Keychain credential.
+    public var pollableProvidersNeedingKey: [LocalProvider] {
+        providers.filter(\.needsKey).sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    /// Update an existing catalog shell (after restore / Add Missing Providers)
+    /// instead of rejecting the Add form as a conflict.
+    private func applyCatalogConnection(
+        to provider: inout LocalProvider,
+        entry: LocalProviderCatalogEntry,
+        displayName: String?,
+        apiKey: String?,
+        monthlyBudgetUsd: Double?,
+        subscriptionCostUsd: Double?,
+        subscriptionName: String?,
+        teamId: String?,
+        accountSid: String?,
+        apiKeySid: String?
+    ) async throws {
+        if let displayName, !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            provider.displayName = displayName
+        }
+        let typedKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !typedKey.isEmpty {
+            guard let credentials = try Self.validatedCredentials(
+                entry: entry,
+                apiKey: apiKey,
+                teamId: teamId,
+                accountSid: accountSid,
+                apiKeySid: apiKeySid
+            ) else {
+                throw LocalWriteError.validation("\(entry.displayName) does not take an API key on this phone")
+            }
+            try await replaceKeychainAccount(
+                on: &provider,
+                credentials: credentials,
+                adapterKind: Self.storeAdapterKind(for: entry),
+                activate: true
+            )
+        } else {
+            provider.adapterKind = Self.storeAdapterKind(for: entry)
+            provider.updatedAt = Date()
+            try await store.upsertProvider(provider)
+        }
+        if let monthlyBudgetUsd {
+            var plan = try await store.getPlan(providerId: provider.id) ?? LocalProviderPlan(providerId: provider.id)
+            plan.monthlyBudgetUsd = monthlyBudgetUsd
+            plan.updatedAt = Date()
+            try await store.upsertPlan(plan)
+        }
+        if let explicitCost = subscriptionCostUsd {
+            try await setRecurringFee(
+                providerId: provider.id,
+                name: subscriptionName
+                    ?? entry.suggestedSubscriptionName
+                    ?? "\(entry.displayName) plan",
+                costUsd: max(0, explicitCost)
+            )
+            if explicitCost > 0 {
+                try await setActive(providerId: provider.id, isActive: true)
+            }
+        }
+        try await reload()
+    }
+
+    private func replaceKeychainAccount(
+        on provider: inout LocalProvider,
+        credentials: ProviderCredentials,
+        adapterKind: String,
+        activate: Bool
+    ) async throws {
         let superseded = provider.keychainAccountId
         let accountId = UUID().uuidString
         try secrets.save(accountId: accountId, credentials: credentials)
         provider.keychainAccountId = accountId
-        provider.adapterKind = Self.storeAdapterKind(for: entry)
+        provider.adapterKind = adapterKind
+        if activate { provider.isActive = true }
         provider.updatedAt = Date()
         try await store.upsertProvider(provider)
         if let superseded {
             try? secrets.delete(accountId: superseded)
         }
-        try await reload()
-        return superseded != nil
     }
 
     /// Insert every catalog provider not already present as **inactive $0 shells**,
@@ -590,7 +738,7 @@ public final class LocalAppModel {
             try? await store.setProviderFetchResult(
                 id: provider.id,
                 at: Date(),
-                error: "Missing API key in Keychain"
+                error: "No API key saved on this phone."
             )
             return
         }

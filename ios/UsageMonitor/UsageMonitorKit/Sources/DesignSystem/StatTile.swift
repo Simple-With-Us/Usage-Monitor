@@ -56,6 +56,7 @@ public struct StatTile: View {
         }
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .dsCard(padding: Theme.Spacing.md)
+        .copyableValue(value, label: label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(value)")
         .accessibilityValue(secondary ?? "")

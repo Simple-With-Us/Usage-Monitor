@@ -4,6 +4,7 @@ import Models
 import Networking
 import AppCore
 import DesignSystem
+import OfflineCache
 
 /// A combined snapshot of the two public health probes — `GET /api/health`
 /// (liveness) and `GET /api/ready` (readiness + dependency checks). Readiness
@@ -225,8 +226,22 @@ final class ServerStatusStore {
         self.probe = probe
     }
 
+    /// Snapshots older than this refresh automatically on the next
+    /// `loadIfNeeded`.  Deploy restarts produce 5-10 minute readiness blips
+    /// (three in the last week per UptimeRobot); without an age cap the tab
+    /// showed a mid-deploy "Database — Down" snapshot indefinitely because
+    /// tab views stay mounted and `.task` never re-fires.
+    static let autoRefreshAge: TimeInterval = 180
+
     func loadIfNeeded(using client: APIClient) async {
-        if case .idle = state { await load(using: client) }
+        if case .idle = state {
+            await load(using: client)
+            return
+        }
+        if let snapshot = state.value,
+           Date().timeIntervalSince(snapshot.fetchedAt) > Self.autoRefreshAge {
+            await fetch(using: client)
+        }
     }
 
     func load(using client: APIClient) async {
@@ -240,7 +255,12 @@ final class ServerStatusStore {
 
     private func fetch(using client: APIClient) async {
         do {
-            state = .loaded(try await probe(client))
+            let snapshot = try await probe(client)
+            state = .loaded(snapshot)
+            WidgetSnapshotStore.updateServerService(
+                health: snapshot.health,
+                readiness: snapshot.readiness
+            )
         } catch let error as APIError {
             handle(error)
         } catch {

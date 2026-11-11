@@ -470,6 +470,37 @@ describe("platform-status messaging probes", () => {
       expect(result.metrics).toEqual([]);
     });
 
+    it("names the wrong-token-type trap when SLACK_BOT_TOKEN is a User OAuth token", async () => {
+      vi.stubEnv("SLACK_BOT_TOKEN", "xoxp-user-oauth-secret");
+      routeByUrl([
+        [/slack\.com\/api\/auth\.test$/, response(200, { ok: false, error: "invalid_auth" })],
+      ]);
+
+      const result = await probeFor("slack").probe();
+
+      expect(result.state).toBe("unavailable");
+      expect(result.error).toBe("wrong_token_type");
+      expect(result.headline).toBe(
+        "Slack rejected the bot token.  The API returned invalid_auth.  SLACK_BOT_TOKEN looks like User OAuth Token, not a Bot User OAuth Token (xoxb-) — replace it with the token from Slack app → OAuth & Permissions → Bot User OAuth Token."
+      );
+      expect(result.metrics).toEqual([{ label: "Configured Token Type", value: "User OAuth Token" }]);
+      expect(JSON.stringify(result)).not.toContain("xoxp-user-oauth-secret");
+    });
+
+    it("does not add a token-type hint when an already-correct xoxb- token is rejected", async () => {
+      vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-slack-bot-secret");
+      routeByUrl([
+        [/slack\.com\/api\/auth\.test$/, response(200, { ok: false, error: "token_revoked" })],
+      ]);
+
+      const result = await probeFor("slack").probe();
+
+      expect(result.state).toBe("unavailable");
+      expect(result.error).toBe("unauthorized");
+      expect(result.headline).toBe("Slack rejected the bot token.  The API returned token_revoked.");
+      expect(result.metrics).toEqual([]);
+    });
+
     it("degrades on a non-credential body error", async () => {
       vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-slack-bot-secret");
       routeByUrl([

@@ -162,7 +162,6 @@ struct ProjectBudgetsContentView: View {
             }
             .padding(Theme.Spacing.lg)
         }
-        .tabBarScrollClearance()
         .dsScreenBackground()
     }
 

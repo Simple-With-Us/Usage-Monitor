@@ -409,6 +409,31 @@ const SLACK_CREDENTIAL_ERRORS = new Set([
   "token_revoked",
 ]);
 
+/**
+ * Slack issues several OAuth token prefixes and only `xoxb-` (Bot User OAuth
+ * Token) works with `auth.test` the way this probe expects.  Pasting a User
+ * OAuth token (`xoxp-`) or a legacy workspace token (`xoxa-`/`xoxr-`) into
+ * `SLACK_BOT_TOKEN` is a common agent mistake, and Slack's own error body
+ * (`invalid_auth`) does not distinguish "wrong token type" from "revoked
+ * token" — so a credentialDead card gave no hint which one it was.  This
+ * checks only the token's own prefix, never Slack's response, and returns a
+ * label, never the token itself.
+ */
+const SLACK_TOKEN_TYPE_LABELS: Readonly<Record<string, string>> = {
+  xoxb: "Bot User OAuth Token",
+  xoxp: "User OAuth Token",
+  xoxa: "legacy workspace app token",
+  xoxr: "legacy refresh token",
+  xoxe: "app-level token exchange token",
+  xapp: "app-level token",
+};
+
+function slackTokenTypeLabel(token: string): string {
+  const prefixMatch = /^(xox[a-z]|xapp)-/.exec(token);
+  const prefix = prefixMatch?.[1];
+  return (prefix && SLACK_TOKEN_TYPE_LABELS[prefix]) || "an unrecognized token format";
+}
+
 async function probeSlack(): Promise<PlatformProbeResult> {
   const botToken = envValue("SLACK_BOT_TOKEN");
   if (!botToken) {
@@ -434,15 +459,26 @@ async function probeSlack(): Promise<PlatformProbeResult> {
     if (record?.ok !== true) {
       const slug = errorSlug(record?.error, "invalid_response");
       const credentialDead = SLACK_CREDENTIAL_ERRORS.has(slug);
+      // Only worth naming the token type when the credential itself is dead
+      // and it is not already a bot token — a live xoxb- that Slack still
+      // rejects is a revoked/expired token, not a type mismatch, so the hint
+      // would be noise there.
+      const tokenTypeLabel = credentialDead ? slackTokenTypeLabel(botToken) : null;
+      const wrongTokenType = tokenTypeLabel !== null && !botToken.startsWith("xoxb-");
       return {
         state: credentialDead ? "unavailable" : "degraded",
         headline: sentences(
           credentialDead ? "Slack rejected the bot token." : "Slack refused the auth check.",
-          `The API returned ${slug}.`
+          `The API returned ${slug}.`,
+          wrongTokenType
+            ? `SLACK_BOT_TOKEN looks like ${tokenTypeLabel}, not a Bot User OAuth Token (xoxb-) — replace it with the token from Slack app → OAuth & Permissions → Bot User OAuth Token.`
+            : null
         ),
-        metrics: [],
+        metrics: wrongTokenType ? [metric("Configured Token Type", tokenTypeLabel ?? "Unknown")] : [],
         error: credentialDead
-          ? "unauthorized"
+          ? wrongTokenType
+            ? "wrong_token_type"
+            : "unauthorized"
           : slug === "ratelimited"
             ? "rate_limited"
             : `slack_${slug}`,

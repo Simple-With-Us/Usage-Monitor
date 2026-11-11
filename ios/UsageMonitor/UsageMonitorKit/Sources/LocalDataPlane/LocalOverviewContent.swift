@@ -7,9 +7,11 @@ import LocalBudget
 struct LocalOverviewContent: View {
     let summary: BudgetEngine.Summary
     let alertCount: Int
+    var needsKeyCount: Int = 0
     var onOpenProvider: (String) -> Void
     var onOpenAlerts: () -> Void
     var onAddProvider: () -> Void
+    var onShowNeedsKey: (() -> Void)? = nil
 
     private let columns = [
         GridItem(.flexible(), spacing: Theme.Spacing.md),
@@ -35,6 +37,9 @@ struct LocalOverviewContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            if needsKeyCount > 0 {
+                connectAccountsBanner
+            }
             heroCard
             statsGrid
 
@@ -50,6 +55,36 @@ struct LocalOverviewContent: View {
                 topProvidersSection
             }
         }
+    }
+
+    private var connectAccountsBanner: some View {
+        Button {
+            Haptics.tap()
+            onShowNeedsKey?()
+        } label: {
+            HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                Image(systemName: "key.fill")
+                    .foregroundStyle(Theme.Colors.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Connect Accounts")
+                        .font(Theme.Typography.captionEmphasis)
+                        .foregroundStyle(Theme.Colors.primaryText)
+                    Text("\(needsKeyCount) restored card\(needsKeyCount == 1 ? "" : "s") still need an API key.  Open a provider and tap Connect Account.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.secondaryText)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.Colors.tertiaryText)
+            }
+            .padding(Theme.Spacing.md)
+            .background(Theme.Colors.accentSoft, in: RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows providers that still need a key")
     }
 
     // MARK: - Hero (web DashboardHero parity)

@@ -94,9 +94,9 @@ export async function buildWorkspaceExport(): Promise<WorkspaceExportPayload> {
     formatVersion: WORKSPACE_EXPORT_VERSION,
     source: "usage-monitor-remote",
     exportedAt: new Date().toISOString(),
-    note: "No API keys or secrets. Re-enter keys after import on a new device or local instance.",
+    note: "No API keys or secrets.  Re-enter keys after import on a new device or local instance.  There is no bundle key for this file.",
     copyInstructions:
-      "Download this JSON, then on Local Usage Monitor use Import, or POST it to a local Usage Monitor at /api/workspace/import. Credentials are never included.",
+      "This JSON is the Usage Monitor Local package.  In Usage Monitor Local: Settings → Import Package, then pick this file.  There is no bundle key or passphrase.  API keys are not included.  Optional: a separate Mac .umkeys file is only for Import Keys.",
     projects: projects.map((project) => ({
       id: project.id,
       name: project.name,

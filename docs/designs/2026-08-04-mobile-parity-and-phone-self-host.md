@@ -10,6 +10,8 @@
 | **Audience** | Senior engineers / multi-agent fleet implementing incremental PRs |
 | **Related** | `ios/UsageMonitor/ARCHITECTURE-CONTRACT.md`, `ios/README.md`, `prisma/schema.prisma` |
 
+> **[ARCHAEOLOGY / pre-2026-09-22]**  Bundle IDs `services.jays.usage.monitor` and App Groups `group.services.jays.usage.monitor` / `group.services.jays.local.usage.monitor` referenced below are the pre-2026-09-22 fleet-wide bundle-ID state and have not been retconned.  Canonical IDs after the fleet-wide rename: `com.simplewithus.usagemonitor.ios` (Client), `com.simplewithus.usagemonitor.local.ios` (Local), single shared App Group `group.com.simplewithus.usagemonitor`.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 ---
 
 ## Overview

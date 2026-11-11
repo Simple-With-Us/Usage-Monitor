@@ -48,8 +48,8 @@ describe("DashboardCharts smoke", () => {
       })
     );
 
-    expect(html).toContain("Month pace");
-    expect(html).toContain("Projected cost breakdown");
+    expect(html).toContain("Month Pace");
+    expect(html).toContain("Projected Cost Breakdown");
     expect(html).toContain("incomplete");
     expect(html).toContain("rounded-2xl");
   });
@@ -63,7 +63,7 @@ describe("DashboardCharts smoke", () => {
         monthlyBudgetUsd: null,
       })
     );
-    expect(html).toContain("Month pace");
-    expect(html).not.toContain("Projected cost breakdown");
+    expect(html).toContain("Month Pace");
+    expect(html).not.toContain("Projected Cost Breakdown");
   });
 });

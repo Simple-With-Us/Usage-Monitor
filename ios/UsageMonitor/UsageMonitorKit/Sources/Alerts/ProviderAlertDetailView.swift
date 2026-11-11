@@ -38,6 +38,13 @@ struct ProviderAlertDetailView: View {
 
             statsGrid
 
+            if let records = provider.externalBilling, !records.isEmpty {
+                ProviderAlertBreakdownCard(
+                    providerTitle: provider.title,
+                    records: records
+                )
+            }
+
             alertsSection
         }
         .navigationTitle(provider.title)

@@ -8,8 +8,11 @@ import ApiEquivalentCostCard from "@/components/ApiEquivalentCostCard";
 import LlmBurnCard from "@/components/LlmBurnCard";
 import ProjectsPanel, { type ProjectBudgetStatus } from "@/components/ProjectsPanel";
 import SentryHealthCard from "@/components/SentryHealthCard";
+import SentryUsageCard from "@/components/SentryUsageCard";
+import DatadogUsageCard from "@/components/DatadogUsageCard";
 import type { SubscriptionRow } from "@/components/SubscriptionsPanel";
 import type { ChartFamilySlice } from "@/components/DashboardCharts";
+import type { TimeframeOption } from "@/hooks/useDashboardData";
 
 interface DashboardPortfolioSectionProps {
   portfolioOpen: boolean;
@@ -26,6 +29,8 @@ interface DashboardPortfolioSectionProps {
   chartFamilies: ChartFamilySlice[];
   portfolioSummary: string;
   attentionCount: number;
+  /** Selected chart/history range — drives DashboardCharts' burn-chart mode. */
+  timeframe: TimeframeOption;
 }
 
 const DashboardCharts = dynamic(() => import("@/components/DashboardCharts"));
@@ -44,6 +49,7 @@ export default function DashboardPortfolioSection({
   projectSummary,
   chartFamilies,
   portfolioSummary,
+  timeframe,
 }: DashboardPortfolioSectionProps) {
   return (
     <details
@@ -86,8 +92,14 @@ export default function DashboardPortfolioSection({
             maxItems={6}
           />
 
-          {/* Full-width: MTD pace primary + projected breakdown secondary */}
-          <DashboardCharts families={chartFamilies} />
+          {/* Full-width: MTD pace / range history primary + breakdown secondary */}
+          <DashboardCharts
+            families={chartFamilies}
+            timeframe={timeframe}
+            dailySeries={usageSummary?.dailySeries}
+            groups={usageSummary?.groups}
+            rangeLoading={portfolioLoading}
+          />
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-8">
@@ -103,6 +115,8 @@ export default function DashboardPortfolioSection({
             </div>
             <div className="space-y-8">
               <SentryHealthCard />
+              <SentryUsageCard />
+              <DatadogUsageCard />
             </div>
           </div>
 

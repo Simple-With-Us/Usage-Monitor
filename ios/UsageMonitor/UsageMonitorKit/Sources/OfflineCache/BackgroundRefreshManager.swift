@@ -6,9 +6,6 @@ import WidgetShared
 #if canImport(BackgroundTasks)
 import BackgroundTasks
 #endif
-#if canImport(WidgetKit)
-import WidgetKit
-#endif
 
 /// Drives a `BGAppRefreshTask` that quietly refreshes budget status in the
 /// background: it fetches `GET /api/budget-status`, writes the timestamped disk
@@ -23,7 +20,7 @@ import WidgetKit
 /// to honour a user host override.
 ///
 /// ## App-target wiring (see integration notes)
-///  1. `Info.plist` already declares `services.jays.usage.client.monitor.refresh` in
+///  1. `Info.plist` already declares `com.simplewithus.usage.client.refresh` in
 ///     `BGTaskSchedulerPermittedIdentifiers` and the `fetch` background mode.
 ///  2. During launch, **before the app finishes launching**, call
 ///     `BackgroundRefreshManager.shared.configure(...)` then `.register()`.
@@ -33,7 +30,7 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
     public static let shared = BackgroundRefreshManager()
 
     /// Must match `BGTaskSchedulerPermittedIdentifiers` in the app `Info.plist`.
-    public static let taskIdentifier = "services.jays.usage.client.monitor.refresh"
+    public static let taskIdentifier = "com.simplewithus.usage.client.refresh"
 
     private let lock = NSLock()
     private var _makeClient: @Sendable () -> APIClient = { APIClient() }
@@ -102,12 +99,21 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
         do {
             let response = try await client.budgetStatus()
             BudgetDiskCache(directory: cacheDirectory).save(response)
-            SharedStore.shared.write(WidgetSnapshotBuilder.snapshot(from: response))
-            reloadWidgets()
+            WidgetSnapshotStore.updateBudget(response)
+            // Start the quota fetch in the background; it must not block
+            // the LLM / server / Mac mirrors, the Lock Screen alert, or the
+            // final forced widget reload. We await it after the alert
+            // notifier has fired so the quota mirror still lands on success.
+            let quotaTask = Task { [client] in
+                try? await client.fetchQuotaWindows()
+            }
+            // LLM / server / Mac mirrors only — quota handling lives below.
+            await refreshSecondaryWidgetSections(using: client)
             // The whole point of a background budget monitor: turn a freshly
             // fetched over/near-budget alert into a Lock Screen notification
             // while the app is closed. The notifier dedupes across runs and
-            // honours the user's toggle/severity — see `AlertNotifier`.
+            // honours the user's toggle/severity — see `AlertNotifier`. The
+            // alert must not wait on the quota task.
             if let alertNotifier {
                 let items = response.providers.flatMap { provider in
                     provider.alerts.map {
@@ -120,16 +126,34 @@ public final class BackgroundRefreshManager: @unchecked Sendable {
                 }
                 await alertNotifier(items)
             }
+            // Fire the forced widget reload *before* awaiting the quota task
+            // so a slow or hung quota response cannot gate the timeline
+            // refresh — `BGAppRefreshTask` calls `setTaskCompleted(success:)`
+            // with whatever `performRefresh` returns, so the whole background
+            // budget cycle must return promptly even when the quota endpoint
+            // is slow. The quota mirror still lands on success afterwards.
+            reloadWidgets()
+            if let quotas = await quotaTask.value {
+                WidgetSnapshotStore.updateQuotas(quotas)
+            }
             return true
         } catch {
             return false
         }
     }
 
+    /// Best-effort LLM + server + Mac cache. Failures leave the previous
+    /// section in place so a 401 or timeout cannot stamp empty tiles as live.
+    ///
+    /// Quota fetching lives in `performRefresh` and is awaited *after* the
+    /// forced widget reload has fired, so a slow subscription-quota response
+    /// cannot gate the Lock Screen alert or the final forced widget reload.
+    private func refreshSecondaryWidgetSections(using client: APIClient) async {
+        await WidgetSnapshotStore.refreshSecondarySections(using: client)
+    }
+
     private func reloadWidgets() {
-        #if canImport(WidgetKit) && os(iOS)
-        WidgetCenter.shared.reloadAllTimelines()
-        #endif
+        WidgetSnapshotStore.reloadWidgetsIfNeeded(force: true)
     }
 
     #if canImport(BackgroundTasks) && os(iOS)

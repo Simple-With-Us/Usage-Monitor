@@ -107,6 +107,7 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
     /// decode; callers fall back to local projection math when it is absent.
     public var projectedStatus: BudgetLevel?
     public var alerts: [ProviderAlert]
+    public var externalBilling: [ExternalBillingRecord]?
 
     public init(
         id: String,
@@ -131,7 +132,8 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
         percentUsed: Double? = nil,
         status: BudgetLevel = .unconfigured,
         projectedStatus: BudgetLevel? = nil,
-        alerts: [ProviderAlert] = []
+        alerts: [ProviderAlert] = [],
+        externalBilling: [ExternalBillingRecord]? = nil
     ) {
         self.id = id
         self.name = name
@@ -156,6 +158,7 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
         self.status = status
         self.projectedStatus = projectedStatus
         self.alerts = alerts
+        self.externalBilling = externalBilling
     }
 
     public var snapshotFetchedDate: Date? {

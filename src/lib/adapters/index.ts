@@ -52,7 +52,7 @@ async function loadAdapters() {
     import("./pushover"),
     import("./apify"),
     import("./stripe"),
-    import("./agent-sync-relay"),
+    import("./simple-tools-relay"),
     import("./hetzner"),
     import("./backblaze"),
     import("./github"),
@@ -60,6 +60,7 @@ async function loadAdapters() {
     import("./oracle"),
     import("./coolify"),
     import("./deno"),
+    import("./namecheap"),
   ]);
 
   const [
@@ -71,7 +72,7 @@ async function loadAdapters() {
     twilio, resend, pushover,
     apify,
     stripe,
-    agentSyncRelay,
+    simpleToolsRelay,
     hetzner,
     backblaze,
     github,
@@ -79,6 +80,7 @@ async function loadAdapters() {
     oracle,
     coolify,
     deno,
+    namecheap,
   ] = modules;
 
   // Active built-ins are loaded into the poll registry. Retired and dormant
@@ -130,6 +132,7 @@ async function loadAdapters() {
     apify: apify.fetchUsage,
     llamaindex: llamaindex.fetchUsage,
     stripe: stripe.fetchUsage,
+    namecheap: namecheap.fetchUsage,
     oracle: oracle.fetchUsage,
     coolify: coolify.fetchUsage,
     deno: deno.fetchUsage,
@@ -144,9 +147,9 @@ async function loadAdapters() {
   // Custom
   adapters["custom"] = custom.fetchUsage;
 
-  // Agent Sync Relay (monitoring)
-  adapters["agent-sync-relay"] = agentSyncRelay.fetchUsage;
-  adapters["agent_sync_relay"] = agentSyncRelay.fetchUsage;
+  // Simple Tools Relay (monitoring)
+  adapters["simple-tools-relay"] = simpleToolsRelay.fetchUsage;
+  adapters["simple_tools_relay"] = simpleToolsRelay.fetchUsage;
 }
 
 export async function fetchProviderUsage(

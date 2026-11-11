@@ -13,6 +13,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable, Identifiable {
     case alerts
     case serverStatus
     case computers
+    case agents
     case platforms
     case projects
     case settings
@@ -26,6 +27,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable, Identifiable {
         case .alerts: return "Alerts"
         case .serverStatus: return "Server"
         case .computers: return "Computers"
+        case .agents: return "Agents"
         case .platforms: return "Platforms"
         case .projects: return "Projects"
         case .settings: return "Settings"
@@ -39,6 +41,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable, Identifiable {
         case .alerts: return "bell.fill"
         case .serverStatus: return "waveform.path.ecg"
         case .computers: return "laptopcomputer"
+        case .agents: return "cpu.fill"
         case .platforms: return "server.rack"
         case .projects: return "folder.fill"
         case .settings: return "gearshape.fill"
@@ -53,6 +56,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable, Identifiable {
         case .alerts: return "Threshold alerts and notifications."
         case .serverStatus: return "Host usage, fleet apps, and backups."
         case .computers: return "Mac hardware, load, and process flags."
+        case .agents: return "AI coding agents, tokens, and savings."
         case .platforms: return "Status across every platform."
         case .projects: return "Project budgets and burn."
         case .settings: return "Connection, appearance, security."
@@ -74,6 +78,7 @@ public struct AppFeatures {
     public var alerts: () -> AnyView
     public var serverStatus: () -> AnyView
     public var computers: () -> AnyView
+    public var agents: () -> AnyView
     public var platforms: () -> AnyView
     public var projects: () -> AnyView
     public var settings: () -> AnyView
@@ -84,6 +89,7 @@ public struct AppFeatures {
         alerts: @escaping () -> AnyView,
         serverStatus: @escaping () -> AnyView,
         computers: @escaping () -> AnyView,
+        agents: @escaping () -> AnyView = { AnyView(Text("Agents")) },
         platforms: @escaping () -> AnyView,
         projects: @escaping () -> AnyView,
         settings: @escaping () -> AnyView
@@ -93,6 +99,7 @@ public struct AppFeatures {
         self.alerts = alerts
         self.serverStatus = serverStatus
         self.computers = computers
+        self.agents = agents
         self.platforms = platforms
         self.projects = projects
         self.settings = settings
@@ -105,6 +112,7 @@ public struct AppFeatures {
         case .alerts: return alerts()
         case .serverStatus: return serverStatus()
         case .computers: return computers()
+        case .agents: return agents()
         case .platforms: return platforms()
         case .projects: return projects()
         case .settings: return settings()
@@ -296,10 +304,8 @@ struct GlassTabBar: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
         .glassBarBackground()
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-        .padding(.bottom, 6)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tab bar")
     }
@@ -361,17 +367,16 @@ private extension View {
         }
     }
 
-    /// Liquid Glass when the OS provides it; ultra-thin material + hairline
-    /// stroke + soft shadow as the visually-equivalent fallback.
-    @ViewBuilder
+    /// Full-width anchored bar (owner 2026-08-31): mostly-solid, slightly
+    /// glassy, flush with the screen's sides and bottom — no floating capsule
+    /// gaps.  `.bar` is the system chrome material; a hairline divider marks
+    /// the top edge and the material extends under the home indicator.
     func glassBarBackground() -> some View {
-        if #available(iOS 26.0, *) {
-            self.glassEffect(.regular, in: Capsule())
-        } else {
-            self
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(.primary.opacity(0.08)))
-                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        self.background {
+            Rectangle()
+                .fill(.bar)
+                .overlay(alignment: .top) { Divider() }
+                .ignoresSafeArea(edges: .bottom)
         }
     }
 }

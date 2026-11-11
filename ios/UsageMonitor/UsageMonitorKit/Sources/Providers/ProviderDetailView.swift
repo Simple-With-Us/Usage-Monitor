@@ -101,9 +101,16 @@ struct ProviderDetailView: View {
             if !provider.spendComponents.isEmpty {
                 compositionCard(provider)
             }
+            let billingRecords = !depthStore.billingRecords.isEmpty ? depthStore.billingRecords : (provider.externalBilling ?? [])
+            if !billingRecords.isEmpty {
+                ProviderUsageBreakdownCard(
+                    providerTitle: provider.title,
+                    records: billingRecords
+                )
+            }
             historySection(provider)
-            if !depthStore.billingRecords.isEmpty {
-                ExternalBillingCard(records: depthStore.billingRecords)
+            if !billingRecords.isEmpty {
+                ExternalBillingCard(records: billingRecords)
             }
             if provider.hasRenewalContext {
                 renewalCard(provider)

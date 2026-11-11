@@ -1,0 +1,6 @@
+{
+  "five_hour": { "utilization": 37.5, "resets_at": "2026-09-12T18:00:00Z" },
+  "seven_day": { "utilization": 82, "resets_at": "2026-09-16T00:00:00Z" },
+  "seven_day_opus": { "utilization": 95.5, "resets_at": "2026-09-16T00:00:00Z" },
+  "account_uuid": "not-a-window"
+}

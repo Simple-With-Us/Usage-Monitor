@@ -338,6 +338,37 @@ final class DashboardViewDataTests: XCTestCase {
         XCTAssertEqual(pace?.projected, 300) // clamped up to spent
     }
 
+    // MARK: - TimeframeOption tests
+
+    func testTimeframeOptionLabels() {
+        XCTAssertEqual(TimeframeOption.rolling(days: 1).displayLabel, "Past 24 hours")
+        XCTAssertEqual(TimeframeOption.rolling(days: 7).displayLabel, "Past 7 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 30).displayLabel, "Past 30 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 90).displayLabel, "Past 90 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 180).displayLabel, "Past 180 days")
+        XCTAssertEqual(TimeframeOption.rolling(days: 365).displayLabel, "Past 12 months")
+        XCTAssertEqual(TimeframeOption.rolling(days: 3650).displayLabel, "All time")
+        XCTAssertEqual(TimeframeOption.currentMonth.displayLabel, "This month")
+        XCTAssertEqual(TimeframeOption.calendarYear(year: 2026).displayLabel, "2026")
+    }
+
+    func testTimeframeOptionQueryItems() {
+        let rolling365 = TimeframeOption.rolling(days: 365)
+        XCTAssertEqual(rolling365.usageEventsQueryItems, [URLQueryItem(name: "days", value: "365")])
+
+        let month = TimeframeOption.calendarMonth(year: 2026, month: 8)
+        XCTAssertEqual(month.usageEventsQueryItems, [
+            URLQueryItem(name: "from", value: "2026-08-01"),
+            URLQueryItem(name: "to", value: "2026-08-31"),
+        ])
+    }
+
+    func testTimeframeRecentMonths() {
+        let months = TimeframeOption.recentMonths(count: 13)
+        XCTAssertEqual(months.count, 13)
+        XCTAssertEqual(months.first, TimeframeOption.currentMonth)
+    }
+
     // MARK: - Fixture helpers
 
     private func makeResponse(budget: Double, providers: [ProviderBudgetStatus]) -> BudgetStatusResponse {

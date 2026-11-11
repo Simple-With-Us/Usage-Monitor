@@ -26,12 +26,12 @@ jobs:
   # e.g. a PagerDuty "resolve" curl failing after a SUCCESSFUL check would
   # conclude the run as failure and be miscounted later as downtime.
   ping:
-    # Self-hosted CI with hosted fallback; dependabot forced hosted. See ci.yml
-    # for the full rationale/runbook. Clear UM_CI_RUNNER for instant fallback.
-    # This 5-minute cron is the steady hosted-minutes drain, so moving it is the
-    # main saving. It relies on curl + jq (readiness probe) and gh (incident
-    # issue/streak steps, all continue-on-error); confirm those exist on the
-    # runner during the proving dispatch — the readiness gate needs only curl+jq.
+    # Runs on GitHub-hosted ubuntu-latest, deliberately.  See ci.yml's verify
+    # job for the full history.  Do not reintroduce a self-hosted label here.
+    # This 5-minute cron is the repo's steady hosted-minutes consumer; if that
+    # cost ever needs revisiting, the lever is the cron cadence, not a runner
+    # swap.  The readiness gate needs only curl + jq; the incident issue/streak
+    # steps additionally use gh and are all continue-on-error.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:

@@ -10,6 +10,7 @@ export default defineConfig({
     hookTimeout: 60_000,
     testTimeout: 60_000,
     setupFiles: ["./vitest.setup.ts"],
+    globalSetup: ["./vitest.global-setup.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
@@ -18,7 +19,18 @@ export default defineConfig({
       // is worked on by a multi-agent fleet) — their test files are not this
       // checkout's code and must not gate local `npm run verify`.
       "**/.worktrees/**",
+      "**/tests/e2e/**", // Playwright owns these specs, not Vitest.
       "**/*.workers.test.*",
+      // The iOS ship tooling is tested by Node's own test runner
+      // (`node --test scripts/ios-fleet/*.test.mjs`) and by the iOS
+      // credential step in CI.  Vitest cannot run them:  they are node:test
+      // suites, and a file with no Vitest suite in it is a failed file.
+      "**/scripts/ios-fleet/**",
+      // Node's test runner owns backup cleanup repro suites (see test:backup-concurrent-startup).
+      "**/scripts/__tests__/**",
+      // The shared Worker budget guard is a node:test suite too:
+      // `npm run test:budget-guard`.
+      "**/budget-guard.test.mjs",
     ],
     coverage: {
       provider: "v8",
@@ -39,6 +51,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // The poller imports `server-only` so the admin key cannot land in a
+      // client bundle.  Vitest is a Node runner; the package throws there.
+      "server-only": path.resolve(__dirname, "./src/test-shims/server-only.ts"),
     },
   },
 });

@@ -6,6 +6,7 @@ import type { MacHealthResponse } from "@/lib/mac-health";
 export function MacHealthCard() {
   const [data, setData] = useState<MacHealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showFleetDetails, setShowFleetDetails] = useState(false);
 
   useEffect(() => {
     let unmounted = false;
@@ -79,16 +80,35 @@ export function MacHealthCard() {
     return days > 0 ? `${days}d ${hours}h` : `${hours}h`;
   };
 
+  const getProcessBadge = (statusVal: string) => {
+    if (statusVal === "running" || statusVal === "online" || statusVal === "ok") {
+      return { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-300", bg: "bg-emerald-500/10", label: "Running" };
+    }
+    if (statusVal === "degraded") {
+      return { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300", bg: "bg-amber-500/10", label: "Degraded" };
+    }
+    if (statusVal === "not_enabled" || statusVal === "disabled") {
+      return { dot: "bg-slate-400 dark:bg-slate-500", text: "text-muted-foreground", bg: "bg-muted/80", label: "Not Enabled" };
+    }
+    return { dot: "bg-rose-500", text: "text-rose-700 dark:text-rose-300", bg: "bg-rose-500/10", label: "Stopped" };
+  };
+
   return (
     <div className="rounded-xl border border-border bg-card p-5 shadow-sm transition-all">
       <div className="flex items-center justify-between border-b border-border pb-3">
         <div className="flex items-center gap-2.5">
           <span className={`h-2.5 w-2.5 rounded-full ${statusColor} animate-pulse`} />
           <div>
-            <h3 className="font-semibold text-foreground text-sm flex items-center gap-2">
-              🖥️ {mac.hostname}
+            <h3 className="font-semibold text-foreground text-sm flex items-center gap-1.5">
+              <span>🖥️</span>
+              <span>{mac.hostname}</span>
+              <span className="text-xs font-normal text-muted-foreground">
+                ({mac.username || "jay"} · {mac.tailscaleHostname || "macbook.boa-roygbiv.ts.net"})
+              </span>
             </h3>
-            <p className="text-[11px] text-muted-foreground">{mac.osVersion || "macOS"} • {mac.arch || "arm64"}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {mac.osVersion || "macOS"} • {mac.chipName || mac.arch || "Apple M5"}
+            </p>
           </div>
         </div>
         <div className="text-right">
@@ -129,7 +149,7 @@ export function MacHealthCard() {
         </div>
 
         <div className="rounded-lg bg-muted/40 p-2.5 text-center">
-          <div className="text-[11px] font-medium text-muted-foreground">Disk Storage</div>
+          <div className="text-[11px] font-medium text-muted-foreground">Data Disk</div>
           <div className="text-base font-bold text-foreground mt-0.5">{mac.diskUsagePct}%</div>
           <div className="w-full bg-muted h-1 rounded-full mt-1.5 overflow-hidden">
             <div
@@ -142,20 +162,87 @@ export function MacHealthCard() {
 
       {mac.processes && Object.keys(mac.processes).length > 0 && (
         <div className="mt-3.5 pt-3 border-t border-border/60">
-          <div className="text-[11px] font-medium text-muted-foreground mb-2">Monitored Host Services</div>
+          <div className="text-[11px] font-medium text-muted-foreground mb-2">Monitored Local Services</div>
           <div className="flex flex-wrap gap-2">
-            {Object.entries(mac.processes).map(([name, procStatus]) => (
-              <span
-                key={name}
-                className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-[11px] font-mono"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${
-                  procStatus === "running" ? "bg-emerald-500" : "bg-rose-500"
-                }`} />
-                {name}
-              </span>
-            ))}
+            {Object.entries(mac.processes).map(([name, procStatus]) => {
+              const badge = getProcessBadge(procStatus);
+              return (
+                <span
+                  key={name}
+                  className={`inline-flex items-center gap-1.5 rounded-md ${badge.bg} px-2 py-1 text-[11px] font-mono`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
+                  <span className="font-semibold">{name}</span>
+                  <span className={`text-[10px] ${badge.text}`}>({badge.label})</span>
+                </span>
+              );
+            })}
           </div>
+        </div>
+      )}
+
+      {((mac.pm2Processes && mac.pm2Processes.length > 0) || (mac.launchdProcesses && mac.launchdProcesses.length > 0)) && (
+        <div className="mt-3.5 pt-3 border-t border-border/60">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-medium text-muted-foreground">
+              Dev Fleet Processes (PM2 & Launchd)
+            </div>
+            <button
+              onClick={() => setShowFleetDetails(!showFleetDetails)}
+              className="text-[11px] font-medium text-primary hover:underline"
+            >
+              {showFleetDetails ? "Hide Fleet (ms)" : `Show All (${(mac.pm2Processes?.length || 0) + (mac.launchdProcesses?.length || 0)} jobs)`}
+            </button>
+          </div>
+
+          {showFleetDetails && (
+            <div className="mt-2.5 space-y-3">
+              {mac.pm2Processes && mac.pm2Processes.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                    PM2 Fleet Services
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                    {mac.pm2Processes.map((p) => {
+                      const badge = getProcessBadge(p.status);
+                      return (
+                        <div
+                          key={p.name}
+                          className="flex items-center justify-between rounded bg-muted/50 px-2 py-1 text-[11px]"
+                        >
+                          <span className="font-mono truncate mr-1">{p.name}</span>
+                          <span className={`h-1.5 w-1.5 rounded-full ${badge.dot} flex-shrink-0`} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {mac.launchdProcesses && mac.launchdProcesses.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                    Launchd Background Daemons
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {mac.launchdProcesses.map((p) => {
+                      const badge = getProcessBadge(p.status);
+                      const cleanName = p.name.replace(/^com\.(jay|jays)\./, "").replace(/^actions\.runner\./, "runner:");
+                      return (
+                        <div
+                          key={p.name}
+                          className="flex items-center justify-between rounded bg-muted/50 px-2 py-1 text-[11px]"
+                        >
+                          <span className="font-mono truncate mr-1" title={p.name}>{cleanName}</span>
+                          <span className={`text-[10px] font-medium ${badge.text}`}>{p.status}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

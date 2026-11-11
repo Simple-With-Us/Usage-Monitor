@@ -20,11 +20,15 @@ struct FleetBackupDetailView: View {
                             : "exclamationmark.triangle.fill"
                     )
                 }
+                .copyableRow(label: "Overall", value: overallLabel)
                 if let configured = fleet.configured {
-                    LabeledContent("B2 Monitor", value: configured ? "Configured" : "Missing")
+                    let cfgText = configured ? "Configured" : "Missing"
+                    LabeledContent("B2 Monitor", value: cfgText)
+                        .copyableRow(label: "B2 Monitor", value: cfgText)
                 }
                 if let asOf = fleet.asOf {
                     LabeledContent("As Of", value: asOf)
+                        .copyableRow(label: "As Of", value: asOf)
                 }
             } footer: {
                 Text("Locations are independent.  A fresh B2 full dump keeps disaster recovery alive even when continuous Litestream is lagging.")
@@ -60,6 +64,7 @@ struct FleetBackupDetailView: View {
                         Text(warning)
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.warning)
+                            .copyableValue(warning, label: "Warning")
                     }
                 }
             }
@@ -83,11 +88,17 @@ struct FleetBackupDetailView: View {
     @ViewBuilder
     private func locationRow(_ location: ServerMetrics.FleetBackups.Location) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            let labelText = locationLabel(location)
             LabeledContent(location.label) {
                 StatusBadge(
-                    locationLabel(location),
+                    labelText,
                     status: locationStatus(location),
-                    systemImage: location.ok == true ? "checkmark" : "exclamationmark"
+                    // No verdict at all (never probed, or the check was
+                    // skipped) is not a failure: an unobserved row must not
+                    // wear the failure glyph beside its neutral badge.
+                    systemImage: location.unknown == true || location.ok == nil
+                        ? "questionmark.circle"
+                        : location.ok == true ? "checkmark" : "exclamationmark"
                 )
             }
             if let detail = locationDetail(location) {
@@ -96,6 +107,8 @@ struct FleetBackupDetailView: View {
                     .foregroundStyle(Theme.Colors.secondaryText)
             }
         }
+        .contentShape(Rectangle())
+        .copyableValue(locationDetail(location).map { "\(locationLabel(location)) (\($0))" } ?? locationLabel(location), label: location.label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "\(location.label): \(locationLabel(location)). \(locationDetail(location) ?? "")"
@@ -103,6 +116,8 @@ struct FleetBackupDetailView: View {
     }
 
     private func locationLabel(_ location: ServerMetrics.FleetBackups.Location) -> String {
+        // Never observed is not a failure: no probe result exists at all.
+        if location.unknown == true { return "Unknown" }
         if location.ok == true { return "OK" }
         if location.ok == false {
             return location.present == true ? "Lagging" : "Missing"
@@ -115,9 +130,16 @@ struct FleetBackupDetailView: View {
     }
 
     private func locationStatus(_ location: ServerMetrics.FleetBackups.Location) -> Theme.SemanticStatus {
+        if location.unknown == true { return .neutral }
+        // A deliberately skipped check observed nothing: an unobserved row is
+        // neutral, but a row that was really observed keeps its own state,
+        // so the detail view agrees with the web card and the platforms
+        // section.
+        if fleet.offline == true && location.ok == nil { return .neutral }
         if location.ok == true { return .ok }
         if location.ok == false { return .warning }
-        return .warning
+        // No probe result at all is unknown, never a failure.
+        return .neutral
     }
 
     private func locationDetail(_ location: ServerMetrics.FleetBackups.Location) -> String? {

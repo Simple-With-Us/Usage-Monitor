@@ -204,7 +204,6 @@ public struct ProvidersRootView: View {
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Theme.Colors.background)
-            .tabBarScrollClearance()
             .searchable(
                 text: $model.searchText,
                 placement: .navigationBarDrawer(displayMode: .automatic),

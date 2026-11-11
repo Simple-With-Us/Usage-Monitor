@@ -1,0 +1,15 @@
+{
+  "plan_type": "pro",
+  "rate_limit": {
+    "primary_window": {
+      "used_percent": 12.5,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 3600
+    },
+    "secondary_window": {
+      "used_percent": 64,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 172800
+    }
+  }
+}

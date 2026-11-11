@@ -3,7 +3,7 @@ import Networking
 
 extension Notification.Name {
     static let usageMonitorAccountDidChange = Notification.Name(
-        "services.jays.usage.client.monitor.account-did-change"
+        "com.simplewithus.usage.client.account-did-change"
     )
 }
 

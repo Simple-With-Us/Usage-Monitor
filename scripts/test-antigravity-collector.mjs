@@ -15,7 +15,10 @@ import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-s
 import {
   assertUniqueSeriesKeys,
   buildEvents,
+  buildPerModelEvents,
+  extractAntigravityUsageModels,
   extractQuotaRecords,
+  parseAntigravityUsageCli,
 } from "./antigravity-usage-collector.mjs";
 
 // Verbatim from a real run, with the long human-readable `description`
@@ -122,6 +125,35 @@ check("structured command payload is the preferred source", () => {
   assertEqual(records[1].window, "5h", "the second bucket is the 5h window");
 });
 
+check("the Claude and GPT group is displayed as Third-Party", () => {
+  const records = extractQuotaRecords(REAL_ENVELOPE);
+  assertEqual(records[2].label, "Third-Party (weekly)", "structured label for the weekly bucket");
+  assertEqual(records[3].label, "Third-Party (5h)", "structured label for the 5h bucket");
+  // Only the display label moves: the raw CLI group, bucket id and series key
+  // stay as the CLI reported them, so stored data and eventIds do not change.
+  assertEqual(records[2].group, "Claude and GPT models", "raw group name is kept");
+  assertEqual(records[2].seriesKey, "3p-weekly", "series key is still the bucket id");
+  const events = buildEvents(REAL_ENVELOPE, OCCURRED_AT);
+  assertEqual(events[2].label, "Third-Party (weekly)", "event label");
+  assertEqual(events[3].label, "Third-Party (5h)", "event label");
+  assertEqual(events[2].metadata.modelGroup, "Claude and GPT models", "raw group name in metadata");
+  assertEqual(events[2].metadata.bucketId, "3p-weekly", "bucket id unchanged");
+  assertEqual(events[0].label, "Gemini Models (weekly)", "Gemini label is unchanged");
+  for (const event of events) {
+    assert(!/Claude and GPT/.test(event.label), `${event.label}: legacy label leaked`);
+  }
+});
+
+check("the rendered-text fallback shows the same Third-Party label", () => {
+  const { command, ...withoutCommand } = REAL_ENVELOPE;
+  void command;
+  const records = extractQuotaRecords(withoutCommand);
+  assertEqual(records[2].label, "Third-Party (Weekly Limit Remaining)", "fallback label");
+  assertEqual(records[2].group, "Claude and GPT models", "raw group name is kept");
+  assertEqual(records[2].seriesKey, "Claude and GPT models|Weekly Limit Remaining", "series key is unchanged");
+  assertEqual(records[0].label, "Gemini Models (Weekly Limit Remaining)", "Gemini label is unchanged");
+});
+
 check("quota is metered per group and window, never per group alone", () => {
   const records = extractQuotaRecords(REAL_ENVELOPE);
   const groups = new Set(records.map((r) => r.group));
@@ -140,6 +172,9 @@ check("events are well formed and collision free", () => {
   assertEqual(geminiWeekly.metricType, "quota", "metricType");
   assertEqual(geminiWeekly.billingMode, "actual", "billingMode");
   assertEqual(geminiWeekly.confidence, "actual", "confidence");
+  assertEqual(geminiWeekly.metadata.reportedAt, OCCURRED_AT, "reportedAt");
+  assertEqual(typeof geminiWeekly.metadata.windowKey, "string", "windowKey");
+  assertEqual(typeof geminiWeekly.metadata.machine, "string", "machine");
   assertEqual(geminiWeekly.limit, 100, "percent scale limit");
   assertEqual(geminiWeekly.credits, 92.67, "credits are percent remaining");
   assertEqual(geminiWeekly.occurredAt, OCCURRED_AT, "occurredAt is passed through");
@@ -202,6 +237,53 @@ check("absolute counts still win over the percent fallback", () => {
   assertEqual(event.metadata.scale, undefined, "no percent-scale marker on absolute events");
 });
 
+const USAGE_CLI_PAYLOAD = {
+  timestamp: "2026-09-04T04:23:04.653Z",
+  method: "google",
+  models: [
+    {
+      label: "Claude Opus 4.6 (Thinking)",
+      modelId: "claude-opus-4-6-thinking",
+      remainingPercentage: 0.29751188,
+      isExhausted: false,
+      resetTime: "2026-09-09T07:04:37Z",
+      isAutocompleteOnly: false,
+    },
+    {
+      label: "Gemini 3 Flash",
+      modelId: "gemini-3-flash",
+      remainingPercentage: null,
+      isExhausted: false,
+      resetTime: "2026-09-05T03:58:25Z",
+      isAutocompleteOnly: false,
+    },
+    {
+      label: "Gemini 2.5 Flash (autocomplete)",
+      modelId: "gemini-2.5-flash-002",
+      remainingPercentage: 1,
+      isExhausted: false,
+      resetTime: "2026-09-05T03:58:25Z",
+      isAutocompleteOnly: true,
+    },
+  ],
+};
+
+check("antigravity-usage per-model JSON becomes quota events", () => {
+  const records = extractAntigravityUsageModels(USAGE_CLI_PAYLOAD);
+  assertEqual(records.length, 3, "all models including autocomplete");
+  const events = buildPerModelEvents(USAGE_CLI_PAYLOAD, OCCURRED_AT);
+  assertEqual(events.length, 2, "autocomplete models are dropped");
+  const opus = events.find((e) => e.metadata.modelId === "claude-opus-4-6-thinking");
+  assert(opus, "opus event present");
+  assertEqual(opus.credits, 29.75, "fraction converted to percent remaining");
+  assertEqual(opus.metadata.resetAt, "2026-09-09T07:04:37Z", "reset carried");
+  assertEqual(opus.metadata.source, "antigravity-usage", "source tag");
+  const gemini = events.find((e) => e.metadata.modelId === "gemini-3-flash");
+  assert(gemini, "gemini event present even without remainingPercentage");
+  assertEqual(gemini.credits, 0, "N/A remaining is none remains");
+  assertEqual(gemini.metadata.isExhausted, true, "N/A remaining is exhausted");
+});
+
 // The collector posts straight to prod, so the batch it builds has to satisfy
 // the same schema the ingest route validates with — catching a shape error
 // here beats discovering it as a 400 from a launchd job nobody is watching.
@@ -233,6 +315,82 @@ check("colliding series keys fail loudly instead of losing a reading", () => {
     );
   }
   assert(threw, "duplicate series keys must throw");
+});
+
+const USAGE_CLI_FIXTURE = {
+  timestamp: "2026-09-04T04:20:02.182Z",
+  method: "google",
+  models: [
+    {
+      label: "Claude Opus 4.6 (Thinking)",
+      modelId: "claude-opus-4-6-thinking",
+      remainingPercentage: 0.29751188,
+      isExhausted: false,
+      resetTime: "2026-09-09T07:04:37Z",
+      timeUntilResetMs: 441874826,
+      isAutocompleteOnly: false,
+    },
+    {
+      label: "Gemini 3.1 Pro (High)",
+      modelId: "gemini-3.1-pro-high",
+      isExhausted: false,
+      resetTime: "2026-09-05T03:58:25Z",
+      timeUntilResetMs: 85102826,
+      isAutocompleteOnly: false,
+    },
+    {
+      label: "Gemini 2.5 Pro",
+      modelId: "gemini-2.5-pro",
+      isExhausted: false,
+      resetTime: "2026-09-05T03:58:25Z",
+      timeUntilResetMs: 85102826,
+      isAutocompleteOnly: true,
+    },
+    {
+      label: "Gemini 3.6 Flash (High)",
+      modelId: "gemini-3.6-flash-high",
+      isExhausted: true,
+      resetTime: "2026-09-05T03:58:25Z",
+      timeUntilResetMs: 85102826,
+      isAutocompleteOnly: false,
+    },
+  ],
+};
+
+check("antigravity-usage quota --json is preferred over agy group buckets", () => {
+  const records = extractQuotaRecords(USAGE_CLI_FIXTURE);
+  assertEqual(records.length, 3, "autocomplete-only Gemini 2.5 Pro is skipped");
+  assertEqual(records[0].seriesKey, ["claude", "opus", "4-6", "thinking"].join("-"), "series key is the model id");
+  assertEqual(records[0].percentRemaining, 29.75, "fraction converted to percent");
+  assertEqual(records[0].isExhausted, false, "30% remaining is not exhausted");
+  assertEqual(records[1].remainingUnknown, false, "N/A remaining is not unknown");
+  assertEqual(records[1].percentRemaining, 0, "N/A remaining is none remains");
+  assertEqual(records[1].isExhausted, true, "N/A remaining is exhausted");
+  assertEqual(records[2].isExhausted, true, "isExhausted true is a hit");
+  assertEqual(records[2].percentRemaining, 0, "exhausted models store 0 remaining");
+});
+
+check("antigravity-usage events validate against the shared v2 ingest schema", () => {
+  const events = buildEvents(USAGE_CLI_FIXTURE, OCCURRED_AT);
+  assertEqual(events[0].metadata.modelId, ["claude", "opus", "4-6", "thinking"].join("-"), "modelId in metadata");
+  assertEqual(events[0].metadata.source, "antigravity-usage", "source tag");
+  assertEqual(events[1].credits, 0, "N/A remaining stores 0 credits");
+  assertEqual(events[2].credits, 0, "exhausted credits are zero");
+  const result = UsageTelemetryV2BatchSchema.safeParse({
+    schemaVersion: 2,
+    producerId: "antigravity-cli",
+    producerInstanceId: "test-host.local",
+    events,
+  });
+  assert(
+    result.success,
+    `usage-cli batch rejected: ${JSON.stringify(result.error?.issues)}`
+  );
+});
+
+check("parseAntigravityUsageCli ignores agy group envelopes", () => {
+  const records = parseAntigravityUsageCli(REAL_ENVELOPE);
+  assertEqual(records.length, 0, "agy command.data.groups is not this shape");
 });
 
 if (failures.length > 0) {

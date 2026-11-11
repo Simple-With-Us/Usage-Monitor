@@ -56,7 +56,7 @@
  */
 
 import { Client } from "pg";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
 async function main() {
   const sourceUrl = process.env.SOURCE_DATABASE_URL;
@@ -69,7 +69,7 @@ async function main() {
   }
 
   const pg = new Client({ connectionString: sourceUrl });
-  const prisma = new PrismaClient();
+  const prisma = createPrismaClient();
 
   try {
     await pg.connect();

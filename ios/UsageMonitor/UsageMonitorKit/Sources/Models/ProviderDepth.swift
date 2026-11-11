@@ -98,6 +98,8 @@ public struct ExternalBillingRecord: Codable, Hashable, Sendable, Identifiable {
     public var currentPeriodStart: String?
     public var currentPeriodEnd: String?
     public var nextRenewalAt: String?
+    public var usageQuantity: Double?
+    public var usageUnit: String?
     public var syncedAt: String
 
     public init(
@@ -113,6 +115,8 @@ public struct ExternalBillingRecord: Codable, Hashable, Sendable, Identifiable {
         currentPeriodStart: String? = nil,
         currentPeriodEnd: String? = nil,
         nextRenewalAt: String? = nil,
+        usageQuantity: Double? = nil,
+        usageUnit: String? = nil,
         syncedAt: String
     ) {
         self.source = source
@@ -127,6 +131,8 @@ public struct ExternalBillingRecord: Codable, Hashable, Sendable, Identifiable {
         self.currentPeriodStart = currentPeriodStart
         self.currentPeriodEnd = currentPeriodEnd
         self.nextRenewalAt = nextRenewalAt
+        self.usageQuantity = usageQuantity
+        self.usageUnit = usageUnit
         self.syncedAt = syncedAt
     }
 
@@ -145,6 +151,61 @@ public struct ExternalBillingRecord: Codable, Hashable, Sendable, Identifiable {
             }
         }
         return kind
+    }
+
+    /// Readable application / project name mapped from bucket or service names.
+    public var resolvedAppName: String {
+        let raw = (serviceName ?? planName ?? externalId ?? kind).lowercased()
+        if raw.contains("socratic") {
+            return "Socratic.Trade"
+        }
+        if raw.contains("congress") {
+            return "Congress.Trade"
+        }
+        if raw.contains("usage-monitor") || raw.contains("usagemonitor") {
+            return "Usage Monitor"
+        }
+        if raw.contains("fleet") {
+            return "Fleet Infra"
+        }
+
+        // Clean common bucket prefixes/suffixes: "jays-foo-eu" -> "Foo"
+        var cleaned = serviceName ?? displayName
+        if cleaned.lowercased().hasPrefix("jays-") {
+            cleaned = String(cleaned.dropFirst(5))
+        }
+        if cleaned.lowercased().hasSuffix("-eu") {
+            cleaned = String(cleaned.dropLast(3))
+        } else if cleaned.lowercased().hasSuffix("-us") {
+            cleaned = String(cleaned.dropLast(3))
+        }
+
+        let words = cleaned.replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        let result = words.joined(separator: " ")
+        return result.isEmpty ? displayName : result
+    }
+
+    /// Formatted usage quantity (e.g. "150.0 GB") or cost when quantity is missing.
+    public var formattedUsage: String {
+        if let qty = usageQuantity, qty > 0 {
+            if let unit = usageUnit, !unit.isEmpty {
+                if qty >= 10 {
+                    return String(format: "%.1f %@", qty, unit)
+                } else if qty >= 1 {
+                    return String(format: "%.2f %@", qty, unit)
+                } else {
+                    return String(format: "%.3f %@", qty, unit)
+                }
+            }
+            return String(format: "%.1f", qty)
+        }
+        if let amount = amountUsd, amount > 0 {
+            return String(format: "$%.2f", amount)
+        }
+        return "--"
     }
 
     public var currentPeriodStartDate: Date? {

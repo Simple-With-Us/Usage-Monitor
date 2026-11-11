@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "node scripts/agent-hook-otlp.mjs cursor afterFileEdit"
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node scripts/agent-hook-otlp.mjs cursor afterAgentResponse"
+      }
+    ],
+    "stop": [
+      {
+        "command": "node scripts/agent-hook-otlp.mjs cursor stop"
+      }
+    ]
+  }
+}

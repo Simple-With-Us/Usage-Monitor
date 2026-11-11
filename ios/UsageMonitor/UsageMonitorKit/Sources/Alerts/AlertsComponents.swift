@@ -63,6 +63,7 @@ struct AlertCard: View {
         }
         .dsCard()
         .contentShape(Rectangle())
+        .copyableValue("\(item.provider.title) - \(item.alert.title): \(item.alert.message)", label: item.alert.title)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(item.provider.title), \(item.alert.severity.badgeText): \(item.alert.title)")
         .accessibilityHint(item.alert.message)
@@ -73,7 +74,6 @@ struct AlertCard: View {
 /// A compact, non-navigating row for a provider's alert inside the detail view.
 struct AlertDetailRow: View {
     let alert: ProviderAlert
-
     private var status: Theme.SemanticStatus { .init(alert.severity) }
 
     var body: some View {
@@ -91,6 +91,8 @@ struct AlertDetailRow: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, Theme.Spacing.xs)
+        .contentShape(Rectangle())
+        .copyableValue("\(alert.title): \(alert.message)", label: alert.title)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(alert.severity.badgeText): \(alert.title). \(alert.message)")
     }
