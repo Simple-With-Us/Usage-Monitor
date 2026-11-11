@@ -15,6 +15,7 @@ case "$MODE" in
 value) printf synthetic-token;;
 folder) case "$*" in *--path=/global-api-keys*) printf synthetic-folder-token;;esac;;
 fail) echo synthetic-secret-marker >&2;exit 43;;
+mixed) case "$*" in *--path=/global-api-keys*) echo synthetic-secret-marker >&2;exit 43;;*) exit 0;;esac;;
 slow) sleep 1;printf synthetic-delayed-token;;
 esac
 `,{mode:0o700});
@@ -27,7 +28,8 @@ env.MODE='folder';assert.equal(await r(),'synthetic-folder-token');check();
 env=base();env.MODE='fail';r=createTokenResolver({env});await assert.rejects(r(),e=>!e.message.includes('synthetic-secret-marker')&&!e.cause&&/status\(43\)/.test(e.message));check();
 env=base();env.MODE='empty';t=100000;r=createTokenResolver({env,now:()=>t});assert.equal(await r(),undefined);env.MODE='value';assert.equal(await r(),undefined);check();t+=60001;assert.equal(await r(),'synthetic-token');check();
 env={USAGE_INGEST_TOKEN:' env-first '};assert.equal(await createTokenResolver({env})(),'env-first');check();
-await assert.rejects(createTokenResolver({env:{}})(),/binding is missing/);check();
+assert.equal(await createTokenResolver({env:{}})(),undefined);check();
+env=base();env.MODE='mixed';assert.equal(await createTokenResolver({env})(),undefined);check();
 env=base();env.MODE='slow';let tick=false;setTimeout(()=>tick=true,10);assert.equal(await createTokenResolver({env})(),'synthetic-delayed-token');assert.equal(tick,true);check();
 let calls=0;r=createTokenResolver({env:{},now:()=>100000,getSecret:async(name,opt)=>{assert.equal(name,'USAGE_INGEST_TOKEN');assert.equal(opt.strict,true);calls++;return ' injected ';}});assert.equal(await r(),'injected');assert.equal(calls,1);check();
 console.log(`${n}/${n} sender direct/read/memo/injection checks passed`);

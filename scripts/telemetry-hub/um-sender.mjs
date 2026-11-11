@@ -40,24 +40,47 @@ const execFileAsync = promisify(execFile);
 
 // Consumer-local direct read. Candidate folder order is inherited from the
 // retired JS caller; runtime binding/reference continuity remains unqualified.
+//
+// Absence contract (aligned with the collector-side scoped read and with
+// this resolver's memoize-a-miss design):
+//   - No scoped binding resolves as absent (null), never a throw: a hub
+//     without a UM token (e.g. a Sentry-only hub) keeps running, and the
+//     environment remains the only token source.
+//   - A folder that answers cleanly with empty output confirms absence.
+//     A confirmed miss in any folder wins over a failure in another: a
+//     least-privilege binding may cover only one of the two folders and
+//     fail (403) on the other, which must not turn absence into a throw.
+//   - Only when every folder fails without a clean answer is the first
+//     failure thrown, so a broken binding or auth failure is never
+//     memoized as a miss.
+// Both folder probes share one 15-second deadline, so token resolution
+// cannot stall a delivery pass for two sequential timeouts.
 async function readSenderIngestToken(env) {
   const project = env.INFISICAL_FLEET_OPS_PROJECT_ID?.trim();
   if (!env.INFISICAL_TOKEN?.trim() || !project) {
-    throw new Error("UM sender Infisical scoped binding is missing");
+    return null;
   }
   const childEnv = { ...env, INFISICAL_DOMAIN: "https://app.infisical.com" };
   for (const key of ["INFISICAL_API_URL", "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID",
     "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_CLIENT_ID",
     "INFISICAL_CLIENT_SECRET", "INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN", "TOKEN"]) delete childEnv[key];
   let failure;
+  let confirmedMiss = false;
+  const deadline = Date.now() + 15000;
   for (const folder of ["/", "/global-api-keys"]) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      failure ??= new Error("UM sender Infisical read failed (deadline)");
+      break;
+    }
     try {
       const { stdout } = await execFileAsync(env.INFISICAL_BIN || "infisical",
         ["secrets", "get", "USAGE_INGEST_TOKEN", "--plain", "--silent",
          "--telemetry=false", "--expand=false", "--env=prod", `--path=${folder}`,
          `--projectId=${project}`],
-        { encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv });
+        { encoding: "utf8", timeout: remaining, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv });
       if (stdout.trim()) return stdout.trim();
+      confirmedMiss = true;
     } catch (err) {
       // No child message, stderr, stdout or cause may enter a logged error.
       const sig = ["SIGKILL", "SIGTERM", "SIGINT", "SIGHUP"].includes(err.signal) ? err.signal : "unknown";
@@ -69,6 +92,7 @@ async function readSenderIngestToken(env) {
       failure ??= new Error(`UM sender Infisical read failed (${diag})`);
     }
   }
+  if (confirmedMiss) return null;
   if (failure) throw failure;
   return null;
 }
@@ -345,7 +369,8 @@ export function createTokenResolver({
     let value;
     try {
       // Async direct read keeps the OTLP event loop live. Confirmed absence
-      // returns null; binding/auth/fetch/spawn failures throw sanitized errors.
+      // (including no scoped binding) returns null; auth/fetch/spawn
+      // failures with no clean folder answer throw sanitized errors.
       value = await getSecret("USAGE_INGEST_TOKEN", { strict: true });
     } catch (error) {
       //  A transient lookup failure keeps the last good token, so a hub that
