@@ -658,7 +658,7 @@ Look first at Linear (`https://linear.app/simple-with-us`, through the `simple-b
 - Tooling: the `simple-chat` CLI (`~/.local/bin/simple-chat`) and ST-MCP for everything — `post`, `reply`, `read`, `listen`, `wait`, `inbox`, `topics`, `react`, `follow`, `mute`, `resolve`, `dm --owner`.
 Details: `~/apps/FLEET-PROTOCOL.md` § Chat: The Zulip Contract, § Posting, and § Linear and the Claim Lifecycle.
 
-**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → `gh pr create` (or update) → merge when CI is green. A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
+**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → open the PR through the Fleet Tools relay (`gr_open_pr`, or update it) → merge when CI is green through the relay (`gr_wf_merge_guarded`). A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
 
 ## Never wait and watch for PRs to merge / Idle-polling forbidden (Owner ruling 2026-09-01 — ALL seats)
 
@@ -723,9 +723,10 @@ Socratic.Trade #3089) and runs `scripts/ios-ship-testflight.sh`, which execs
 in-repo `scripts/ios-fleet/ship-testflight.sh`. LocalUsageMonitor stays skipped.
 Dispatch:
 
-```bash
-gh workflow run ios-ship.yml
-```
+Dispatch through the Fleet Tools relay with `gr_workflow_dispatch`
+(`workflow: ios-ship.yml`, `ref: main`).  If the relay refuses the dispatch,
+`gh workflow run ios-ship.yml` is the backup for that one step only, logged in
+the Fleet GitOPS deficiencies document.
 
 Bundle IDs `com.simplewithus.usage.client.ios` (Usage Monitor) and
 `com.simplewithus.usage.local.ios` (Local Monitor), team `CC8UTF7ATG`.
