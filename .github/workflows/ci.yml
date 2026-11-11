@@ -336,6 +336,8 @@ jobs:
           bash scripts/test-ios-scheduled-ship-gate.sh
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
+          bash -n scripts/ios-fleet/publish-ios-versions.sh
+          bash -n scripts/ios-fleet/assign-external-beta.sh
 
       # The server's storage watch (deploy/server/vps-storage-watch):  a
       # database past its growth threshold posts one alert tagging both
@@ -357,6 +359,11 @@ jobs:
           bash -n scripts/ios-fleet/test-asc-credentials.sh
           node --test scripts/ios-fleet/test-asc-key.test.mjs
           bash scripts/ios-fleet/test-asc-credentials.sh
+
+      # Version-manifest publish and external beta assignment (UM-1640).
+      # Fully offline: a fake gh and a fake App Store Connect client, no secrets.
+      - name: Test the iOS version manifest and external beta assignment
+        run: node --test scripts/ios-fleet/publish-ios-versions.test.mjs scripts/ios-fleet/assign-external-beta.node-test.mjs
 
       # The fleet's version-numbering rules (AFC-517):  the marketing version
       # is the next patch on the app's train and the build number is

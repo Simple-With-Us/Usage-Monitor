@@ -983,22 +983,84 @@ record_successful_ship() {
   log "ship-gate: recorded success ts=${now} sha=${head_sha:0:10} -> ${path}"
   emit_ship_output "uploaded=1"
   # Public version manifest for the in-app update prompt.  Best-effort —
-  # a publish miss must never fail a ship that already uploaded.
+  # a publish miss must never fail a ship that already uploaded.  The ship
+  # workflow does not put a token on this step.  It reads these outputs and
+  # publishes from the manifest-publish step with the SWU Autofix app token.
   if [[ -n "${BUNDLE_ID:-}" && -n "${MARKETING:-}" ]]; then
     local apple_id display
     local -a pub_args
     apple_id="$(json_get "$APP_KEY" appleId || true)"
     display="$(json_get "$APP_KEY" displayName || true)"
+    emit_ship_output "manifest_bundle=${BUNDLE_ID}"
+    emit_ship_output "manifest_version=${MARKETING}"
+    [[ -n "${BUILD_NUM:-}" ]] && emit_ship_output "manifest_build=${BUILD_NUM}"
+    [[ -n "${apple_id:-}" ]] && emit_ship_output "manifest_apple_id=${apple_id}"
+    [[ -n "${display:-}" ]] && emit_ship_output "manifest_display_name=${display}"
+    if [[ -z "${GH_TOKEN:-}" || ( -n "${GITHUB_TOKEN:-}" && "$GH_TOKEN" == "$GITHUB_TOKEN" ) ]]; then
+      if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        log "version-manifest: ${BUNDLE_ID} ${MARKETING} waits for the manifest-publish step"
+      else
+        log "warning: version-manifest publish skipped (GH_TOKEN is unset, non-fatal)"
+      fi
+      return 0
+    fi
     pub_args=(--bundle-id "$BUNDLE_ID" --version "$MARKETING")
     [[ -n "${BUILD_NUM:-}" ]] && pub_args+=(--build "$BUILD_NUM")
     [[ -n "${apple_id:-}" ]] && pub_args+=(--apple-id "$apple_id")
     [[ -n "${display:-}" ]] && pub_args+=(--display-name "$display")
-    if bash "${FLEET_DIR}/publish-ios-versions.sh" "${pub_args[@]}" >/dev/null 2>&1; then
+    # Keep the publisher's own lines.  The previous redirect to /dev/null made
+    # a missing script and a missing token look the same.
+    local pub_log pub_rc
+    pub_log="$(mktemp)"
+    if bash "${FLEET_DIR}/publish-ios-versions.sh" "${pub_args[@]}" >"$pub_log" 2>&1; then
+      pub_rc=0
+    else
+      pub_rc=$?
+    fi
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && log "version-manifest: $line"
+    done <"$pub_log"
+    rm -f "$pub_log"
+    if [[ "$pub_rc" -eq 0 ]]; then
       log "version-manifest: published ${BUNDLE_ID} ${MARKETING}"
     else
-      log "warning: version-manifest publish failed (non-fatal)"
+      log "warning: version-manifest publish failed (rc=${pub_rc}, non-fatal)"
+      if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        echo "::warning::version-manifest publish failed (rc=${pub_rc}) for ${BUNDLE_ID} ${MARKETING}"
+      fi
     fi
   fi
+}
+
+# After a real upload, put that build on the external groups that already
+# exist.  IOS_ASSIGN_EXTERNAL_BETA=1 is set only on the normal ship steps, so
+# a dry run, a plan, or a hand invocation does not write to App Store Connect.
+assign_external_beta() {
+  local apple_id rc
+  apple_id="$(json_get "$APP_KEY" appleId || true)"
+  if [[ -z "${apple_id:-}" || -z "${BUILD_NUM:-}" || "$BUILD_NUM" == "(from IPA)" || "${MARKETING:-}" == "(from IPA)" ]]; then
+    log "warning: external-beta assign skipped (apple id or build is not a real ship value)"
+    return 0
+  fi
+  mkdir -p "$LOG_DIR"
+  set +e
+  ASC_NODE="$ASC_NODE" bash "${FLEET_DIR}/assign-external-beta.sh" \
+    "$apple_id" "$BUILD_NUM" "${MARKETING:-}" \
+    >"${LOG_DIR}/assign-external-beta.json" 2>"${LOG_DIR}/assign-external-beta.err"
+  rc=$?
+  set -e
+  if [[ -s "${LOG_DIR}/assign-external-beta.err" ]]; then
+    while IFS= read -r line; do log "$line"; done <"${LOG_DIR}/assign-external-beta.err"
+  fi
+  if [[ "$rc" -eq 0 && "${IOS_ASSIGN_EXTERNAL_BETA:-}" == "1" ]]; then
+    log "external-beta: existing external groups checked for build ${BUILD_NUM}"
+  elif [[ "$rc" -ne 0 ]]; then
+    log "warning: external-beta assign failed (rc=${rc}, non-fatal)"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning::external beta group assign failed (rc=${rc}) for ${BUNDLE_ID} build ${BUILD_NUM}"
+    fi
+  fi
+  return 0
 }
 
 while [[ $# -gt 0 ]]; do
@@ -1502,6 +1564,7 @@ if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
   UPLOAD_RC=${PIPESTATUS[0]}
   set -e
   [[ $UPLOAD_RC -eq 0 ]] || die "altool upload failed (rc=$UPLOAD_RC); see ${LOG_DIR}/upload.log"
+  assign_external_beta
   record_successful_ship
   log "upload submitted; watch TestFlight processing in App Store Connect"
   exit 0
@@ -1681,6 +1744,7 @@ if [[ $EXPORT_RC -eq 0 ]]; then
   log "build ${MARKETING} (${BUILD_NUM}) submitted for ${BUNDLE_ID}"
   release_archive_lock
   ensure_tf_ready
+  assign_external_beta
   record_successful_ship
   log "logs: ${LOG_DIR}"
   exit 0
@@ -1737,6 +1801,7 @@ fi
 
 release_archive_lock
 ensure_tf_ready
+assign_external_beta
 record_successful_ship
 log "upload submitted; watch TestFlight processing for ${BUNDLE_ID} build ${BUILD_NUM}"
 log "logs: ${LOG_DIR}"
