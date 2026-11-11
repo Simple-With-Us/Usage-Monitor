@@ -53,8 +53,10 @@ const execFileAsync = promisify(execFile);
 //   - Only when every folder fails without a clean answer is the first
 //     failure thrown, so a broken binding or auth failure is never
 //     memoized as a miss.
-// Both folder probes share one 15-second deadline, so token resolution
-// cannot stall a delivery pass for two sequential timeouts.
+// Both folders are probed in parallel, each capped at 15 seconds, so
+// token resolution cannot stall a delivery pass for two sequential
+// timeouts and a hung probe can never starve the other folder; results
+// are still evaluated in folder order, so "/" wins when both answer.
 async function readSenderIngestToken(env) {
   const project = env.INFISICAL_FLEET_OPS_PROJECT_ID?.trim();
   if (!env.INFISICAL_TOKEN?.trim() || !project) {
@@ -66,30 +68,28 @@ async function readSenderIngestToken(env) {
     "INFISICAL_CLIENT_SECRET", "INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN", "TOKEN"]) delete childEnv[key];
   let failure;
   let confirmedMiss = false;
-  const deadline = Date.now() + 15000;
-  for (const folder of ["/", "/global-api-keys"]) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      failure ??= new Error("UM sender Infisical read failed (deadline)");
-      break;
-    }
-    try {
-      const { stdout } = await execFileAsync(env.INFISICAL_BIN || "infisical",
-        ["secrets", "get", "USAGE_INGEST_TOKEN", "--plain", "--silent",
-         "--telemetry=false", "--expand=false", "--env=prod", `--path=${folder}`,
-         `--projectId=${project}`],
-        { encoding: "utf8", timeout: remaining, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv });
-      if (stdout.trim()) return stdout.trim();
+  const probes = await Promise.allSettled(["/", "/global-api-keys"].map(async (folder) => {
+    const { stdout } = await execFileAsync(env.INFISICAL_BIN || "infisical",
+      ["secrets", "get", "USAGE_INGEST_TOKEN", "--plain", "--silent",
+       "--telemetry=false", "--expand=false", "--env=prod", `--path=${folder}`,
+       `--projectId=${project}`],
+      { encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv });
+    return stdout;
+  }));
+  for (const probe of probes) {
+    if (probe.status === "fulfilled") {
+      if (probe.value.trim()) return probe.value.trim();
       confirmedMiss = true;
-    } catch (err) {
+    } else if (!failure) {
       // No child message, stderr, stdout or cause may enter a logged error.
+      const err = probe.reason;
       const sig = ["SIGKILL", "SIGTERM", "SIGINT", "SIGHUP"].includes(err.signal) ? err.signal : "unknown";
       const diag = err.code === "ETIMEDOUT" ? `deadline-killed(${sig})`
         : err.signal ? `signal(${sig})`
         : ["ENOENT", "EACCES", "EPERM", "ENOTDIR"].includes(err.code) ? `spawn(${err.code})`
         : Number.isInteger(err.code) && err.code >= 0 && err.code <= 255 ? `status(${err.code})`
         : "status(unknown)";
-      failure ??= new Error(`UM sender Infisical read failed (${diag})`);
+      failure = new Error(`UM sender Infisical read failed (${diag})`);
     }
   }
   if (confirmedMiss) return null;
