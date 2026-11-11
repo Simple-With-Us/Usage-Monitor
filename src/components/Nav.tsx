@@ -209,7 +209,7 @@ export default function Nav() {
                 onClick={() => setCommandOpen(true)}
                 aria-label="Open command palette (⌘K)"
                 title="Command palette (⌘K)"
-                className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent xl:h-auto xl:w-auto xl:px-2.5 xl:py-2 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent xl:h-11 xl:w-auto xl:px-2.5 xl:py-2 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
                 <Search size={16} aria-hidden="true" />
                 <span className="hidden text-xs font-medium text-gray-500 xl:inline dark:text-gray-400">
