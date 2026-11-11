@@ -258,17 +258,30 @@ test("the ship script and workflow keep assignment inside the two ship steps", (
   for (const name of ["Ship UsageMonitor to TestFlight", "Ship LocalUsageMonitor to TestFlight"]) {
     const step = body(name);
     assert.match(step, /IOS_ASSIGN_EXTERNAL_BETA: "1"/);
-    assert.match(step, /GH_TOKEN: \$\{\{ secrets\.GH_PAT \}\}/);
+    assert.doesNotMatch(step, /GH_TOKEN|GH_PAT/);
   }
   for (const name of [
     "Sync standing TestFlight testers (usage)",
     "Sync standing TestFlight testers (usage-local)",
     "Plan release builds (once per app per release)",
     "Re-check TestFlight readiness after tester sync (usage)",
-    "Re-check TestFlight readiness after tester sync (usage-local)"
+    "Re-check TestFlight readiness after tester sync (usage-local)",
+    "Check version-manifest credentials",
+    "Mint version-manifest token"
   ]) {
     assert.doesNotMatch(body(name), /IOS_ASSIGN_EXTERNAL_BETA/);
+    assert.doesNotMatch(body(name), /GH_TOKEN:/);
   }
+  assert.doesNotMatch(workflow, /secrets\.GH_PAT/);
+  assert.match(workflow, /actions\/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510/);
+  assert.match(workflow, /owner: Simple-With-Us\n\s+repositories: AI-Fleet-Coordinator/);
+  assert.match(workflow, /app-id: \$\{\{ vars\.SWU_AUTOFIX_GITHUB_APP_ID \}\}/);
+  assert.match(workflow, /private-key: \$\{\{ secrets\.SWU_AUTOFIX_GITHUB_APP_PRIVATE_KEY \}\}/);
+  const publish = body("Publish iOS version manifest");
+  assert.match(publish, /GH_TOKEN: \$\{\{ steps\.manifest_token\.outputs\.token \}\}/);
+  assert.match(publish, /env -u GITHUB_TOKEN/);
+  assert.match(workflow, /::notice::version-manifest publish skipped: SWU Autofix GitHub App id or private key is not available/);
+  assert.match(workflow, /::notice::version-manifest publish skipped: SWU Autofix GitHub App token was not minted/);
   assert.ok(
     workflow.indexOf("Ship UsageMonitor to TestFlight") <
       workflow.indexOf("Re-check TestFlight readiness after tester sync (usage)")

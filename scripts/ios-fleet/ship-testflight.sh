@@ -983,12 +983,27 @@ record_successful_ship() {
   log "ship-gate: recorded success ts=${now} sha=${head_sha:0:10} -> ${path}"
   emit_ship_output "uploaded=1"
   # Public version manifest for the in-app update prompt.  Best-effort —
-  # a publish miss must never fail a ship that already uploaded.
+  # a publish miss must never fail a ship that already uploaded.  The ship
+  # workflow does not put a token on this step.  It reads these outputs and
+  # publishes from the manifest-publish step with the SWU Autofix app token.
   if [[ -n "${BUNDLE_ID:-}" && -n "${MARKETING:-}" ]]; then
     local apple_id display
     local -a pub_args
     apple_id="$(json_get "$APP_KEY" appleId || true)"
     display="$(json_get "$APP_KEY" displayName || true)"
+    emit_ship_output "manifest_bundle=${BUNDLE_ID}"
+    emit_ship_output "manifest_version=${MARKETING}"
+    [[ -n "${BUILD_NUM:-}" ]] && emit_ship_output "manifest_build=${BUILD_NUM}"
+    [[ -n "${apple_id:-}" ]] && emit_ship_output "manifest_apple_id=${apple_id}"
+    [[ -n "${display:-}" ]] && emit_ship_output "manifest_display_name=${display}"
+    if [[ -z "${GH_TOKEN:-}" || ( -n "${GITHUB_TOKEN:-}" && "$GH_TOKEN" == "$GITHUB_TOKEN" ) ]]; then
+      if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        log "version-manifest: ${BUNDLE_ID} ${MARKETING} waits for the manifest-publish step"
+      else
+        log "warning: version-manifest publish skipped (GH_TOKEN is unset, non-fatal)"
+      fi
+      return 0
+    fi
     pub_args=(--bundle-id "$BUNDLE_ID" --version "$MARKETING")
     [[ -n "${BUILD_NUM:-}" ]] && pub_args+=(--build "$BUILD_NUM")
     [[ -n "${apple_id:-}" ]] && pub_args+=(--apple-id "$apple_id")

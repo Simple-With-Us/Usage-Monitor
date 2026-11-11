@@ -19,9 +19,10 @@
 # write, so this script never puts the file on that branch.
 #
 # THE TOKEN: the publish needs a credential that can open a pull request on
-# AI-Fleet-Coordinator.  The ship workflow passes the fleet GH_PAT secret as
-# GH_TOKEN.  The workflow GITHUB_TOKEN is contents:read on this repo and
-# cannot write to another repository, so it is refused here.
+# AI-Fleet-Coordinator.  The ship workflow mints a short-lived SWU Autofix
+# GitHub App installation token and passes that as GH_TOKEN.  The workflow
+# GITHUB_TOKEN is contents:read on this repo and cannot write to another
+# repository, so it is refused here.  This repo has no GH_PAT.
 #
 # SAFETY: seed from the live manifest (or an explicit --base-json).  A local
 # snapshot is not a seed.  Refuse to publish a document that drops apps.
@@ -86,15 +87,16 @@ if [[ "$VERSION" == *" "* || "$VERSION" == *$'\n'* || "$VERSION" == *$'\t'* || "
   exit 1
 fi
 
-# GH_TOKEN is the fleet PAT.  GITHUB_TOKEN is the workflow's own read-only
-# token and cannot open a pull request on another repository.
+# GH_TOKEN is the SWU Autofix GitHub App installation token.  GITHUB_TOKEN is
+# the workflow's own read-only token and cannot open a pull request on
+# another repository.
 resolve_token() {
-  if [[ -n "${GH_TOKEN:-}" ]]; then
+  if [[ -n "${GH_TOKEN:-}" && ( -z "${GITHUB_TOKEN:-}" || "$GH_TOKEN" != "$GITHUB_TOKEN" ) ]]; then
     return 0
   fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     echo "error: GITHUB_TOKEN cannot write to ${REPO}" >&2
-    echo "error: pass the fleet GH_PAT secret as GH_TOKEN (the ship workflow does)" >&2
+    echo "error: pass the SWU Autofix GitHub App installation token as GH_TOKEN" >&2
     return 1
   fi
   echo "error: GH_TOKEN is required to publish the manifest" >&2

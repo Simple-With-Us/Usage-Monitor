@@ -110,7 +110,19 @@ test("GITHUB_TOKEN alone cannot publish, and a live seed is required without --b
   ], { PATH: `${dir}:/usr/bin:/bin`, GITHUB_TOKEN: "workflow-token" });
   assert.equal(token.status, 1);
   assert.match(token.stderr, /GITHUB_TOKEN cannot write/);
+  assert.match(token.stderr, /SWU Autofix GitHub App installation token/);
+  assert.doesNotMatch(token.stderr, /GH_PAT/);
   assert.doesNotMatch(token.stderr, /called/);
+  const aliased = run([
+    "--bundle-id", "com.example.usage",
+    "--version", "0.1.0",
+    "--build", "10",
+    "--base-json", base,
+    "--skip-local-write"
+  ], { PATH: `${dir}:/usr/bin:/bin`, GH_TOKEN: "workflow-token", GITHUB_TOKEN: "workflow-token" });
+  assert.equal(aliased.status, 1);
+  assert.match(aliased.stderr, /GITHUB_TOKEN cannot write/);
+  assert.doesNotMatch(aliased.stderr, /called/);
 
   const live = run([
     "--bundle-id", "com.example.usage",
