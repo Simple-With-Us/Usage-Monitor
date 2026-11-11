@@ -1,17 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Template launchd job for scripts/muse-code-usage-collector.mjs
+  Template launchd job for scripts/muse-code-usage-collector.mjs.
 
   Reports Meta Muse Code percent REMAINING for the 5h rolling window and the
-  weekly window.  The collector receives MUSE_CODE_ACCESS_TOKEN through the
-  approved scoped Usage Monitor secret-injection route.  It does not read Meta
-  credentials from Keychain.  Do not put secret values in this plist.  When the
-  approved injection route is unavailable, the launcher exits with an error
-  without starting the collector or clearing prior readings.
+  weekly window.  Must run on the Mac that holds the Muse Code OAuth credential
+  in the macOS keychain (service "ai.meta.dev.credentials", account "meta") —
+  the API call is the one the Meta CLI itself makes with that token, and a
+  server-side connector impersonating the CLI stays out by the same ruling that
+  keeps the subscription-quota-collector on the laptop (issue #1411).
 
-  The launcher requires an explicit scoped custody file and auth mode.  Do not
-  substitute a shared or Automation identity.
+  First run: macOS will prompt to allow `security find-generic-password` for the
+  keychain item.  Choose "Always Allow" for this collector so subsequent ticks
+  do not prompt; until that grant is in place the collector logs the explicit
+  hint and exits 0 with zero events.
 
   Replace /ABSOLUTE/PATH/TO/HOME below with the owner's home directory.
 
@@ -23,10 +25,8 @@
        ~/Library/LaunchAgents/com.jays.muse-code-usage-collector.plist
     launchctl kickstart -k gui/$(id -u)/com.jays.muse-code-usage-collector
 
-  Dry run first through the approved secret-injection route (prints numbers,
-  window labels and ISO dates only):
-    /ABSOLUTE/PATH/TO/node /ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs \
-      muse-code AUTH_MODE /ABSOLUTE/PATH/TO/CUSTODY.json --dry-run
+  Dry run first (prints numbers, window labels and ISO dates only):
+    node scripts/muse-code-usage-collector.mjs --dry-run
 
   StartInterval 900 = 15 minutes, matching subscription-quota-collector.
 
@@ -40,10 +40,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/node</string>
-    <string>/ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs</string>
-    <string>muse-code</string>
-    <string>AUTH_MODE</string>
-    <string>/ABSOLUTE/PATH/TO/CUSTODY.json</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/muse-code-usage-collector.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

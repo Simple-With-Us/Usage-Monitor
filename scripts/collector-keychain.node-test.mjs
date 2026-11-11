@@ -46,12 +46,16 @@ const ENTRY_POINTS = {
   "codex-usage-collector.mjs": "codex",
   "grok-usage-collector.mjs": "grok",
   "minimax-runtime-usage-collector.mjs": "minimax-runtime",
-  "muse-code-usage-collector.mjs": "muse-code",
   "opencode-usage-collector.mjs": "opencode",
   "subscription-quota-collector.mjs": "subscription-quota",
 };
 
-/** The collectors that keep the shared library and are not part of this change. */
+/** The collectors that keep the shared library and are not part of this change.
+ *  muse-code belongs here, not with the scoped bindings:  its Meta access
+ *  token rotates inside the Muse CLI's own keychain entry, so the
+ *  collector reads that entry directly and resolves only its ingest token
+ *  through the shared library.  A provisioned copy of the access token goes
+ *  stale, so the scoped route cannot carry this provider. */
 const SHARED_COLLECTORS = [
   "copilot-usage-collector.mjs",
   "cursor-usage-collector.mjs",
@@ -59,6 +63,7 @@ const SHARED_COLLECTORS = [
   "fleet-usage-collector.mjs",
   "fx-usage-collector.mjs",
   "minimax-usage-collector.mjs",
+  "muse-code-usage-collector.mjs",
   "muse-usage-collector.mjs",
 ];
 
