@@ -351,6 +351,10 @@ jobs:
         if: ${{ steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
+          # GH_PAT opens the version-manifest pull request.  GITHUB_TOKEN cannot.
+          # The assign flag is set only on this ship step.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          IOS_ASSIGN_EXTERNAL_BETA: "1"
         run: |
           build="${{ steps.plan.outputs.build_usage }}"
           [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage; refusing to re-plan"; exit 1; }
@@ -390,6 +394,8 @@ jobs:
         if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.plan.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
         env:
           IOS_TF_RELEASE_NOTES: "1"
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          IOS_ASSIGN_EXTERNAL_BETA: "1"
         run: |
           build="${{ steps.plan.outputs.build_usage_local }}"
           [[ "$build" =~ ^[1-9][0-9]{11}$ ]] || { echo "::error::missing planned build for usage-local; refusing to re-plan"; exit 1; }
