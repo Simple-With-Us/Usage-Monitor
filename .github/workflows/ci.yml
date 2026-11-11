@@ -325,6 +325,8 @@ jobs:
           bash -n scripts/test-ios-scheduled-ship-gate.sh
           bash -n scripts/ios-ship-testflight.sh
           bash -n scripts/ios-ship-testflight-local.sh
+          bash -n scripts/ios-recheck-tf-ready.sh
+          bash -n scripts/ios-fleet/tf-ready-rc.sh
           bash -n scripts/ios-appstore-gm-prepare.sh
           bash -n scripts/ios-stage-asc-key.sh
           bash -n scripts/test-ios-stage-asc-key.sh
@@ -371,6 +373,9 @@ jobs:
       # this is its unit test.  Fully offline:  no network, no credentials.
       - name: Test the iOS fleet shared release build
         run: node --test scripts/ios-fleet/shared-build.test.mjs
+
+      - name: Test ensure-tf-ready exit-code labels
+        run: node --test scripts/ios-fleet/test-ensure-tf-ready-rc.node-test.mjs
 
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place

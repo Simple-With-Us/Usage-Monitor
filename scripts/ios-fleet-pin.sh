@@ -34,7 +34,10 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 # version-numbering rules, so an unreviewed edit to it would change what
 # version a ship gets without the pin noticing.  shared-build.mjs is here for
 # the same reason:  it decides the uploaded build in fixed mode.
-PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs"
+# tf-ready-rc.sh is here because ship-testflight.sh sources it:  it maps
+# ensure-tf-ready exit codes to the readiness labels a ship reports, so an
+# unreviewed edit would change reported readiness without the pin noticing.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs tf-ready-rc.sh"
 COPIED_PROMPT_TARGETS="ios/UsageMonitor/App/AppUpdatePrompt.swift ios/UsageMonitor/LocalApp/AppUpdatePrompt.swift"
 
 MODE="check"
