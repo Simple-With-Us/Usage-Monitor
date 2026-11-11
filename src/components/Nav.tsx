@@ -87,6 +87,13 @@ export default function Nav() {
     setPrefsOpen(false);
   }, [pathname]);
 
+  // At xl every link is inline and MoreMenu unmounts (no overflow links), but
+  // moreOpen lives here and would survive: reset it so the dropdown does not
+  // reappear already open when the viewport narrows back below xl.
+  useEffect(() => {
+    if (navTier === "xl") setMoreOpen(false);
+  }, [navTier]);
+
   useEffect(() => {
     if (!moreOpen && !prefsOpen) return;
     const onPointer = (event: MouseEvent) => {
