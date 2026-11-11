@@ -32,7 +32,7 @@ def _read_secret(name):
     if val:
         return val.strip().strip("\"'")
 
-    # OPS-818: the flat ~/.secrets file is no longer read.  Fall back to the
+    # OPS-818: the retired flat key file is no longer read.  Fall back to the
     # Mac-side fleet-secrets CLI;  stdout is captured and never logged.
     binary = shutil.which("fleet-secrets") or os.path.expanduser("~/.local/bin/fleet-secrets")
     for secret_path in ("/", "/global-api-keys"):

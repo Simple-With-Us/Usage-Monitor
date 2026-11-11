@@ -4,6 +4,8 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth";
 import { loadResolvedProviderManifest } from "@/lib/provider-manifest";
 import { loadLatestQuotaWindowEvents } from "@/lib/quota-events-loader";
+import { prisma } from "@/lib/prisma";
+import { CODECAPS_PUSH_MAX_ALERT_AGE_MS, codeCapsPushSourceInstanceId } from "@/lib/codecaps-push";
 import { projectQuotaWindows } from "@/lib/quota-windows";
 
 export const runtime = "nodejs";
@@ -57,7 +59,36 @@ export async function GET(request: NextRequest) {
   // Every subscription provider posts `metricType: "quota"` with credits =
   // percent remaining, so no per-provider filter is needed here.
   const projected = projectQuotaWindows(events, new Date(), manifest);
-  const body = { ok: true as const, ...projected };
+  const now = new Date();
+  const alertsSince = new Date(now.getTime() - CODECAPS_PUSH_MAX_ALERT_AGE_MS);
+  const alerts = await prisma.codeCapsPushAlert.findMany({
+    where: { occurredAt: { gte: alertsSince, lte: now } },
+    orderBy: [{ occurredAt: "desc" }, { id: "asc" }],
+    take: 50,
+    select: {
+      id: true,
+      kind: true,
+      providerKey: true,
+      providerTitle: true,
+      windowLabel: true,
+      summary: true,
+      occurredAt: true,
+    },
+  });
+  const recentAlerts = alerts.map((alert) => {
+    const sourceInstanceId = codeCapsPushSourceInstanceId(alert.id);
+    return {
+      id: alert.id,
+      kind: alert.kind,
+      providerKey: alert.providerKey,
+      providerTitle: alert.providerTitle,
+      windowLabel: alert.windowLabel,
+      summary: alert.summary,
+      occurredAt: alert.occurredAt.toISOString(),
+      ...(sourceInstanceId ? { sourceInstanceId } : {}),
+    };
+  });
+  const body = { ok: true as const, ...projected, alerts: recentAlerts };
   return NextResponse.json(body, {
     headers: {
       "cache-control": "no-store",

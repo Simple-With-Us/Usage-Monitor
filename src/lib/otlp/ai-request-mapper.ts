@@ -387,7 +387,11 @@ export function mapOtlpLogsToAiRequests(request: OtlpExportLogsServiceRequest): 
             attrs["event.timestamp"] ?? String(record.timeUnixNano ?? ""),
           ]);
         } else if (name === "codex.api_request" || name === "codex.websocket_request") {
-          mapped = codexApiRequest(attrs, arrays, occurredAt);
+          // An api_request that names no model is not an inference call (Codex
+          // also reports its own housekeeping HTTP calls through this event),
+          // and no response.completed will ever arrive to complete it.  Storing
+          // it left permanent zero-token rows grouped as model "unknown" (UM-1610).
+          if (str(attrs["model"])) mapped = codexApiRequest(attrs, arrays, occurredAt);
         } else if (
           name === "codex.sse_event" &&
           attrs["event.kind"] === "response.completed" &&

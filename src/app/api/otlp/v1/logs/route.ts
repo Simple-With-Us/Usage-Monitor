@@ -89,6 +89,13 @@ export async function POST(request: NextRequest) {
   if (credential.allowedSourceApps) {
     const unauthorized = mapped.requests.find((r) => !credential.allowedSourceApps!.has(r.harness));
     if (unauthorized) {
+      void import("@/lib/sentry-ops").then(({ recordIngestScopeRejected }) =>
+        recordIngestScopeRejected({
+          route: "otlp/v1/logs",
+          dimension: "harness",
+          value: unauthorized.harness,
+        })
+      );
       return NextResponse.json(
         { error: `Credential is not authorized for harness "${unauthorized.harness}"` },
         { status: 403 }
@@ -113,6 +120,10 @@ export async function POST(request: NextRequest) {
   try {
     const { persistAiRequests } = await import("@/lib/ai-requests");
     const result = await persistAiRequests(mapped.requests);
+    if (result.inserted + result.merged > 0) {
+      const { fanoutAiRequests } = await import("@/lib/usage-fanout");
+      void fanoutAiRequests(result.persistedInputs ?? mapped.requests, "otlp/v1/logs");
+    }
     return NextResponse.json(
       {
         ok: true,

@@ -2,51 +2,95 @@ name: Deploy mapped Workers
 on:
   push:
     branches: [main]
+    # Native-only (ios/, macos/) and web-app-only merges must not redeploy the
+    # Workers.  This list covers everything the pipeline needs (including
+    # test-only files, so test changes still run CI).  schedule and
+    # workflow_dispatch cannot filter by path, so worker_changed() in
+    # scripts/deploy-mapped-worker.py applies its narrower deploy-relevant
+    # subset to them; a unit test keeps that subset inside this list.
+    paths:
+      - 'workers/**'
+      - 'scripts/check-worker-guards.py'
+      - 'scripts/deploy-mapped-worker.py'
+      - 'scripts/test-deploy-mapped-worker.py'
+      - 'scripts/worker-targets.json'
+      - 'scripts/infisical-fetch.mjs'
+      - 'scripts/verify-receipt-inbox-lifecycle.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vitest.config.ts'
+      - 'vitest.setup.ts'
+      - '.github/workflows/worker-deploy.yml'
+  # Runs only the guards job: no credentials, no deploy.
+  pull_request:
+    paths:
+      - 'workers/**'
+      - 'scripts/check-worker-guards.py'
+      - 'scripts/deploy-mapped-worker.py'
+      - 'scripts/test-deploy-mapped-worker.py'
+      - 'scripts/worker-targets.json'
+      - '.github/workflows/worker-deploy.yml'
   schedule:
     - cron: '11,41 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
+# Serializes whole runs.  This stays at workflow level because a job-level group would be
+# shared by every matrix job, and GitHub cancels all but the newest pending job in a group.
+# A pull request only runs the guards job, so it gets its own group and never waits on a deploy.
 concurrency:
-  group: mapped-workers-production
+  group: ${{ github.event_name == 'pull_request' && format('worker-guards-{0}', github.ref) || 'mapped-workers-production' }}
   cancel-in-progress: false
 jobs:
+  guards:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check-worker-guards.py
+      - run: python3 scripts/test-deploy-mapped-worker.py
   deploy:
-    if: vars.WORKER_DEPLOY_ENABLED == 'true'
+    if: vars.WORKER_DEPLOY_ENABLED == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       max-parallel: 1
       fail-fast: false
       matrix:
-        worker: ["expenses-jays-services", "usage-monitor-receipt-inbox"]
+        # The auditor goes first because the inbox reads it over a service binding.
+        worker: ["usage-monitor-receipt-lifecycle-auditor", "expenses-jays-services", "usage-monitor-receipt-inbox"]
     steps:
       - uses: actions/checkout@v7
         with:
           ref: main
           persist-credentials: false
+          # worker_changed() diffs the deployed tag against main.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
       - run: npm ci --ignore-scripts
       - run: npx --no-install vitest run workers/receipt-inbox/index.test.mjs workers/receipt-lifecycle-auditor/index.test.mjs --maxWorkers=1 --no-file-parallelism
       - run: python3 scripts/test-deploy-mapped-worker.py
+      # wrangler sends limits only when the config has them, so a config without
+      # them could drop the live limits.  No exceptions here, unlike the guards job.
+      - run: python3 scripts/check-worker-guards.py --require-limits
       - name: Load scoped deploy credential from Fleet-OPS
         env:
           INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
           INFISICAL_ENVIRONMENT: prod
-          INFISICAL_SECRET_PATH: /
+          INFISICAL_SECRET_PATH: /um-worker-deploy
           INFISICAL_NAMES: CLOUDFLARE_FLEET_API_TOKEN
           INFISICAL_REQUIRED: CLOUDFLARE_FLEET_API_TOKEN
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_AUTOMATION_CLIENT_SECRET }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_UM_WORKER_DEPLOY_READ_TOKEN }}
         run: node scripts/infisical-fetch.mjs
       - name: Deploy exact main and verify receipt
         env:
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_FLEET_API_TOKEN }}
-          WORKER_HEALTH_ACCESS_CLIENT_ID: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_ID }}
-          WORKER_HEALTH_ACCESS_CLIENT_SECRET: ${{ secrets.WORKER_HEALTH_ACCESS_CLIENT_SECRET }}
           RECEIPT_INBOX_READ_TOKEN: ${{ secrets.RECEIPT_INBOX_READ_TOKEN }}
           RECEIPT_LIFECYCLE_AUDIT_TOKEN: ${{ secrets.RECEIPT_LIFECYCLE_AUDIT_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 3a9368057468d0909cafaa85df12d1b7

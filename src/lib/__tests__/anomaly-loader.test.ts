@@ -81,6 +81,7 @@ async function addExternalEvent(input: {
   sourceApp?: string;
   service?: string | null;
   label?: string | null;
+  billingMode?: string;
 }) {
   eventSeq += 1;
   await prisma.externalUsageEvent.create({
@@ -90,7 +91,7 @@ async function addExternalEvent(input: {
       provider: input.provider,
       service: input.service ?? null,
       label: input.label ?? null,
-      billingMode: "actual",
+      billingMode: input.billingMode ?? "actual",
       metricType: input.metricType ?? "usage",
       confidence: "exact",
       costUsd: input.costUsd,
@@ -107,14 +108,20 @@ async function addRollup(input: {
   totalCostUsd: number;
   groupKey?: string;
   metricType?: string;
+  sourceApp?: string;
+  service?: string | null;
+  label?: string | null;
+  billingMode?: string;
 }) {
   await prisma.externalUsageEventDailyRollup.create({
     data: {
       day: new Date(`${input.day}T00:00:00.000Z`),
       groupKey: input.groupKey ?? `test-rollup-${input.day}-${input.provider}-${input.projectId ?? "none"}`,
-      sourceApp: "test-producer",
+      sourceApp: input.sourceApp ?? "test-producer",
       provider: input.provider,
-      billingMode: "actual",
+      service: input.service ?? null,
+      label: input.label ?? null,
+      billingMode: input.billingMode ?? "actual",
       metricType: input.metricType ?? "usage",
       confidence: "exact",
       totalCostUsd: input.totalCostUsd,
@@ -237,7 +244,118 @@ describe("S7: observed point is the latest COMPLETE day, not today's partial day
   });
 });
 
+describe("UM-1622: gauge totalRequests (Backblaze storage MB) never pages as requests", () => {
+  it("a storage-peak swing produces no request anomaly, while a real request spike still does", async () => {
+    const backblaze = await createProvider("backblaze");
+    const openai = await createProvider("openai");
+
+    // Baseline 2026-06-27..2026-07-18 (long enough that the window's first
+    // cumulative-as-increment point falls outside the 14-day baseline):
+    // cost +$10/day for both; Backblaze totalRequests is inventoried storage
+    // MB (a gauge, ~200 GB growing 100 MB/day); OpenAI totalRequests is a
+    // cumulative MTD request count (+100/day, resetting July 1).
+    const dayMs = 24 * 60 * 60 * 1000;
+    const start = Date.UTC(2026, 5, 27);
+    for (let i = 0; i < 22; i += 1) {
+      const date = new Date(start + i * dayMs);
+      const iso = `${date.toISOString().slice(0, 10)}T23:00:00.000Z`;
+      const inJuly = date.getUTCMonth() === 6;
+      const monthDayIndex = inJuly ? date.getUTCDate() - 1 : date.getUTCDate() - 27;
+      const cost = inJuly ? 10 * (monthDayIndex + 1) : 40 + 10 * monthDayIndex;
+      const openaiRequests = inJuly ? 100 * (monthDayIndex + 1) : 1_000 + 100 * monthDayIndex;
+      await addSnapshot(backblaze.id, iso, cost, 200_000 + 100 * i);
+      await addSnapshot(openai.id, iso, cost, openaiRequests);
+    }
+    // July 19 (complete day): Backblaze storage jumps +41,292 MB (the PD #463
+    // swing, 311251-269959) with no request storm; OpenAI requests spike by
+    // the same increment. Cost stays +$10/day for both.
+    await addSnapshot(backblaze.id, "2026-07-19T23:00:00.000Z", 190, 202_100 + 41_292);
+    await addSnapshot(openai.id, "2026-07-19T23:00:00.000Z", 190, 1_800 + 41_292);
+
+    const results = await loadSpendAnomaliesByProviderId(
+      new Date("2026-07-20T12:00:00.000Z"),
+      CONFIG,
+      [
+        { id: backblaze.id, name: backblaze.name },
+        { id: openai.id, name: openai.name },
+      ]
+    );
+
+    // The storage gauge swing must not page as a request anomaly.
+    expect(results.get(backblaze.id) ?? []).toEqual([]);
+    // Control: the detector still fires for a genuine cumulative request spike.
+    expect(results.get(openai.id) ?? []).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ metric: "requests", providerId: openai.id, day: "2026-07-19", observed: 41_292 }),
+      ])
+    );
+  });
+});
+
 describe("S5: push-channel baseline crosses the month boundary via daily rollups", () => {
+  it("uses raw and rolled-up OpenCode PAYG cost while excluding seat estimates", async () => {
+    const provider = await createProvider("anthropic");
+    const project = await prisma.project.create({
+      data: { name: "OpenCode Project", monthlyBudgetUsd: 100 },
+    });
+    for (let day = 20; day <= 31; day += 1) {
+      const date = `2026-07-${String(day).padStart(2, "0")}`;
+      await addRollup({
+        day: date,
+        provider: "anthropic",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        totalCostUsd: 10,
+      });
+      await addRollup({
+        day: date,
+        provider: "muse-code",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        totalCostUsd: 1000,
+        groupKey: `seat-estimate-${date}`,
+      });
+    }
+    for (const [date, costUsd] of [
+      ["2026-08-01T10:00:00.000Z", 10],
+      ["2026-08-02T10:00:00.000Z", 160],
+    ] as const) {
+      await addExternalEvent({
+        provider: "anthropic",
+        projectId: project.id,
+        sourceApp: "opencode",
+        service: "opencode",
+        label: "api-equivalent",
+        metricType: "cost",
+        billingMode: "estimated",
+        costUsd,
+        occurredAt: date,
+      });
+    }
+
+    const at = new Date("2026-08-03T12:00:00.000Z");
+    const providerResults = await loadSpendAnomaliesByProviderId(at, CONFIG, [
+      { id: provider.id, name: provider.name },
+    ]);
+    const projectResults = await loadSpendAnomaliesByProjectId(at, CONFIG, [
+      { id: project.id, name: project.name },
+    ]);
+    expect(providerResults.get(provider.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metric: "cost", observed: 160, baselineCenter: 10 }),
+    ]));
+    expect(projectResults.get(project.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metric: "cost", observed: 160, baselineCenter: 10 }),
+    ]));
+  });
+
   it("detects a day-2-of-month spike for a push-only provider using prior-month rollups", async () => {
     const provider = await createProvider("Anthropic");
     // Prior month: steady ~$10/day (inside the trailing windowDays window).

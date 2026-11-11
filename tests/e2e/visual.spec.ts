@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { BUDGET_VIEW } from '../../src/lib/fleet-budget/__tests__/view-fixture';
+import type { AgentsOverviewResponse } from '../../src/lib/agents-overview';
 import { test, expect, type Page, type Route } from '@playwright/test';
 
 // Committed determinism stylesheet (DejaVu font pinning).  Applied AFTER
@@ -154,6 +155,10 @@ async function stubApi(page: Page): Promise<void> {
       await json(route, { notifications: { emailConfigured: false, minSeverity: 'warning' } });
       return;
     }
+    if (req.url().includes('/api/settings/infisical')) {
+      await json(route, { connections: [] });
+      return;
+    }
     // Anything unmapped passes through to the test server (fresh throwaway
     // SQLite), so pages never hang on an un-stubbed endpoint.
     await route.continue();
@@ -209,6 +214,55 @@ test.describe('visual: dashboard', () => {
     // Stable marker: the hero section renders once provider data settles.
     await expect(page.locator('main')).toBeVisible();
     await expect(page).toHaveScreenshot('dashboard.png', { ...stableShot, fullPage: true });
+  });
+
+  test('token telemetry keeps quantity separate from its dollar estimate', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 1000 });
+    await settle(page);
+    await page.route('**/api/providers?*', route => json(route, [{
+      id: 'visual-openai', name: 'openai', displayName: 'OpenAI',
+      type: 'api', groupId: null, label: null,
+      isActive: true, plan: null, latestSnapshot: null, alerts: [],
+      spentUsd: 0, projectedEomUsd: 0, monthlyBudgetUsd: 100,
+      estimatedMonthlyCostUsd: 0, costCoverage: 'complete', spendCoverage: 'complete',
+      pushedCostCoverage: 'complete', pushedPricedEventCount: 0, pushedUnpricedEventCount: 0,
+      pushedUnclassifiedCostEventCount: 0, budgetStatus: 'ok',
+    }]));
+    await page.route('**/api/usage-events?*', route => json(route, {
+      days: 30, totalCostUsd: 0, estimatedApiEquivalentUsd: 3,
+      pricedEventCount: 0, unpricedEventCount: 1, unclassifiedCostEventCount: 0,
+      costCoverage: 'unknown', totalRequests: 0, eventCount: 1,
+      groups: [{
+        sourceApp: 'opencode', environment: null, provider: 'openai', canonicalProvider: 'openai',
+        service: 'opencode', projectId: null, metricType: 'usage', unit: 'token',
+        eventCount: 1, pricedEventCount: 0, unpricedEventCount: 1, unclassifiedCostEventCount: 0,
+        costCoverage: 'unknown', totalCostUsd: 0, estimatedApiEquivalentUsd: 3,
+        totalRequests: 0, totalQuantity: 1_000_000, limit: null, limitWindow: null,
+        latestAt: FROZEN_NOW_ISO,
+      }],
+    }));
+    await login(page);
+    await page.goto('/');
+    await pinFonts(page);
+    const details = page.locator('#portfolio details');
+    await expect(details).toBeVisible();
+    if (await details.getAttribute('open') === null) {
+      await details.locator('summary').click();
+    }
+    await expect(details).toHaveAttribute('open', '');
+    // Exercise the existing recovery action if initial loading fails.
+    // This fixture verifies the populated token row after delivery succeeds.
+    const loadError = details.getByRole('status').filter({ hasText: 'External app telemetry is temporarily unavailable.' });
+    await expect(details.getByTestId('external-telemetry-panel').or(loadError)).toBeVisible();
+    if (await loadError.isVisible()) {
+      await loadError.getByRole('button', { name: 'Retry', exact: true }).click();
+    }
+    const panel = page.getByTestId('external-telemetry-panel');
+    const row = panel.getByRole('row').filter({ hasText: 'opencode' });
+    await expect(row.getByText('1,000,000', { exact: true })).toBeVisible();
+    await expect(row.getByText('API-equivalent estimate: $3.00 · excluded from cash spend', { exact: true }))
+      .toBeVisible();
+    await expect(panel).toHaveScreenshot('token-quantity-and-estimate.png', stableShot);
   });
 });
 
@@ -288,6 +342,66 @@ test.describe('visual: settings page', () => {
   });
 });
 
+
+test('visual: coding platform notes preserve sentence gaps', async ({ page }) => {
+  const overview: AgentsOverviewResponse = {
+    ok: true, windowDays: 30, windowLabel: 'Last 30 Days', generatedAt: FROZEN_NOW_ISO,
+    macHostname: 'Office Mac', macChip: 'Apple Silicon',
+    summary: {
+      activeAgentCount: 4, totalAgentCount: 4, totalTokens: 40000,
+      totalApiEquivalentCostUsd: 0.04, apiEquivalentCostComplete: true, unpricedModelCount: 0,
+      totalSubscriptionCostUsd: 0, totalNetSavingsUsd: 0, savingsMultiplier: 0,
+      topModel: null, telemetryIncomplete: false, telemetryIncompleteNote: null,
+      unreliablePlatformIds: [],
+    },
+    burn5h: { tokens5h: 0, costEstimate5hUsd: 0, costEstimateComplete: true,
+      burnRateTokensPerHour: 0, burnRateUsdPerHour: 0 },
+    platforms: [{
+      id: 'opencode', name: 'OpenCode', provider: 'Multi-Provider', isRunningOnMac: true,
+      macStatus: 'running', dataCapability: 'Local session token receipts', fidelityTier: 'session_jsonl',
+      notes: 'Local session usage is reported.  Cloud sessions require separate receipts.',
+      monthlySeatCostUsd: 0, billedMonthlySeatCostUsd: 0, seatPlanName: 'No Fixed Seat',
+      seatPlanNote: null, seatPlanSource: 'unknown', listMonthlySeatCostUsd: 0,
+      bundledOffsetUsd: null, bundledOffsetLabel: null, seatCostNote: null,
+      telemetryAccuracy: 'reported', telemetryAccuracyLabel: 'Reported',
+      telemetryAccuracyNote: 'Exact token counts from local session receipts.', usageIsReliable: true,
+      totalTokens: 10000, inputTokens: 8000, outputTokens: 2000,
+      cacheReadTokens: 0, cacheCreationTokens: 0, apiEquivalentCostUsd: 0.04,
+      apiEquivalentCostComplete: true, tokenDerivedCostUsd: 0.04, reportedCostUsd: 0,
+      estimatedCostUsd: 0.04, netSavingsUsd: 0, modelsUsed: [],
+    }],
+    modelDistribution: [],
+  };
+  overview.platforms.push(...[
+    { id: 'claude-code', name: 'Claude Code', provider: 'Anthropic',
+      dataCapability: 'Full real-time OTLP telemetry',
+      notes: 'Native OTLP metrics report tokens and cost estimates from Claude processes.' },
+    { id: 'openai-codex', name: 'OpenAI Codex', provider: 'OpenAI',
+      dataCapability: 'Incremental local session parsing',
+      notes: 'Local CLI session telemetry.  Cloud and separate Desktop coverage require their own receipts.' },
+    { id: 'fx', name: 'Fx', provider: 'xAI',
+      dataCapability: 'Generation token and cache parsing',
+      notes: 'Reads Fx generation facts.  Input includes cached tokens; reasoning is included in output.' },
+  ].map(platform => ({ ...overview.platforms[0], ...platform })));
+  await settle(page);
+  await page.route('**/api/agents-overview?*', route => json(route, overview));
+  await page.route('**/api/quota-windows', route => json(route, { windows: [] }));
+  await login(page);
+  await page.goto('/agents');
+  await pinFonts(page);
+  const card = page.getByTestId('agent-platform-opencode');
+  await expect(card.getByText('Local session usage is reported.', { exact: false }))
+    .toHaveJSProperty('textContent', 'Local session usage is reported.\u00a0 Cloud sessions require separate receipts.');
+  await expect(card.getByRole('heading', { name: 'OpenCode', exact: true })).toBeVisible();
+  await expect(card).toHaveScreenshot('coding-platform-notes.png', stableShot);
+  const claude = page.getByTestId('agent-platform-claude-code');
+  await expect(claude.getByRole('heading', { name: 'Claude Code', exact: true })).toBeVisible();
+  await expect(claude).toHaveScreenshot('claude-code-platform.png', stableShot);
+  await expect(page.getByTestId('agent-platform-openai-codex'))
+    .toHaveScreenshot('codex-platform.png', stableShot);
+  await expect(page.getByTestId('agent-platform-fx'))
+    .toHaveScreenshot('fx-platform.png', stableShot);
+});
 
 test('visual: quota provenance distinguishes conflicting readings', async ({ page }) => {
   await settle(page);
@@ -426,4 +540,157 @@ test('visual: receipt inbox held duplicates panel', async ({ page }) => {
   await expect(card.getByRole('button', { name: 'Post Anyway' })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Discard' })).toBeVisible();
   await expect(card).toHaveScreenshot('receipt-inbox-held-duplicates.png', stableShot);
+});
+
+// Posted Expenses card on /ops (UM-1659, Kody rule [4]): the management
+// surface for owner-recorded expenses — search/filter, Tech vs Other
+// totals, edit and tombstoned delete.  The list endpoint is stubbed with a
+// frozen two-row fixture (one Tech, one Other); /api/operations and every
+// other card still come from the test server.
+test('visual: posted expenses card with tech and other rows', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  await page.route(/\/api\/owner-expenses\?/, (route) => json(route, {
+    expenses: [
+      {
+        idempotencyKey: 'owner-recorded-expense:v1:visual-fixture-uw',
+        vendor: 'Unusual Whales',
+        amountUsd: 50,
+        occurredAt: '2026-07-30T12:00:00.000Z',
+        kind: 'one_time',
+        label: 'Unusual Whales trial',
+        notes: 'Category: Tech',
+        confidence: 'actual',
+        cancelledNoRenew: false,
+        category: 'Tech',
+      },
+      {
+        idempotencyKey: 'owner-recorded-expense:v1:visual-fixture-gcx',
+        vendor: 'GCX.raise',
+        amountUsd: 192.6,
+        occurredAt: '2026-09-08T12:00:00.000Z',
+        kind: 'one_time',
+        label: 'Princess Cruises gift cards',
+        notes: 'Category: Other',
+        confidence: 'actual',
+        cancelledNoRenew: false,
+        category: 'Other',
+      },
+    ],
+    nextCursor: null,
+    hasMore: false,
+    totals: {
+      count: 2,
+      totalUsd: 242.6,
+      byCategory: { Tech: 50, Other: 192.6, uncategorized: 0 },
+      counts: { Tech: 1, Other: 1, uncategorized: 0 },
+    },
+  }));
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.locator('section[aria-labelledby="posted-expenses-heading"]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('Unusual Whales', { exact: true })).toBeVisible();
+  await expect(card.getByText('GCX.raise', { exact: true })).toBeVisible();
+  await expect(card.getByText('$242.60')).toBeVisible();
+  await expect(card).toHaveScreenshot('posted-expenses-card.png', stableShot);
+});
+
+// Fleet Alerts card on /ops (#1715, Kody rule [4]): new visible UI element gets
+// a pinned screenshot.  /api/fleet-alerts is stubbed with a fixed two-topic
+// payload (one firing, one clear); every other card keeps its test-server shape.
+test('visual: fleet alerts card with firing topic', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  const frozenEpoch = Date.parse(FROZEN_NOW_ISO) / 1000;
+  await page.route('**/api/fleet-alerts', (route) => json(route, {
+    configured: true,
+    generatedAt: FROZEN_NOW_ISO,
+    ok: true,
+    summary: { topics: 2, alerts: 3, firing: 1 },
+    topics: {
+      'quota-burn': {
+        firing: 1,
+        total: 2,
+        alerts: [
+          { key: 'runaway|openai|5h', service: 'OpenAI', phase: 'alerting', severity: 'SEVERE', text: '5h window at 92% (burn 3.1x)', link: '', since: frozenEpoch - 900, updated: frozenEpoch - 60, prodDown: false },
+          { key: 'watch|anthropic|7d', service: 'Anthropic', phase: 'pending', severity: 'MODERATE', text: '7d window trending to cap', link: '', since: frozenEpoch - 3600, updated: frozenEpoch - 120, prodDown: false },
+        ],
+      },
+      'ship-pipeline': {
+        firing: 0,
+        total: 1,
+        alerts: [
+          { key: 'ship|ios|testflight', service: 'TestFlight', phase: 'ok', severity: 'INFO', text: 'Last ship green', link: '', since: frozenEpoch - 7200, updated: frozenEpoch - 300, prodDown: false },
+        ],
+      },
+    },
+  }));
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.getByTestId('fleet-alerts-card');
+  // The card only mounts once the /ops payload resolves, so wait for it
+  // instead of asserting on its contents straight after navigation.
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('5h window at 92% (burn 3.1x)')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Refresh Fleet Alerts' })).toBeVisible();
+  await expect(card.getByText('quota-burn')).toBeVisible();
+  await expect(card.getByText('ship-pipeline')).toBeVisible();
+  await expect(card).toHaveScreenshot('fleet-alerts-card.png', stableShot);
+});
+
+// Fleet Backups card offline state (#1715, Kody rule [4]): pin the card
+// against a FROZEN offline payload - the real e2e server's fleetBackups rows
+// derive from runner-local backup state (filesystem snapshots, litestream
+// side-channel), which would make the baseline machine-specific. The rest of
+// /api/operations still comes from the test server, so the page renders its
+// other cards normally. asOf is pinned to FROZEN_NOW_ISO and the page clock
+// is frozen, so the relative time renders deterministically.
+test('visual: fleet backups card offline', async ({ page }) => {
+  test.setTimeout(90_000);
+  await settle(page);
+  const offlineRow = (id: string, label: string) => ({
+    id, label,
+    ok: null, present: false, unknown: true,
+    latestAgeSeconds: null, bytes: null, fileCount: null,
+    reason: 'peer_health_offline',
+  });
+  // Registered after settle() so it wins over the catch-all /api/** route.
+  await page.route('**/api/operations', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.fleetBackups = {
+      configured: false,
+      offline: true,
+      ok: false,
+      asOf: FROZEN_NOW_ISO,
+      cacheAgeSeconds: 0,
+      apps: [
+        { id: 'usage-monitor', label: 'Usage Monitor', self: true, ok: false, locations: [
+          offlineRow('local-snapshots', 'Local Snapshots'),
+          offlineRow('b2-litestream', 'B2 Litestream'),
+        ]},
+        { id: 'socratic-trade', label: 'Socratic Trade', self: false, ok: false, locations: [
+          offlineRow('peer-litestream', 'Live Litestream'),
+          offlineRow('b2-litestream', 'B2 Litestream'),
+        ]},
+      ],
+      warnings: ['Backblaze monitor check skipped (offline mode); B2 dump and LTX inventory unavailable.'],
+    };
+    await route.fulfill({ response, json: body });
+  });
+  await login(page);
+  await page.goto('/ops');
+  await pinFonts(page);
+  const card = page.locator('section[aria-labelledby="fleet-backups-heading"]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText('Backup checks skipped (offline mode)')).toBeVisible();
+  // Expand the details and pin the per-location offline rows themselves:
+  // unobserved rows must read Unavailable, never Healthy or Missing.
+  await card.getByRole('button', { name: 'Details' }).click();
+  await expect(card.locator('#fleet-backups-detail')).toBeVisible();
+  await expect(card.locator('#fleet-backups-detail li').filter({ hasText: 'Unavailable' }).first()).toBeVisible();
+  await expect(card).toHaveScreenshot('fleet-backups-offline.png', stableShot);
 });

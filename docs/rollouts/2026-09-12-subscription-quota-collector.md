@@ -42,7 +42,7 @@ impersonated and no GPL code is vendored.
 
 | Provider | Credential read | Endpoint |
 |---|---|---|
-| Claude | `CLAUDE_CODE_OAUTH_CREDENTIALS_JSON` (Zod-validated env JSON), else legacy `~/.claude/.credentials.json` → `claudeAiOauth`.  Modern macOS Keychain is **not** read inside the collector — inject with `scripts/claude-code-oauth-credentials-from-keychain.sh` or `export CLAUDE_CODE_OAUTH_CREDENTIALS_JSON="$(security find-generic-password -s 'Claude Code-credentials' -w)"` in a launchd wrapper. | `GET https://api.anthropic.com/api/oauth/usage` |
+| Claude | `CLAUDE_CODE_OAUTH_CREDENTIALS_JSON` (Zod-validated env JSON), else legacy `~/.claude/.credentials.json` → `claudeAiOauth`.  Modern macOS Keychain is **not** read inside the collector — the LaunchAgent runs `scripts/run-subscription-quota-collector.sh` (UM-1616), which reads the `Claude Code-credentials` Keychain item and injects it; `scripts/claude-code-oauth-credentials-from-keychain.sh` remains for one-off dry runs. | `GET https://api.anthropic.com/api/oauth/usage` |
 | Codex | `~/.codex/auth.json` → `tokens` | `GET https://chatgpt.com/backend-api/wham/usage` |
 | Grok | `~/.grok/auth.json` (nested `https://auth.x.ai::<id>.key`, not a flat `access_token`) | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (`config.creditUsagePercent` is percent USED) |
 | MiniMax | `~/.mmx/config.json` | `GET https://api.minimax.io/v1/api/openplatform/coding_plan/remains` (falls back to `api.minimaxi.com`) |

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import botFleetReceipt from "@/lib/__tests__/fixtures/botfleet-singlecall-v2.json";
 
 const externalUsageMocks = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -179,6 +180,20 @@ afterEach(() => {
 });
 
 describe("POST /api/ingest/usage admission", () => {
+  it("persists transcript cache reads without inferring native aggregate coverage", async () => {
+    const response = await POST(nextRequest({
+      sourceApp: "claude-code", provider: "anthropic", service: "claude-code",
+      metricType: "usage", unit: "token", quantity: 1000,
+      occurredAt: "2026-10-30T12:00:00Z",
+      metadata: { collector: "transcript", "host.name": "host-a", tokenType: "cacheRead" },
+    }, USAGE_TOKEN));
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist.mock.calls[0][0][0]).toMatchObject({
+      sourceApp: "claude-code", quantity: 1000, metadata: { tokenType: "cacheRead" },
+    });
+    expect(await response.json()).toMatchObject({ received: 1, accepted: 1 });
+  });
+
   it("accepts v2 through the shared schema and returns explicit persistence counts", async () => {
     externalUsageMocks.persist.mockResolvedValueOnce({
       attempted: 1,
@@ -495,6 +510,34 @@ describe("POST /api/ingest/usage admission", () => {
     const release = tryAcquireIngestAdmission();
     expect(release).not.toBeNull();
     release?.();
+  });
+
+  it.each(["SQLITE_BUSY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED_SHAREDCACHE"])(
+    "returns retryable receiver_busy for %s without acknowledging data",
+    async (originalCode) => {
+      externalUsageMocks.persist.mockRejectedValueOnce({
+        code: "P1008",
+        meta: { driverAdapterError: { cause: { originalCode } } },
+      });
+      const response = await POST(v2Request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+      expect(await response.json()).toMatchObject({
+        ok: false, error: { code: "receiver_busy", retryable: true, retryAfterSeconds: 5 },
+      });
+      const release = tryAcquireIngestAdmission();
+      expect(release).not.toBeNull();
+      release?.();
+    }
+  );
+
+  it("does not classify an unknown busy suffix as lock contention", async () => {
+    externalUsageMocks.persist.mockRejectedValueOnce({
+      code: "P1008", meta: { driverAdapterError: { cause: { originalCode: "SQLITE_BUSY_UNKNOWN" } } },
+    });
+    const response = await POST(v2Request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
   });
 
   it("accepts an exact signed receipt only for its dedicated token and provider ID", async () => {
@@ -1027,6 +1070,18 @@ describe("POST /api/ingest/usage producer scoping", () => {
       "USAGE_INGEST_PRODUCER_TOKENS",
       `socratic-trade:${tokA},congress-trade:${tokB}`
     );
+  });
+
+  it.each([false, true])("grants receipt authority only to a scoped BotFleet credential: scoped=%s", async (scoped) => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "botfleet:botfleet-test-scoped");
+    const payload = structuredClone(botFleetReceipt);
+    Object.assign(payload.events[0].metadata, { _botFleetReceiptCredential: "botfleet-v1", _botFleetReceiptSignature: "0".repeat(64) });
+    const response = await POST(nextRequest(payload, scoped ? "botfleet-test-scoped" : USAGE_TOKEN, undefined, 2));
+    expect(response.status).toBe(202);
+    const persisted = externalUsageMocks.persist.mock.calls[0][0][0];
+    expect(persisted.metadata._botFleetReceiptCredential).toBe(scoped ? "botfleet-v1" : undefined);
+    if (scoped) expect(persisted.metadata._botFleetReceiptSignature).toMatch(/^[a-f0-9]{64}$/);
+    else expect(persisted.metadata._botFleetReceiptSignature).toBeUndefined();
   });
 
   it("accepts a scoped token when events match allowedSourceApps", async () => {

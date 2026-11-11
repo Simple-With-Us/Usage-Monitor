@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { resolveUsageIngestCredential } from "../ingest-auth";
+import {
+  resolveOtlpTracesCredential,
+  resolveUsageIngestCredential,
+} from "../ingest-auth";
 
 function req(token?: string, headerName = "x-usage-ingest-token"): NextRequest {
   const headers = new Headers();
@@ -84,6 +87,22 @@ describe("resolveUsageIngestCredential producer scoping", () => {
     const cred = resolveUsageIngestCredential(req(legacyToken));
     expect(cred).not.toBeNull();
     expect(cred?.credentialId).toBe("unscoped");
+  });
+});
+
+describe("resolveOtlpTracesCredential trace-only scoping", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("accepts a trace-only producer token without authorizing usage ingest", () => {
+    vi.stubEnv("OTLP_TRACES_PRODUCER_TOKENS", "openrouter:trace-only-token");
+    const request = req("trace-only-token");
+
+    const traceCredential = resolveOtlpTracesCredential(request);
+    expect(traceCredential?.credentialId).toBe("openrouter");
+    expect(traceCredential?.allowedSourceApps).toEqual(new Set(["openrouter"]));
+    expect(resolveUsageIngestCredential(request)).toBeNull();
   });
 });
 

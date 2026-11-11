@@ -73,6 +73,32 @@ describe("resolveGenAiIdentity", () => {
   it("falls back to a normalized unknown-agent when nothing is set", () => {
     expect(resolveGenAiIdentity({}).sourceApp).toBe("unknown-agent");
   });
+
+  it("canonicalizes Z.ai, ZCode, GLM, and BigModel aliases to ZCode", () => {
+    for (const system of ["z.ai", "zai", "zcode", "z-code", "z-ai", "zhipu", "zhipuai", "zhipu ai", "bigmodel", "bigmodel.cn", "glm", "glm-code"]) {
+      const platform = system.trim().toLowerCase().replace(/[\s_]+/g, "-");
+      expect(resolveGenAiIdentity({ "gen_ai.system": system })).toMatchObject({
+        sourceApp: platform,
+        provider: "zcode",
+        service: platform,
+      });
+    }
+
+    for (const platform of ["zcode", "z-code", "z-ai", "z.ai", "glm-code"]) {
+      expect(resolveGenAiIdentity({ "agent.platform": platform })).toMatchObject({
+        provider: "zcode",
+      });
+    }
+  });
+
+  it("keeps Kimi aliases under the canonical Moonshot provider", () => {
+    for (const platform of ["kimi", "kimi-code", "kimi-code-cli", "moonshot", "moonshot-kimi"]) {
+      expect(resolveGenAiIdentity({ "agent.platform": platform })).toMatchObject({
+        sourceApp: platform,
+        provider: "moonshot",
+      });
+    }
+  });
 });
 
 describe("shouldMapGenAiPlatform", () => {
@@ -80,7 +106,15 @@ describe("shouldMapGenAiPlatform", () => {
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(false);
     expect(shouldMapGenAiPlatform("cursor")).toBe(false);
     expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(false);
+    expect(shouldMapGenAiPlatform("fx")).toBe(false);
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
+    for (const app of ["kimi-code", "kimi-code-cli", "moonshot-kimi", "zcode", "z-code", "glm-code"]) {
+      expect(shouldMapGenAiPlatform(app)).toBe(false);
+    }
+    for (const provider of ["moonshot", "z.ai", "zai", "zhipu", "glm", "bigmodel", "kimi"]) {
+      expect(shouldMapGenAiPlatform(provider)).toBe(true);
+    }
     for (const app of OVERLAP_SOURCE_APPS) {
       expect(shouldMapGenAiPlatform(app)).toBe(false);
     }
@@ -89,13 +123,20 @@ describe("shouldMapGenAiPlatform", () => {
   it("maps overlap platforms when OTLP_GEN_AI_ALLOW_OVERLAP is on", () => {
     vi.stubEnv("OTLP_GEN_AI_ALLOW_OVERLAP", "1");
     expect(shouldMapGenAiPlatform("openai-codex")).toBe(true);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(true);
+    expect(shouldMapGenAiPlatform("fx")).toBe(true);
+    for (const app of ["kimi-code", "kimi-code-cli", "moonshot-kimi", "zcode", "z-code", "glm-code"]) {
+      expect(shouldMapGenAiPlatform(app)).toBe(true);
+    }
   });
 
   it("honors an explicit platform allowlist and still blocks overlap platforms", () => {
-    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "botfleet,muse-code,cursor-agent");
+    vi.stubEnv("OTLP_GEN_AI_PLATFORM_ALLOWLIST", "botfleet,muse-code,cursor-agent,opencode,fx");
     expect(shouldMapGenAiPlatform("botfleet")).toBe(true);
     expect(shouldMapGenAiPlatform("muse-code")).toBe(true);
     expect(shouldMapGenAiPlatform("cursor-agent")).toBe(false);
+    expect(shouldMapGenAiPlatform("opencode")).toBe(false);
+    expect(shouldMapGenAiPlatform("fx")).toBe(false);
     expect(shouldMapGenAiPlatform("openai")).toBe(false);
   });
 
