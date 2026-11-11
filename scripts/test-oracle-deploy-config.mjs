@@ -255,6 +255,16 @@ const restoreEndMarker = "\n}\n\nverify_render_retirement()";
 const restoreEnd = deploy.indexOf(restoreEndMarker, restoreStart);
 assert.ok(restoreStart >= 0 && restoreEnd > restoreStart, "restore functions must be extractable for behavioral tests");
 const restoreFunctions = deploy.slice(restoreStart, restoreEnd + 2);
+const productionRestoreKillSwitch = "/data/r2-disabled-70pct.flag";
+assert.equal(
+  restoreFunctions.split(productionRestoreKillSwitch).length - 1,
+  1,
+  "restore fixture must contain exactly one production kill-switch path",
+);
+const isolatedRestoreFunctions = restoreFunctions.replace(
+  productionRestoreKillSwitch,
+  "$CASE_DIR_VALUE/r2-disabled-70pct.flag",
+);
 
 const retentionTemp = mkdtempSync(path.join(os.tmpdir(), "usage-monitor-image-retention-"));
 const receiptPath = path.join(retentionTemp, "current.json");
@@ -381,10 +391,13 @@ function runRestoreCase({
   foreignKeyStatus = 0,
   foreignKeyResult = "",
   orphanAfterRestore = false,
+  killSwitch = false,
 } = {}) {
   const caseDir = mkdtempSync(path.join(restoreTemp, "case-"));
   const commandLog = path.join(caseDir, "commands.log");
   const restoreMarker = path.join(caseDir, "restore-started");
+  writeFileSync(commandLog, "");
+  if (killSwitch) writeFileSync(path.join(caseDir, "r2-disabled-70pct.flag"), "enabled\n");
   const harness = `
 set -Eeuo pipefail
 APP_CONTAINER=usage-monitor-app-1
@@ -442,7 +455,7 @@ sqlite3() {
     *) return 2 ;;
   esac
 }
-${restoreFunctions}
+${isolatedRestoreFunctions}
 trap cleanup_restore_scratch EXIT
 verify_backup_restore
 `;
@@ -550,6 +563,11 @@ try {
   assert.equal((successfulRestore.commands.match(/PRAGMA integrity_check/g) ?? []).length, 1);
   assert.equal((successfulRestore.commands.match(/PRAGMA foreign_key_check/g) ?? []).length, 1);
   assert.deepEqual(successfulRestore.restoreFiles, [], "successful restore scratch must be removed");
+
+  const skippedRestore = runRestoreCase({ killSwitch: true });
+  assert.equal(skippedRestore.result.status, 0, skippedRestore.result.stderr);
+  assert.match(skippedRestore.result.stderr, /R2 free-tier kill switch engaged; skipping full Garage acceptance restore/);
+  assert.equal(skippedRestore.commands, "", "kill switch must skip all restore commands");
 
   const timedOutRestore = runRestoreCase({ restoreStatus: 124 });
   assert.notEqual(timedOutRestore.result.status, 0, "restore timeout must fail closed");

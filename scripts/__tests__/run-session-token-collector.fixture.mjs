@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, existsSync, writeFileSync, chmodSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveCollectorToken } from "../lib/run-session-token-collector.mjs";
+import { configureCollectorSentryToken, resolveCollectorToken } from "../lib/run-session-token-collector.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -211,6 +211,44 @@ function record() { return existsSync(recordFile) ? readFileSync(recordFile, "ut
   resetRecord();
   const v = resolveCollectorToken(["BAD-NAME!"], { env: stubEnv("empty") });
   check("invalid name -> null, no spawn", v === null && !record().includes("ARGS:"));
+}
+
+// 11. strict injected-secrets mode skips the runtime lookup entirely
+{
+  resetRecord();
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], {
+    env: stubEnv("gakonly", { COLLECTOR_STRICT_INJECTED_SECRETS: "1" }),
+  });
+  check("strict mode -> null despite folder value", v === null);
+  check("strict mode -> CLI never spawned", !record().includes("ARGS:"));
+}
+
+// 12. configureCollectorSentryToken: a failing lookup degrades to false
+// instead of throwing (telemetry is optional; collection must continue)
+{
+  resetRecord();
+  const env = stubEnv("fail3", {
+    COLLECTOR_SENTRY_ENABLED: "1",
+    COLLECTOR_TELEMETRY_HUB_ENDPOINT: "https://hub.invalid",
+  });
+  let outcome = null;
+  let threw = false;
+  try {
+    outcome = configureCollectorSentryToken(["USAGE_INGEST_TOKEN"], { env });
+  } catch { threw = true; }
+  check("sentry token lookup failure does not throw", !threw);
+  check("sentry token lookup failure returns false", outcome === false);
+  check("sentry token env left unset on failure", !env.COLLECTOR_TELEMETRY_HUB_TOKEN);
+}
+
+// 13. configureCollectorSentryToken: a resolvable token is loaded
+{
+  const env = stubEnv("gakonly", {
+    COLLECTOR_SENTRY_ENABLED: "1",
+    COLLECTOR_TELEMETRY_HUB_ENDPOINT: "https://hub.invalid",
+  });
+  const ok = configureCollectorSentryToken(["USAGE_INGEST_TOKEN"], { env });
+  check("sentry token loaded from second folder", ok === true && env.COLLECTOR_TELEMETRY_HUB_TOKEN === "tok-from-gak");
 }
 
 rmSync(work, { recursive: true, force: true });

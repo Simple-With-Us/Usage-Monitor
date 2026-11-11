@@ -22,7 +22,7 @@ import {
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/antigravity-session-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const PRODUCER_ID =
@@ -81,7 +81,7 @@ async function main() {
   }
   // ANTIGRAVITY_INGEST_TOKEN is scoped to the antigravity-cli producer, not
   // this one, so it is deliberately not a candidate here.
-  const token = resolveCollectorToken(STATUSLINE_TOKEN_ENV_NAMES);
+  const token = await resolveCollectorToken(STATUSLINE_TOKEN_ENV_NAMES);
   try {
     const ack = await postUsageBatches({
       events,

@@ -84,17 +84,21 @@ export function resolveCollectorToken(
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
+    // Strict injected-secrets mode (from main) skips the runtime lookup
+    // entirely: only values already injected into the environment count.
     let fromLookup = null;
-    try {
-      fromLookup = effectiveLookup(name)?.trim();
-    } catch (err) {
-      // A remote read/auth failure is not a value and must never mask a
-      // usable input under a later name (the retired helper returned null
-      // on failure, so a later env token still won).  The first failure is
-      // rethrown only when no name yields a value at all: a failure with no
-      // usable token anywhere is not a silent miss (deliberate contract
-      // change from the retired helper's null-on-failure).
-      deferredFailure ??= err;
+    if (env.COLLECTOR_STRICT_INJECTED_SECRETS !== "1") {
+      try {
+        fromLookup = effectiveLookup(name)?.trim();
+      } catch (err) {
+        // A remote read/auth failure is not a value and must never mask a
+        // usable input under a later name (the retired helper returned null
+        // on failure, so a later env token still won).  The first failure is
+        // rethrown only when no name yields a value at all: a failure with no
+        // usable token anywhere is not a silent miss (deliberate contract
+        // change from the retired helper's null-on-failure).
+        deferredFailure ??= err;
+      }
     }
     if (fromLookup) return fromLookup;
   }
@@ -112,7 +116,17 @@ export function configureCollectorSentryToken(
   if (!env.COLLECTOR_TELEMETRY_HUB_ENDPOINT?.trim()) return false;
   if (env.COLLECTOR_TELEMETRY_HUB_TOKEN?.trim()) return true;
   if (env.COLLECTOR_TELEMETRY_HUB_TOKENS_JSON?.trim()) return true;
-  const token = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
+  let token = null;
+  try {
+    token = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
+  } catch {
+    // Telemetry is optional: a failed token lookup must not abort usage
+    // collection.  The thrown error's message is deliberately not logged -
+    // lookup errors are constructed to be secret-free, but an injected
+    // lookup's errors are not covered by that guarantee.
+    console.warn("configureCollectorSentryToken: collector token lookup failed; continuing without a telemetry hub token");
+    return false;
+  }
   if (!token) return false;
   env.COLLECTOR_TELEMETRY_HUB_TOKEN = token;
   return true;

@@ -12,15 +12,25 @@ import { isUnresolvedReference, run } from "./infisical-fetch.mjs";
 const REFERENCE = "${prod.global-api-keys.SENTINEL_KEY_ref_3c9e}";
 const RESOLVED = "sentinel-resolved-value-5d1a";
 
-/** Stub Infisical: login succeeds, the list call returns the fixture secrets
+/** Stub Infisical: the list call returns the fixture secrets
  * and records every list URL so a test can assert on the query string. */
 function stubFetch(vaultSecrets, listUrls = []) {
-  return async (url) => {
+  return async (url, options) => {
     const u = String(url);
-    if (u.includes("/api/v1/auth/universal-auth/login")) {
-      return { ok: true, json: async () => ({ accessToken: "test-token", expiresIn: 3600 }) };
+    assert.equal(options.redirect, "error");
+    if (u.endsWith("/api/v2/service-token")) {
+      return {
+        ok: true,
+        json: async () => ({
+          projectId: "proj",
+          workspace: "proj",
+          scopes: [{ secretPath: "/", environment: "prod" }],
+          permissions: ["read"],
+        }),
+      };
     }
     if (u.includes("/api/v3/secrets/raw")) {
+      assert.match(options.headers.authorization, /^Bearer st\./);
       listUrls.push(u);
       return {
         ok: true,
@@ -37,8 +47,7 @@ function baseEnv(githubEnv, names) {
   return {
     INFISICAL_NAMES: names,
     INFISICAL_PROJECT_ID: "proj",
-    INFISICAL_CLIENT_ID: "id",
-    INFISICAL_CLIENT_SECRET: "secret",
+    INFISICAL_TOKEN: "st.fixture-read-token-value-123456789",
     GITHUB_ENV: githubEnv,
   };
 }
@@ -50,6 +59,8 @@ test("the secrets list asks Infisical to expand secret references", async () => 
     await run({ env: baseEnv(join(dir, "env"), "FOO"), fetchImpl: stubFetch({ FOO: RESOLVED }, listUrls), log: () => {} });
     assert.equal(listUrls.length, 1);
     assert.equal(new URL(listUrls[0]).searchParams.get("expandSecretReferences"), "true");
+    assert.equal(new URL(listUrls[0]).searchParams.get("recursive"), "false");
+    assert.equal(new URL(listUrls[0]).searchParams.get("include_imports"), "false");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

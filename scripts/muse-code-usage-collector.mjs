@@ -1,30 +1,59 @@
 #!/usr/bin/env node
 // Mac-side quota collector for Meta's Muse Code (NOT Anthropic's Muse CLI,
-// NOT MiniMax's mcode).  It reads MUSE_CODE_ACCESS_TOKEN injected into the
-// process by the approved scoped runtime binding, POSTs to Meta's
-// /muse-code/key endpoint, then emits 5h rolling + weekly quota windows.  The
-// collector does not read Keychain or refresh credentials.  It never logs,
-// persists, or echoes the access token, and never logs Meta's response body
-// (which carries the API key id, plan, and account email).  Redirects are treated as errors.  Invocation:
+// NOT MiniMax's mcode).  This is a tiny tool that:
+//   1. Reads the Muse Code OAuth access token from the macOS keychain
+//      (service "ai.meta.dev.credentials", account "meta").
+//   2. POSTs to https://api.meta.ai/muse-code/key with that Bearer token.
+//   3. Emits one "quota" event per remaining-percent window
+//      (5h rolling + weekly) via the existing /api/ingest/usage contract.
+//
+// Why this runs on the Mac and not on the server: the /muse-code/key endpoint
+// is the one the Meta CLI itself calls with the OAuth token it stored in the
+// user's keychain.  A server-side connector impersonating that product stays
+// out by the same owner ruling that keeps the subscription-quota-collector on
+// the laptop (issue #1411, 2026-09-03).  Tokens stay on the Mac.
 //
 // Usage:
 //   node scripts/muse-code-usage-collector.mjs [--dry-run] [--debug]
 //
 // Env:
-//   MUSE_CODE_ACCESS_TOKEN - Meta OAuth access token, injected at runtime.
-//   MUSE_CODE_INGEST_TOKEN - per-producer scoped token, with fallback to
-//                            USAGE_INGEST_TOKEN.
+//   MUSE_CODE_INGEST_TOKEN  - per-producer scoped token, the value half of the
+//                             "muse-code:<token>" pair added to
+//                             USAGE_INGEST_PRODUCER_TOKENS.  Falls back to
+//                             USAGE_INGEST_TOKEN.
 //   USAGE_MONITOR_INGEST_URL - defaults to https://usage.jays.services/api/ingest/usage
+//   MUSE_CODE_KEYCHAIN_SERVICE - defaults to "ai.meta.dev.credentials"
+//   MUSE_CODE_KEYCHAIN_ACCOUNT - defaults to "meta"
+//   MUSE_CODE_KEYCHAIN_TIMEOUT_MS - defaults to 9_000 (8–10s per the brief)
+//
+// SECRETS:
+//   The keychain entry holds the OAuth access token.  We read it via
+//   `security find-generic-password -w` and never log, persist, or echo the
+//   token or the raw keychain stdout.  We also never log the HTTP response
+//   body under any flag — it carries the API key id, plan, and account
+//   email — and we treat 3xx as an error (no redirect-following).
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { postUsageBatches } from "./lib/session-token-collectors.mjs";
 import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
 import { buildQuotaEvent, clampPercent, toIsoTimestamp } from "./lib/quota-event.mjs";
 
+const execFileAsync = promisify(execFile);
+
 const PRODUCER_ID = "muse-code";
 const PROVIDER = "muse-code";
 const SERVICE = "muse-code";
+
+const KEYCHAIN_SERVICE = process.env.MUSE_CODE_KEYCHAIN_SERVICE || "ai.meta.dev.credentials";
+const KEYCHAIN_ACCOUNT = process.env.MUSE_CODE_KEYCHAIN_ACCOUNT || "meta";
+const KEYCHAIN_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.MUSE_CODE_KEYCHAIN_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 9_000;
+})();
+const KEYCHAIN_MAX_STDOUT_BYTES = 1_048_576;
 
 const KEY_ENDPOINT = "https://api.meta.ai/muse-code/key";
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -48,10 +77,122 @@ function debugLog(message) {
 
 // ---------------------------------------------------------------- helpers ---
 
-/** Resolve the scoped Meta access token injected into this process. */
-export function resolveMuseCodeAccessToken(env = process.env) {
-  const token = env.MUSE_CODE_ACCESS_TOKEN;
-  if (typeof token !== "string" || !token.trim()) return null;
+/** macOS keychain read for the Muse Code OAuth access token.
+ *
+ *  Returns the access_token string (trimmed) or null on:
+ *    - non-darwin host
+ *    - execFile timeout / non-zero exit (keychain ACL prompt, missing entry)
+ *    - non-JSON stdout (legacy / wrong entry shape)
+ *    - JSON without a string access_token
+ *
+ *  Never logs or echoes the token.  On darwin, every failure path prints the
+ *  explicit Always-Allow hint and returns null so the caller can skip cleanly.
+ */
+export async function readMuseCodeAccessTokenFromKeychain({
+  execFileImpl = execFileAsync,
+  platform = process.platform,
+  service = KEYCHAIN_SERVICE,
+  account = KEYCHAIN_ACCOUNT,
+  timeoutMs = KEYCHAIN_TIMEOUT_MS,
+  maxBuffer = KEYCHAIN_MAX_STDOUT_BYTES,
+} = {}) {
+  if (platform !== "darwin") {
+    log(
+      `not on macOS; keychain unavailable for "${service}"; muse-code quota is skipped on non-darwin hosts (the access token never leaves the laptop).`,
+    );
+    return null;
+  }
+  let stdout = "";
+  try {
+    const result = await execFileImpl(
+      "security",
+      ["find-generic-password", "-s", service, "-a", account, "-w"],
+      {
+        timeout: timeoutMs,
+        maxBuffer,
+        encoding: "utf8",
+      },
+    );
+    stdout = String(result?.stdout ?? "");
+  } catch (error) {
+    // execFile's timeout kills the child with SIGTERM; its rejection has
+    // code=null, signal=SIGTERM, killed=true (not ETIMEDOUT).  A non-zero
+    // exit from a keychain ACL prompt (rc=36 "user interaction not allowed")
+    // lands here too.  Both are operator-visible: the first read needs an
+    // "Always Allow" grant.
+    if (
+      error &&
+      typeof error === "object" &&
+      error.killed === true &&
+      error.signal === "SIGTERM"
+    ) {
+      log(
+        `muse-code: macOS keychain lookup for "${service}" timed out after ${timeoutMs}ms; ` +
+          'the keychain entry exists but the first read from this process / LaunchAgent ' +
+          'needs a one-time "Always Allow" grant so subsequent reads succeed.  Open ' +
+          "Keychain Access, search for the entry, open it, click \"Access Control\", " +
+          'and add this collector (e.g. /opt/homebrew/bin/node) with "Allow" once — ' +
+          "after that the keychain returns the token without prompting.  Nothing will " +
+          "appear for Muse Code in Usage Monitor until the grant is in place.  " +
+          "Skipping this run (exit 0, zero events).",
+      );
+      return null;
+    }
+    const code = error && typeof error === "object" ? error.code : null;
+    log(
+      `muse-code: macOS keychain lookup for "${service}" failed` +
+          (code ? ` (${code})` : "") +
+          "; the keychain entry exists but the first read from this process / LaunchAgent " +
+          'needs a one-time "Always Allow" grant so subsequent reads succeed.  Open ' +
+          "Keychain Access, search for the entry, open it, click \"Access Control\", " +
+          'and add this collector (e.g. /opt/homebrew/bin/node) with "Allow" once — ' +
+          "after that the keychain returns the token without prompting.  Nothing will " +
+          "appear for Muse Code in Usage Monitor until the grant is in place.  " +
+          "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned empty content; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned non-JSON content; ` +
+        "the CLI may have stored a non-standard payload.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned an unexpected JSON shape; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
+  const token = parsed.access_token;
+  if (typeof token !== "string" || !token.trim()) {
+    log(
+      `muse-code: macOS keychain entry "${service}" is missing a string access_token; ` +
+        "the CLI may have stored a non-standard payload.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   return token.trim();
 }
 
@@ -227,10 +368,12 @@ export async function fetchMuseCodeKey(accessToken, {
 // ----------------------------------------------------------------- main ---
 
 export async function collectMuseCode({
-  accessToken = resolveMuseCodeAccessToken(),
+  execFileImpl = execFileAsync,
   fetchImpl,
+  platform = process.platform,
   now = new Date(),
 } = {}) {
+  const accessToken = await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform });
   if (!accessToken) {
     return { provider: PROVIDER, status: "skipped", reason: "access-token-missing", events: [] };
   }
@@ -239,6 +382,14 @@ export async function collectMuseCode({
     payload = await fetchMuseCodeKey(accessToken, { fetchImpl });
   } catch (error) {
     if (error?.code === "MUSE_CODE_AUTH_REQUIRED") {
+      // The keychain token itself was rejected (CLI signed out or the token
+      // revoked).  That is a skip, not a failure: zero events, exit 0, and
+      // the next tick retries quietly once the CLI holds a valid token.
+      log(
+        "muse-code: Meta rejected the keychain access token (401/403); " +
+          "skipping this run (exit 0, zero events).  Sign in with the Muse " +
+          "CLI so the keychain entry holds a valid token.",
+      );
       return { provider: PROVIDER, status: "skipped", reason: "access-token-rejected", events: [] };
     }
     throw error;
@@ -248,17 +399,15 @@ export async function collectMuseCode({
   return {
     provider: PROVIDER,
     status: events.length === 0 ? "skipped" : "ok",
+    // Every skipped result carries a distinct reason so callers can tell
+    // the skip causes apart: access-token-missing, access-token-rejected,
+    // or no-quota-windows (inactive subscription or empty payload).
+    ...(events.length === 0 ? { reason: "no-quota-windows" } : {}),
     events,
   };
 }
 
 async function main() {
-  const accessToken = resolveMuseCodeAccessToken();
-  if (!accessToken) {
-    log("skipped (MUSE_CODE_ACCESS_TOKEN is unavailable from the configured secret source)");
-    process.exit(0);
-  }
-
   const token = resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   if (!token && !DRY_RUN) {
     log(
@@ -269,23 +418,23 @@ async function main() {
 
   let result;
   try {
-    result = await collectMuseCode({ accessToken });
+    result = await collectMuseCode();
   } catch (error) {
     log(`FAILED (${error instanceof Error ? error.message : String(error)})`);
-    // Network and non-auth API failures remain operator-visible so launchd
-    // retries on its next 15-minute tick.  Missing/rejected auth is skipped
-    // above and does not post an empty batch or clear prior readings.
+    // A failed fetch is an operator-visible problem (not the keychain ACL
+    // case, which already short-circuited inside readMuseCodeKey), so this
+    // exit 1 is intentional: launchd will retry on the next 15-minute tick.
     process.exit(1);
   }
 
   if (result.status === "skipped") {
-    if (result.reason === "access-token-missing") {
-      log("skipped (MUSE_CODE_ACCESS_TOKEN is unavailable from the configured secret source)");
-    } else if (result.reason === "access-token-rejected") {
-      log("skipped (Meta rejected MUSE_CODE_ACCESS_TOKEN; update the configured scoped secret)");
-    } else {
-      log(result.events.length === 0 ? "skipped (inactive subscription or no quota windows)" : "skipped");
-    }
+    log(
+      result.reason
+        ? `skipped (${result.reason})`
+        : result.events.length === 0
+          ? "skipped (no quota windows emitted; keychain ACL or inactive subscription)"
+          : "skipped",
+    );
     process.exit(0);
   }
 
@@ -337,4 +486,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 }
 
 export const MUSE_CODE_PRODUCER_ID = PRODUCER_ID;
-export { KEY_ENDPOINT, INGEST_URL };
+export { KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, KEYCHAIN_TIMEOUT_MS, KEY_ENDPOINT, INGEST_URL };
