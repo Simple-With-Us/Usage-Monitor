@@ -158,6 +158,15 @@ PLAN_BUILD_ONLY=0
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "[ios-ship] $*"; }
+
+# GitHub Actions step output for the ship step: lets ios-ship.yml tell a
+# real upload from a ship-gate skip (both exit 0), so the post-sync
+# readiness recheck only polls ASC for a build that was actually
+# uploaded (OPS-1052).  No-op outside GitHub Actions.
+emit_ship_output() {
+  [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
+  printf '%s\n' "$1" >>"$GITHUB_OUTPUT"
+}
 # Same prefix, but on stderr — for use inside $(...) helpers whose stdout is
 # the return value and must stay clean.
 logerr() { echo "[ios-ship] $*" >&2; }
@@ -972,6 +981,7 @@ record_successful_ship() {
   printf '%s %s\n' "$now" "$head_sha" >"$path"
   chmod 600 "$path" 2>/dev/null || true
   log "ship-gate: recorded success ts=${now} sha=${head_sha:0:10} -> ${path}"
+  emit_ship_output "uploaded=1"
   # Public version manifest for the in-app update prompt.  Best-effort —
   # a publish miss must never fail a ship that already uploaded.
   if [[ -n "${BUNDLE_ID:-}" && -n "${MARKETING:-}" ]]; then
@@ -1244,6 +1254,7 @@ IOS_PATH_PREFIX="$(dirname "$PROJECT_REL")"
 
 if [[ "$SHIP_GATE_DECISION" == "skip" && "$DRY_RUN" -eq 0 ]]; then
   log "ship-gate: exiting 0 before any version is resolved (nothing consumed)"
+  emit_ship_output "uploaded=0"
   exit 0
 fi
 
@@ -1600,6 +1611,9 @@ release_archive_lock() {
 # ITSAppUsesNonExemptEncryption. Otherwise TestFlight stays
 # MISSING_EXPORT_COMPLIANCE and the phone never sees the build (ST 1.0.1/2
 # on 2026-08-12).
+# shellcheck source=scripts/ios-fleet/tf-ready-rc.sh
+source "${FLEET_DIR}/tf-ready-rc.sh"
+
 ensure_tf_ready() {
   log "verifying TestFlight ready-to-install for ${BUNDLE_ID} build ${BUILD_NUM}"
   set +e
@@ -1619,35 +1633,7 @@ ensure_tf_ready() {
   if [[ -s "${LOG_DIR}/ensure-tf-ready.err" ]]; then
     while IFS= read -r line; do log "tf-ready: $line"; done <"${LOG_DIR}/ensure-tf-ready.err"
   fi
-  if [[ $rc -eq 0 ]]; then
-    log "TestFlight internal testers can install this build"
-    return 0
-  fi
-  if [[ $rc -eq 3 ]]; then
-    log "warning: upload succeeded but ASC has not reached IN_BETA_TESTING yet; watch TestFlight"
-    return 0
-  fi
-  if [[ $rc -eq 4 ]]; then
-    # The upload itself succeeded; ASC simply never surfaced the build in time.
-    # Warn loudly but do NOT fail: the caller must still record_successful_ship,
-    # or the rate gate never advances and the next scheduled run re-ships the
-    # same HEAD. A red job after a successful upload also mislabels the outcome.
-    log "warning: ASC never surfaced build ${BUILD_NUM}; export compliance NOT declared on it"
-    log "warning: if the phone never gets this build, declare compliance by hand in App Store Connect"
-    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-      echo "::warning::ensure-tf-ready could not find uploaded build ${BUILD_NUM} for ${BUNDLE_ID}; export compliance not declared"
-    fi
-    return 0
-  fi
-  # rc=2 is a usage error or an ASC API error. Compliance was NOT declared, so
-  # this deserves the same CI annotation rc=4 gets -- otherwise the only trace
-  # is one log line inside a green job, which is how ST 1.0.1/2 stayed
-  # VALID-but-uninstallable without anyone noticing.
-  log "warning: ensure-tf-ready failed (rc=$rc); build may be stuck on export compliance"
-  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-    echo "::warning::ensure-tf-ready failed (rc=${rc}) for ${BUNDLE_ID} build ${BUILD_NUM}; export compliance not declared"
-  fi
-  return 0
+  handle_ensure_tf_ready_rc "$rc"
 }
 
 acquire_archive_lock

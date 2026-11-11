@@ -250,6 +250,7 @@ test("the ship script and workflow keep assignment inside the two ship steps", (
   assert.equal(ship.slice(readyStart, readyEnd).includes("assign_external_beta"), false);
   assert.equal(ship.includes('publish-ios-versions.sh" "${pub_args[@]}" >/dev/null'), false);
   assert.equal(ship.match(/assign_external_beta\n\s*record_successful_ship/g).length, 3);
+  assert.equal(ship.match(/ensure_tf_ready\n\s*assign_external_beta/g).length, 2);
 
   const workflow = readFileSync(workflowUrl, "utf8");
   const steps = workflow.split("\n      - name: ");
@@ -262,8 +263,18 @@ test("the ship script and workflow keep assignment inside the two ship steps", (
   for (const name of [
     "Sync standing TestFlight testers (usage)",
     "Sync standing TestFlight testers (usage-local)",
-    "Plan release builds (once per app per release)"
+    "Plan release builds (once per app per release)",
+    "Re-check TestFlight readiness after tester sync (usage)",
+    "Re-check TestFlight readiness after tester sync (usage-local)"
   ]) {
     assert.doesNotMatch(body(name), /IOS_ASSIGN_EXTERNAL_BETA/);
   }
+  assert.ok(
+    workflow.indexOf("Ship UsageMonitor to TestFlight") <
+      workflow.indexOf("Re-check TestFlight readiness after tester sync (usage)")
+  );
+  assert.ok(
+    workflow.indexOf("Ship LocalUsageMonitor to TestFlight") <
+      workflow.indexOf("Re-check TestFlight readiness after tester sync (usage-local)")
+  );
 });

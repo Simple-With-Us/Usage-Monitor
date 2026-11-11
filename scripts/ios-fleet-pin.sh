@@ -36,7 +36,10 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 # the same reason:  it decides the uploaded build in fixed mode.
 # publish-ios-versions.sh writes the public manifest.  assign-external-beta.sh
 # is the gate that keeps that App Store Connect write inside the ship job.
-PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs publish-ios-versions.sh assign-external-beta.sh"
+# tf-ready-rc.sh is here because ship-testflight.sh sources it:  it maps
+# ensure-tf-ready exit codes to the readiness labels a ship reports, so an
+# unreviewed edit would change reported readiness without the pin noticing.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs publish-ios-versions.sh assign-external-beta.sh tf-ready-rc.sh"
 COPIED_PROMPT_TARGETS="ios/UsageMonitor/App/AppUpdatePrompt.swift ios/UsageMonitor/LocalApp/AppUpdatePrompt.swift"
 
 MODE="check"

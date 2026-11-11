@@ -1,7 +1,7 @@
 # sha256 pin for the in-repo iOS ship tooling in scripts/ios-fleet.
 # GitHub-hosted macos-latest ships from this copy, not /Users/jay/apps/ios-fleet.
 # Refresh with: bash scripts/ios-fleet-pin.sh --update  (then land it in a PR)
-80097ff987ea944b075afbc240a7cd21ca02292af11bae721f1e24743c8d8878  ship-testflight.sh
+0faa9d4762530e7d6a010b3472de5e3aa349ac27ed0fe67aded0dd97d3500443  ship-testflight.sh
 ae1a380d41ed8ee9f19b99d7a420a0fab4d5352e2fb300e8625b423cffb2ecd5  asc-api.mjs
 1d57b7bb3c76bf73f6ed932bfc34a937a2aa8ea1aa483d60d3ae0849576ec595  asc-key.mjs
 3de97aa5b28a8f15571eb4ec3c34436d720b99bd43f852c320387d57ea3927ca  apps.json
@@ -10,3 +10,4 @@ c2f45059b2462a1c6d0c204999cb6da3c50ea2d74b5d829254b143a252dff221  version-plan.m
 82c0b8ceb8111f2e1297f6860cef5e8e039572582eb3ef17705fb670e4f06c28  shared-build.mjs
 a9ba332e25a880147ff21ecc0b86dcf1fb32f0e2485f02954adccdf6c5b82e55  publish-ios-versions.sh
 7571ddc4ba6a5f2c68a145492105dc961826d2610b0951af31a1173914fc8521  assign-external-beta.sh
+592b71b3816d9158ff754b52e0f6abec8cbc3968fa8e3528e1d575f0d897feed  tf-ready-rc.sh
