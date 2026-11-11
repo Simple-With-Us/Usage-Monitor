@@ -69,7 +69,8 @@ export default function Nav() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
-  const moreRef = useRef<HTMLDivElement>(null);
+  const moreRefMd = useRef<HTMLDivElement>(null);
+  const moreRefLg = useRef<HTMLDivElement>(null);
   const prefsRef = useRef<HTMLDivElement>(null);
 
   const { theme, setTheme } = useTheme();
@@ -90,7 +91,8 @@ export default function Nav() {
     if (!moreOpen && !prefsOpen) return;
     const onPointer = (event: MouseEvent) => {
       const t = event.target as Node;
-      if (moreOpen && moreRef.current && !moreRef.current.contains(t)) {
+      const insideMore = [moreRefMd, moreRefLg].some((r) => r.current?.contains(t));
+      if (moreOpen && !insideMore) {
         setMoreOpen(false);
       }
       if (prefsOpen && prefsRef.current && !prefsRef.current.contains(t)) {
@@ -184,14 +186,6 @@ export default function Nav() {
                       </Link>
                     );
                   })}
-                  <MoreMenu
-                    moreRef={moreRef}
-                    moreOpen={moreOpen}
-                    setMoreOpen={setMoreOpen}
-                    secondaryActive={overflowLinksMd.some((l) => isLinkActive(pathname, l.href))}
-                    links={overflowLinksMd}
-                    pathname={pathname}
-                  />
                 </div>
                 {/* lg–xl: 5 links + overflow (primary tail + secondary) */}
                 <div className="hidden items-center gap-0.5 lg:flex xl:hidden">
@@ -212,14 +206,6 @@ export default function Nav() {
                       </Link>
                     );
                   })}
-                  <MoreMenu
-                    moreRef={moreRef}
-                    moreOpen={moreOpen}
-                    setMoreOpen={setMoreOpen}
-                    secondaryActive={overflowLinksLg.some((l) => isLinkActive(pathname, l.href))}
-                    links={overflowLinksLg}
-                    pathname={pathname}
-                  />
                 </div>
                 {/* xl+: all primary + secondary inline — no More (nothing overflows) */}
                 <div className="hidden items-center gap-0.5 xl:flex">
@@ -241,6 +227,29 @@ export default function Nav() {
                     );
                   })}
                 </div>
+              </div>
+              {/* Overflow menus render outside the scroll container so their
+                  dropdowns are not clipped by overflow-x-auto; each breakpoint
+                  instance gets its own ref so outside-click close works. */}
+              <div className="lg:hidden">
+                <MoreMenu
+                  moreRef={moreRefMd}
+                  moreOpen={moreOpen}
+                  setMoreOpen={setMoreOpen}
+                  secondaryActive={overflowLinksMd.some((l) => isLinkActive(pathname, l.href))}
+                  links={overflowLinksMd}
+                  pathname={pathname}
+                />
+              </div>
+              <div className="hidden lg:block xl:hidden">
+                <MoreMenu
+                  moreRef={moreRefLg}
+                  moreOpen={moreOpen}
+                  setMoreOpen={setMoreOpen}
+                  secondaryActive={overflowLinksLg.some((l) => isLinkActive(pathname, l.href))}
+                  links={overflowLinksLg}
+                  pathname={pathname}
+                />
               </div>
             </div>
 
