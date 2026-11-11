@@ -158,6 +158,15 @@ PLAN_BUILD_ONLY=0
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "[ios-ship] $*"; }
+
+# GitHub Actions step output for the ship step: lets ios-ship.yml tell a
+# real upload from a ship-gate skip (both exit 0), so the post-sync
+# readiness recheck only polls ASC for a build that was actually
+# uploaded (OPS-1052).  No-op outside GitHub Actions.
+emit_ship_output() {
+  [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
+  printf '%s\n' "$1" >>"$GITHUB_OUTPUT"
+}
 # Same prefix, but on stderr — for use inside $(...) helpers whose stdout is
 # the return value and must stay clean.
 logerr() { echo "[ios-ship] $*" >&2; }
@@ -972,6 +981,7 @@ record_successful_ship() {
   printf '%s %s\n' "$now" "$head_sha" >"$path"
   chmod 600 "$path" 2>/dev/null || true
   log "ship-gate: recorded success ts=${now} sha=${head_sha:0:10} -> ${path}"
+  emit_ship_output "uploaded=1"
   # Public version manifest for the in-app update prompt.  Best-effort —
   # a publish miss must never fail a ship that already uploaded.
   if [[ -n "${BUNDLE_ID:-}" && -n "${MARKETING:-}" ]]; then
@@ -1197,6 +1207,7 @@ IOS_PATH_PREFIX="$(dirname "$PROJECT_REL")"
 
 if [[ "$SHIP_GATE_DECISION" == "skip" && "$DRY_RUN" -eq 0 ]]; then
   log "ship-gate: exiting 0 before any version is resolved (nothing consumed)"
+  emit_ship_output "uploaded=0"
   exit 0
 fi
 

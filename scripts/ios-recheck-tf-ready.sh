@@ -11,7 +11,14 @@ FLEET_DIR="${ROOT}/scripts/ios-fleet"
 # shellcheck source=scripts/ios-fleet/tf-ready-rc.sh
 source "${FLEET_DIR}/tf-ready-rc.sh"
 
-read -r BUNDLE_ID MARKETING APPLE_ID <<EOF
+# The Python prints one value per line; read three lines explicitly.
+# (A single `read -r A B C` consumes only the first line, leaving
+# MARKETING and APPLE_ID empty.)
+{
+  read -r BUNDLE_ID
+  read -r MARKETING
+  read -r APPLE_ID
+} <<EOF
 $(python3 - <<'PY' "$APP_KEY" "$FLEET_DIR/apps.json"
 import json, sys
 app_key, path = sys.argv[1], sys.argv[2]

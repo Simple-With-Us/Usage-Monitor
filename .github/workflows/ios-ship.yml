@@ -388,7 +388,7 @@ jobs:
       # sync so the job summary reflects post-sync installability (OPS-1052).
       - name: Re-check TestFlight readiness after tester sync (usage)
         id: recheck_usage
-        if: ${{ !cancelled() && steps.ship_usage.outcome == 'success' && steps.gate.outputs.ship_usage == '1' }}
+        if: ${{ !cancelled() && steps.ship_usage.outcome == 'success' && steps.gate.outputs.ship_usage == '1' && steps.ship_usage.outputs.uploaded == '1' }}
         continue-on-error: true
         run: |
           build="${{ steps.plan.outputs.build_usage }}"
@@ -436,7 +436,7 @@ jobs:
 
       - name: Re-check TestFlight readiness after tester sync (usage-local)
         id: recheck_usage_local
-        if: ${{ !cancelled() && steps.ship_usage_local.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' }}
+        if: ${{ !cancelled() && steps.ship_usage_local.outcome == 'success' && steps.gate.outputs.ship_usage_local == '1' && steps.ship_usage_local.outputs.uploaded == '1' }}
         continue-on-error: true
         run: |
           build="${{ steps.plan.outputs.build_usage_local }}"
@@ -447,19 +447,23 @@ jobs:
         if: ${{ always() && steps.gate.outputs.should_ship == '1' }}
         run: |
           set -euo pipefail
-          echo "## TestFlight readiness (after standing-tester sync)"
+          echo "## TestFlight readiness (after standing-tester sync)" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "${{ steps.gate.outputs.ship_usage }}" = "1" ] && [ "${{ steps.ship_usage.outcome }}" = "success" ]; then
-            if [ -n "${{ steps.recheck_usage.outputs.tf_ready_summary }}" ]; then
-              echo "- Usage Monitor Client (${{ steps.recheck_usage.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage.outputs.tf_ready_rc }} — ${{ steps.recheck_usage.outputs.tf_ready_summary }}"
+            if [ "${{ steps.ship_usage.outputs.uploaded }}" != "1" ]; then
+              echo "- Usage Monitor Client: ship-gate skipped this run (no upload); nothing to re-check" | tee -a "$GITHUB_STEP_SUMMARY"
+            elif [ -n "${{ steps.recheck_usage.outputs.tf_ready_summary }}" ]; then
+              echo "- Usage Monitor Client (${{ steps.recheck_usage.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage.outputs.tf_ready_rc }} — ${{ steps.recheck_usage.outputs.tf_ready_summary }}" | tee -a "$GITHUB_STEP_SUMMARY"
             else
-              echo "- Usage Monitor Client: post-sync readiness check did not run"
+              echo "- Usage Monitor Client: post-sync readiness check did not run" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           fi
           if [ "${{ steps.gate.outputs.ship_usage_local }}" = "1" ] && [ "${{ steps.ship_usage_local.outcome }}" = "success" ]; then
-            if [ -n "${{ steps.recheck_usage_local.outputs.tf_ready_summary }}" ]; then
-              echo "- Local Monitor (${{ steps.recheck_usage_local.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage_local.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage_local.outputs.tf_ready_rc }} — ${{ steps.recheck_usage_local.outputs.tf_ready_summary }}"
+            if [ "${{ steps.ship_usage_local.outputs.uploaded }}" != "1" ]; then
+              echo "- Local Monitor: ship-gate skipped this run (no upload); nothing to re-check" | tee -a "$GITHUB_STEP_SUMMARY"
+            elif [ -n "${{ steps.recheck_usage_local.outputs.tf_ready_summary }}" ]; then
+              echo "- Local Monitor (${{ steps.recheck_usage_local.outputs.tf_ready_bundle }} build ${{ steps.recheck_usage_local.outputs.tf_ready_build }}): rc=${{ steps.recheck_usage_local.outputs.tf_ready_rc }} — ${{ steps.recheck_usage_local.outputs.tf_ready_summary }}" | tee -a "$GITHUB_STEP_SUMMARY"
             else
-              echo "- Local Monitor: post-sync readiness check did not run"
+              echo "- Local Monitor: post-sync readiness check did not run" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           fi
 

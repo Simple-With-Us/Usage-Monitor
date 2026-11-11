@@ -20,7 +20,10 @@ test("ensure-tf-ready rc codes map to distinct handler branches", () => {
   for (const rc of [0, 2, 3, 4, 5, 6]) {
     assert.ok(branchAfter(rc).length > 10, `rc=${rc} branch is empty`);
   }
-  const bodies = [0, 2, 3, 4, 5, 6].map((rc) => branchAfter(rc));
+  // Strip each branch's own `rc)` header before comparing: with the
+  // header included the slices are trivially distinct even when the
+  // branch bodies are identical.
+  const bodies = [0, 2, 3, 4, 5, 6].map((rc) => branchAfter(rc).replace(/^\n\s*\d+\)/, ""));
   const uniq = new Set(bodies);
   assert.equal(uniq.size, bodies.length, "each rc branch must be distinct");
 });
@@ -58,6 +61,9 @@ test("ios-ship.yml rechecks readiness after standing-tester sync and summarizes 
   const yml = readFileSync(join(ROOT, ".github/workflows/ios-ship.yml"), "utf8");
   assert.match(yml, /name: Re-check TestFlight readiness after tester sync \(usage\)/);
   assert.match(yml, /ios-recheck-tf-ready\.sh" usage/);
+  assert.match(yml, /steps\.ship_usage\.outputs\.uploaded == '1'/);
+  assert.match(yml, /steps\.ship_usage_local\.outputs\.uploaded == '1'/);
+  assert.match(yml, /GITHUB_STEP_SUMMARY/);
   assert.match(yml, /name: Re-check TestFlight readiness after tester sync \(usage-local\)/);
   assert.match(yml, /ios-recheck-tf-ready\.sh" usage-local/);
   assert.match(yml, /recheck_usage\.outputs\.tf_ready_summary/);
