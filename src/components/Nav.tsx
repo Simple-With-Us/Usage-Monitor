@@ -15,8 +15,8 @@ import { useTheme } from "next-themes";
 import { Monitor, Moon, Search, Sun } from "lucide-react";
 import { setStoredDisplayDensity, useDisplayDensity } from "@/lib/display-density";
 import CommandPalette from "@/components/CommandPalette";
-
-type NavLink = { href: string; label: string };
+import { splitNavLinks, type NavLink } from "@/components/nav-link-split";
+import { useNavViewportTier } from "@/components/use-nav-viewport-tier";
 
 const PRIMARY_LINKS: NavLink[] = [
   { href: "/", label: "Overview" },
@@ -69,12 +69,12 @@ export default function Nav() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
-  const moreRefMd = useRef<HTMLDivElement>(null);
-  const moreRefLg = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
   const prefsRef = useRef<HTMLDivElement>(null);
 
   const { theme, setTheme } = useTheme();
   const density = useDisplayDensity();
+  const navTier = useNavViewportTier();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -87,12 +87,18 @@ export default function Nav() {
     setPrefsOpen(false);
   }, [pathname]);
 
+  // At xl every link is inline and MoreMenu unmounts (no overflow links), but
+  // moreOpen lives here and would survive: reset it so the dropdown does not
+  // reappear already open when the viewport narrows back below xl.
+  useEffect(() => {
+    if (navTier === "xl") setMoreOpen(false);
+  }, [navTier]);
+
   useEffect(() => {
     if (!moreOpen && !prefsOpen) return;
     const onPointer = (event: MouseEvent) => {
       const t = event.target as Node;
-      const insideMore = [moreRefMd, moreRefLg].some((r) => r.current?.contains(t));
-      if (moreOpen && !insideMore) {
+      if (moreOpen && moreRef.current && !moreRef.current.contains(t)) {
         setMoreOpen(false);
       }
       if (prefsOpen && prefsRef.current && !prefsRef.current.contains(t)) {
@@ -125,14 +131,12 @@ export default function Nav() {
 
   const mobileLinks = [...PRIMARY_LINKS, ...SECONDARY_LINKS];
 
-  // Primary links that fit the bar; remainder (+ secondary) go under More only
-  // when there is real overflow. At xl+ everything fits inline — no More.
-  // lg: first 5 primary; md: first 4 primary.
-  const mainLinksXl = [...PRIMARY_LINKS, ...SECONDARY_LINKS];
-  const mainLinksLg = PRIMARY_LINKS.slice(0, 5);
-  const overflowLinksLg = [...PRIMARY_LINKS.slice(5), ...SECONDARY_LINKS];
-  const mainLinksMd = PRIMARY_LINKS.slice(0, 4);
-  const overflowLinksMd = [...PRIMARY_LINKS.slice(4), ...SECONDARY_LINKS];
+  const tierForSplit = navTier ?? "md";
+  const { main: desktopMainLinks, overflow: desktopOverflowLinks } = splitNavLinks(
+    PRIMARY_LINKS,
+    SECONDARY_LINKS,
+    tierForSplit
+  );
 
   return (
     <>
@@ -164,93 +168,38 @@ export default function Nav() {
               </span>
             </Link>
 
-            {/* Desktop / tablet nav — hide below md; use overflow-x if tight */}
-            <div className="hidden min-w-0 flex-1 items-center md:flex">
-              <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                {/* md–lg: fewer inline links */}
-                <div className="flex items-center gap-0.5 lg:hidden">
-                  {mainLinksMd.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                </div>
-                {/* lg–xl: 5 links + overflow (primary tail + secondary) */}
-                <div className="hidden items-center gap-0.5 lg:flex xl:hidden">
-                  {mainLinksLg.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                </div>
-                {/* xl+: all primary + secondary inline — no More (nothing overflows) */}
-                <div className="hidden items-center gap-0.5 xl:flex">
-                  {mainLinksXl.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                </div>
+            {/* Desktop / tablet nav — one link row + one More; scroll clips links only */}
+            <div className="hidden min-w-0 flex-1 items-center gap-0.5 md:flex">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {desktopMainLinks.map((link) => {
+                  const isActive = isLinkActive(pathname, link.href);
+                  return (
+                    <Link
+                      key={link.href}
+                      href={link.href}
+                      aria-current={isActive ? "page" : undefined}
+                      className={`shrink-0 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors lg:px-2.5 ${
+                        isActive
+                          ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
+                          : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                      }`}
+                    >
+                      {link.label}
+                    </Link>
+                  );
+                })}
               </div>
-              {/* Overflow menus render outside the scroll container so their
-                  dropdowns are not clipped by overflow-x-auto; each breakpoint
-                  instance gets its own ref so outside-click close works. */}
-              <div className="lg:hidden">
+              {desktopOverflowLinks.length > 0 && (
                 <MoreMenu
-                  moreRef={moreRefMd}
+                  moreRef={moreRef}
                   moreOpen={moreOpen}
                   setMoreOpen={setMoreOpen}
-                  secondaryActive={overflowLinksMd.some((l) => isLinkActive(pathname, l.href))}
-                  links={overflowLinksMd}
+                  onToggle={() => setPrefsOpen(false)}
+                  secondaryActive={desktopOverflowLinks.some((l) => isLinkActive(pathname, l.href))}
+                  links={desktopOverflowLinks}
                   pathname={pathname}
                 />
-              </div>
-              <div className="hidden lg:block xl:hidden">
-                <MoreMenu
-                  moreRef={moreRefLg}
-                  moreOpen={moreOpen}
-                  setMoreOpen={setMoreOpen}
-                  secondaryActive={overflowLinksLg.some((l) => isLinkActive(pathname, l.href))}
-                  links={overflowLinksLg}
-                  pathname={pathname}
-                />
-              </div>
+              )}
             </div>
 
             {/* Right tools: never shrink; compact chrome on narrow desktop */}
@@ -258,11 +207,14 @@ export default function Nav() {
               <button
                 type="button"
                 onClick={() => setCommandOpen(true)}
-                aria-label="Open command palette"
+                aria-label="Open command palette (⌘K)"
                 title="Command palette (⌘K)"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent xl:h-11 xl:w-auto xl:px-2.5 xl:py-2 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
                 <Search size={16} aria-hidden="true" />
+                <span className="hidden text-xs font-medium text-gray-500 xl:inline dark:text-gray-400">
+                  ⌘K
+                </span>
               </button>
 
               {mounted && (
@@ -541,6 +493,7 @@ function MoreMenu({
   moreRef,
   moreOpen,
   setMoreOpen,
+  onToggle,
   secondaryActive,
   links,
   pathname,
@@ -548,6 +501,7 @@ function MoreMenu({
   moreRef: RefObject<HTMLDivElement | null>;
   moreOpen: boolean;
   setMoreOpen: Dispatch<SetStateAction<boolean>>;
+  onToggle?: () => void;
   secondaryActive: boolean;
   links: NavLink[];
   pathname: string;
@@ -559,7 +513,10 @@ function MoreMenu({
         type="button"
         aria-expanded={moreOpen}
         aria-haspopup="menu"
-        onClick={() => setMoreOpen((v) => !v)}
+        onClick={() => {
+          onToggle?.();
+          setMoreOpen((v) => !v);
+        }}
         className={`whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors lg:px-2.5 ${
           secondaryActive || moreOpen
             ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
