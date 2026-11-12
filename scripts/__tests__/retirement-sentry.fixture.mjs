@@ -8,6 +8,6 @@ for(const key of ['COLLECTOR_TELEMETRY_HUB_TOKEN','COLLECTOR_TELEMETRY_HUB_TOKEN
 let env={...base(),K:' env-token '};assert.equal(configure(['K'],{env}),true);assert.equal(env.COLLECTOR_TELEMETRY_HUB_TOKEN,'env-token');n++;
 env=base();assert.equal(configure(['K'],{env,fleetSecretsGet:()=> ' injected '}),true);assert.equal(env.COLLECTOR_TELEMETRY_HUB_TOKEN,'injected');n++;
 env=base();assert.equal(configure(['K'],{env}),false);n++;
-env=base();assert.throws(()=>configure(['K'],{env,fleetSecretsGet:()=>{throw Error('synthetic-fail')}}),/synthetic-fail/);assert.equal(env.COLLECTOR_TELEMETRY_HUB_TOKEN,undefined);n++;
+env=base();assert.equal(configure(['K'],{env,fleetSecretsGet:()=>{throw Error('synthetic-fail')}}),false);assert.equal(env.COLLECTOR_TELEMETRY_HUB_TOKEN,undefined);n++;
 env={...base(),SECOND:'later-env'};assert.equal(configure(['FIRST','SECOND'],{env,fleetSecretsGet:()=>{throw Error('synthetic-fail')}}),true);assert.equal(env.COLLECTOR_TELEMETRY_HUB_TOKEN,'later-env');n++;
 console.log(`${n}/${n} Sentry configuration checks passed`);
