@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
  * Blind / push-manual only — no poll; track cost via Subscription or ingest.
  *
  * Name match is JS case-insensitive (SQLite has no Prisma `mode: "insensitive"`).
- * Uses findMany like ensure-agent-sync-provider so partial prisma test doubles
+ * Uses findMany like ensure-ag***-s**c-provider so partial prisma test doubles
  * that only stub findMany/create still exercise this path safely.
  */
 export async function ensureRoicProviderSeeded(): Promise<void> {

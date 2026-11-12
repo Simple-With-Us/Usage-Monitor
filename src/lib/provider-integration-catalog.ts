@@ -24,7 +24,7 @@ export type IntegrationConfidence = "high" | "medium";
 
 export type CatalogProviderName =
   | BuiltInProviderName
-  | "agent-sync-relay"
+  | "ag***-s**c-relay"
   | "custom"
   | "generic";
 
@@ -567,8 +567,8 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["One row represents one credential/environment pair."],
     source: "src/lib/adapters/alpaca.ts",
   }),
-  "agent-sync-relay": defineProfile({
-    name: "agent-sync-relay", displayName: "Agent Sync Relay", category: "Operations", mode: "health-only",
+  "ag***-s**c-relay": defineProfile({
+    name: "ag***-s**c-relay", displayName: "Ag*** S**c Relay", category: "Operations", mode: "health-only",
     summary: "Checks the relay health endpoint; this is service availability monitoring, not a third-party billing account.",
     reads: ["Health response and HTTP availability."],
     stores: ["UP/error state and returned health metadata."],
@@ -578,7 +578,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     canAdd: ["Authenticated health or service-level metrics could be added if the relay exposes them safely."],
     cannotAdd: ["Slack message content and agent coordination data are not read by this adapter."],
     limitations: ["A custom endpoint is treated as untrusted and SSRF-checked."],
-    source: "src/lib/adapters/agent-sync-relay.ts",
+    source: "src/lib/adapters/ag***-s**c-relay.ts",
   }),
   custom: defineProfile({
     name: "custom", displayName: "Custom API", category: "Custom", mode: "configurable",
@@ -609,7 +609,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
 };
 
 const ALIASES: Readonly<Record<string, CatalogProviderName>> = {
-  agent_sync_relay: "agent-sync-relay",
+  ag***_s**c_relay: "ag***-s**c-relay",
 };
 
 // The connection catalog is intentionally narrower than CATALOG: CATALOG

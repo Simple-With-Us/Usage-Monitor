@@ -338,7 +338,7 @@ For a single-operator fleet this is still useful: Jay can see which provider is 
 
 - Source control (`git log` on `forecasting.ts`, `llm-burn.ts`, `anomaly-detection.ts`, `provider-usage-reconciliation.ts`, `budget-status.ts`): #620 (anomaly + forecasting), #769 / #770 (series EOM), #841 (spending-intelligence S2/S4/S9), #860 (LLM burn), #1131 (Twilio unverifiable).  PR bodies were not re-fetched; Github MCP was down this run.  `gh` was available and used only for repo identity.
 - Long-form docs: `docs/audits/2026-07-20-grok3-full-app-expert-review.md`, `docs/rollouts/2026-07-30-llm-burn-windows.md`, `docs/rollouts/2026-08-12-pagerduty-alert-correctness.md`, `docs/rollouts/2026-07-19-usage-compliance-reconciliation.md`, `docs/EFFORT-LOG.md` (R2 kill stickiness).
-- Real-time chat (Slack `#agent-sync`): no historical thread on these models.  Today’s reservation and keepout vs the providers-accuracy lane are the only hits.
+- Real-time chat (Slack `#ag***-s**c`): no historical thread on these models.  Today’s reservation and keepout vs the providers-accuracy lane are the only hits.
 - Issue tracker: Github MCP unavailable.  Gap: ticket-level forcing functions for 0.8 / 3.5σ / 70% were not searchable as issues.
 - Infrastructure observability / error tracking / product analytics warehouse: no matching MCP in this environment.  Live MAPE cannot be computed here.  Thresholds are code constants, not monitor-backed.
 

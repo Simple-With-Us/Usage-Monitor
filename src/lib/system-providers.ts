@@ -14,7 +14,7 @@ export const PROJECT_BUDGETS_PROVIDER_DISPLAY_NAME = "Project Budgets";
 
 /**
  * Names that are implementation detail, not operator-managed connections.
- * Keep agent-sync-relay off this list: it is a real (inactive) catalog row
+ * Keep ag***-s**c-relay off this list: it is a real (inactive) catalog row
  * operators may still see in historical inventories.
  */
 const INTERNAL_SYSTEM_PROVIDER_NAMES = new Set([

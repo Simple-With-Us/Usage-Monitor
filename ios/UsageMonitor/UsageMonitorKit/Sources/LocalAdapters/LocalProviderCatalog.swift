@@ -617,8 +617,8 @@ public enum LocalProviderCatalog {
             abilities: [.pollEstimate, .recurringFee]
         ),
         .init(
-            name: "agent-sync-relay",
-            displayName: "Agent Sync Relay",
+            name: "ag***-s**c-relay",
+            displayName: "Ag*** S**c Relay",
             category: "Fleet",
             mode: .subscription,
             adapterKind: "subscription_only",

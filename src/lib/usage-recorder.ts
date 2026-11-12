@@ -6,7 +6,7 @@ import {
   isUsageMaintenanceHealthy,
   runUsageMaintenance,
 } from "@/lib/usage-maintenance";
-import { ensureAgentSyncProviderSeeded } from "@/lib/ensure-agent-sync-provider";
+import { ensureAg***S**cProviderSeeded } from "@/lib/ensure-ag***-s**c-provider";
 import { ensureCloudflareFleetProvidersSeeded } from "@/lib/ensure-cloudflare-fleet-providers";
 import { ensureRoicProviderSeeded } from "@/lib/ensure-roic-provider";
 import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
@@ -381,7 +381,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 
   const run = (async () => {
-    await withInternalUsageWriteAdmission(() => ensureAgentSyncProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureAg***S**cProviderSeeded());
     await withInternalUsageWriteAdmission(() => ensureRoicProviderSeeded());
     await withInternalUsageWriteAdmission(() =>
       ensureCloudflareFleetProvidersSeeded()

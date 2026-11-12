@@ -396,7 +396,7 @@ Do not “fix” these without a new incident:
 - Source control: this tree at `8db78b5`; PRs #1180, #1144, #1131, #1223, #1226, #1228; open report-only #1233–#1238 (keepout).
 - Long-form: `docs/litestream.md`, `DEPLOY.md`, `docs/runbooks/sqlite-data-loss-incident.md`, rollouts 2026-08-12 PD, 2026-08-13 Pushover, 2026-08-14 restore-proof, 2026-08-15 weekly R2, 2026-08-16 Computers/`/tmp`, AGENTS.md, 2026-07-20 full-app review.
 - Effort board: `docs/EFFORT-LOG.md` In Progress / Deployed (R2 weekly-only, restore-proof, kill-switch, `/tmp` 503, ST peer Litestream).
-- Slack `#agent-sync`: claim posted 2026-08-17; parallel UM audits reserved the same hour.  No prior “backend durability” claim after 2026-08-15.
+- Slack `#ag***-s**c`: claim posted 2026-08-17; parallel UM audits reserved the same hour.  No prior “backend durability” claim after 2026-08-15.
 - Issue tracker: GitHub MCP unavailable this run; `gh pr list` used instead.
 - Infra observability / Sentry / analytics warehouse: no live prod queries (read-only code audit).  Live restore numbers taken from dated rollouts, not re-measured.
 

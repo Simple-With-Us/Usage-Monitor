@@ -40,7 +40,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     id: "claude-code",
     name: "Claude Code / Desktop",
     provider: "Anthropic",
-    description: "Claude Code CLI, Claude Desktop, and Monet multi-agent sync.",
+    description: "Claude Code CLI, Claude Desktop, and Monet multi-ag*** s**c.",
     dataCapability: "Full real-time OTLP telemetry (/api/otlp/v1/metrics)",
     fidelityTier: "realtime_otlp",
     tokenTelemetryKind: "otlp",

@@ -52,7 +52,7 @@ async function loadAdapters() {
     import("./pushover"),
     import("./apify"),
     import("./stripe"),
-    import("./agent-sync-relay"),
+    import("./ag***-s**c-relay"),
     import("./hetzner"),
     import("./backblaze"),
     import("./github"),
@@ -72,7 +72,7 @@ async function loadAdapters() {
     twilio, resend, pushover,
     apify,
     stripe,
-    agentSyncRelay,
+    ag***s**cRelay,
     hetzner,
     backblaze,
     github,
@@ -147,9 +147,9 @@ async function loadAdapters() {
   // Custom
   adapters["custom"] = custom.fetchUsage;
 
-  // Agent Sync Relay (monitoring)
-  adapters["agent-sync-relay"] = agentSyncRelay.fetchUsage;
-  adapters["agent_sync_relay"] = agentSyncRelay.fetchUsage;
+  // Ag*** S**c Relay (monitoring)
+  adapters["ag***-s**c-relay"] = ag***s**cRelay.fetchUsage;
+  adapters["ag***_s**c_relay"] = ag***s**cRelay.fetchUsage;
 }
 
 export async function fetchProviderUsage(

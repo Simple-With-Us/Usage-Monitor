@@ -16,10 +16,10 @@ or filed as Planned board rows — see the effort board (2026-07-15 MONET reconc
 | `ag/sync-effort-log-deploy` | AG | CONTENT_MERGED | DELETE_SAFE: Single-line docs/EFFORT-LOG.md edit marking the 'Add MIT License' task as Deployed in the repo mirror. |
 | `ag/ui-updates` | AG | CONTENT_MERGED | DELETE_SAFE: UI/UX finalization pass and ProviderTable sorting/date-formatting improvements. |
 | `ag/ui-ux-refinements-clean` | AG | CONTENT_MERGED | DELETE_SAFE: UI/UX refinements for responsiveness/accessibility across login, dashboard, provider-detail, settings pages plus a ProviderCard duplicate-re |
-| `agent/ag-alert-cleanup` | AG | CONTENT_MERGED | DELETE_SAFE: Branch name was reused for two different features over time: (1) originally 'disable noisy Agent Sync Relay / Anthropic must-keep-funded ale |
+| `agent/ag-alert-cleanup` | AG | CONTENT_MERGED | DELETE_SAFE: Branch name was reused for two different features over time: (1) originally 'disable noisy Ag*** S**c Relay / Anthropic must-keep-funded ale |
 | `chore/remove-temp-migration-route` | OTHER | CONTENT_MERGED | DELETE_SAFE: Removes the temporary Postgres-to-SQLite migration route added early in the project's history; part of original repo bootstrap/consolidation |
 | `claude/adapter-resilience` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds per-adapter HTTP timeouts, bounded 429/5xx retry with Retry-After handling and exponential backoff, per-provider request budget, and re |
-| `claude/agent-sync-stanza` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds the AGENTS.md 'Inter-agent coordination' section (Slack #agent-sync channel + AGENT-SYNC.md protocol pointer) and the effort-log-protoc |
+| `claude/ag***-s**c-stanza` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Adds the AGENTS.md 'Inter-agent coordination' section (Slack #ag***-s**c channel + AG***-S**C.md protocol pointer) and the effort-log-protoc |
 | `claude/board-backlog-pass` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Docs-only effort-board reconciliation: marks completed rows and seeds a 2026-07-04 backlog pass. |
 | `claude/board-effort-sync-refinements` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Docs-only: records effort-sync review refinements from PR #40 on the effort board. |
 | `claude/board-nextwave-c2` | CLAUDE | CONTENT_MERGED | DELETE_SAFE: Appends a 'next-wave cycle 2' planning section to docs/EFFORT-LOG.md (repo mirror of the effort board). |
@@ -101,7 +101,7 @@ or filed as Planned board rows — see the effort board (2026-07-15 MONET reconc
 | `codex-render-ready-skip-probe` | CODEX | SUPERSEDED | DELETE_SAFE: A local-only follow-up meant to make Render's /api/ready avoid blocking DB probes in fallback mode — same problem space as codex-render-read |
 | `codex-retention-summary-bounds` | CODEX | SUPERSEDED | DELETE_SAFE: Bounded retention/usage-summary memory: wrapped pruneExternalUsageEvents' select+group+delete in a single transaction to avoid a race with l |
 | `codex-scheduler-admission-current-20260715` | CODEX | SUPERSEDED | DO_NOT_LAND: Attempts to serialize scheduled/internal SQLite writes against ingest admission by narrowing tryAcquireIngestAdmission() to ignore queued in |
-| `codex-scheduler-ingest-serialization` | CODEX | SUPERSEDED | DO_NOT_LAND: Wraps alert-delivery.ts, data-retention.ts, ensure-agent-sync-provider.ts, usage-recorder.ts writes in a FIFO ingest-admission lease (13 fil |
+| `codex-scheduler-ingest-serialization` | CODEX | SUPERSEDED | DO_NOT_LAND: Wraps alert-delivery.ts, data-retention.ts, ensure-ag***-s**c-provider.ts, usage-recorder.ts writes in a FIFO ingest-admission lease (13 fil |
 | `codex-security-provider-billing` | CODEX | SUPERSEDED | DO_NOT_LAND: Adds provider-secret-config.ts, provider-external-billing.ts, migrate-provider-config-secrets.mjs, audit-provider-duplicates.mjs and per-ada |
 | `codex-status-materialization-durability` | CODEX | SUPERSEDED | DO_NOT_LAND: 12-commit series: durable status snapshots, dashboard session rotation, provider integration UX/boundary explainer (ProviderIntegrationDrawe |
 | `codex-telemetry-cost-correctness` | CODEX | SUPERSEDED | DO_NOT_LAND: Single commit fixing OTLP/telemetry cumulative-cost accounting and forecasts: adds otlp/cumulative-state.ts, otlp/mapping-utils.ts, otlp/val |

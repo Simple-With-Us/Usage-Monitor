@@ -12,7 +12,7 @@ describe("provider integration catalog", () => {
     expect(new Set(names)).toEqual(
       new Set([
         ...BUILT_IN_PROVIDERS.filter((provider) => provider.lifecycle == null).map((provider) => provider.name),
-        "agent-sync-relay",
+        "ag***-s**c-relay",
         "custom",
         "generic",
       ])
@@ -58,7 +58,7 @@ describe("provider integration catalog", () => {
     ]) {
       expect(getProviderIntegrationProfile(alias, "builtin").name, alias).toBe("google-ai");
     }
-    expect(getProviderIntegrationProfile("agent_sync_relay").name).toBe("agent-sync-relay");
+    expect(getProviderIntegrationProfile("ag***_s**c_relay").name).toBe("ag***-s**c-relay");
     expect(getProviderIntegrationProfile("private-service", "custom").name).toBe("custom");
     expect(getProviderIntegrationProfile("manual-service", "generic").name).toBe("generic");
     expect(getProviderIntegrationProfile("google-gemini", "push").name).toBe("generic");

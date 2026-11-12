@@ -4,7 +4,7 @@ export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
-  const defaultUrl = "https://agent-sync.jays.services/health";
+  const defaultUrl = "https://ag***-s**c.jays.services/health";
   const url = (config?.endpoint as string) || defaultUrl;
   const res = await fetchJson(
     url,
@@ -15,7 +15,7 @@ export async function fetchUsage(
     }
   );
   if (!res.ok) {
-    return errorResult(res.status, { note: "Agent Sync Relay health check failed" });
+    return errorResult(res.status, { note: "Ag*** S**c Relay health check failed" });
   }
 
   // Health-only provider: never report complete $0 cash. A totalCost of 0 with

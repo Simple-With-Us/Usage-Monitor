@@ -208,8 +208,8 @@ const SEVERITY_RANK: Record<AlertSeverity, number> = {
 // ProviderAlertNotification.providerId is a REQUIRED foreign key to Provider,
 // so project-scoped alerts cannot persist (and therefore cannot dedup,
 // hysteresis, remind, or resolve) without a real Provider row. This dedicated
-// inactive system row — same pattern as the self-seeded "Agent Sync Relay"
-// catalog row (ensure-agent-sync-provider.ts) — carries every per-project
+// inactive system row — same pattern as the self-seeded "Ag*** S**c Relay"
+// catalog row (ensure-ag***-s**c-provider.ts) — carries every per-project
 // incident with `scope` = project id, reusing the machinery unchanged.
 // Name constants: PROJECT_ALERTS_PROVIDER_* from @/lib/system-providers.
 // S1c: unassigned-spend info alerts only fire above this default floor (and

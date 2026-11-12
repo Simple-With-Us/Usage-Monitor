@@ -6,19 +6,19 @@ import { setupPrismaSqliteTestDb } from "./setup-test-db";
 
 let dbPath: string;
 let prisma: typeof import("@/lib/prisma").prisma;
-let fetchUsage: typeof import("../adapters/agent-sync-relay").fetchUsage;
-let ensureAgentSyncProviderSeeded: typeof import("../ensure-agent-sync-provider").ensureAgentSyncProviderSeeded;
+let fetchUsage: typeof import("../adapters/ag***-s**c-relay").fetchUsage;
+let ensureAg***S**cProviderSeeded: typeof import("../ensure-ag***-s**c-provider").ensureAg***S**cProviderSeeded;
 
 beforeAll(async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sync-relay-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag***-s**c-relay-test-"));
   dbPath = path.join(dir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
 
   setupPrismaSqliteTestDb(dbPath);
 
   ({ prisma } = await import("@/lib/prisma"));
-  ({ fetchUsage } = await import("../adapters/agent-sync-relay"));
-  ({ ensureAgentSyncProviderSeeded } = await import("../ensure-agent-sync-provider"));
+  ({ fetchUsage } = await import("../adapters/ag***-s**c-relay"));
+  ({ ensureAg***S**cProviderSeeded } = await import("../ensure-ag***-s**c-provider"));
 });
 
 afterAll(async () => {
@@ -28,7 +28,7 @@ afterAll(async () => {
   }
 });
 
-describe("agent-sync-relay adapter", () => {
+describe("ag***-s**c-relay adapter", () => {
   let fetchMock: any;
 
   beforeEach(() => {
@@ -41,7 +41,7 @@ describe("agent-sync-relay adapter", () => {
 
   it("fetches uptime status successfully when service is up", async () => {
     const mockResponse = new Response(
-      JSON.stringify({ ok: true, service: "agent-sync-push" }),
+      JSON.stringify({ ok: true, service: "ag***-s**c-push" }),
       {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -50,7 +50,7 @@ describe("agent-sync-relay adapter", () => {
     fetchMock.mockResolvedValue(mockResponse);
 
     const res = await fetchUsage("dummy-key", {
-      endpoint: "https://agent-sync.jays.services/health",
+      endpoint: "https://ag***-s**c.jays.services/health",
     });
 
     expect(res.balance).toBeNull();
@@ -59,10 +59,10 @@ describe("agent-sync-relay adapter", () => {
     expect(res.totalRequests).toBeNull();
     expect(res.rawData).toEqual({
       status: "UP",
-      data: { ok: true, service: "agent-sync-push" },
+      data: { ok: true, service: "ag***-s**c-push" },
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://agent-sync.jays.services/health",
+      "https://ag***-s**c.jays.services/health",
       expect.any(Object)
     );
   });
@@ -76,32 +76,32 @@ describe("agent-sync-relay adapter", () => {
 
     await expect(
       fetchUsage("dummy-key", {
-        endpoint: "https://agent-sync.jays.services/health",
+        endpoint: "https://ag***-s**c.jays.services/health",
       })
     ).rejects.toMatchObject({ code: "HTTP_ERROR", status: 500 });
   });
 });
 
-describe("ensureAgentSyncProviderSeeded", () => {
+describe("ensureAg***S**cProviderSeeded", () => {
   beforeEach(async () => {
-    // Delete any existing agent-sync-relay providers for clean state
+    // Delete any existing ag***-s**c-relay providers for clean state
     const providers = await prisma.provider.findMany({
-      where: { name: "agent-sync-relay" },
+      where: { name: "ag***-s**c-relay" },
     });
     for (const p of providers) {
       await prisma.provider.delete({ where: { id: p.id } });
     }
   });
 
-  it("seeds the agent-sync-relay provider if it does not exist", async () => {
-    await ensureAgentSyncProviderSeeded();
+  it("seeds the ag***-s**c-relay provider if it does not exist", async () => {
+    await ensureAg***S**cProviderSeeded();
 
     const provider = await prisma.provider.findFirst({
-      where: { name: "agent-sync-relay" },
+      where: { name: "ag***-s**c-relay" },
     });
 
     expect(provider).toBeDefined();
-    expect(provider?.displayName).toBe("Agent Sync Relay");
+    expect(provider?.displayName).toBe("Ag*** S**c Relay");
     expect(provider?.type).toBe("builtin");
     // Wave F / E17: catalog/health-only — inactive, never sub-daily poll.
     expect(provider?.isActive).toBe(false);
@@ -110,15 +110,15 @@ describe("ensureAgentSyncProviderSeeded", () => {
   });
 
   it("does not create a duplicate if provider already exists", async () => {
-    await ensureAgentSyncProviderSeeded();
+    await ensureAg***S**cProviderSeeded();
     const countAfterFirst = await prisma.provider.count({
-      where: { name: "agent-sync-relay" },
+      where: { name: "ag***-s**c-relay" },
     });
     expect(countAfterFirst).toBe(1);
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureAg***S**cProviderSeeded();
     const countAfterSecond = await prisma.provider.count({
-      where: { name: "agent-sync-relay" },
+      where: { name: "ag***-s**c-relay" },
     });
     expect(countAfterSecond).toBe(1);
   });
@@ -126,14 +126,14 @@ describe("ensureAgentSyncProviderSeeded", () => {
   it("increments the alert revision when disabling an existing active relay", async () => {
     const provider = await prisma.provider.create({
       data: {
-        name: "agent-sync-relay",
-        displayName: "Agent Sync Relay",
+        name: "ag***-s**c-relay",
+        displayName: "Ag*** S**c Relay",
         isActive: true,
         refreshIntervalMin: 15,
       },
     });
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureAg***S**cProviderSeeded();
 
     expect(
       await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })
@@ -147,14 +147,14 @@ describe("ensureAgentSyncProviderSeeded", () => {
   it("raises sub-daily refresh floor on an already-inactive relay", async () => {
     const provider = await prisma.provider.create({
       data: {
-        name: "agent-sync-relay",
-        displayName: "Agent Sync Relay",
+        name: "ag***-s**c-relay",
+        displayName: "Ag*** S**c Relay",
         isActive: false,
         refreshIntervalMin: 60,
       },
     });
 
-    await ensureAgentSyncProviderSeeded();
+    await ensureAg***S**cProviderSeeded();
 
     expect(
       await prisma.provider.findUniqueOrThrow({ where: { id: provider.id } })

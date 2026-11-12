@@ -120,7 +120,7 @@
 - Anomalies poll-snapshot-only (push-primary blind).  
 - OpenRouter verification does not correct cash (audit-only); batch 25/tick.  
 - Reconciliation compares push usage to whole snapshot (fixed-included noise).  
-- Agent-sync as seeded Provider couples coordination into poller (inactive by design).  
+- ag***-s**c as seeded Provider couples coordination into poller (inactive by design).  
 - Ingest rate limit keyed on shared CF IP, not auth identity.  
 - Tombstones never pruned (correct for money, unbounded growth).  
 - VACUUM opt-in; freelist grows.  
