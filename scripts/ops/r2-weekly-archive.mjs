@@ -23,8 +23,10 @@
  * Safety contract — nothing is deleted until a replacement is PROVEN good:
  *   1. Consistent snapshot via SQLite's Online Backup API (no writer downtime).
  *   2. Local PRAGMA integrity_check.
- *   3. gzip, then upload with a real signed payload hash (a truncated body is
- *      rejected by R2 rather than silently stored).
+ *   3. gzip, then upload as an S3 multipart upload — every part signed with a
+ *      real payload hash (a truncated part is rejected by R2 rather than
+ *      silently stored) and retried on its own, so one dropped connection
+ *      costs one ~64 MB part, not the whole ~1.5 GB transfer.
  *   4. Download the object back, re-hash it, decompress it, and run
  *      integrity_check on the DECOMPRESSED copy. That is a genuine weekly
  *      restore drill, not a "the PUT returned 200" check.
@@ -41,7 +43,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
-  readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -51,7 +53,8 @@ import { mkdtempSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { createGzip, gunzipSync } from "node:zlib";
+import { createGunzip, createGzip } from "node:zlib";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { backup, DatabaseSync } from "node:sqlite";
 
@@ -62,15 +65,25 @@ const DEFAULTS = {
   bucket: "usage-monitor-prod-v3",
   prefix: "weekly/",
   region: "auto",
-  // 2 generations (~100 MB compressed) against a 10 GiB free tier. The owner's
-  // ask was "delete the old one once the new one is verified"; keeping one extra
-  // generation still bounds storage but leaves an escape hatch if a structurally
-  // valid snapshot turns out to be logically wrong. Set to 1 for strict
-  // one-copy-only behaviour.
+  // Jay 2026-10-29 fleet policy: keep the newest 2 weekly generations (at most
+  // ~2 weeks, ~100 MB compressed against a 10 GiB free tier), matching the privacy-policy
+  // copy in src/app/privacy/page.tsx. Prune still runs only after the fresh
+  // upload is verified. R2_ARCHIVE_KEEP_GENERATIONS / --keep override this.
   keepGenerations: 2,
+  // Jay 2026-10-30: "the 2 weeks counts from day 1". Hard cap on top of
+  // keepGenerations: after a verified upload, any archive more than 14 days
+  // older than the fresh one is pruned, so a skipped/failed week or a raised
+  // R2_ARCHIVE_KEEP_GENERATIONS can never keep a copy past 2 weeks.
+  maxAgeDays: 14,
   statusPath: "/data/.r2-archive-status.json",
   // Pages per sqlite3_backup_step(); matches the pre-migration backup default.
   backupRatePages: 100,
+  // A SIGKILLed run skips the `finally` cleanup and leaves its whole work dir
+  // behind — multi-GB on the volume the app gates on for free space. The next
+  // run reclaims those leftovers, but only ones old enough that no run can
+  // still be using them (an overlapping invocation's dir is still being
+  // written to).
+  staleWorkDirMs: 24 * 60 * 60 * 1000,
 };
 
 function log(message) {
@@ -165,11 +178,29 @@ export function isManagedArchiveKey(key, prefix) {
   return /^prod-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.db\.gz$/.test(remainder);
 }
 
+/** Epoch ms of a `prod-YYYY-MM-DDTHH-MM-SSZ.db.gz` archive key, or NaN. */
+export function archiveKeyTimeMs(key) {
+  const match = /prod-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z\.db\.gz$/.exec(
+    typeof key === "string" ? key : ""
+  );
+  if (!match) return Number.NaN;
+  return Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}Z`);
+}
+
 /**
  * Which existing objects to delete, given the freshly uploaded key.
+ * Keeps the newest `keepGenerations` (fresh upload included), then also drops
+ * any kept archive more than `maxAgeDays` older than the fresh upload. The
+ * fresh upload itself is never a candidate.
  * Pure so the retention rule is unit-testable without touching R2.
  */
-export function selectPruneTargets(objects, freshKey, keepGenerations, prefix = DEFAULTS.prefix) {
+export function selectPruneTargets(
+  objects,
+  freshKey,
+  keepGenerations,
+  prefix = DEFAULTS.prefix,
+  maxAgeDays = DEFAULTS.maxAgeDays
+) {
   const archives = objects
     .filter((o) => isManagedArchiveKey(o.key, prefix))
     .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0)); // newest first
@@ -178,6 +209,14 @@ export function selectPruneTargets(objects, freshKey, keepGenerations, prefix = 
   for (const object of archives) {
     if (keep.size >= keepGenerations) break;
     keep.add(object.key);
+  }
+  const freshMs = archiveKeyTimeMs(freshKey);
+  const referenceMs = Number.isFinite(freshMs) ? freshMs : Date.now();
+  const cutoffMs = referenceMs - maxAgeDays * 24 * 60 * 60 * 1000;
+  for (const key of [...keep]) {
+    if (key === freshKey) continue;
+    const keyMs = archiveKeyTimeMs(key);
+    if (Number.isFinite(keyMs) && keyMs < cutoffMs) keep.delete(key);
   }
   return archives.filter((o) => !keep.has(o.key)).map((o) => o.key);
 }
@@ -220,6 +259,201 @@ function writeStatus(statusPath, payload) {
   }
 }
 
+/**
+ * Multipart upload. The single-PUT upload this replaces died mid-transfer
+ * twice on 2026-11-07 with `S3 PUT transport failed (UND_ERR_SOCKET)` after
+ * several minutes: one dropped connection voided a ~1.5 GB transfer that had
+ * to restart from byte zero. Parts bound the blast radius — each is signed
+ * with its own payload hash and retried up to 3 times, and only an
+ * unrecoverable part aborts the upload (AbortMultipartUpload, so no orphan
+ * parts linger against the bucket's storage). The completed object is
+ * indistinguishable from a single-PUT one: the metadata rides on
+ * CreateMultipartUpload, and the download-back verification in runArchive
+ * still proves the stored bytes match the local hash before anything prunes.
+ */
+const MULTIPART_PART_BYTES = 64 * 1024 * 1024;
+const MULTIPART_MAX_PART_ATTEMPTS = 3;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function xmlEscape(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Streaming SHA-256 + byte count of a file, without loading it into memory. */
+async function hashFile(path) {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+    bytes += chunk.length;
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+/** Read exactly `length` bytes starting at `start` — one part's worth. */
+async function readFileRange(path, start, length) {
+  if (length === 0) return Buffer.alloc(0);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of createReadStream(path, { start, end: start + length - 1 })) {
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  if (total !== length) {
+    throw new Error(`short read on ${path}: wanted ${length} bytes at offset ${start}, got ${total}`);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Every failure of the multipart sequence must classify as `upload_failed`.
+ * Part failures already do — the signer reports them as `S3 PUT ...`, which
+ * `classifyFailure` maps. Create/complete failures arrive as `S3 POST ...`;
+ * re-prefix those so the status file keeps the reason vocabulary the
+ * single-PUT upload produced.
+ */
+function asUploadError(error, phase) {
+  if (typeof error?.message === "string" && error.message.startsWith("S3 PUT")) return error;
+  return new Error(`S3 PUT multipart ${phase} failed: ${error?.message ?? String(error)}`);
+}
+
+async function uploadPartWithRetry({ creds, bucket, key, uploadId, partNumber, body, fetchImpl }) {
+  let lastError;
+  for (let attempt = 1; attempt <= MULTIPART_MAX_PART_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await s3Request({
+        method: "PUT",
+        creds,
+        bucket,
+        key,
+        query: { partNumber: String(partNumber), uploadId },
+        body,
+        fetchImpl,
+      });
+      const etag = response.headers?.get?.("etag");
+      if (!etag) throw new Error(`S3 PUT part ${partNumber} response carried no ETag`);
+      return etag;
+    } catch (error) {
+      lastError = error;
+      if (attempt < MULTIPART_MAX_PART_ATTEMPTS) {
+        log(`part ${partNumber} attempt ${attempt} failed (${error.message}); retrying`);
+        await sleep(500 * attempt);
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function abortMultipartUpload({ creds, bucket, key, uploadId, fetchImpl }) {
+  try {
+    await s3Request({
+      method: "DELETE",
+      creds,
+      bucket,
+      key,
+      query: { uploadId },
+      expectStatuses: [200, 204, 404],
+      fetchImpl,
+    });
+  } catch (error) {
+    // Best effort: a stranded upload costs a little storage until the bucket
+    // lifecycle reaps it, but masking the real upload failure would cost the
+    // diagnosis, so the original error is the one that propagates.
+    log(`WARNING: could not abort multipart upload ${uploadId}: ${error.message}`);
+  }
+}
+
+export async function uploadMultipart({
+  creds,
+  bucket,
+  key,
+  filePath,
+  fileBytes,
+  headers = {},
+  fetchImpl,
+  partBytes = MULTIPART_PART_BYTES,
+}) {
+  // Fail fast on nonsense geometry: partBytes 0 makes partCount Infinity and
+  // the part loop below would issue empty PUTs forever instead of failing.
+  if (!Number.isSafeInteger(fileBytes) || fileBytes < 0) {
+    throw new Error(`uploadMultipart fileBytes must be a non-negative integer, got ${fileBytes}`);
+  }
+  if (!Number.isSafeInteger(partBytes) || partBytes <= 0) {
+    throw new Error(`uploadMultipart partBytes must be a positive integer, got ${partBytes}`);
+  }
+  let uploadId;
+  try {
+    const createResponse = await s3Request({
+      method: "POST",
+      creds,
+      bucket,
+      key,
+      query: { uploads: "" },
+      headers,
+      fetchImpl,
+    });
+    const createXml = await createResponse.text();
+    uploadId = /<UploadId>([\s\S]*?)<\/UploadId>/.exec(createXml)?.[1];
+    if (!uploadId) throw new Error("CreateMultipartUpload response carried no UploadId");
+  } catch (error) {
+    throw asUploadError(error, "create");
+  }
+
+  try {
+    const partCount = Math.max(1, Math.ceil(fileBytes / partBytes));
+    log(`multipart upload ${uploadId}: ${partCount} part(s) of up to ${partBytes} bytes`);
+    const parts = [];
+    for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
+      const start = (partNumber - 1) * partBytes;
+      const body = await readFileRange(filePath, start, Math.min(partBytes, fileBytes - start));
+      const etag = await uploadPartWithRetry({
+        creds,
+        bucket,
+        key,
+        uploadId,
+        partNumber,
+        body,
+        fetchImpl,
+      });
+      parts.push({ partNumber, etag });
+    }
+    const completeBody =
+      `<?xml version="1.0" encoding="UTF-8"?>\n<CompleteMultipartUpload>` +
+      parts
+        .map(
+          (part) =>
+            `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>${xmlEscape(part.etag)}</ETag></Part>`
+        )
+        .join("") +
+      `</CompleteMultipartUpload>`;
+    const completeResponse = await s3Request({
+      method: "POST",
+      creds,
+      bucket,
+      key,
+      query: { uploadId },
+      body: completeBody,
+      headers: { "content-type": "application/xml" },
+      fetchImpl,
+    });
+    const completeXml = await completeResponse.text();
+    // S3 answers a failed completion with HTTP 200 and an <Error> body, and
+    // R2 inherits the quirk. Without this check a failed completion reads as
+    // success and the verification GET 404s with a misleading reason.
+    if (completeXml.includes("<Error>")) {
+      const code = /<Code>([\s\S]*?)<\/Code>/.exec(completeXml)?.[1] ?? "unknown";
+      throw new Error(`CompleteMultipartUpload returned an error body (code ${code})`);
+    }
+    return { uploadId, partCount };
+  } catch (error) {
+    await abortMultipartUpload({ creds, bucket, key, uploadId, fetchImpl });
+    throw asUploadError(error, "upload");
+  }
+}
+
 export async function runArchive({ env = process.env, argv = [], fetchImpl } = {}) {
   const options = parseArgs(argv);
   const config = resolveArchiveConfig(env, { keep: options.keep });
@@ -243,6 +477,21 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
   }
 
   mkdirSync(config.workDirBase, { recursive: true });
+  // Reclaim work dirs abandoned by a killed run before claiming a new one. The
+  // age guard keeps this from deleting the dir of an overlapping invocation,
+  // which is still being written to.
+  const staleCutoff = Date.now() - DEFAULTS.staleWorkDirMs;
+  for (const entry of readdirSync(config.workDirBase, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("run-")) continue;
+    const stalePath = join(config.workDirBase, entry.name);
+    try {
+      if (statSync(stalePath).mtimeMs >= staleCutoff) continue;
+    } catch {
+      continue; // vanished underneath us; nothing to reclaim
+    }
+    log(`reclaiming stale work dir from a previous run: ${entry.name}`);
+    rmSync(stalePath, { recursive: true, force: true });
+  }
   const workDir = mkdtempSync(join(config.workDirBase, "run-"));
   const snapshotPath = join(workDir, "snapshot.db");
   const compressedPath = join(workDir, "snapshot.db.gz");
@@ -256,13 +505,19 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     log(`snapshot verified (${snapshotBytes} bytes)`);
 
     await gzipFile(snapshotPath, compressedPath);
-    // Read once, then derive size, hash, and the upload body from those exact
-    // bytes. A stat-then-hash-then-read sequence is a genuine TOCTOU race: the
-    // file could change between steps and we would advertise a hash that does
-    // not describe what we actually uploaded.
-    const compressedBuffer = readFileSync(compressedPath);
-    const compressedBytes = compressedBuffer.length;
-    const localHash = createHash("sha256").update(compressedBuffer).digest("hex");
+    // The snapshot is spent the moment it is gzipped — only `snapshotBytes` is
+    // read after this. Drop it rather than carry a second full-size copy
+    // through the rest of the run on a volume with a free-space floor.
+    rmSync(snapshotPath, { force: true });
+    // Hash the gzip in one streaming pass, then read upload parts back from
+    // the same file. The old design read the whole gzip into memory so the
+    // advertised hash provably described the uploaded bytes; that guarantee
+    // now comes from where the file lives (this run's private work dir —
+    // nothing else can write to it) plus the download-back verification
+    // below, which still refuses to prune anything unless the stored object
+    // re-hashes to exactly this value. What changes is only the memory: the
+    // gzip is ~1.5 GB and no longer has to fit in a Buffer to be uploaded.
+    const { bytes: compressedBytes, sha256: localHash } = await hashFile(compressedPath);
     log(`compressed to ${compressedBytes} bytes (sha256 ${localHash.slice(0, 12)}...)`);
 
     const key = archiveKeyFor(config.prefix, startedAt);
@@ -273,12 +528,12 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     }
 
     log(`uploading ${key}`);
-    await s3Request({
-      method: "PUT",
+    await uploadMultipart({
       creds: config.creds,
       bucket: config.bucket,
       key,
-      body: compressedBuffer,
+      filePath: compressedPath,
+      fileBytes: compressedBytes,
       headers: {
         "content-type": "application/gzip",
         // Survives independently of this script so a human can verify by hand.
@@ -288,6 +543,9 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
       },
       fetchImpl,
     });
+    // The upload is complete; the on-disk gzip is redundant from here, and
+    // the verification download below needs the room more.
+    rmSync(compressedPath, { force: true });
 
     // ---- Verification: prove the remote object restores, not just that it exists.
     log("verifying uploaded object (download, re-hash, decompress, integrity_check)");
@@ -298,25 +556,45 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
       key,
       fetchImpl,
     });
-    const downloaded = Buffer.from(await response.arrayBuffer());
-
-    // Verify BEFORE anything touches the filesystem. Once the hash matches,
-    // these bytes are provably the ones we just uploaded, so the raw response
-    // body never needs to be persisted at all — only the decompressed database
-    // is written, and only because SQLite needs a file to open.
-    const remoteHash = createHash("sha256").update(downloaded).digest("hex");
-    if (remoteHash !== localHash) {
+    // Stream the download in two passes, never holding it in memory: pass 1
+    // hashes the compressed bytes into a temp .gz, pass 2 gunzips that file
+    // to the verify database. The decompressed database is now ~3 GB, past
+    // Node's 2 GiB Buffer cap, so the old arrayBuffer()/gunzipSync pair threw
+    // on every run and prune (below) never executed. Both copies land only in
+    // this run's temp work dir, and prune is still gated on hash + size +
+    // integrity all passing.
+    if (!response.body) throw new Error("S3 GET returned no body — keeping all existing archives");
+    const remoteHash = createHash("sha256");
+    const hashTap = new Transform({
+      transform(chunk, _encoding, callback) {
+        remoteHash.update(chunk);
+        callback(null, chunk);
+      },
+    });
+    const downloadedPath = join(workDir, "verify.db.gz");
+    await pipeline(Readable.fromWeb(response.body), hashTap, createWriteStream(downloadedPath, { mode: 0o600 }));
+    const remoteDigest = remoteHash.digest("hex");
+    if (remoteDigest !== localHash) {
       throw new Error(
-        `uploaded object hash mismatch: local ${localHash} vs remote ${remoteHash} — keeping all existing archives`
+        `uploaded object hash mismatch: local ${localHash} vs remote ${remoteDigest} — keeping all existing archives`
       );
     }
-    const restored = gunzipSync(downloaded);
-    if (restored.length !== snapshotBytes) {
+    let restoredBytes = 0;
+    const countTap = new Transform({
+      transform(chunk, _encoding, callback) {
+        restoredBytes += chunk.length;
+        callback(null, chunk);
+      },
+    });
+    await pipeline(createReadStream(downloadedPath), createGunzip(), countTap, createWriteStream(restoredPath, { mode: 0o600 }));
+    // The compressed copy is spent once gunzipped — free it before the
+    // multi-GB restore lands next to it.
+    rmSync(downloadedPath, { force: true });
+    if (restoredBytes !== snapshotBytes) {
       throw new Error(
-        `restored size mismatch: ${restored.length} vs ${snapshotBytes} — keeping all existing archives`
+        `restored size mismatch: ${restoredBytes} vs ${snapshotBytes} — keeping all existing archives`
       );
     }
-    writeFileSync(restoredPath, restored, { mode: 0o600 });
     assertIntegrity(restoredPath);
     log("verification passed — the archive restores to a byte-identical, integrity-checked database");
 
@@ -364,7 +642,7 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     });
     log(
       `done — ${key} verified, ${pruneTargets.length} superseded archive(s) pruned, ` +
-        `${config.keepGenerations} generation(s) retained`
+        `up to ${config.keepGenerations} generation(s) retained, none older than ${DEFAULTS.maxAgeDays} days`
     );
     return result;
   } finally {

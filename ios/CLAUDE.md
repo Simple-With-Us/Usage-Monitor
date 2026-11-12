@@ -4,8 +4,8 @@ Two shipped apps share one XcodeGen project and one Swift package:
 
 | App | Bundle ID | Scheme | Entry |
 |-----|-----------|--------|-------|
-| Usage Client Monitor | `com.simplewithus.usage.client.ios` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
-| Usage Local Monitor | `com.simplewithus.usage.local.ios` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
+| Usage Monitor Client | `com.simplewithus.usage.client.ios` | `UsageMonitor` | `App/UsageMonitorApp.swift` (talks to the server) |
+| Usage Monitor Local | `com.simplewithus.usage.local.ios` | `LocalUsageMonitor` | `LocalApp/LocalUsageMonitorApp.swift` (on-device, no server) |
 
 **Project:** `ios/UsageMonitor/UsageMonitor.xcodeproj`
 **XcodeGen:** `ios/UsageMonitor/project.yml` — edit this, then `xcodegen generate`. Do not hand-edit `project.pbxproj`.
@@ -13,7 +13,7 @@ Two shipped apps share one XcodeGen project and one Swift package:
 **Team:** `CC8UTF7ATG`
 **Ship:** GitHub-hosted `macos-latest` via `.github/workflows/ios-ship.yml` (`scripts/ios-ship-testflight.sh` → in-repo `scripts/ios-fleet/`). LocalUsageMonitor stays skipped. Do not exec `/Users/jay/apps/ios-fleet` on a hosted runner. Do not mint a new ASC key.
 
-Binding fleet rule: `/Users/jay/apps/AGENT-SYNC.md` § iOS agent build loop. `xcodebuild` / `xcrun simctl` via bash are pre-approved. Do not ask. Do not stand up or narrate Xcode MCP.
+Binding fleet rule: `/Users/jay/apps/FLEET-PROTOCOL.md` § iOS agent build loop. `xcodebuild` / `xcrun simctl` via bash are pre-approved. Do not ask. Do not stand up or narrate Xcode MCP.
 
 ## Build & test
 

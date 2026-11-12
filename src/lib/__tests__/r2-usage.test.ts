@@ -9,6 +9,7 @@ import {
   enforceR2AutoDisable,
   clearR2AutoDisable,
   hasR2AutoResumeMarker,
+  isR2EmergencyAlertSent,
   R2_AUTO_RESUMED_FLAG_FILENAME,
   sendPushoverNotification,
   formatDailyPushoverMessage,
@@ -43,16 +44,15 @@ import {
   __resetR2UsageStateForTests,
 } from "../r2-usage";
 
-// Flag files live under /data when the persistent volume exists (production
-// containers); these tests exercise the private mkdtemp fallback used
-// everywhere else.
-const hasDataVolume = fs.existsSync("/data");
-
 describe("R2 usage monitoring & auto-disable", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
     process.env = { ...originalEnv };
+    delete (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"];
+    delete process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE;
+    delete process.env.LITESTREAM_R2_SUPERVISOR_PID;
+    delete process.env.APP_STARTUP_WRAPPER;
     delete process.env.LITESTREAM_EMERGENCY_DISABLE;
     delete process.env.R2_WRITES_DISABLED;
     delete process.env.PUSHOVER_USER_KEY;
@@ -1109,13 +1109,20 @@ describe("R2 usage monitoring & auto-disable", () => {
     expect(st?.overallOnTrackToExceed70Pct).toBe(true);
   });
 
-  it("enforces R2 auto-disable when emergency flag or env is set", () => {
+  it("preserves B2 replication while enforcing the independent R2 archive kill", async () => {
     expect(isR2AutoDisabled()).toBe(false);
 
-    enforceR2AutoDisable("Test 90% breach");
+    process.env.LITESTREAM_ACTIVE = "true";
+    process.env.LITESTREAM_S3_ENDPOINT = "s3.us-west-004.backblazeb2.com";
+    const setCheckpoint = vi.fn(async () => {});
+    (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = setCheckpoint;
+    await enforceR2AutoDisable("Test 90% breach");
     expect(isR2AutoDisabled()).toBe(true);
     expect(process.env.LITESTREAM_EMERGENCY_DISABLE).toBe("true");
     expect(process.env.R2_WRITES_DISABLED).toBe("true");
+    expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+    expect(setCheckpoint).not.toHaveBeenCalled();
+    expect(fs.existsSync(__getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME))).toBe(true);
   });
 
   // Regression: production sat kill-switched from 2026-08-04 to 2026-08-12
@@ -1124,9 +1131,23 @@ describe("R2 usage monitoring & auto-disable", () => {
   // every maintenance-cycle resume died with the process and the next restart
   // re-injected the variable. The resume has to outlive the process.
   describe("durable auto-resume over an env-pinned kill switch", () => {
-    // These write real flag files; on a host that has /data (production
-    // containers) __resetR2UsageStateForTests only clears the mkdtemp
-    // fallback, so clean both up explicitly.
+    function configureManagedR2Supervisor(active: boolean, watcherActive = active): void {
+      process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
+      if (watcherActive) {
+        process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "true";
+        process.env.LITESTREAM_R2_SUPERVISOR_PID = String(process.pid);
+      } else {
+        process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "false";
+        delete process.env.LITESTREAM_R2_SUPERVISOR_PID;
+      }
+      process.env.LITESTREAM_S3_BUCKET = "test-r2-bucket";
+      process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
+      process.env.LITESTREAM_S3_ACCESS_KEY_ID = "test-access-key";
+      process.env.LITESTREAM_S3_SECRET_ACCESS_KEY = "test-secret-key";
+      process.env.LITESTREAM_ACTIVE = active ? "true" : "false";
+    }
+
+    // These write isolated flag files; clean them up explicitly between cases.
     afterEach(() => {
       for (const name of [R2_DISABLED_FLAG_FILENAME, R2_AUTO_RESUMED_FLAG_FILENAME]) {
         try {
@@ -1143,12 +1164,325 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
-    it("overrides an env-set kill switch once auto-resume has recorded a marker", () => {
+    it("leaves an already-healthy R2 checkpoint owner unchanged on clear", async () => {
+      configureManagedR2Supervisor(true);
+      const checkpoint = vi.fn(async () => {
+        throw new Error("healthy R2 should not transfer checkpoint ownership");
+      });
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await clearR2AutoDisable("idempotent healthy clear");
+
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+      expect(hasR2AutoResumeMarker()).toBe(false);
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("hands checkpoint ownership to and from the R2 supervisor around kill and resume", async () => {
+      configureManagedR2Supervisor(true);
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+        };
+
+      await enforceR2AutoDisable("test R2 threshold");
+      expect(checkpointChanges).toEqual([1_000]);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      await clearR2AutoDisable("test R2 recovery");
+      expect(checkpointChanges).toEqual([1_000, 0]);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+      expect(isR2AutoDisabled()).toBe(false);
+      expect(hasR2AutoResumeMarker()).toBe(true);
+    });
+
+    it("defers resume until restart when R2 booted without its watcher", async () => {
+      configureManagedR2Supervisor(false, false);
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled at boot\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+        };
+
+      await clearR2AutoDisable("boot recovery");
+
+      expect(checkpointChanges).toEqual([]);
+      expect(hasR2AutoResumeMarker()).toBe(true);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("does not claim R2 replication resumed without the managed supervisor config", async () => {
+      process.env.LITESTREAM_S3_ENDPOINT = "account.r2.cloudflarestorage.com";
+      process.env.APP_STARTUP_WRAPPER = "start-with-litestream-v2";
+      process.env.LITESTREAM_R2_SUPERVISOR_ACTIVE = "false";
+      process.env.LITESTREAM_R2_SUPERVISOR_PID = "2147483647";
+      process.env.LITESTREAM_ACTIVE = "false";
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled at boot\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
+      const checkpoint = vi.fn(async () => {});
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await clearR2AutoDisable("resume with no supervisor");
+
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("does not claim checkpoint ownership when the recorded watcher has exited", async () => {
+      configureManagedR2Supervisor(false);
+      process.env.LITESTREAM_R2_SUPERVISOR_PID = "2147483647";
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled at boot\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
+      const checkpoint = vi.fn(async () => {});
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await clearR2AutoDisable("resume with an exited watcher");
+
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(hasR2AutoResumeMarker()).toBe(true);
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
+    it("keeps the R2 kill engaged and inactive when a checkpoint transition fails", async () => {
+      configureManagedR2Supervisor(true);
+      const checkpoint = vi.fn(async () => {
+        throw new Error("sqlite pragma rejected");
+      });
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+
+      await expect(enforceR2AutoDisable("test R2 threshold")).rejects.toThrow(
+        "R2 kill persisted but SQLite checkpoint handoff failed"
+      );
+      expect(checkpoint).toHaveBeenCalledWith(1_000);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      await expect(clearR2AutoDisable("test R2 recovery")).rejects.toThrow(
+        "sqlite pragma rejected"
+      );
+      expect(checkpoint).toHaveBeenCalledWith(0);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+    });
+
+    it("retries a failed kill checkpoint handoff at the next maintenance check", async () => {
+      configureManagedR2Supervisor(true);
+      let failFirstHandoff = true;
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+          if (pages === 1_000 && failFirstHandoff) {
+            failFirstHandoff = false;
+            throw new Error("transient pragma failure");
+          }
+        };
+
+      await expect(enforceR2AutoDisable("transient checkpoint failure")).rejects.toThrow(
+        "R2 kill persisted but SQLite checkpoint handoff failed"
+      );
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+
+      const deniedListRequest: typeof fetch = async () =>
+        new Response("AccessDenied", { status: 403 });
+      await runR2UsageCheck(deniedListRequest);
+      expect(checkpointChanges).toEqual([1_000, 1_000]);
+
+      await runR2UsageCheck(deniedListRequest);
+      expect(checkpointChanges).toEqual([1_000, 1_000]);
+      expect(isR2AutoDisabled()).toBe(true);
+    });
+
+    it("finalizes and sends the emergency alert after a failed fail-closed handoff", async () => {
+      configureManagedR2Supervisor(true);
+      vi.stubEnv("NODE_ENV", "production");
+      process.env.PUSHOVER_USER_KEY = "test-user";
+      process.env.PUSHOVER_USAGE_API_TOKEN = "test-app";
+      const checkpoint = vi.fn(async () => {
+        throw new Error("transient pragma failure");
+      });
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] = checkpoint;
+      const requests: string[] = [];
+      const fetchImpl: typeof fetch = async (input) => {
+        const url = String(input);
+        requests.push(url);
+        return url.includes("list-type=2")
+          ? new Response("AccessDenied", { status: 403 })
+          : new Response("ok", { status: 200 });
+      };
+
+      const assessment = await runR2UsageCheck(
+        fetchImpl,
+        new Date("2026-10-30T15:00:00.000Z")
+      );
+
+      expect(checkpoint).toHaveBeenCalledWith(1_000);
+      expect(assessment.autoDisabled).toBe(true);
+      expect(assessment.checkpointTransitionError).toBe(
+        "R2 fail-closed kill persisted; checkpoint handoff is pending"
+      );
+      expect(isR2EmergencyAlertSent()).toBe(true);
+      expect(requests).toContain("https://api.pushover.net/1/messages.json");
+    });
+
+    it("rolls checkpoint ownership back when atomic resume-marker preparation fails", async () => {
+      configureManagedR2Supervisor(true);
+      const disabledPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+      fs.writeFileSync(disabledPath, "disabled before resume\n", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+        };
+      const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+
+      await expect(clearR2AutoDisable("marker write failure")).rejects.toThrow(
+        "Failed writing R2 auto-resume marker"
+      );
+      write.mockRestore();
+
+      expect(checkpointChanges).toEqual([0, 1_000]);
+      expect(fs.existsSync(disabledPath)).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+    });
+
+    it("rolls back an uncommitted resume when old kill-flag cleanup fails", async () => {
+      configureManagedR2Supervisor(true);
+      const disabledPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+      fs.writeFileSync(disabledPath, "disabled before resume\n", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+        };
+      const unlink = fs.unlinkSync.bind(fs);
+      const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation((filePath) => {
+        if (String(filePath) === disabledPath) throw new Error("permission denied");
+        return unlink(filePath);
+      });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(clearR2AutoDisable("kill-flag cleanup failure")).rejects.toThrow(
+        "Failed clearing R2 emergency disable flag"
+      );
+      unlinkSpy.mockRestore();
+      log.mockRestore();
+
+      expect(checkpointChanges).toEqual([0, 1_000]);
+      expect(fs.existsSync(disabledPath)).toBe(true);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+    });
+
+    it("keeps a fresh kill authoritative if removing an old resume marker fails", async () => {
+      configureManagedR2Supervisor(true);
+      const markerPath = __getR2FlagFilePathForTests(R2_AUTO_RESUMED_FLAG_FILENAME);
+      const disabledPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+      fs.writeFileSync(markerPath, "older resume\n", { encoding: "utf8", mode: 0o600 });
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+        };
+      const unlink = fs.unlinkSync.bind(fs);
+      const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation((filePath) => {
+        if (String(filePath) === markerPath) throw new Error("permission denied");
+        return unlink(filePath);
+      });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await enforceR2AutoDisable("fresh kill after resume");
+      unlinkSpy.mockRestore();
+      log.mockRestore();
+
+      expect(checkpointChanges).toEqual([1_000]);
+      expect(fs.existsSync(markerPath)).toBe(true);
+      expect(fs.existsSync(disabledPath)).toBe(true);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+    });
+
+    it("serializes an in-flight resume before a newer kill transition", async () => {
+      configureManagedR2Supervisor(true);
+      process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
+      process.env.R2_WRITES_DISABLED = "true";
+      fs.writeFileSync(
+        __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME),
+        "disabled before concurrent transition\n",
+        { encoding: "utf8", mode: 0o600 }
+      );
+      let releaseCheckpoint!: () => void;
+      const checkpointStarted = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      let markCheckpointReady!: () => void;
+      const checkpointReady = new Promise<void>((resolve) => {
+        markCheckpointReady = resolve;
+      });
+      const checkpointChanges: number[] = [];
+      (globalThis as Record<string, unknown>)["__apiUsageMonitorSetWalAutocheckpoint"] =
+        async (pages: number) => {
+          checkpointChanges.push(pages);
+          if (pages === 0) {
+            markCheckpointReady();
+            await checkpointStarted;
+          }
+        };
+
+      const resume = clearR2AutoDisable("older resume");
+      await checkpointReady;
+      const kill = enforceR2AutoDisable("newer kill");
+      releaseCheckpoint();
+      await Promise.all([resume, kill]);
+
+      expect(checkpointChanges).toEqual([0, 1_000]);
+      expect(hasR2AutoResumeMarker()).toBe(false);
+      expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+      expect(isR2AutoDisabled()).toBe(true);
+    });
+
+    it("overrides an env-set kill switch once auto-resume has recorded a marker", async () => {
       process.env.LITESTREAM_EMERGENCY_DISABLE = "true";
       process.env.R2_WRITES_DISABLED = "true";
       expect(isR2AutoDisabled()).toBe(true);
 
-      clearR2AutoDisable("storage 4.4% < 85% resume threshold");
+      await clearR2AutoDisable("storage 4.4% < 85% resume threshold");
       expect(hasR2AutoResumeMarker()).toBe(true);
       expect(isR2AutoDisabled()).toBe(false);
 
@@ -1160,11 +1494,11 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(false);
     });
 
-    it("lets a fresh breach supersede an earlier resume", () => {
-      clearR2AutoDisable("first resume");
+    it("lets a fresh breach supersede an earlier resume", async () => {
+      await clearR2AutoDisable("first resume");
       expect(isR2AutoDisabled()).toBe(false);
 
-      enforceR2AutoDisable("storage back over 90%");
+      await enforceR2AutoDisable("storage back over 90%");
       expect(hasR2AutoResumeMarker()).toBe(false);
       expect(isR2AutoDisabled()).toBe(true);
 
@@ -1175,8 +1509,8 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
-    it("lets an explicit persisted kill flag win over a stale resume marker", () => {
-      clearR2AutoDisable("resumed earlier");
+    it("lets an explicit persisted kill flag win over a stale resume marker", async () => {
+      await clearR2AutoDisable("resumed earlier");
       expect(isR2AutoDisabled()).toBe(false);
 
       // Hand-written flag file, the documented operator override — the marker
@@ -1190,10 +1524,10 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(isR2AutoDisabled()).toBe(true);
     });
 
-    it.skipIf(hasDataVolume)(
+    it(
       "writes the resume marker owner-only, with the reason and how to undo it",
-      () => {
-        clearR2AutoDisable("storage 4.4% < 85% resume threshold");
+      async () => {
+        await clearR2AutoDisable("storage 4.4% < 85% resume threshold");
 
         const markerPath = __getR2FlagFilePathForTests(R2_AUTO_RESUMED_FLAG_FILENAME);
         const fd = fs.openSync(markerPath, "r");
@@ -1210,7 +1544,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     );
   });
 
-  it.skipIf(hasDataVolume)(
+  it(
     "places fallback flag files in a private per-process mkdtemp directory, not a predictable shared temp path",
     () => {
       const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
@@ -1228,10 +1562,19 @@ describe("R2 usage monitoring & auto-disable", () => {
     }
   );
 
-  it.skipIf(hasDataVolume)(
+  it("keeps test flag files isolated when a test enables production behavior", () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
+
+    expect(flagPath).not.toBe(path.join("/data", R2_DISABLED_FLAG_FILENAME));
+    expect(path.dirname(path.dirname(flagPath))).toBe(path.resolve(os.tmpdir()));
+  });
+
+  it(
     "writes flag files with owner-only permissions and the expected content",
-    () => {
-      enforceR2AutoDisable("perm check reason");
+    async () => {
+      await enforceR2AutoDisable("perm check reason");
 
       const flagPath = __getR2FlagFilePathForTests(R2_DISABLED_FLAG_FILENAME);
       const fd = fs.openSync(flagPath, "r");
@@ -1528,6 +1871,26 @@ describe("R2 usage monitoring & auto-disable", () => {
     ).toBe(false);
   });
 
+  it("ignores orphan buckets with no current sample in the freshness check", () => {
+    const now = new Date("2026-08-05T00:30:00.000Z");
+    const fresh = {
+      bucketName: "usage-monitor-bucket",
+      bytes: 15 * 1024 ** 3,
+      objectCount: 600,
+      asOf: "2026-08-05T00:00:00.000Z",
+    };
+    const orphan = {
+      bucketName: "deleted-ghost-bucket",
+      bytes: 2 * 1024 ** 3,
+      objectCount: 40,
+      asOf: null,
+    };
+    // Ghost bucket alone must not flip a fresh set to stale (Seer #1706).
+    expect(graphqlStorageSamplesAreFresh([fresh, orphan], now)).toBe(true);
+    // But with no sampled bucket at all there is no fresh data.
+    expect(graphqlStorageSamplesAreFresh([orphan], now)).toBe(false);
+  });
+
   it("does not kill on stale GraphQL storage when live S3 list is unavailable", async () => {
     process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
     process.env.R2_USAGE_API_TOKEN = "tok-test";
@@ -1641,7 +2004,7 @@ describe("R2 usage monitoring & auto-disable", () => {
       process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
       process.env.R2_USAGE_API_TOKEN = "tok-test";
       // No LITESTREAM_S3_*/AWS_* env: post-B2-cutover deploy shape.
-      enforceR2AutoDisable("test kill");
+      await enforceR2AutoDisable("test kill");
       expect(isR2AutoDisabled()).toBe(true);
 
       const storageBytes = 4.6 * 1024 * 1024 * 1024; // ~46% of 10 GiB
@@ -1662,7 +2025,7 @@ describe("R2 usage monitoring & auto-disable", () => {
     it("does not auto-resume on stale GraphQL storage without a live list", async () => {
       process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
       process.env.R2_USAGE_API_TOKEN = "tok-test";
-      enforceR2AutoDisable("test kill");
+      await enforceR2AutoDisable("test kill");
       expect(isR2AutoDisabled()).toBe(true);
 
       const storageBytes = 4.6 * 1024 * 1024 * 1024;
@@ -1678,9 +2041,79 @@ describe("R2 usage monitoring & auto-disable", () => {
       expect(hasR2AutoResumeMarker()).toBe(false);
     });
 
+    it("drops an orphan bucket's stale size instead of killing on it", async () => {
+      process.env.R2_USAGE_ACCOUNT_ID = "acct-test";
+      process.env.R2_USAGE_API_TOKEN = "tok-test";
+
+      // Live bucket is small; the deleted ghost alone would exceed the kill
+      // threshold, and it has no 24h sample (asOf null).
+      const liveBytes = 2 * 1024 * 1024 * 1024;
+      const body = {
+        data: {
+          viewer: {
+            accounts: [
+              {
+                r2OperationsAdaptiveGroups: [
+                  {
+                    sum: { requests: 50_000 },
+                    dimensions: { actionType: "PutObject" },
+                  },
+                ],
+                r2StorageAdaptiveGroups: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: {
+                      datetime: "2026-08-05T00:00:00Z",
+                      bucketName: "usage-monitor-prod-v3",
+                    },
+                  },
+                ],
+                // Month-window row for a deleted bucket: no datetime
+                // dimension, so asOf is null (the orphan shape).
+                r2StorageByBucket: [
+                  {
+                    max: {
+                      payloadSize: liveBytes,
+                      metadataSize: 0,
+                      objectCount: 1200,
+                    },
+                    dimensions: { bucketName: "usage-monitor-prod-v3" },
+                  },
+                  {
+                    max: {
+                      payloadSize: 9 * 1024 * 1024 * 1024,
+                      metadataSize: 0,
+                      objectCount: 900,
+                    },
+                    dimensions: { bucketName: "deleted-ghost-bucket" },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      };
+      const now = new Date("2026-08-05T00:30:00.000Z");
+      const assessment = await runR2UsageCheck(
+        graphqlFetch(body) as unknown as typeof fetch,
+        now
+      );
+
+      expect(assessment.storageSampleStale).toBe(false);
+      expect(assessment.buckets?.map((b) => b.bucketName)).toEqual([
+        "usage-monitor-prod-v3",
+      ]);
+      expect(assessment.storage.mtdPct).toBeLessThan(R2_THRESHOLD_PCT);
+      expect(isR2AutoDisabled()).toBe(false);
+    });
+
     it("does not auto-resume when metrics are unavailable", async () => {
       // No R2/Cloudflare creds at all.
-      enforceR2AutoDisable("test kill");
+      await enforceR2AutoDisable("test kill");
       expect(isR2AutoDisabled()).toBe(true);
 
       const mockFetch = vi.fn().mockResolvedValue({

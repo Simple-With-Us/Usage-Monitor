@@ -35,37 +35,120 @@ export const PRODUCER_SOURCE_APP_ALIASES: Readonly<Record<string, readonly strin
   "openai-codex": ["codex"],
 };
 
+/**
+ * Named env vars that hold one producer's ingest token, beside the copy
+ * inside USAGE_INGEST_PRODUCER_TOKENS. The Mac subscription-quota collector
+ * sends CLAUDE_CODE_INGEST_TOKEN for the claude-code batch. When that named
+ * secret drifts from the comma-map entry, the map match misses and the
+ * route returns 401 even though the collector presented the token minted
+ * for that producer. Each name is an additional credential for the same
+ * producer id. A value that is empty, or equal to the unscoped or receipt
+ * token, is ignored so those credentials keep their existing meaning.
+ */
+export const NAMED_PRODUCER_INGEST_TOKEN_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_INGEST_TOKEN: "claude-code",
+  CODEX_INGEST_TOKEN: "openai-codex",
+  GROK_INGEST_TOKEN: "grok-build",
+  MINIMAX_INGEST_TOKEN: "minimax-code",
+  COPILOT_INGEST_TOKEN: "github-copilot",
+  DEEPSEEK_INGEST_TOKEN: "deepseek-dsh",
+  ANTIGRAVITY_INGEST_TOKEN: "antigravity-cli",
+  ANTIGRAVITY_STATUSLINE_INGEST_TOKEN: "antigravity-statusline",
+  MAC_HEARTBEAT_INGEST_TOKEN: "mac-host",
+  CODECAPS_INGEST_TOKEN: "codecaps",
+  BOTFLEET_INGEST_TOKEN: "botfleet",
+  CONGRESS_TRADE_INGEST_TOKEN: "congress-trade",
+  SOCRATIC_TRADE_INGEST_TOKEN: "socratic-trade",
+  MUSE_INGEST_TOKEN: "muse",
+  MUSE_CODE_INGEST_TOKEN: "muse-code",
+  GBU_INGEST_TOKEN: "gbu",
+};
+
 export interface IngestCredential {
   credentialId: string;
   token: string;
   allowedSourceApps: ReadonlySet<string> | null;
 }
 
+function scopedCredential(producerId: string, actual: string): IngestCredential {
+  return {
+    credentialId: producerId,
+    token: actual,
+    allowedSourceApps: new Set([
+      producerId,
+      ...(PRODUCER_SOURCE_APP_ALIASES[producerId] ?? []),
+    ]),
+  };
+}
+
+function resolveProducerCredential(
+  actual: string,
+  rawProducerTokens: string | undefined
+): IngestCredential | null {
+  if (!rawProducerTokens) return null;
+  const entries = rawProducerTokens
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const entry of entries) {
+    const colonIndex = entry.indexOf(":");
+    if (colonIndex <= 0 || colonIndex === entry.length - 1) continue;
+    const producerId = entry.slice(0, colonIndex).trim();
+    const token = entry.slice(colonIndex + 1).trim();
+    if (!producerId || !token) continue;
+    if (safeEqual(actual, token)) return scopedCredential(producerId, actual);
+  }
+  return null;
+}
+
+/**
+ * Accept a producer-named env token when the comma map's copy of that
+ * producer has drifted. Two named vars holding the same distinct token is
+ * ambiguous, so neither is accepted.
+ */
+function resolveNamedProducerCredential(actual: string): IngestCredential | null {
+  const blocked = [
+    process.env.USAGE_INGEST_TOKEN?.trim(),
+    process.env.BILLING_RECEIPT_INGEST_TOKEN?.trim(),
+  ].filter((value): value is string => Boolean(value));
+  let matched: IngestCredential | null = null;
+  for (const [envName, producerId] of Object.entries(NAMED_PRODUCER_INGEST_TOKEN_ENV)) {
+    const token = process.env[envName]?.trim();
+    if (!token) continue;
+    if (blocked.some((value) => safeEqual(token, value))) continue;
+    if (!safeEqual(actual, token)) continue;
+    if (matched) return null;
+    matched = scopedCredential(producerId, actual);
+  }
+  return matched;
+}
+
+/** A rotation window has explicit endpoints and can last at most one hour. */
+function matchesPreviousUsageToken(actual: string, now = Date.now()): boolean {
+  const previous = process.env.USAGE_INGEST_PREVIOUS_TOKEN?.trim();
+  const from = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_FROM?.trim();
+  const until = process.env.USAGE_INGEST_PREVIOUS_TOKEN_VALID_UNTIL?.trim();
+  if (!previous || !from || !until) return false;
+  const receiptToken = process.env.BILLING_RECEIPT_INGEST_TOKEN?.trim();
+  if (receiptToken && safeEqual(previous, receiptToken)) return false;
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+  if (!iso.test(from) || !iso.test(until)) return false;
+  const start = Date.parse(from);
+  const end = Date.parse(until);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  if (end <= start || end - start > 3_600_000 || now < start || now >= end) return false;
+  return safeEqual(actual, previous);
+}
+
 export function resolveUsageIngestCredential(request: NextRequest): IngestCredential | null {
   const actual = tokenFromRequest(request, "x-usage-ingest-token");
   if (!actual) return null;
 
-  const rawProducerTokens = process.env.USAGE_INGEST_PRODUCER_TOKENS?.trim();
-  if (rawProducerTokens) {
-    const entries = rawProducerTokens
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const entry of entries) {
-      const colonIndex = entry.indexOf(":");
-      if (colonIndex <= 0 || colonIndex === entry.length - 1) continue;
-      const producerId = entry.slice(0, colonIndex).trim();
-      const token = entry.slice(colonIndex + 1).trim();
-      if (!producerId || !token) continue;
-      if (safeEqual(actual, token)) {
-        return {
-          credentialId: producerId,
-          token: actual,
-          allowedSourceApps: new Set([producerId, ...(PRODUCER_SOURCE_APP_ALIASES[producerId] ?? [])]),
-        };
-      }
-    }
-  }
+  const producerCredential = resolveProducerCredential(
+    actual,
+    process.env.USAGE_INGEST_PRODUCER_TOKENS?.trim()
+  );
+  if (producerCredential) return producerCredential;
 
   const expected = process.env.USAGE_INGEST_TOKEN?.trim();
   // Canonical bool parsing (true/1/yes/on are all "true" per the knob
@@ -80,7 +163,27 @@ export function resolveUsageIngestCredential(request: NextRequest): IngestCreden
     };
   }
 
-  return null;
+  if (expected && !requireScoped && matchesPreviousUsageToken(actual)) {
+    return { credentialId: "unscoped", token: actual, allowedSourceApps: null };
+  }
+
+  return resolveNamedProducerCredential(actual);
+}
+
+/**
+ * Trace ingest accepts a separate producer-token map before the ordinary
+ * usage-ingest credentials.  Tokens in OTLP_TRACES_PRODUCER_TOKENS are never
+ * consulted by cash-ledger or metrics routes, so a third-party trace exporter
+ * cannot use its credential to create ExternalUsageEvent rows.
+ */
+export function resolveOtlpTracesCredential(request: NextRequest): IngestCredential | null {
+  const actual = tokenFromRequest(request, "x-usage-ingest-token");
+  if (!actual) return null;
+  const traceCredential = resolveProducerCredential(
+    actual,
+    process.env.OTLP_TRACES_PRODUCER_TOKENS?.trim()
+  );
+  return traceCredential ?? resolveUsageIngestCredential(request);
 }
 
 export function isUsageIngestAuthorized(request: NextRequest): boolean {

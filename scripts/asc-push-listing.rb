@@ -52,11 +52,11 @@ APPS = {
     loc_id: nil,
     app_info_id: nil,
     app_info_loc_id: nil,
-    name: "Usage Client Monitor",
+    name: "Usage Monitor Client",
     subtitle: "Live budgets for API spend",
     promotional_text: "Connect your self-hosted Usage Monitor server. See month-to-date spend, provider budgets, project allocation, and alerts — with Face ID lock and offline widgets.",
     description: <<~TXT.strip,
-      Usage Client Monitor is the iOS companion for a Usage Monitor server you host.
+      Usage Monitor Client is the iOS companion for a Usage Monitor server you host.
 
       See month-to-date API spend, budgets, and alerts without living in a browser tab. Point the app at your server URL, store a read token in the Keychain, and keep budgets on your Lock Screen and Home Screen widgets.
 
@@ -80,7 +80,7 @@ APPS = {
       Not a brokerage, bank, or tax product — developer tooling for API cost visibility.
     TXT
     keywords: "api,budget,cost,usage,openai,anthropic,llm,devops,monitor,self-host,spend",
-    whats_new: "Initial App Store release of Usage Client Monitor — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.",
+    whats_new: "Initial App Store release of Usage Monitor Client — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.",
     review_notes: <<~TXT.strip,
       This is a client for a self-hosted Usage Monitor server (developer tools).
 
@@ -105,11 +105,11 @@ APPS = {
     loc_id: nil,
     app_info_id: nil,
     app_info_loc_id: nil,
-    name: "Usage Local Monitor",
+    name: "Usage Monitor Local",
     subtitle: "On-device API budget tracker",
     promotional_text: "Track OpenRouter, OpenAI, Anthropic, and more on your phone — keys in Keychain, budgets in on-device SQLite. No Usage Monitor server required.",
     description: <<~TXT.strip,
-      Usage Local Monitor keeps API and subscription spend visible on your iPhone — entirely on-device.
+      Usage Monitor Local keeps API and subscription spend visible on your iPhone — entirely on-device.
 
       Add the providers you already pay for, store keys in the Keychain, and see month-to-date cost, budgets, renewals, and alerts without running a separate server.
 
@@ -127,14 +127,14 @@ APPS = {
       Individual developers and small teams who want phone-first cost awareness without hosting Usage Monitor.
 
       WHAT IT IS NOT
-      • Not a remote dashboard client (that is Usage Client Monitor)
+      • Not a remote dashboard client (that is Usage Monitor Client)
       • Not a bank, brokerage, or tax product
       • Does not invent spend for providers that only offer console billing — those stay as subscription or manual rows
 
       Privacy-minded: processing is on-device. Keys leave the device only over HTTPS to providers you choose.
     TXT
     keywords: "api,budget,cost,openai,anthropic,openrouter,llm,local,on-device,usage,spend",
-    whats_new: "Initial App Store release of Usage Local Monitor — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.",
+    whats_new: "Initial App Store release of Usage Monitor Local — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.",
     review_notes: <<~TXT.strip,
       On-device developer tools app. No login and no developer-operated backend.
 

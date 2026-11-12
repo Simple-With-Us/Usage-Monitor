@@ -176,6 +176,7 @@ export function parseMuseSubscriptionStatus(text, { now = new Date() } = {}) {
   const lines = String(text || "").split(/\r?\n/);
   let planType = null;
   let weeklyUsed = null;
+  let weeklyFreeWording = false;
   let weeklyResetLine = null;
   let additionalUsed = null;
   let additionalTokensLeftRaw = null;
@@ -186,9 +187,10 @@ export function parseMuseSubscriptionStatus(text, { now = new Date() } = {}) {
 
     // Data-line patterns FIRST.  A data line appearing before the plan line
     // must be parsed as data, never swallowed as planType.
-    let m = /^Usage:\s*(\d+(?:\.\d+)?)%\s*of\s*free\s*weekly\s*limit/i.exec(line);
+    let m = /^Usage:\s*(\d+(?:\.\d+)?)%\s*of\s*(free\s+)?weekly\s*limit/i.exec(line);
     if (m) {
       weeklyUsed = Number(m[1]);
+      weeklyFreeWording = Boolean(m[2]);
       continue;
     }
     m = /^Weekly\s+limit\s+resets\s+(.+)$/i.exec(line);
@@ -221,7 +223,7 @@ export function parseMuseSubscriptionStatus(text, { now = new Date() } = {}) {
     if (weeklyRemaining != null) {
       readings.push({
         bucketId: WEEKLY_BUCKET,
-        label: "Free weekly limit",
+        label: weeklyFreeWording ? "Free weekly limit" : "Weekly limit",
         quotaWindow: "weekly",
         remainingPercent: weeklyRemaining,
         usedPercent: clampPercent(weeklyUsed),

@@ -113,6 +113,7 @@ describe("private billing receipt importer", () => {
       JSON.stringify({ receipts: [{ receiptId: "fixture-id", amountUsd: 1 }] }),
       { mode: 0o644 }
     );
+    await fs.chmod(inputPath, 0o644);
     await expect(readPrivateReceiptInput(inputPath)).rejects.toThrow(/mode 600/);
     await fs.chmod(inputPath, 0o600);
     await expect(readPrivateReceiptInput(inputPath)).resolves.toHaveLength(1);

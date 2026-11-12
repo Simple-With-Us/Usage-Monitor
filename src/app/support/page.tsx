@@ -5,7 +5,7 @@ import { ReportProblemButton } from "@/components/ReportProblemButton";
 export const metadata: Metadata = {
   title: "Support — Usage Monitor",
   description:
-    "Support for Usage Client Monitor and Usage Local Monitor iOS apps.",
+    "Support for Usage Monitor Client and Usage Monitor Local iOS apps.",
   robots: { index: true, follow: true },
 };
 
@@ -36,7 +36,7 @@ export default function SupportPage() {
           >
             mail@jays.services
           </a>
-          . Include the app name (Usage Client Monitor or Usage Local Monitor),
+          . Include the app name (Usage Monitor Client or Usage Monitor Local),
           iOS version, and a short description of the issue. Do not send API
           keys or dashboard passwords.
         </p>
@@ -56,12 +56,12 @@ export default function SupportPage() {
         </h2>
         <ul className="list-disc space-y-2 pl-5">
           <li>
-            <strong>Usage Local Monitor</strong> — on-device only. Keys live in
+            <strong>Usage Monitor Local</strong> — on-device only. Keys live in
             Keychain; no Usage Monitor server required. Banner says
             “ON-DEVICE · no server”.
           </li>
           <li>
-            <strong>Usage Client Monitor</strong> — connects to a Usage Monitor
+            <strong>Usage Monitor Client</strong> — connects to a Usage Monitor
             server you host (or an instance you control). Settings holds the
             base URL and access token.
           </li>

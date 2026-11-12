@@ -1,4 +1,32 @@
-## Current (2026-09-18 CLAUDE — USAGE_READ_TOKEN cannot enroll an APNs device)
+## Current (2026-11-03 CODEX — Codex Workspace Hints Candidate)
+
+The held draft candidate adds only a non-authoritative configured-root workspace hint to Codex telemetry, preserving all rows and measurements without claiming launch provenance or expanding exclusion.
+
+The shared collector suite, 57 receiver/OTLP/replay tests, targeted ESLint, TypeScript and diff hygiene pass.  Publication and independent review are the next steps; no collector installation or runtime activation is included.
+
+Rollout: `docs/rollouts/2026-11-03-codex-workspace-hints.md`.
+
+## Current (2026-10-30 CODEX — Repository Report Library)
+
+`docs/reports/README.md` is the entry point for saved reports, audits, reviews and research.  Historical files retain their original paths and links.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The central document collector and placement are tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
+## Current (2026-10-29 CODEX — Host-Isolated Unit Tests)
+
+Unit tests no longer select live `/data` R2 guard files when the runner has a production-style data mount.
+
+Permission fixtures now set exact file modes after creation, so restrictive host umasks cannot invalidate their security assertions.
+
+Verification: 3,328 tests passed and 1 skipped; typecheck passed; lint reported 0 errors and 13 pre-existing warnings.
+
+Rollout: `docs/rollouts/2026-10-29-host-isolated-unit-tests.md`.
+
+## Current (2026-10-23 CODEX — Coding Platform Telemetry Completeness)
+
+UM-1624 adds OpenCode and Fx to Agents Overview, prevents overlapping generic metrics from duplicating their collector usage, preserves Sentry's custom TTFT/context attributes, and fixes hub identity collisions for spans missing native IDs.  A bounded production audit confirmed 20,907 OpenCode events and 2.12 billion tokens omitted from the prior overview.  Other gaps remain explicit: stale ledger receipts alongside newer request telemetry, quota-only sources, at-least-once generic turn persistence, and Sentry read access returning 403.  Rollout and evidence: `docs/rollouts/2026-10-23-telemetry-completeness.md`.  Server deployment does not activate or install the Mac hub.
+
+## Prior (2026-09-18 CLAUDE — USAGE_READ_TOKEN cannot enroll an APNs device)
 
 `POST /api/apns/device-tokens` accepted `USAGE_READ_TOKEN` the same as GET, so a
 read-only credential could register a device to receive push alerts. PR #1458
@@ -40,7 +68,7 @@ scheduled upsert.  Extra-ship no.  No Coolify.  Rollout:
 
 ## Prior (2026-09-13 FX — Local Import Package tap)
 
-Usage Local Monitor Settings no longer puts a Merge / Replace picker next to
+Usage Monitor Local Settings no longer puts a Merge / Replace picker next to
 **Import Package**.  That List Picker stole the button tap (repeat of
 2026-09-04).  Import Package is its own section; merge vs replace is a sheet
 after the file pick.  The website **Download For Local** JSON

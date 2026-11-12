@@ -1,0 +1,557 @@
+// The Sentry sender.
+//
+// Sentry gets ONLY counts, durations, the model, the tool names and a
+// status.  It never gets the prompt, the response, the tool arguments, the
+// tool results, a file path, a project name, a session id or a raw error
+// message.
+//
+// The scrubber in ./allowlist.mjs is the control.  Sentry's own default
+// scrubbing does not protect `gen_ai.input.messages`,
+// `gen_ai.output.messages`, `gen_ai.tool.call.arguments` or
+// `gen_ai.tool.call.result`, and plain OTLP bypasses the SDK PII flags
+// entirely, so the content is removed on this Mac before the packet
+// leaves.
+//
+// Two envelopes go out: `/v1/traces` for the turn events and `/v1/logs` for
+// the log events.  Sentry has no OTLP metrics path, so none is attempted.
+//
+// The endpoint is project-specific and region-specific, so it is read from
+// the environment and never hardcoded.  The public key is not a secret, but
+// it is still read from the environment.
+
+import { gzipSync } from "node:zlib";
+import { z } from "zod";
+
+import { scrubInternalEvent } from "./allowlist.mjs";
+import { NULL_LOGGER } from "./internal-event.mjs";
+import { eventIdOf } from "./journal.mjs";
+
+/**
+ * Success ACKs are byte-bounded and retain only typed rejection counts.
+ * Response messages, rejection bodies and headers are never persisted.
+ */
+const AckCount = z.union([z.number(), z.string().max(16).regex(/^(0|[1-9][0-9]*)$/).transform(Number)]).pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER));
+export const MAX_SENTRY_ACK_BYTES = 64 * 1024;
+
+async function readSuccessAck(response, logs, submitted) {
+  let text = "";
+  let reader;
+  try {
+    if (response.body === undefined) return { responseClass: "unreadable_ack" };
+    if (response.body) {
+      if (typeof response.body.getReader !== "function") return { responseClass: "unreadable_ack" };
+      reader = response.body.getReader();
+      const chunks = [];
+      let bytes = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        bytes += next.value.byteLength;
+        if (bytes > MAX_SENTRY_ACK_BYTES) {
+          await reader.cancel().catch(() => {});
+          return { responseClass: "oversized_ack" };
+        }
+        chunks.push(next.value);
+      }
+      text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+    }
+  } catch { return { responseClass: "unreadable_ack" }; }
+  finally { reader?.releaseLock(); }
+  const contentType = response.headers?.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  const jsonType = !contentType || contentType === "application/json" || /^application\/[a-z0-9.+-]+\+json$/.test(contentType);
+  const emptyProtobuf = !text.trim() && ["application/x-protobuf", "application/protobuf"].includes(contentType);
+  if (!jsonType && !emptyProtobuf) return { responseClass: "unexpected_content_type" };
+  if (!text.trim()) return { accepted: true };
+  const camel = logs ? "rejectedLogRecords" : "rejectedSpans";
+  const snake = logs ? "rejected_log_records" : "rejected_spans";
+  const schema = z.strictObject({
+    partialSuccess: z.strictObject({ [camel]: AckCount.optional(), errorMessage: z.string().optional() }).optional(),
+    partial_success: z.strictObject({ [snake]: AckCount.optional(), error_message: z.string().optional() }).optional(),
+  }).refine((ack) => !(ack.partialSuccess && ack.partial_success));
+  let result;
+  try { result = schema.safeParse(JSON.parse(text)); } catch { return { responseClass: "malformed_ack" }; }
+  if (!result.success) return { responseClass: "malformed_ack" };
+  const partial = result.data.partialSuccess ?? result.data.partial_success;
+  const rejected = partial?.[camel] ?? partial?.[snake] ?? 0;
+  if (rejected > submitted) return { responseClass: "malformed_ack" };
+  return rejected > 0 ? { responseClass: "partial_success", rejectedCount: rejected } : { accepted: true };
+}
+
+/** The Sentry OTLP envelopes.  Sentry does not support OTLP metrics. */
+export const SENTRY_TRACES_PATH = "/v1/traces";
+export const SENTRY_LOGS_PATH = "/v1/logs";
+
+/** Sentry accepts at most 100 log records per envelope. */
+export const MAX_LOGS_PER_REQUEST = 100;
+
+/** Sentry accepts at most 1000 spans per request. */
+export const MAX_SPANS_PER_REQUEST = 1000;
+
+/** Keep every request body well under 1 MB, far inside the 12 MiB cap. */
+export const MAX_BODY_CHARS = 512 * 1024;
+
+/** How many journal events one pass reads before it splits them by kind. */
+export const DEFAULT_READ_LIMIT = 200;
+
+/** How long one pass may keep draining batches after the first read. */
+export const DEFAULT_DRAIN_BUDGET_MS = 5_000;
+
+/** How many journal batches one pass may read while draining. */
+export const DEFAULT_DRAIN_MAX_BATCHES = 25;
+
+const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_ATTEMPTS = 3;
+const BASE_BACKOFF_MS = 1_000;
+
+/** The service name Sentry sees. */
+const SERVICE_NAME = "telemetry-hub";
+const SERVICE_VERSION = "1";
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Classify an HTTP status.  Same policy as the UM sender: a validation
+ * failure is a poison event, an auth or routing failure is the channel's
+ * own problem, and 429/5xx is transient.
+ */
+export function classifyStatus(status) {
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 429 || status >= 500) return "retry";
+  if (status === 400 || status === 409 || status === 422) return "poison";
+  return "channel";
+}
+
+function isoToNanos(iso) {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return undefined;
+  return String(BigInt(Math.round(time)) * 1_000_000n);
+}
+
+/** A 32 hex trace id and a 16 hex span id, derived from the event id. */
+export function traceAndSpanIds(eventId) {
+  const hex = typeof eventId === "string" ? eventId.replace(/[^0-9a-f]/gi, "").toLowerCase() : "";
+  const traceId = (hex + "0".repeat(32)).slice(0, 32);
+  const spanId = (hex + "0".repeat(16)).slice(0, 16);
+  return { traceId, spanId };
+}
+
+/**
+ * Build the OTLP traces envelope for a list of SCRUBBED events.
+ *
+ * The input is already scrubbed, so this function never sees a prompt or a
+ * response and never has to decide whether one is safe.
+ */
+export function buildTracesEnvelope(events) {
+  const spans = [];
+  for (const event of events) {
+    if (!isPlainObject(event)) continue;
+    const { traceId, spanId } = traceAndSpanIds(event.eventId);
+    const start = isoToNanos(event.ts);
+    const durationMs = typeof event.durationMs === "number" ? event.durationMs : 0;
+    const end = start ? String(BigInt(start) + BigInt(Math.max(0, Math.round(durationMs)) * 1_000_000)) : undefined;
+    const span = {
+      traceId,
+      spanId,
+      name: typeof event.name === "string" && event.name ? event.name : "chat",
+      kind: 3,
+      attributes: Array.isArray(event.attributes) ? event.attributes : [],
+    };
+    if (start) span.startTimeUnixNano = start;
+    if (end) span.endTimeUnixNano = end;
+    if (isPlainObject(event.status)) span.status = { code: event.status.code };
+    spans.push(span);
+  }
+  return {
+    resourceSpans: [
+      {
+        resource: {
+          attributes: [
+            { key: "service.name", value: { stringValue: SERVICE_NAME } },
+            { key: "service.version", value: { stringValue: SERVICE_VERSION } },
+          ],
+        },
+        scopeSpans: [{ scope: { name: SERVICE_NAME }, spans }],
+      },
+    ],
+  };
+}
+
+/**
+ * Build the OTLP logs envelope for a list of SCRUBBED events.
+ *
+ * The body was rebuilt by the scrubber from allowlisted fields, so it never
+ * contains producer free text.
+ */
+export function buildLogsEnvelope(events) {
+  const logRecords = [];
+  for (const event of events) {
+    if (!isPlainObject(event)) continue;
+    const { traceId, spanId } = traceAndSpanIds(event.eventId);
+    const record = {
+      timeUnixNano: isoToNanos(event.ts) ?? String(Date.now() * 1_000_000),
+      severityNumber: typeof event.severityNumber === "number" ? event.severityNumber : 9,
+      body: isPlainObject(event.body) ? event.body : { stringValue: "" },
+      traceId,
+      spanId,
+      attributes: Array.isArray(event.attributes) ? event.attributes : [],
+    };
+    logRecords.push(record);
+  }
+  return {
+    resourceLogs: [
+      {
+        resource: {
+          attributes: [
+            { key: "service.name", value: { stringValue: SERVICE_NAME } },
+            { key: "service.version", value: { stringValue: SERVICE_VERSION } },
+          ],
+        },
+        scopeLogs: [{ scope: { name: SERVICE_NAME }, logRecords }],
+      },
+    ],
+  };
+}
+
+/**
+ * Split a list into chunks that respect both a count cap and a body size
+ * cap.  The body cap is checked on the serialized envelope, so a batch of
+ * very large attribute values is split before it reaches the 12 MiB cap.
+ *
+ * The size of ONE event is measured once and the running total is carried
+ * along.  Re-serializing the whole candidate for every event made the pass
+ * quadratic and could build hundreds of megabytes of discarded JSON.
+ */
+export function chunkBySize(events, build, { maxCount, maxChars }) {
+  const chunks = [];
+  let current = [];
+  let currentChars = 0;
+  //  The fixed part of the envelope is serialized once, and every event
+  //  gets an allowance for the ids and the timestamps the envelope adds.
+  const overhead = JSON.stringify(build([])).length;
+  const perEventAllowance = 256;
+  const limit = Math.max(1, maxChars - overhead);
+  for (const event of events) {
+    const eventChars = JSON.stringify(event ?? null).length + perEventAllowance;
+    const candidateChars = currentChars + eventChars;
+    if (current.length > 0 && (current.length + 1 > maxCount || candidateChars > limit)) {
+      chunks.push(current);
+      current = [event];
+      currentChars = eventChars;
+      continue;
+    }
+    current.push(event);
+    currentChars = candidateChars;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Create the Sentry sender.
+ *
+ * @param {object} options
+ * @param {import("./journal.mjs").Journal} options.journal
+ */
+export function createSentrySender({
+  journal,
+  endpoint = process.env.SENTRY_OTLP_ENDPOINT?.trim(),
+  publicKey = process.env.SENTRY_PUBLIC_KEY?.trim(),
+  readLimit = DEFAULT_READ_LIMIT,
+  drainBudgetMs = DEFAULT_DRAIN_BUDGET_MS,
+  drainMaxBatches = DEFAULT_DRAIN_MAX_BATCHES,
+  dryRun = false,
+  logger = NULL_LOGGER,
+  fetchImpl = globalThis.fetch,
+  retryDelayMs = BASE_BACKOFF_MS,
+} = {}) {
+  if (!journal) throw new Error("The Sentry sender needs a journal");
+  const destination = "sentry";
+  const root = endpoint ? endpoint.replace(/\/+$/, "") : "";
+  let inFlight = false;
+  // A missing intent is not reconciliation proof after a state error or hold.
+  // Keep this instance latched; recovery requires a reconciled fresh instance.
+  let blocked = false;
+  let holdWarningSent = false;
+
+  function warnHeld({ responseClass, heldEvents = 0, rejectedCount } = {}) {
+    if (holdWarningSent) return;
+    holdWarningSent = true;
+    logger.warn("sentry delivery is held", { destination, responseClass: responseClass ?? "unresolved_intent", heldEvents, ...(rejectedCount === undefined ? {} : { rejectedCount }) });
+  }
+
+  async function post(path, envelope, submitted) {
+    const json = JSON.stringify(envelope);
+    const body = gzipSync(Buffer.from(json, "utf8"));
+    let response;
+    try {
+      response = await fetchImpl(`${root}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+          "x-sentry-auth": `sentry sentry_key=${publicKey}`,
+          "content-length": String(body.length),
+        },
+        body,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      return { outcome: "retry", status: 0, errorName: error?.name ?? "Error" };
+    }
+    const outcome = classifyStatus(response.status);
+    if (outcome === "ok") {
+      const ack = await readSuccessAck(response, path === SENTRY_LOGS_PATH, submitted);
+      return ack.accepted ? { outcome, status: response.status } : { outcome: "held", status: response.status, ...ack };
+    }
+    // Rejection bodies can echo producer content; only the HTTP class is needed.
+    await response.body?.cancel?.().catch(() => {});
+    return { outcome, status: response.status };
+  }
+
+  async function postWithRetry(path, envelope, submitted) {
+    let last = { outcome: "retry", status: 0 };
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      last = await post(path, envelope, submitted);
+      if (last.outcome !== "retry") return last;
+      if (attempt < MAX_ATTEMPTS && retryDelayMs > 0) {
+        await sleep(retryDelayMs * 2 ** (attempt - 1));
+      }
+    }
+    return last;
+  }
+
+  /**
+   * Deliver one group of events, isolating a single poisoned event.
+   *
+   * A poison response is answered for the whole envelope, so the group is
+   * halved until one event is left; that event is quarantined and the rest
+   * is delivered.
+   */
+  async function deliverGroup(events, path, build) {
+    const delivered = [];
+    const quarantined = [];
+
+    const attempt = async (subset) => {
+      let intent;
+      let result;
+      try {
+        intent = await journal.prepareSentryRequest(path === SENTRY_LOGS_PATH ? "logs" : "traces", subset);
+        result = await postWithRetry(path, build(intent.events), subset.length);
+        if (result.outcome === "held") {
+          blocked = true;
+          warnHeld({ responseClass: result.responseClass, heldEvents: subset.length, rejectedCount: result.rejectedCount });
+          await journal.holdSentryRequest(intent.batchDigest, { responseClass: result.responseClass, rejectedCount: result.rejectedCount, httpStatus: result.status });
+          return { ...result, heldEvents: subset.length };
+        }
+        if (result.outcome === "ok") await journal.markSentBatch(destination, intent.eventIds);
+        await journal.clearSentryRequest(intent.batchDigest);
+      } catch (error) {
+        blocked = true;
+        throw error;
+      }
+      if (result.outcome === "ok") {
+        delivered.push(...subset);
+        return { outcome: "ok" };
+      }
+      if (result.outcome === "retry" || result.outcome === "channel") {
+        return { outcome: result.outcome, status: result.status };
+      }
+      if (subset.length === 1) {
+        quarantined.push(subset[0]);
+        await journal.quarantine(destination, subset[0], {
+          reason: "sentry rejected the event",
+          status: result.status,
+        });
+        logger.warn("quarantined an event", {
+          destination,
+          eventId: subset[0]?.eventId,
+          metricType: subset[0]?.operation,
+          status: result.status,
+        });
+        return { outcome: "ok" };
+      }
+      const middle = Math.ceil(subset.length / 2);
+      const left = await attempt(subset.slice(0, middle));
+      if (left.outcome !== "ok") return left;
+      const right = await attempt(subset.slice(middle));
+      if (right.outcome !== "ok") return right;
+      return { outcome: "ok" };
+    };
+
+    const result = await attempt(events);
+    return { ...result, delivered, quarantined };
+  }
+
+  /** One pass over the Sentry destination. */
+  async function runOnce() {
+    //  A pass can outlive the delivery tick.  The guard keeps two passes
+    //  from delivering the same events twice and from writing the same
+    //  offset file at the same time.  The hub guards the whole pass as
+    //  well; this one makes the sender safe on its own.
+    if (inFlight) return { ok: true, delivered: 0, quarantined: 0, busy: true };
+    inFlight = true;
+    try {
+      return await runOnceGuarded();
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  async function runOnceGuarded() {
+    let request;
+    try { request = await journal.readSentryRequest(); }
+    catch { blocked = true; warnHeld({ responseClass: "invalid_request_state" }); }
+    if (blocked || request) {
+      warnHeld({ responseClass: request?.responseClass, heldEvents: request?.events.length, rejectedCount: request?.rejectedCount });
+      return { ok: false, retry: false, held: true, delivered: 0, quarantined: 0, ...(request ? { heldEvents: request.events.length, responseClass: request.responseClass ?? "unresolved_intent", ...(request.rejectedCount === undefined ? {} : { rejectedCount: request.rejectedCount }) } : {}) };
+    }
+    //  One batch of readLimit events every ten seconds cannot keep pace
+    //  when a collector drains a durable outbox into the receiver: the
+    //  backlog then grows faster than the pass drains it, which is the
+    //  same shape the collector-side drain fix (UM-1649) addressed.  Each
+    //  pass therefore keeps reading and delivering batches until a short
+    //  read says the journal is caught up, or the wall-clock or
+    //  request-count budget runs out, so a backlog drains promptly without
+    //  ever turning one pass into an unbounded run.  Delivery failure
+    //  semantics are unchanged: whatever a failed batch delivered before
+    //  failing stays delivered, the pass stops there, and the next tick
+    //  resumes.
+    const deadline = Date.now() + drainBudgetMs;
+    let batchesLeft = drainMaxBatches;
+    let deliveredTotal = 0;
+    let quarantinedTotal = 0;
+    let firstBatch = true;
+
+    for (;;) {
+      const batch = await journal.readBatch(destination, readLimit);
+      if (batch.events.length === 0) {
+        if (!firstBatch) break;
+        return { ok: true, delivered: 0, quarantined: 0, empty: true };
+      }
+
+      // S1: the content fields are stripped before the scrubber runs, and the
+      // scrubber drops them as well.  Two independent barriers.
+      const scrubbed = batch.events
+        .map((event) => scrubInternalEvent(event))
+        .filter((event) => !!event);
+
+      const spans = scrubbed.filter((event) => event.kind !== "log");
+      const logs = scrubbed.filter((event) => event.kind === "log");
+
+      if (dryRun) {
+        logger.info("sentry dry run", {
+          destination,
+          events: batch.events.length,
+          spans: spans.length,
+          logs: logs.length,
+          attributeKeys: [...new Set(scrubbed.flatMap((event) => event.attributes.map((a) => a.key)))].sort(),
+        });
+        return { ok: true, delivered: 0, quarantined: 0, dryRun: true };
+      }
+
+      if (!root || !publicKey) {
+        logger.error("the sentry otlp endpoint or public key is not configured", { destination });
+        return { ok: false, retry: false, delivered: 0, quarantined: 0 };
+      }
+
+      const deliveredIds = [];
+      let quarantined = 0;
+
+      const spanChunks = chunkBySize(spans, buildTracesEnvelope, {
+        maxCount: MAX_SPANS_PER_REQUEST,
+        maxChars: MAX_BODY_CHARS,
+      });
+      for (const chunk of spanChunks) {
+        const outcome = await deliverGroup(chunk, SENTRY_TRACES_PATH, buildTracesEnvelope);
+        if (outcome.outcome !== "ok") {
+          //  Whatever was delivered before the failure stays delivered, so
+          //  the next pass does not send it again.  That includes the events
+          //  of the failed chunk that the isolation split delivered before
+          //  the failure: they reached Sentry, so they must be marked.
+          const partial = [...outcome.delivered, ...outcome.quarantined]
+            .map((event) => eventIdOf(event))
+            .filter((id) => typeof id === "string" && id);
+          await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
+          logger.warn("sentry is not accepting the batch", {
+            destination,
+            path: SENTRY_TRACES_PATH,
+            status: outcome.status,
+            outcome: outcome.outcome,
+          });
+          return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredTotal + deliveredIds.length + outcome.delivered.length, quarantined: quarantinedTotal + quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        }
+        const ids = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event.eventId)
+          .filter((id) => typeof id === "string" && id);
+        quarantined += outcome.quarantined.length;
+        await journal.markSentBatch(destination, ids);
+        deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          //  Budget stop between chunks.  The offset stays where it was, so
+          //  the rest of this batch is re-read next pass and the sent set
+          //  keeps the delivered events from going out twice.
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
+      }
+
+      const logChunks = chunkBySize(logs, buildLogsEnvelope, {
+        maxCount: MAX_LOGS_PER_REQUEST,
+        maxChars: MAX_BODY_CHARS,
+      });
+      for (const chunk of logChunks) {
+        const outcome = await deliverGroup(chunk, SENTRY_LOGS_PATH, buildLogsEnvelope);
+        if (outcome.outcome !== "ok") {
+          //  The same rule as the span chunks: the events of the failed
+          //  chunk that were delivered before the failure stay delivered.
+          const partial = [...outcome.delivered, ...outcome.quarantined]
+            .map((event) => eventIdOf(event))
+            .filter((id) => typeof id === "string" && id);
+          await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
+          logger.warn("sentry is not accepting the batch", {
+            destination,
+            path: SENTRY_LOGS_PATH,
+            status: outcome.status,
+            outcome: outcome.outcome,
+          });
+          return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredTotal + deliveredIds.length + outcome.delivered.length, quarantined: quarantinedTotal + quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        }
+        const ids = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event.eventId)
+          .filter((id) => typeof id === "string" && id);
+        quarantined += outcome.quarantined.length;
+        await journal.markSentBatch(destination, ids);
+        deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
+      }
+
+      //  The offset advances per fully delivered batch, so progress is
+      //  durable even when a later batch fails and a backlog never wedges
+      //  compaction behind one pass.
+      await journal.setOffset(destination, batch.endOffset);
+      deliveredTotal += deliveredIds.length;
+      quarantinedTotal += quarantined;
+      firstBatch = false;
+      const drained = batch.events.length < readLimit;
+      if (drained || Date.now() >= deadline || (batchesLeft -= 1) <= 0) break;
+    }
+
+    return {
+      ok: true,
+      delivered: deliveredTotal,
+      quarantined: quarantinedTotal,
+    };
+  }
+
+  return {
+    destinations: [destination],
+    runOnce,
+  };
+}

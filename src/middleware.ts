@@ -33,6 +33,9 @@ export const isPublicPath = (pathname: string) => {
     "/api/ingest",
     "/api/otlp",
     "/api/apns",
+    // Self-authenticates with the dedicated CodeCaps registration token or
+    // the existing scoped usage-ingest credential; no dashboard cookie.
+    "/api/codecaps/push",
     "/api/settings",
     "/api/budget-status",
     // Self-authenticates (session OR USAGE_READ_TOKEN) for BotFleet skip-model.
@@ -70,7 +73,14 @@ export const isPublicPath = (pathname: string) => {
     // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
     // own session/OWNER_EXPENSE_TOKEN check in the route.
     // See src/app/api/owner-expenses/route.ts.
-    "/api/owner-expenses",    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
+    "/api/owner-expenses",
+    // Usage-events read model (dashboard telemetry + raw event reads).
+    // Self-authenticates via dashboard session or USAGE_READ_TOKEN, like
+    // /api/owner-expenses above — without this exclusion, bearer read
+    // tokens 401 at the session gate before the route's own auth runs.
+    // See src/app/api/usage-events/route.ts.
+    "/api/usage-events",
+    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
     // budget-status / agents-overview.
     "/api/quota-windows",
     // Unlisted Apple Calendar subscribe URL; the route checks BILLS_CALENDAR_TOKEN.
@@ -90,6 +100,9 @@ export const isPublicPath = (pathname: string) => {
   // daily-rollups exclusion above) — without this, bearer read tokens 401 at
   // the session gate before the route's own auth runs.
   if (pathname === "/api/agent-model-mix" || pathname === "/api/agent-model-mix/") return true;
+  // Same self-auth pattern: /api/muse-code-burn verifies the dashboard
+  // session cookie or the USAGE_READ_TOKEN bearer itself.
+  if (pathname === "/api/muse-code-burn" || pathname === "/api/muse-code-burn/") return true;
   return false;
 };
 

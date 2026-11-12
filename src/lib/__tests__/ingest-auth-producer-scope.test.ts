@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { resolveUsageIngestCredential } from "../ingest-auth";
+import {
+  resolveOtlpTracesCredential,
+  resolveUsageIngestCredential,
+} from "../ingest-auth";
 
 function req(token?: string, headerName = "x-usage-ingest-token"): NextRequest {
   const headers = new Headers();
@@ -87,6 +90,22 @@ describe("resolveUsageIngestCredential producer scoping", () => {
   });
 });
 
+describe("resolveOtlpTracesCredential trace-only scoping", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("accepts a trace-only producer token without authorizing usage ingest", () => {
+    vi.stubEnv("OTLP_TRACES_PRODUCER_TOKENS", "openrouter:trace-only-token");
+    const request = req("trace-only-token");
+
+    const traceCredential = resolveOtlpTracesCredential(request);
+    expect(traceCredential?.credentialId).toBe("openrouter");
+    expect(traceCredential?.allowedSourceApps).toEqual(new Set(["openrouter"]));
+    expect(resolveUsageIngestCredential(request)).toBeNull();
+  });
+});
+
 describe("resolveUsageIngestCredential producer aliases (UM-1599)", () => {
   beforeEach(() => {
     vi.stubEnv("USAGE_INGEST_TOKEN", "shared-legacy-ingest-token");
@@ -115,5 +134,65 @@ describe("resolveUsageIngestCredential producer aliases (UM-1599)", () => {
     expect(resolveUsageIngestCredential(req("shared-legacy-ingest-token"))).toBeNull();
     const cred = resolveUsageIngestCredential(req("tok-codex"));
     expect(cred?.allowedSourceApps?.has("codex")).toBe(true);
+  });
+});
+
+describe("resolveUsageIngestCredential named producer tokens (AFC-667)", () => {
+  const collectorToken = "claude-collector-named-token";
+  const orphanMapToken = "claude-map-orphan-token";
+
+  beforeEach(() => {
+    vi.stubEnv("USAGE_INGEST_TOKEN", "shared-legacy-ingest-token");
+    vi.stubEnv("BILLING_RECEIPT_INGEST_TOKEN", "receipt-token-distinct");
+    vi.stubEnv(
+      "USAGE_INGEST_PRODUCER_TOKENS",
+      `claude-code:${orphanMapToken},openai-codex:tok-codex`
+    );
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("rejects the collector's claude token when the named env var is unset and the map entry has drifted", () => {
+    expect(resolveUsageIngestCredential(req(collectorToken))).toBeNull();
+  });
+
+  it("accepts CLAUDE_CODE_INGEST_TOKEN for claude-code when the map entry has drifted", () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    const cred = resolveUsageIngestCredential(req(collectorToken));
+    expect(cred?.credentialId).toBe("claude-code");
+    expect(cred?.allowedSourceApps).toEqual(new Set(["claude-code"]));
+  });
+
+  it("still accepts the drifted map token for claude-code", () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    const cred = resolveUsageIngestCredential(req(orphanMapToken));
+    expect(cred?.credentialId).toBe("claude-code");
+  });
+
+  it("keeps the named claude token scoped when unscoped ingest is denied", () => {
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    expect(resolveUsageIngestCredential(req("shared-legacy-ingest-token"))).toBeNull();
+    expect(resolveUsageIngestCredential(req(collectorToken))?.credentialId).toBe("claude-code");
+  });
+
+  it("does not treat the unscoped or receipt token as a named producer credential", () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", "shared-legacy-ingest-token");
+    expect(resolveUsageIngestCredential(req("shared-legacy-ingest-token"))?.credentialId).toBe(
+      "unscoped"
+    );
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", "receipt-token-distinct");
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    expect(resolveUsageIngestCredential(req("receipt-token-distinct"))).toBeNull();
+  });
+
+  it("refuses a token that two named producer vars share", () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    vi.stubEnv("CODEX_INGEST_TOKEN", collectorToken);
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    expect(resolveUsageIngestCredential(req(collectorToken))).toBeNull();
   });
 });
