@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.28
-FROM node:24.22.1-bookworm-slim AS build
+FROM node:24.22.2-bookworm-slim AS build
 
 # python3 + make + g++ are required by the builder stage only.  better-sqlite3
 # 13.0.3 dropped its `install` script (`prebuild-install || node-gyp rebuild --release`),
@@ -28,6 +28,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # visible inside RUN without it.
 ARG NEXT_PUBLIC_SENTRY_DSN=""
 ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
+# Public upload routing is build-time configuration; runtime injection is too late.
+ARG SENTRY_ORG="simple-with-us"
+ARG SENTRY_SELF_PROJECT="usage-monitor"
+ENV SENTRY_ORG=${SENTRY_ORG} SENTRY_SELF_PROJECT=${SENTRY_SELF_PROJECT}
 # Bind the compiled SDK release to the same revision exposed by runtime health.
 # Docker stages do not inherit ARG/ENV values from the later runtime stage.
 ARG SOURCE_COMMIT=""
@@ -40,12 +44,26 @@ ENV SOURCE_COMMIT=${SOURCE_COMMIT} GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 # succeed (and stayed unfixable, because the bad image is cached against the
 # commit SHA). The explicit test after it guards against the fetch script ever
 # regaining a silent-skip path.
-RUN npm run build \
+# The upload token is available only to this RUN via BuildKit, never ARG/ENV.
+# Builders without a secret keep the credential-free CI/local build path.
+# Coolify's secret mode passes every build variable as a secret, including
+# public routing and revision values that otherwise arrive as build arguments.
+# Optional file mounts preserve ARG/ENV fallbacks when a secret is absent.
+RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN,required=false \
+    --mount=type=secret,id=NEXT_PUBLIC_SENTRY_DSN,required=false \
+    --mount=type=secret,id=SENTRY_ORG,required=false \
+    --mount=type=secret,id=SENTRY_SELF_PROJECT,required=false \
+    --mount=type=secret,id=SOURCE_COMMIT,required=false \
+    --mount=type=secret,id=GIT_COMMIT_SHA,required=false \
+    for key in NEXT_PUBLIC_SENTRY_DSN SENTRY_ORG SENTRY_SELF_PROJECT SOURCE_COMMIT GIT_COMMIT_SHA; do \
+      if [ -s "/run/secrets/$key" ]; then export "$key=$(cat "/run/secrets/$key")"; fi; \
+    done \
+  && npm run build \
   && FETCH_LITESTREAM_REQUIRED=true bash scripts/fetch-litestream.sh \
   && test -x bin/litestream \
   && ./bin/litestream version
 
-FROM node:24.22.1-bookworm-slim AS runtime
+FROM node:24.22.2-bookworm-slim AS runtime
 
 # Coolify / CI pass the git SHA as SOURCE_COMMIT (or COOLIFY_CONTAINER_NAME alone).
 # Bake it into the image so /api/health revision is correct even when a stale
@@ -70,7 +88,15 @@ RUN apt-get update \
   # GitHub-CDN/HTTP2 flake with no retry to absorb it, which then stalled the
   # whole serialized build queue behind the failed deploy. HTTP/1.1 sidesteps
   # the framing bug class; --retry-all-errors covers the rest.
-  && curl -fsSL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/infisical.tgz \
+  #
+  # The retry BUDGET matters as much as the flags.  Measured on 2026-11-09,
+  # the release-asset CDN degrades in rotating windows of roughly 20 seconds
+  # to 2 minutes, and the window moves between assets: the same release's
+  # arm64 asset served 200 while its amd64 asset returned 504.  The previous
+  # 5x2s budget spans about 10 seconds, which cannot survive one of those
+  # windows, so the build failed on a CDN state it had no chance to wait out.
+  # 180 seconds is the bound; a genuinely missing asset still fails closed.
+  && curl -fsSL --http1.1 --retry 10 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o /tmp/infisical.tgz \
        "https://github.com/Infisical/cli/releases/download/v${INFISICAL_CLI_VERSION}/cli_${INFISICAL_CLI_VERSION}_linux_${cli_arch}.tar.gz" \
   && tar -xzf /tmp/infisical.tgz -C /tmp \
   && install -m 0755 /tmp/infisical /usr/local/bin/infisical \

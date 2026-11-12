@@ -2,7 +2,7 @@
 
 Machine-checkable reference for the four public endpoints. The v2 ingest wire
 schema, canonical idempotency, and ACK semantics are owned byte-for-byte by
-`@jaywedgeworth22/congress-trading-shared` (currently pinned at `v2.5.2` in
+`@jaywedgeworth22/congress-trading-shared` (currently pinned at `v2.9.0` in
 `package.json`); this document describes the receiver side only. Do not loosen
 the v2 schema or change idempotency semantics here.
 

@@ -8,13 +8,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 
-import { awsUriEncode, signS3Request } from "./lib/s3-sigv4.mjs";
+import { awsUriEncode, signS3Request, s3Request } from "./lib/s3-sigv4.mjs";
 import {
   archiveKeyFor,
   archiveKeyTimeMs,
@@ -23,6 +23,7 @@ import {
   resolveArchiveConfig,
   runArchive,
   selectPruneTargets,
+  uploadMultipart,
 } from "./ops/r2-weekly-archive.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -264,6 +265,182 @@ await test("classifyFailure never lets remote error text reach the status file",
   }
 });
 
+await test("S3 transport failures retain operation and bounded nested cause codes", async () => {
+  for (const [method, reason] of [["PUT", "upload_failed"], ["GET", "download_failed"], ["DELETE", "prune_failed"]]) {
+    let calls = 0;
+    await assert.rejects(s3Request({
+      method,
+      creds: { endpoint: "https://fixture.invalid", accessKeyId: "fixture", secretAccessKey: "fixture" },
+      bucket: "fixture",
+      fetchImpl: async () => {
+        calls++;
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("private socket detail"), { code: "ECONNRESET" }) });
+      },
+    }), (error) => {
+      assert.equal(error.message, `S3 ${method} transport failed (ECONNRESET)`);
+      assert.equal(classifyFailure(error), reason);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1, "diagnostics must not retry the request");
+  }
+});
+
+await test("S3 transport diagnostics exclude arbitrary messages, codes and credentials", async () => {
+  const privateDetail = "private-secret https://private.invalid/?token=private-secret";
+  const hostile = Object.assign(new Error(privateDetail), { code: privateDetail });
+  hostile.cause = hostile;
+  await assert.rejects(s3Request({
+    method: "PUT",
+    creds: { endpoint: "https://fixture.invalid", accessKeyId: "private-key", secretAccessKey: "private-secret" },
+    bucket: "private-bucket",
+    key: "private-object",
+    fetchImpl: async () => { throw hostile; },
+  }), (error) => {
+    assert.equal(error.message, "S3 PUT transport failed (unknown)");
+    assert.doesNotMatch(error.stack, /private-|token=/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+// ------------------------------------------------------------ multipart ----
+
+const STUB_CREDS = {
+  endpoint: "https://acct.r2.cloudflarestorage.com",
+  region: "auto",
+  accessKeyId: "test-key",
+  secretAccessKey: "test-secret",
+};
+
+await test("uploadMultipart assembles sequential parts into one object", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    const payload = Buffer.alloc(2500);
+    for (let i = 0; i < payload.length; i += 1) payload[i] = i % 251;
+    writeFileSync(filePath, payload);
+    const s3 = makeS3Stub();
+
+    const { partCount } = await uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath,
+      fileBytes: payload.length,
+      fetchImpl: s3.fetchImpl,
+      partBytes: 1000,
+    });
+
+    assert.equal(partCount, 3, "2500 bytes at 1000-byte parts is 3 parts");
+    assert.deepEqual(s3.store.get("weekly/test.db.gz"), payload);
+    assert.deepEqual(
+      s3.calls.map((c) => c.method),
+      ["POST", "PUT", "PUT", "PUT", "POST"],
+      "create, three parts, complete"
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart retries a part whose connection drops, then completes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    const payload = Buffer.from("one part, dropped once");
+    writeFileSync(filePath, payload);
+    const s3 = makeS3Stub();
+    let putAttempts = 0;
+
+    const result = await uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath,
+      fileBytes: payload.length,
+      fetchImpl: async (url, init) => {
+        if (init.method === "PUT") {
+          putAttempts += 1;
+          if (putAttempts === 1) {
+            // The 2026-11-07 live failure: the socket dies mid-transfer.
+            throw new TypeError("fetch failed", { cause: { code: "UND_ERR_SOCKET" } });
+          }
+        }
+        return s3.fetchImpl(url, init);
+      },
+    });
+
+    assert.equal(result.partCount, 1);
+    assert.equal(putAttempts, 2, "the dropped part is retried, not the whole upload");
+    assert.deepEqual(s3.store.get("weekly/test.db.gz"), payload);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart aborts and preserves the signer error when a part never lands", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    writeFileSync(filePath, Buffer.from("never lands"));
+    const s3 = makeS3Stub();
+
+    await assert.rejects(
+      uploadMultipart({
+        creds: STUB_CREDS,
+        bucket: "usage-monitor-prod-v3",
+        key: "weekly/test.db.gz",
+        filePath,
+        fileBytes: 11,
+        fetchImpl: async (url, init) => {
+          if (init.method === "PUT") {
+            throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+          }
+          return s3.fetchImpl(url, init);
+        },
+      }),
+      (error) => {
+        assert.equal(error.message, "S3 PUT transport failed (ECONNRESET)");
+        assert.equal(classifyFailure(error), "upload_failed");
+        return true;
+      }
+    );
+    assert.equal(s3.uploads.size, 0, "abort removes the in-flight upload");
+    assert.equal(s3.store.size, 0, "no object is created from a failed upload");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart rejects non-positive part geometry before any S3 call", async () => {
+  const s3 = makeS3Stub();
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: 10,
+      fetchImpl: s3.fetchImpl,
+      partBytes: 0,
+    }),
+    /partBytes must be a positive integer/
+  );
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: -1,
+      fetchImpl: s3.fetchImpl,
+    }),
+    /fileBytes must be a non-negative integer/
+  );
+  assert.equal(s3.calls.length, 0, "validation happens before CreateMultipartUpload");
+});
+
 // --------------------------------------------------------------- config ----
 
 await test("resolveArchiveConfig refuses to fall back to the B2 litestream keys", () => {
@@ -328,7 +505,15 @@ function makeDatabase(path) {
 /** Tiny in-memory S3 so the full flow runs with no network and no credential. */
 function makeS3Stub({ corruptOnGet = false } = {}) {
   const store = new Map();
+  const uploads = new Map();
   const calls = [];
+  let uploadSeq = 0;
+  const respond = (status, textBody, headers = {}) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
+    async text() { return textBody; },
+  });
   const fetchImpl = async (url, init) => {
     const method = init.method;
     const parsed = new URL(url);
@@ -336,9 +521,42 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
     const key = keyParts.join("/");
     calls.push({ method, key: key || "(list)" });
 
+    // CreateMultipartUpload — POST with ?uploads and no uploadId yet.
+    if (method === "POST" && parsed.searchParams.has("uploads")) {
+      uploadSeq += 1;
+      const uploadId = `stub-upload-${uploadSeq}`;
+      uploads.set(uploadId, { key, parts: new Map() });
+      return respond(
+        200,
+        `<?xml version="1.0"?><InitiateMultipartUploadResult><Bucket>stub</Bucket>` +
+          `<Key>${key}</Key><UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`
+      );
+    }
+    // CompleteMultipartUpload — assemble the parts in part-number order.
+    if (method === "POST" && parsed.searchParams.get("uploadId")) {
+      const uploadId = parsed.searchParams.get("uploadId");
+      const upload = uploads.get(uploadId);
+      if (!upload) return respond(404, "<Error><Code>NoSuchUpload</Code></Error>");
+      const assembled = Buffer.concat(
+        [...upload.parts.entries()].sort((a, b) => a[0] - b[0]).map(([, body]) => body)
+      );
+      store.set(upload.key, assembled);
+      uploads.delete(uploadId);
+      return respond(
+        200,
+        `<?xml version="1.0"?><CompleteMultipartUploadResult><Key>${upload.key}</Key></CompleteMultipartUploadResult>`
+      );
+    }
     if (method === "PUT") {
+      const partNumber = parsed.searchParams.get("partNumber");
+      if (partNumber !== null) {
+        const upload = uploads.get(parsed.searchParams.get("uploadId"));
+        if (!upload) return respond(404, "<Error><Code>NoSuchUpload</Code></Error>");
+        upload.parts.set(Number(partNumber), Buffer.from(init.body));
+        return respond(200, "", { etag: `"stub-etag-${partNumber}"` });
+      }
       store.set(key, Buffer.from(init.body));
-      return { ok: true, status: 200, async text() { return ""; } };
+      return respond(200, "", { etag: '"stub-etag"' });
     }
     if (method === "GET" && parsed.searchParams.get("list-type") === "2") {
       const prefix = parsed.searchParams.get("prefix") ?? "";
@@ -351,15 +569,16 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
         )
         .join("");
       const xml = `<?xml version="1.0"?><ListBucketResult>${contents}<IsTruncated>false</IsTruncated></ListBucketResult>`;
-      return { ok: true, status: 200, async text() { return xml; } };
+      return respond(200, xml);
     }
     if (method === "GET") {
       const stored = store.get(key);
-      if (!stored) return { ok: false, status: 404, async text() { return "<Error/>"; } };
+      if (!stored) return respond(404, "<Error/>");
       const body = corruptOnGet ? Buffer.concat([stored, Buffer.from("x")]) : stored;
       return {
         ok: true,
         status: 200,
+        headers: { get: () => null },
         // Real fetch exposes a web ReadableStream; the archiver streams it.
         body: new Response(body).body,
         async arrayBuffer() { return body.buffer.slice(body.byteOffset, body.byteOffset + body.length); },
@@ -367,12 +586,18 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
       };
     }
     if (method === "DELETE") {
+      const uploadId = parsed.searchParams.get("uploadId");
+      if (uploadId) {
+        // AbortMultipartUpload — the parts vanish, no object is created.
+        uploads.delete(uploadId);
+        return respond(204, "");
+      }
       store.delete(key);
-      return { ok: true, status: 204, async text() { return ""; } };
+      return respond(204, "");
     }
     throw new Error(`unexpected ${method}`);
   };
-  return { fetchImpl, store, calls };
+  return { fetchImpl, store, calls, uploads };
 }
 
 function baseEnv(dir, dbPath) {
@@ -401,7 +626,6 @@ await test("runArchive uploads a verifiable, restorable snapshot", async () => {
 
     // The stored bytes really are a gzipped, openable SQLite database.
     const restored = join(dir, "restored.db");
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(restored, gunzipSync(s3.store.get(result.key)));
     const db = new DatabaseSync(restored, { readOnly: true });
     const row = db.prepare("SELECT COUNT(*) AS n FROM budget").get();
@@ -479,6 +703,40 @@ await test("runArchive applies the 14-day cap even when --keep would retain more
     assert.ok(s3.store.has(result.key), "fresh upload retained");
     assert.ok(s3.store.has(lastWeek), "7-day-old copy retained");
     assert.ok(!s3.store.has(stale), "20-day-old copy pruned by the 14-day cap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("an upload transport rejection reports its phase and never verifies or prunes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const dbPath = join(dir, "prod.db");
+    makeDatabase(dbPath);
+    const s3 = makeS3Stub();
+    const oldKey = archiveKeyFor("weekly/", new Date(Date.now() - 20 * DAY_MS));
+    s3.store.set(oldKey, Buffer.from("old-archive"));
+    const methods = [];
+    await assert.rejects(runArchive({
+      env: baseEnv(dir, dbPath),
+      argv: [],
+      fetchImpl: async (url, init) => {
+        methods.push(init.method);
+        if (init.method === "PUT") {
+          throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+        }
+        return s3.fetchImpl(url, init);
+      },
+    }), (error) => {
+      assert.equal(error.message, "S3 PUT transport failed (UND_ERR_HEADERS_TIMEOUT)");
+      assert.equal(classifyFailure(error), "upload_failed");
+      return true;
+    });
+    // Create, the part's three attempts (the per-part retry budget), then the
+    // abort — and nothing else: a failed upload never verifies or prunes.
+    assert.deepEqual(methods, ["POST", "PUT", "PUT", "PUT", "DELETE"]);
+    assert.equal(s3.uploads.size, 0, "the aborted upload leaves nothing behind");
+    assert.deepEqual([...s3.store.keys()], [oldKey]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

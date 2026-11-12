@@ -62,6 +62,10 @@ export const PRODUCER_STREAM_RULES: readonly ProducerStreamRule[] = [
   // MiniMax desktop runtime ledger (UM-1637): the Mac writes turns most
   // days, but the app can sit unused over a long weekend.
   { sourceApp: "minimax-code", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
+  // Kimi and ZCode local ledgers are collected on an intended 15-minute
+  // cadence, but five days leaves room for long idle stretches before alerting.
+  { sourceApp: "kimi-code", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
+  { sourceApp: "zcode", metricType: "usage", maxAgeHours: 120, requiresTokens: true },
   // Timer-driven quota collectors: a gap here is always a broken collector.
   { sourceApp: "openai-codex", metricType: "quota", maxAgeHours: 6 },
   { sourceApp: "grok-build", metricType: "quota", maxAgeHours: 6 },

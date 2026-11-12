@@ -2,7 +2,7 @@
 
 **Seat:** MONET (owner-directed pickup of `docs/rollouts/2026-07-15-pickup-codex-cap-handoff-to-monet.md`)
 **Date:** 2026-07-15
-**Coordination:** #agent-sync `[MONET->FLEET] sync-1` claim; live-board In Progress row under CLAUDE's handoff row.
+**Coordination:** #ag***-s**c `[MONET->FLEET] sync-1` claim; live-board In Progress row under CLAUDE's handoff row.
 **Owner mid-run directives honored:** "integrate (if appropriate)" the two novel-content residues; "fix all P0, P1, P2, and P3."
 
 ## Outcome summary — every handoff queue item is closed

@@ -99,7 +99,28 @@ describe("POST /api/otlp/v1/traces", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(0);
   });
 
-  it("writes a retried turn once per platform and generation id", async () => {
+  it("retains distinct observations sharing a generation id and millisecond", async () => {
+    const common = {
+      platform: "botfleet",
+      generationId: "response-1",
+      occurredAt: "2026-10-11T12:00:00.000Z",
+    };
+    const observations = [
+      { ...common, conversationId: "session-a", inputTokens: 11 },
+      { ...common, conversationId: "session-b", inputTokens: 19 },
+      { ...common, conversationId: "session-a", inputTokens: 23 },
+    ];
+    const response = await POST(jsonRequest({ turns: observations }, { authorization: "Bearer test-token-123" }));
+    expect(await response.json()).toMatchObject({ ok: true, accepted: 3 });
+    const next = await POST(jsonRequest({ turns: [{ ...common, conversationId: "session-c", inputTokens: 29 }] },
+      { authorization: "Bearer test-token-123" }));
+    expect(await next.json()).toMatchObject({ ok: true, accepted: 1 });
+    expect((await prisma.agentTurn.findMany()).map((turn) => turn.inputTokens).sort((a, b) => a! - b!))
+      .toEqual([11, 19, 23, 29]);
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+  });
+
+  it("retains possible exporter retries when source identity is unproven", async () => {
     const turn = (generationId: string | undefined) => ({
       platform: "cursor-agent",
       model: "gpt-5",
@@ -111,14 +132,42 @@ describe("POST /api/otlp/v1/traces", () => {
     });
     const body = { turns: [turn("gen-1"), turn("gen-1"), turn("gen-2"), turn(undefined)] };
     const first = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
-    expect(await first.json()).toMatchObject({ ok: true, accepted: 3 });
+    expect(await first.json()).toMatchObject({ ok: true, accepted: 4 });
     // The exporter did not see the response and sends the same request again.
     const retry = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
     expect(retry.status).toBe(202);
-    // Only the turn with no generation id is indistinguishable from a new one.
-    expect(await retry.json()).toMatchObject({ ok: true, accepted: 1 });
+    // A generation id does not prove that two observations are one source event.
+    expect(await retry.json()).toMatchObject({ ok: true, accepted: 4 });
     const turns = await prisma.agentTurn.findMany({ orderBy: { generationId: "asc" } });
-    expect(turns.map((t) => t.generationId)).toEqual([null, null, "gen-1", "gen-2"]);
+    expect(turns.map((t) => t.generationId)).toEqual([null, null, "gen-1", "gen-1", "gen-1", "gen-1", "gen-2", "gen-2"]);
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+  });
+
+  it("retains native BotFleet, Kimi and ZCode spans with colliding response ids", async () => {
+    const platforms = ["botfleet", "kimi-code", "zcode"];
+    const spans = platforms.flatMap((platform) => [11, 19].map((input, index) => ({
+      name: "chat",
+      traceId: "1".repeat(32),
+      spanId: String(index + 1).repeat(16),
+      startTimeUnixNano: "1760184000000000000",
+      endTimeUnixNano: "1760184001000000000",
+      attributes: [
+        { key: "agent.platform", value: { stringValue: platform } },
+        { key: "gen_ai.response.id", value: { stringValue: "shared-response" } },
+        { key: "gen_ai.conversation.id", value: { stringValue: "session-" + index } },
+        { key: "gen_ai.usage.input_tokens", value: { intValue: String(input) } },
+      ],
+    })));
+    const body = { resourceSpans: [{ scopeSpans: [{ spans }] }] };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+      expect(await response.json()).toMatchObject({ ok: true, accepted: 6 });
+    }
+    for (const platform of platforms) {
+      const rows = await prisma.agentTurn.findMany({ where: { platform } });
+      expect(rows.map((row) => row.inputTokens).sort((a, b) => a! - b!)).toEqual([11, 11, 19, 19]);
+    }
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
   });
 
   it("rejects a payload that is neither resourceSpans nor turns", async () => {

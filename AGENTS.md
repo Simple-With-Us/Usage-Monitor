@@ -131,6 +131,18 @@ but contribute zero to `persisted`; never derive it from `activeEvents.length`.
   collection route the dashboard-session middleware excludes for GET (see "Subscriptions" below);
   `POST /api/subscriptions` and both `PUT`/`DELETE /api/subscriptions/:id` stay
   session-cookie-only.
+- `GET /api/muse-code-burn?window=90` — dashboard session cookie OR Bearer
+  `USAGE_READ_TOKEN` (same dual-auth + middleware exclusion as
+  `/api/agent-model-mix`). Sums the token events the CodeCaps app posts as
+  producer `muse-code` (metricType `usage`, `unit = "token"`,
+  `producerKeyRef` = modelId, quantity = per-session segment deltas) over a
+  trailing window in minutes (default 90, 1–240): total tokens, burn rate
+  per hour, per-model split, contributor tokens/share (contributor =
+  modelId ending in `-contributor`), and `allContributor`. Logic in
+  `src/lib/muse-code-burn.ts`; the payload contract is pinned by
+  `src/lib/__tests__/muse-code-ingest-contract.test.ts`. This route exists
+  because `/api/llm-burn` takes whole hours only, folds per-model groups
+  out of its report, and is dashboard-session only.
 - `GET /api/workspace/export` — dashboard session cookie OR `USAGE_READ_TOKEN`.  Secret-free Local-compatible JSON (projects, provider shells, plans, subscriptions, latest snapshots).  Format `usage-monitor-local-export` v1.  No API keys and no bundle key / passphrase.  Import in Usage Monitor Local: Settings → Import Package.  Or `POST /api/workspace/import` (session) on a local Usage Monitor.  Encrypted `.umkeys` files are a separate Mac-only Import Keys path.
 - `POST /api/providers/refresh-stale` — dashboard session.  Re-fetches pollable providers whose usage snapshot or external billing confirmation is older than one hour.  Manual/push providers are skipped.
 - `GET /api/export/daily-rollups` — dashboard session cookie OR the same
@@ -646,7 +658,7 @@ Look first at Linear (`https://linear.app/simple-with-us`, through the `simple-b
 - Tooling: the `simple-chat` CLI (`~/.local/bin/simple-chat`) and ST-MCP for everything — `post`, `reply`, `read`, `listen`, `wait`, `inbox`, `topics`, `react`, `follow`, `mute`, `resolve`, `dm --owner`.
 Details: `~/apps/FLEET-PROTOCOL.md` § Chat: The Zulip Contract, § Posting, and § Linear and the Claim Lifecycle.
 
-**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → `gh pr create` (or update) → merge when CI is green. A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
+**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → open the PR through the Fleet Tools relay (`gr_open_pr`, or update it) → merge when CI is green through the relay (`gr_wf_merge_guarded`). A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
 
 ## Never wait and watch for PRs to merge / Idle-polling forbidden (Owner ruling 2026-09-01 — ALL seats)
 
@@ -711,9 +723,10 @@ Socratic.Trade #3089) and runs `scripts/ios-ship-testflight.sh`, which execs
 in-repo `scripts/ios-fleet/ship-testflight.sh`. LocalUsageMonitor stays skipped.
 Dispatch:
 
-```bash
-gh workflow run ios-ship.yml
-```
+Dispatch through the Fleet Tools relay with `gr_workflow_dispatch`
+(`workflow: ios-ship.yml`, `ref: main`).  If the relay refuses the dispatch,
+`gh workflow run ios-ship.yml` is the backup for that one step only, logged in
+the Fleet GitOPS deficiencies document.
 
 Bundle IDs `com.simplewithus.usage.client.ios` (Usage Monitor) and
 `com.simplewithus.usage.local.ios` (Local Monitor), team `CC8UTF7ATG`.

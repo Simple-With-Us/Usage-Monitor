@@ -15,7 +15,7 @@ export async function fetchUsage(
     }
   );
   if (!res.ok) {
-    return errorResult(res.status, { note: "Agent Sync Relay health check failed" });
+    return errorResult(res.status, { note: "Simple Tools Relay health check failed" });
   }
 
   // Health-only provider: never report complete $0 cash. A totalCost of 0 with

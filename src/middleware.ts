@@ -100,6 +100,9 @@ export const isPublicPath = (pathname: string) => {
   // daily-rollups exclusion above) — without this, bearer read tokens 401 at
   // the session gate before the route's own auth runs.
   if (pathname === "/api/agent-model-mix" || pathname === "/api/agent-model-mix/") return true;
+  // Same self-auth pattern: /api/muse-code-burn verifies the dashboard
+  // session cookie or the USAGE_READ_TOKEN bearer itself.
+  if (pathname === "/api/muse-code-burn" || pathname === "/api/muse-code-burn/") return true;
   return false;
 };
 

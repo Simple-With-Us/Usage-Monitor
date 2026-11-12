@@ -59,8 +59,10 @@
 
 import {
   createInfisicalSettings,
+  InfisicalWriteError,
   type InfisicalSettings,
 } from "@jaywedgeworth22/congress-trading-shared";
+import { resolveUmInfisicalEnv } from "../../scripts/lib/infisical-app-auth-env.mjs";
 import { resolveProdInfisicalEnvironment } from "./infisical-environment";
 
 const DEFAULT_REFRESH_MS = 300_000; // 5 minutes, per the canonical pattern.
@@ -284,18 +286,10 @@ export interface AppSettingsCredentials {
 function resolveCredentials(
   env: NodeJS.ProcessEnv = process.env
 ): AppSettingsCredentials {
-  // Prefer dedicated runtime credentials; fall back to the shared fleet
-  // automation machine identity (Admin on this project's usage-monitor
-  // project — see INFISICAL.md).  Values are never logged.
-  const clientId =
-    env.INFISICAL_CLIENT_ID?.trim() ||
-    env.INFISICAL_AUTOMATION_CLIENT_ID?.trim();
-  const clientSecret =
-    env.INFISICAL_CLIENT_SECRET?.trim() ||
-    env.INFISICAL_AUTOMATION_CLIENT_SECRET?.trim();
+  const auth = resolveUmInfisicalEnv(env);
   return {
-    clientId: clientId || undefined,
-    clientSecret: clientSecret || undefined,
+    clientId: auth.clientId,
+    clientSecret: auth.clientSecret,
   };
 }
 
@@ -385,6 +379,7 @@ export interface AppSettingMeta {
 export class AppSettingsService {
   private client: InfisicalSettings | null = null;
   private infisicalMode = false;
+  private infisicalWritesBlocked = false;
   private initPromise: Promise<void> | null = null;
   private proxy: NodeJS.ProcessEnv | null = null;
 
@@ -424,7 +419,7 @@ export class AppSettingsService {
       console.warn(
         "[app-settings] No Infisical universal-auth credentials " +
           "(INFISICAL_CLIENT_ID/INFISICAL_CLIENT_SECRET or " +
-          "INFISICAL_AUTOMATION_CLIENT_ID/INFISICAL_AUTOMATION_CLIENT_SECRET); " +
+          "INFISICAL_UM_CLIENT_ID/INFISICAL_UM_CLIENT_SECRET); " +
           "running in env-fallback mode. Tunable knobs read process.env. See INFISICAL.md."
       );
       return;
@@ -610,6 +605,7 @@ export class AppSettingsService {
       throw new Error(`"${key}" is not a writable app setting (see INFISICAL.md)`);
     }
     const normalized = normalizeForWrite(def, value);
+    if (this.infisicalWritesBlocked) throw new InfisicalWriteError(key, "connection unavailable or disabled; save rejected");
     // Write under the canonical def key (from the allowlisted def object),
     // never the raw caller-supplied string, so the property name written is
     // always one of the known setting keys.
@@ -622,6 +618,24 @@ export class AppSettingsService {
   }
 
   /** On-demand refresh ("Reload settings" admin action, SIGHUP). */
+  installInfisicalClient(candidate: InfisicalSettings): void {
+    this.client?.stop();
+    this.client = candidate;
+    this.infisicalMode = true;
+    this.infisicalWritesBlocked = false;
+    this.initPromise = Promise.resolve();
+  }
+
+  disableInfisicalConnection(): void {
+    this.client?.stop();
+    this.client = null;
+    this.infisicalMode = false;
+    this.infisicalWritesBlocked = true;
+    this.initPromise = Promise.resolve();
+  }
+
+  get areInfisicalWritesBlocked(): boolean { return this.infisicalWritesBlocked; }
+
   async refresh(): Promise<void> {
     if (this.infisicalMode && this.client) {
       await this.client.refresh();
@@ -674,6 +688,7 @@ export class AppSettingsService {
     this.stop();
     this.client = null;
     this.infisicalMode = false;
+    this.infisicalWritesBlocked = false;
     this.initPromise = null;
     this.proxy = null;
   }

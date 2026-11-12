@@ -38,31 +38,37 @@ case "$DEST" in
   "$HOME"/Code/*) echo "refusing to install into the ~/Code integration tree: $DEST" >&2; exit 2 ;;
 esac
 
+# Validate the entire existing graph before rsync can overwrite or delete it.
+INSTALL_PREFLIGHT="$(node "$SRC/scripts/check-collector-install.mjs" "$SRC" "$DEST")"
+read -r SHA ZOD_VERSION INSTALL_ZOD <<< "$INSTALL_PREFLIGHT"
+if [[ ! "$SHA" =~ ^[a-f0-9]{40}$ || ! "$ZOD_VERSION" =~ ^[~^]?4\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ! "$INSTALL_ZOD" =~ ^[01]$ || "$INSTALL_PREFLIGHT" != "$SHA $ZOD_VERSION $INSTALL_ZOD" ]]; then
+  echo "refusing to install: invalid collector preflight output" >&2
+  exit 2
+fi
 mkdir -p "$DEST/scripts"
 # Entry points and shared libs only; no tests, iOS tooling, or deploy scripts.
 rsync -a --delete --delete-excluded \
   --include='/lib/' --include='/lib/*.mjs' \
   --include='/telemetry-hub/' --include='/telemetry-hub/*.mjs' \
   --include='/*-collector.mjs' \
+  --include='/collector-injector.mjs' \
   --include='/run-subscription-quota-collector.sh' \
   --include='/antigravity-statusline-telemetry.mjs' \
   --exclude='*' \
   "$SRC/scripts/" "$DEST/scripts/"
 
-ZOD_VERSION="$(node -p "require('$SRC/package.json').dependencies.zod" 2>/dev/null || true)"
-ZOD_VERSION="${ZOD_VERSION:-^4.6.5}"
-if [[ ! -f "$DEST/node_modules/zod/package.json" ]]; then
+if [[ "$INSTALL_ZOD" == 1 ]]; then
   printf '{"name":"usage-monitor-collectors","private":true,"type":"module"}\n' > "$DEST/package.json"
   (cd "$DEST" && npm install --omit=dev --no-audit --no-fund --silent "zod@${ZOD_VERSION}")
 fi
 
-SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf 'sha=%s\ninstalled=%s\nsource=%s\n' "$SHA" "$(date -u +%FT%TZ)" "$SRC" > "$DEST/VERSION"
 
 # Syntax-check entry points, then resolve the common bridge dependency graph.
 for f in "$DEST"/scripts/*-collector.mjs; do
   node --check "$f"
 done
+node --check "$DEST/scripts/collector-injector.mjs"
 node --input-type=module -e 'await import(process.argv[1]);' "$DEST/scripts/lib/collector-sentry-bridge.mjs"
 bash -n "$DEST/scripts/run-subscription-quota-collector.sh"
 echo "installed $SHA -> $DEST"
