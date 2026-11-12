@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Production entrypoint wrapper:
-#   - When Infisical universal-auth bootstrap credentials are present, inject
-#     secrets from the usage-monitor Infisical project and then start.
+#   - When a Usage Monitor read token or explicit project machine-identity
+#     credentials are present, inject secrets and then start.
 #   - Otherwise run start-with-litestream.sh with the process environment as-is
 #     (Docker Compose env_file materialization path).
 set -euo pipefail
@@ -10,8 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 has_bootstrap=false
-if [[ -n "${INFISICAL_AUTOMATION_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_CLIENT_ID:-}}}" &&
-  -n "${INFISICAL_AUTOMATION_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_CLIENT_SECRET:-}}}" ]]; then
+if [[ -n "${INFISICAL_UM_READ_TOKEN:-${INFISICAL_TOKEN:-}}" ||
+  ( -n "${INFISICAL_UM_CLIENT_ID:-}" && -n "${INFISICAL_UM_CLIENT_SECRET:-}" ) ]]; then
   has_bootstrap=true
 fi
 

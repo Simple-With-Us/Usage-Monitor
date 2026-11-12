@@ -8,14 +8,13 @@
 #
 # Usage:
 #   bash scripts/cf-token-map.sh
-#   (Infisical credentials come from the environment, else `fleet-secrets get`.)
+#   (Infisical credentials come from the environment.)
 #
 # Env (all optional):
 #   INFISICAL_PROJECT_ID   (see fleet-ops:ATTACK-MAP.md)
 #   INFISICAL_ENV          default prod
 #   INFISICAL_API_URL      Infisical host if not the public default
-#   INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET
-#     or INFISICAL_AUTOMATION_* / INFISICAL_UM_* / CID+CSEC aliases
+#   INFISICAL_UM_READ_TOKEN, or an explicit UM machine-identity pair
 #
 # Output is names, lengths, an 8-hex SHA-256 fingerprint (so two names holding
 # the same token can be spotted), and the Cloudflare account list each token
@@ -33,29 +32,22 @@ command -v infisical >/dev/null 2>/dev/null || die "infisical CLI not found on P
 command -v curl >/dev/null 2>/dev/null || die "curl not found on PATH."
 command -v python3 >/dev/null 2>/dev/null || die "python3 not found on PATH."
 
-CID="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${CID:-}}}}"
-CSEC="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${CSEC:-}}}}"
-# OPS-818: the retired flat key file is no longer read.  Fall back to the
-# Mac-side fleet-secrets CLI for the automation identity (captured, never echoed).
-fleet_value() {
-  command -v fleet-secrets >/dev/null 2>/dev/null || return 0
-  fleet-secrets get "$1" --path / 2>/dev/null \
-    || fleet-secrets get "$1" --path /global-api-keys 2>/dev/null \
-    || true
-}
-[ -n "$CID" ] || CID="$(fleet_value INFISICAL_AUTOMATION_CLIENT_ID)"
-[ -n "$CSEC" ] || CSEC="$(fleet_value INFISICAL_AUTOMATION_CLIENT_SECRET)"
-[ -n "$CID" ] && [ -n "$CSEC" ] || die \
-  "No Infisical credentials. Export INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET, or install fleet-secrets."
+TOKEN="${INFISICAL_UM_READ_TOKEN:-${INFISICAL_TOKEN:-}}"
+if [ -z "$TOKEN" ]; then
+  CID="${INFISICAL_UM_CLIENT_ID:-}"
+  CSEC="${INFISICAL_UM_CLIENT_SECRET:-}"
+  [ -n "$CID" ] && [ -n "$CSEC" ] || die \
+    "No Infisical read credential. Export INFISICAL_UM_READ_TOKEN or an explicit project machine-identity pair."
 
-# Credentials via env, not argv (avoids `ps` / debug-echo leaks).
-export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CID"
-export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CSEC"
-if [ -n "$INF_URL" ]; then
-  export INFISICAL_API_URL="$INF_URL"
+  # Credentials via env, not argv (avoids `ps` / debug-echo leaks).
+  export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CID"
+  export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CSEC"
+  if [ -n "$INF_URL" ]; then
+    export INFISICAL_API_URL="$INF_URL"
+  fi
+  TOKEN="$(infisical login --method=universal-auth --plain --silent 2>/dev/null || true)"
+  unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET CID CSEC
 fi
-TOKEN="$(infisical login --method=universal-auth --plain --silent 2>/dev/null || true)"
-unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
 [ -n "${TOKEN:-}" ] || die "infisical login failed"
 
 # Expected slots (same as src/lib/ensure-cloudflare-fleet-providers.ts).
@@ -169,5 +161,5 @@ for a in rows:
   fi
 done
 
-# Token is a session JWT; drop it before exit.
-unset TOKEN CID CSEC
+# Drop the Infisical credential from this shell before exit.
+unset TOKEN
