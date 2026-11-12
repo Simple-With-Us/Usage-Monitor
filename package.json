@@ -65,7 +65,7 @@
     "test:apple-projects": "bash scripts/verify-apple-projects.sh",
     "test:antigravity-collector": "node scripts/test-antigravity-collector.mjs",
     "test:session-token-collectors": "node scripts/test-session-token-collectors.mjs",
-    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs scripts/idle-collector-sentry.node-test.mjs scripts/collector-keychain.node-test.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
+    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs scripts/idle-collector-sentry.node-test.mjs scripts/collector-keychain.node-test.mjs && node scripts/__tests__/run-session-token-collector.fixture.mjs && node scripts/__tests__/retirement-sentry.fixture.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
     "test:cf-token-map": "bash scripts/test-cf-token-map.sh",
     "test:replica-status-probe": "bash scripts/test-replica-status-probe.sh",
     "test:quota-wrapper": "bash scripts/test-subscription-quota-wrapper.sh",
