@@ -45,7 +45,7 @@ describe("FleetBudgetCard read-only monitor", () => {
     render(<FleetBudgetCard />);
     expect(await screen.findByText("DeepSeek Blocked")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Refresh Budget" }));
-    expect(await screen.findByText("Admission Paused")).toBeTruthy();
+    expect(await screen.findByText("Spending Limits Paused")).toBeTruthy();
   });
   it("bounds hanging reads, clears figures and leaves a working retry path", async () => {
     vi.useFakeTimers();
