@@ -4,7 +4,6 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 model Provider {
@@ -343,6 +342,8 @@ model ExternalUsageEvent {
   // un-ANALYZEd SQLite file. This index turns that into a direct indexed
   // range search.
   @@index([occurredAt])
+  @@index([metricType, occurredAt])
+  @@index([occurredAt, id, provider, sourceApp, service, label, projectId, metricType, costUsd, billingMode, confidence], map: "ExternalUsageEvent_mtd_scan_cover_idx")
 }
 
 model ExternalUsageEventDailyRollup {
@@ -492,6 +493,53 @@ model AgentTurn {
   @@index([platform, occurredAt])
   @@index([conversationId, occurredAt])
   @@index([model, occurredAt])
+}
+
+// One row per model API call (UM-1590).  Fed by /api/otlp/v1/logs
+// (claude_code.api_request, codex.api_request + codex.sse_event
+// response.completed) and by /api/otlp/v1/traces (claude_code.llm_request
+// spans); both upsert on dedupeKey and fill only columns still null, so a
+// request reported by logs AND traces stays one row.  Diagnostic and
+// performance analytics only, like AgentTurn: it never feeds cash budget math
+// (that stays on ExternalUsageEvent).  No prompt or response bodies, ever.
+// Field names follow the UM-1592 canonical `ai` block.
+// Token semantics: inputTokens excludes cache reads and writes (Anthropic
+// convention; OpenAI cached input is subtracted at ingest), outputTokens
+// includes reasoningTokens when the provider counts them inside output.
+// Rows expire after AI_REQUEST_RETENTION_DAYS (default 180).
+model AiRequest {
+  id                 String   @id @default(uuid())
+  dedupeKey          String   @unique
+  harness            String
+  seat               String?
+  project            String?
+  billingMode        String?
+  sessionId          String?
+  requestedModel     String?
+  servedModel        String?
+  durationMs         Int?
+  ttftMs             Int?
+  inputTokens        Int?
+  outputTokens       Int?
+  cacheReadTokens    Int?
+  cacheWriteTokens   Int?
+  cacheWrite5mTokens Int?
+  cacheWrite1hTokens Int?
+  reasoningTokens    Int?
+  costUsd            Float?
+  costSource         String?
+  speed              String?
+  effort             String?
+  querySource        String?
+  statusCode         Int?
+  error              String?
+  sources            String
+  occurredAt         DateTime
+  createdAt          DateTime @default(now())
+
+  @@index([occurredAt])
+  @@index([harness, occurredAt])
+  @@index([sessionId, occurredAt])
 }
 
 model ProviderAlertNotification {
@@ -788,6 +836,58 @@ model ApnsDeviceToken {
   updatedAt   DateTime @updatedAt
 }
 
+// CodeCaps has a separate APNs topic and preference contract from Usage Monitor.  Never mix these
+// tokens into ApnsDeviceToken: that table feeds the generic Usage Monitor alert channel and uses a
+// different bundle ID.
+model CodeCapsPushDevice {
+  id             String   @id @default(uuid())
+  installationId String   @unique
+  generation     BigInt   @default(0)
+  deviceToken    String?  @unique
+  environment    String?
+  preferences    Json?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deliveries     CodeCapsPushAlertDelivery[]
+
+  @@index([isActive, updatedAt])
+}
+
+// The Mac supplies stable occurrence IDs.  A retained receipt prevents a rewritten local snapshot
+// or an HTTP retry from re-alerting the same event.
+model CodeCapsPushAlert {
+  id           String   @id
+  kind         String
+  providerKey  String
+  providerTitle String
+  windowLabel  String
+  summary      String
+  occurredAt   DateTime
+  receivedAt   DateTime @default(now())
+  deliveries   CodeCapsPushAlertDelivery[]
+
+  @@index([receivedAt])
+  @@index([occurredAt])
+}
+
+// One receipt per alert and registered installation.  APNs result state is durable so delivery
+// evidence is separate from event deduplication.
+model CodeCapsPushAlertDelivery {
+  id          String            @id @default(uuid())
+  alertId     String
+  alert       CodeCapsPushAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  deviceId    String
+  device      CodeCapsPushDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  outcome     String
+  attemptCount Int               @default(0)
+  attemptedAt DateTime           @default(now())
+  deliveredAt DateTime?
+
+  @@unique([alertId, deviceId])
+  @@index([deviceId, attemptedAt])
+}
+
 // Singleton portfolio / "Global Budget" cap for Overview hero meter.
 // Null override means use suggested sum of project budgets (or none).
 // Freeform — may disagree with Σ project or provider budgets.
@@ -861,4 +961,59 @@ model FleetBudgetGuard {
   blocked   Boolean @default(false)
   blockedAt DateTime?
   revision  Int @default(0)
+}
+
+// Owner-expense duplicate quarantine.  When POST /api/owner-expenses receives
+// an entry that exactly matches an already-posted ledger row (same vendor +
+// same amount + same charge date, or same receipt inbox id), the entry is
+// HELD here for owner review instead of posting — it never auto-posts and
+// never deletes or alters the posted rows.  Review happens in the dashboard
+// Receipt Inbox card ("Held Duplicates"); resolving as "post" force-records
+// the original input, resolving as "discard" drops it permanently.
+model QuarantinedOwnerExpense {
+  id                   String    @id @default(uuid())
+  quarantinedAt        DateTime  @default(now())
+  status               String    @default("held") // held | posted | discarded
+  resolvedAt           DateTime?
+  provider             String
+  amountUsd            Float
+  occurredAt           DateTime
+  kind                 String
+  label                String
+  notes                String?
+  confidence           String    @default("actual")
+  receiptInboxId       String?
+  dueDate              String?
+  nextDueDate          String?
+  calendarSort         String?
+  cancelledNoRenew     Boolean   @default(false)
+  // JSON array of { idempotencyKey, provider, amountUsd, occurredAt, label }
+  // describing the posted rows this entry matched.
+  matchedEntries       String    @default("[]")
+  // Human-readable why-held reason shown in the review list.
+  matchReason          String    @default("")
+}
+
+// Owner-expense management audit trail (UM-1659).  Every dashboard delete or
+// edit of a posted owner expense writes one row here BEFORE the mutation is
+// applied, in the same transaction, so a removal or change is never silent:
+// `before` is the full pre-change snapshot (same shape the GET
+// /api/owner-expenses route returns, plus cancelledNoRenew), `after` is the
+// post-edit snapshot for edits (null for deletes), and `resultingKey` is the
+// idempotency key the row carries after an edit that rekeyed it (null when
+// the key did not change or the row was deleted).  Deletes additionally
+// upsert an ExternalUsageEventTombstone for the removed key, which is what
+// blocks the receipts intake / ingest from ever resurrecting the entry on a
+// replay or re-forward (persistExternalUsageEvents skips tombstoned keys).
+model OwnerExpenseAudit {
+  id             String   @id @default(uuid())
+  idempotencyKey String
+  action         String // "delete" | "edit"
+  before         Json
+  after          Json?
+  resultingKey   String?
+  createdAt      DateTime @default(now())
+
+  @@index([idempotencyKey])
+  @@index([createdAt])
 }

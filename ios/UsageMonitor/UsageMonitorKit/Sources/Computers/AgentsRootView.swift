@@ -140,17 +140,17 @@ public struct AgentsRootView: View {
             LabeledContent("Total Tokens", value: tokensStr)
                 .copyableRow(label: "Total Tokens", value: tokensStr)
             if data.summary.telemetryIncomplete == true {
-                Text(data.summary.telemetryIncompleteNote ?? "Some seats are not reporting usage.")
+                Text(data.summary.telemetryIncompleteNote ?? "Some tools are not reporting usage.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warning)
                     .copyableRow(
                         label: "Telemetry Accuracy",
-                        value: data.summary.telemetryIncompleteNote ?? "Some seats are not reporting usage."
+                        value: data.summary.telemetryIncompleteNote ?? "Some tools are not reporting usage."
                     )
             }
             let paygStr = formatCurrency(data.summary.totalApiEquivalentCostUsd)
-            LabeledContent("PAYG Value", value: paygStr)
-                .copyableRow(label: "PAYG Value", value: paygStr)
+            LabeledContent("List Price", value: paygStr)
+                .copyableRow(label: "List Price", value: paygStr)
             let savingsStr = "+\(formatCurrency(data.summary.totalNetSavingsUsd))"
             LabeledContent("Net Savings") {
                 Text(savingsStr)
@@ -162,8 +162,8 @@ public struct AgentsRootView: View {
             Text("Fleet Summary · \(data.windowLabel)")
         } footer: {
             Text(data.summary.telemetryIncomplete == true
-                 ? "Token totals omit seats that are not reporting usage.  This is not zero use."
-                 : "API Equivalent compares token volume with direct LiteLLM catalog list rates.")
+                 ? "Token totals omit tools that are not reporting usage.\u{00A0} This is not zero use."
+                 : "List price compares token volume with public rates.")
         }
     }
 
@@ -234,8 +234,8 @@ public struct AgentsRootView: View {
                     LabeledContent("Tokens Processed", value: pTokensStr)
                         .copyableRow(label: "\(platform.name) Tokens", value: pTokensStr)
                     let pPaygStr = platform.reportsUsage ? formatCurrency(platform.estimatedCostUsd) : "not reported"
-                    LabeledContent("PAYG Value", value: pPaygStr)
-                        .copyableRow(label: "\(platform.name) PAYG Value", value: pPaygStr)
+                    LabeledContent("List Price", value: pPaygStr)
+                        .copyableRow(label: "\(platform.name) List Price", value: pPaygStr)
                     let pSavingsStr = platform.reportsUsage
                         ? "+\(formatCurrency(platform.netSavingsUsd))"
                         : "not reported"

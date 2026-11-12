@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { COLLECTOR_CALL_ID, collectorSentryConfig, enqueueCollectorSentry, drainCollectorSentry } from "./collector-sentry-bridge.mjs";
 
 export const GROK_COST_USD_TICKS = 1e10;
 export const MAX_EVENTS_PER_BATCH = 100;
@@ -34,6 +35,18 @@ export const CLAUDE_PRODUCER_ID = "claude-code";
 export const DEEPSEEK_PRODUCER_ID = "deepseek-dsh";
 export const CURSOR_PRODUCER_ID = "cursor-agent";
 export const MUSE_PRODUCER_ID = "muse";
+export const OPENCODE_PRODUCER_ID = "opencode";
+export const FX_PRODUCER_ID = "fx";
+
+/** DSH events at or before this instant keep the pre-v3 event shape (provider
+ *  "deepseek", bare metadata, confidence "estimated", file-based session key) so replaying archives
+ *  that were already ingested in September dedupes instead of returning
+ *  HTTP 409 idempotency_conflict.  Production rows stop at 1788920242939. */
+export const DSH_LEGACY_EVENT_CUTOFF_MS = 1788920300000;
+/** Those production rows were posted while the Mac's hostname was
+ *  "jays.services"; the instance id is part of the stored metadata, so a
+ *  replay must send the same value. */
+export const DSH_LEGACY_PRODUCER_INSTANCE_ID = "jays.services";
 
 const TOKEN_TYPES = ["input", "output", "cacheRead", "cacheCreation"];
 
@@ -71,7 +84,9 @@ function codexTotalSignature(usage) {
   return CODEX_TOTAL_KEYS.map((key) => String(finiteCount(usage[key]))).join("|");
 }
 
-function shaEventId(parts) {
+/** Stable event id for one measurement.  Exported so producer-specific
+ * modules derive ids exactly the way this file does. */
+export function shaEventId(parts) {
   return createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
@@ -97,12 +112,15 @@ export function tokenEventsFromBreakdown({
   model,
   breakdown,
   extraId,
+  extraMetadata,
+  providerRequestId,
+  collectorCallId,
 }) {
   const events = [];
   for (const tokenType of TOKEN_TYPES) {
     const quantity = breakdown[tokenType];
     if (!quantity) continue;
-    events.push({
+    const event = {
       eventId: shaEventId([
         producerId,
         sessionKey,
@@ -121,11 +139,17 @@ export function tokenEventsFromBreakdown({
       billingMode: "estimated",
       confidence: "estimated",
       occurredAt: occurredAtIso,
+      // Not part of the eventId or the monitor's replay comparison, so a row
+      // the monitor already stored keeps its identity when this is added.
+      ...(providerRequestId ? { providerRequestId } : {}),
       metadata: {
         tokenType,
         ...(model ? { model } : {}),
+        ...(extraMetadata ?? {}),
       },
-    });
+    };
+    if (collectorCallId) Object.defineProperty(event, COLLECTOR_CALL_ID, { value: JSON.stringify([sessionKey, collectorCallId]) });
+    events.push(event);
   }
   return events;
 }
@@ -340,7 +364,51 @@ function breakdownHasTokens(breakdown) {
 }
 
 
-export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt } = {}) {
+/** The metadata key a local collector names the harness's own session under.
+ *  The same key the OTLP mappers keep, so both feeds join on one name. */
+export const SESSION_ID_METADATA_KEY = "session.id";
+
+/** Anthropic reports `input_tokens` EXCLUSIVE of cache reads and cache writes
+ *  (total prompt = input + cache_read + cache_creation), unlike Codex, whose
+ *  input includes its cached reads.  Running Claude usage through
+ *  splitInclusiveCache dropped cache reads whenever they exceeded the uncached
+ *  input, which is nearly every call: 6,778 of 6,798 calls over three days on
+ *  the server, about 2.35 billion cache-read tokens reported as zero. */
+export function claudeUsageBreakdown(usage) {
+  return {
+    input: finiteCount(usage?.input_tokens),
+    output: finiteCount(usage?.output_tokens),
+    cacheRead: finiteCount(usage?.cache_read_input_tokens),
+    cacheCreation: finiteCount(usage?.cache_creation_input_tokens),
+  };
+}
+
+/**
+ * Claude Code writes one assistant line per content block (thinking, text,
+ * each tool_use), and every one of those lines repeats the same
+ * `message.usage`.  Counting each line counted one API call two to three times
+ * (2.18x over 6,523 lines on the server, Oct 29, 2026), so only the FIRST line
+ * of each `message.id` is counted.
+ *
+ * The first line is the one to keep, not the last: its line number is fixed
+ * once written, so its eventId (which hashes `L<line>`) is the eventId this
+ * collector already sent for it, and a replay over rows the monitor already
+ * stored stays byte-identical.  The last line moves as a streaming message
+ * gains blocks between passes, which would mint a new eventId.  A line with no
+ * `message.id` is counted as before.
+ *
+ * `seenMessageIds` may be shared across the files of one collector pass, so a
+ * call copied into a forked or resumed session's transcript is counted once;
+ * the caller walks the files oldest first, so the original keeps its id.
+ *
+ * An `agent.launcher` in `extraMetadata` is not stamped on a sidechain
+ * (subagent) line: BotFleet bills only its own main-thread turns, so a
+ * subagent call must never be offered to the monitor's BotFleet coverage drop.
+ */
+export function parseClaudeSessionJsonl(
+  text,
+  { sessionKey, fallbackOccurredAt, extraMetadata, seenMessageIds = new Set() } = {}
+) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
   const lines = text.split("\n");
@@ -355,6 +423,17 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt }
     }
     const usage = obj?.message?.usage || obj?.usage;
     if (!usage || typeof usage !== "object") continue;
+    const messageId = typeof obj.message?.id === "string" ? obj.message.id : "";
+    if (messageId) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
+    const sessionId = typeof obj.sessionId === "string" && obj.sessionId ? obj.sessionId : undefined;
+    // The transcript's requestId is deliberately NOT sent as providerRequestId:
+    // compliance counts every providerRequestId-carrying event as verifiable and
+    // pending until the verification worker settles it, but only OpenRouter rows
+    // are ever verified — so stamping Anthropic rows would wedge the provider's
+    // badge in "pending" forever (src/lib/provider-compliance.ts).
     const rawModel = (typeof obj.message?.model === "string" && obj.message.model.trim()) || "claude-3-7-sonnet";
     const model = rawModel;
     const occurredAtIso = isoTimestamp(obj.timestamp, fallbackIso);
@@ -362,25 +441,49 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt }
     const speed = usage.speed || obj.speed || "standard";
     const effort = obj.effort || "standard";
 
-    const breakdown = splitInclusiveCache({
-      input: usage.input_tokens,
-      output: usage.output_tokens,
-      cacheRead: usage.cache_read_input_tokens,
-      cacheCreation: usage.cache_creation_input_tokens,
-    });
+    const breakdown = claudeUsageBreakdown(usage);
+    const sidechain = obj.isSidechain === true || (typeof obj.agentId === "string" && !!obj.agentId);
+    const { "agent.launcher": launcher, ...baseMetadata } = extraMetadata ?? {};
+    const metadata = {
+      ...baseMetadata,
+      ...(messageId ? { "call.id": messageId } : {}),
+      ...(launcher && !sidechain ? { "agent.launcher": launcher } : {}),
+      ...(sessionId ? { [SESSION_ID_METADATA_KEY]: sessionId } : {}),
+    };
+    const common = {
+      producerId: CLAUDE_PRODUCER_ID,
+      provider: "anthropic",
+      service: "claude-code",
+      sessionKey: sessionKey ?? "claude",
+      occurredAtIso,
+      model,
+      ...(messageId ? { collectorCallId: messageId } : {}),
+      ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
+    };
+    // The input row keeps the quantity the old inclusive split gave it, so a
+    // stored row replays byte-identical (the eventId hashes the quantity).
+    // The old split took cache reads off the input whenever they were no
+    // larger than it; that missing part is sent as its own row, so the call
+    // still totals Anthropic's full uncached input without a double count.
+    const legacy = splitInclusiveCache({ input: breakdown.input, cacheRead: breakdown.cacheRead });
+    const inputExclusiveDelta = breakdown.input - legacy.input;
 
     events.push(
       ...tokenEventsFromBreakdown({
-        producerId: CLAUDE_PRODUCER_ID,
-        provider: "anthropic",
-        service: "claude-code",
-        sessionKey: sessionKey ?? "claude",
-        occurredAtIso,
-        model,
-        breakdown,
+        ...common,
+        breakdown: { ...breakdown, input: legacy.input },
         extraId: `L${lineNo}:${model}`,
       })
     );
+    if (inputExclusiveDelta > 0) {
+      events.push(
+        ...tokenEventsFromBreakdown({
+          ...common,
+          breakdown: { input: inputExclusiveDelta, output: 0, cacheRead: 0, cacheCreation: 0 },
+          extraId: `L${lineNo}:${model}:input-exclusive`,
+        })
+      );
+    }
   }
   return events;
 }
@@ -435,10 +538,62 @@ export function parseAntigravityStatuslineJsonl(text, { fallbackOccurredAt } = {
   return events;
 }
 
-export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt } = {}) {
+/** DSH and Clutch run several upstream providers.  Map the harness's
+ *  `source.provider` to the UM provider string and a billing mode. */
+export function dshProviderInfo(rawProvider) {
+  const id = typeof rawProvider === "string" ? rawProvider.trim().toLowerCase() : "";
+  if (!id || id.startsWith("deepseek")) {
+    return { provider: "deepseek", billingMode: "payg", legacyEligible: true };
+  }
+  if (id.startsWith("minimax")) {
+    return { provider: "minimax", billingMode: "subscription", legacyEligible: false };
+  }
+  if (id === "meta" || id.startsWith("muse")) {
+    return { provider: "muse-code", billingMode: "subscription", legacyEligible: false };
+  }
+  return { provider: id, billingMode: "payg", legacyEligible: false };
+}
+
+function dshStepDurationMs(messageTimeMs, stepStartMs, stream) {
+  const MAX_MS = 6 * 60 * 60 * 1000;
+  if (Number.isFinite(stepStartMs)) {
+    const d = messageTimeMs - stepStartMs;
+    if (d >= 0 && d <= MAX_MS) return d;
+  }
+  if (Array.isArray(stream)) {
+    let first = Infinity;
+    for (const entry of stream) {
+      const t = Number(entry?.time ?? entry?.time0);
+      if (Number.isFinite(t) && t < first) first = t;
+    }
+    const d = messageTimeMs - first;
+    if (Number.isFinite(d) && d >= 0 && d <= MAX_MS) return d;
+  }
+  return null;
+}
+
+/**
+ * Parse one DSH / Clutch session archive.
+ *
+ * Options:
+ *   sessionKey            event-id namespace for this archive.  Callers pass the
+ *                         session DIRECTORY key so session.jsonl and
+ *                         session.v3.jsonl twins of one session share ids.
+ *   legacySessionKey      the pre-v3 file-based key.  When set, DeepSeek
+ *                         messages at or before DSH_LEGACY_EVENT_CUTOFF_MS keep
+ *                         the exact pre-v3 event shape under this key.
+ *   seenMessageIds        optional Set shared across archives; a message id
+ *                         already seen is skipped (v1/v3 twins hold copies).
+ *   harness               "dsh" or "clutch" (diagnostic metadata).
+ */
+export function parseDeepSeekSessionJsonl(
+  text,
+  { sessionKey, fallbackOccurredAt, legacySessionKey, seenMessageIds, harness } = {},
+) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
   const lines = text.split("\n");
+  const stepStarts = new Map();
   for (let lineNo = 0; lineNo < lines.length; lineNo += 1) {
     const line = lines[lineNo].trim();
     if (!line.startsWith("{")) continue;
@@ -446,6 +601,10 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
     try {
       obj = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (obj?.type === "step/start" && obj.data) {
+      stepStarts.set(`${obj.data.turn}:${obj.data.step}`, Number(obj.time));
       continue;
     }
     const dshData = obj?.data && typeof obj.data === "object" ? obj.data : null;
@@ -457,6 +616,14 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
     const source = isDshAssistantMessage && dshData.message?.source && typeof dshData.message.source === "object"
       ? dshData.message.source
       : {};
+    const messageId =
+      isDshAssistantMessage && typeof dshData.message?.id === "string" && dshData.message.id
+        ? dshData.message.id
+        : null;
+    if (messageId && seenMessageIds) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
     const model =
       (typeof source.model === "string" && source.model.trim()) ||
       (typeof obj.model === "string" && obj.model.trim()) ||
@@ -480,23 +647,48 @@ export function parseDeepSeekSessionJsonl(text, { sessionKey, fallbackOccurredAt
           cacheRead: usage.prompt_cache_hit_tokens || usage.cache_read_input_tokens || 0,
           cacheCreation: usage.prompt_cache_miss_tokens || 0,
         });
+    const info = dshProviderInfo(isDshAssistantMessage ? source.provider : "deepseek");
+    const messageTimeMs = Date.parse(occurredAtIso);
+    const legacy =
+      Boolean(legacySessionKey) &&
+      info.legacyEligible &&
+      Number.isFinite(messageTimeMs) &&
+      messageTimeMs <= DSH_LEGACY_EVENT_CUTOFF_MS;
+    const extraId = messageId || `L${lineNo}:${model}`;
+    let extraMetadata;
+    if (!legacy && isDshAssistantMessage) {
+      const durationMs = dshStepDurationMs(
+        Number(obj.time),
+        stepStarts.get(`${dshData.turn}:${dshData.step}`),
+        dshData.stream,
+      );
+      extraMetadata = {
+        harness: harness || "dsh",
+        billingMode: info.billingMode,
+        ...(typeof source.provider === "string" && source.provider
+          ? { providerId: source.provider.slice(0, 80) }
+          : {}),
+        ...(durationMs !== null ? { durationMs } : {}),
+      };
+    }
     const parsed = tokenEventsFromBreakdown({
         producerId: DEEPSEEK_PRODUCER_ID,
-        provider: "deepseek",
+        provider: legacy ? "deepseek" : info.provider,
         service: "deepseek-harness",
-        sessionKey: sessionKey ?? "deepseek",
+        sessionKey: (legacy ? legacySessionKey : sessionKey) ?? "deepseek",
         occurredAtIso,
         model,
         breakdown,
-        extraId:
-          (isDshAssistantMessage && typeof dshData.message?.id === "string" && dshData.message.id) ||
-          `L${lineNo}:${model}`,
+        extraId,
+        extraMetadata,
       });
     // DeepSeek outputTokens already includes reasoning tokens.  Keep the
     // separate count as diagnostic metadata without double-counting it.
     const reasoningTokens = finiteCount(usage.reasoningTokens);
     for (const event of parsed) {
-      event.confidence = "actual";
+      // The September rows were stored with confidence "estimated"; a replay
+      // that says "actual" is a content difference and returns HTTP 409.
+      if (!legacy) event.confidence = "actual";
       if (reasoningTokens > 0) {
         if (event.metadata?.tokenType === "output") {
           event.metadata.reasoningTokens = reasoningTokens;
@@ -600,6 +792,173 @@ export function parseCopilotEventsJsonl(text, { sessionKey, fallbackOccurredAt }
   return events;
 }
 
+/** opencode providerID -> UM provider string and billing mode. */
+export function opencodeProviderInfo(providerId, modelId) {
+  const id = typeof providerId === "string" ? providerId.trim().toLowerCase() : "";
+  if (id.startsWith("minimax")) return { provider: "minimax", billingMode: "subscription" };
+  if (id === "meta" || id.startsWith("muse")) return { provider: "muse-code", billingMode: "subscription" };
+  if (id === "opencode") {
+    return { provider: "opencode", billingMode: "free" };
+  }
+  if (id === "deepseek") return { provider: "deepseek", billingMode: "payg" };
+  if (id === "anthropic" || id === "openai" || id === "google" || id === "xai") {
+    return { provider: id === "google" ? "google-ai" : id, billingMode: "payg" };
+  }
+  return { provider: id || "opencode", billingMode: "payg" };
+}
+
+/**
+ * Parse opencode `session_message` rows (assistant messages only).
+ * Row shape: { id, session_id, data } where data is the JSON string (or object)
+ * holding time.{created,streamed,completed}, model.{id,providerID,variant},
+ * cost, tokens.{input,output,reasoning,cache.{read,write}}.
+ *
+ * opencode's tokens.output EXCLUDES reasoning (143 rows have reasoning greater
+ * than output) and tokens.input is uncached, so reasoning is billed at the
+ * output rate: fold it into the output row (UM prices only input, output,
+ * cacheRead and cacheCreation) and keep the split in metadata.
+ * Rows without time.completed are still streaming and are skipped, because a
+ * changing quantity under one event id would return HTTP 409.
+ */
+export function parseOpencodeMessageRows(rows) {
+  const events = [];
+  for (const row of rows) {
+    let data = row?.data;
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        continue;
+      }
+    }
+    if (!data || typeof data !== "object") continue;
+    const tokens = data.tokens;
+    const time = data.time;
+    if (!tokens || typeof tokens !== "object" || !time || !Number.isFinite(Number(time.completed))) continue;
+    const messageId = typeof row.id === "string" && row.id ? row.id : null;
+    const sessionId = typeof row.session_id === "string" && row.session_id ? row.session_id : null;
+    if (!messageId || !sessionId) continue;
+    const model = typeof data.model?.id === "string" ? data.model.id.trim() : "";
+    const providerId = typeof data.model?.providerID === "string" ? data.model.providerID : "";
+    const info = opencodeProviderInfo(providerId, model);
+    const output = finiteCount(tokens.output);
+    const reasoning = finiteCount(tokens.reasoning);
+    const breakdown = {
+      input: finiteCount(tokens.input),
+      output: output + reasoning,
+      cacheRead: finiteCount(tokens.cache?.read),
+      cacheCreation: finiteCount(tokens.cache?.write),
+    };
+    const created = Number(time.created);
+    const completed = Number(time.completed);
+    const durationMs =
+      Number.isFinite(created) && completed >= created && completed - created <= 6 * 3600 * 1000
+        ? completed - created
+        : null;
+    const cost = Number(data.cost);
+    const events_ = tokenEventsFromBreakdown({
+      producerId: OPENCODE_PRODUCER_ID,
+      provider: info.provider,
+      service: "opencode",
+      sessionKey: sessionId,
+      occurredAtIso: new Date(completed).toISOString(),
+      model: model || undefined,
+      breakdown,
+      extraId: messageId,
+      collectorCallId: messageId,
+      extraMetadata: {
+        harness: "opencode",
+        billingMode: info.billingMode,
+        ...(providerId ? { providerId: providerId.slice(0, 80) } : {}),
+        ...(durationMs !== null ? { durationMs } : {}),
+        ...(typeof data.agent === "string" && data.agent ? { agent: data.agent.slice(0, 80) } : {}),
+        ...(typeof data.model?.variant === "string" && data.model.variant
+          ? { variant: data.model.variant.slice(0, 80) }
+          : {}),
+        ...(typeof data.finish === "string" && data.finish ? { finish: data.finish.slice(0, 80) } : {}),
+        ...(Number.isFinite(cost) && cost > 0 ? { reportedCostUsd: Number(cost.toFixed(9)) } : {}),
+      },
+    });
+    for (const event of events_) {
+      event.confidence = "actual";
+      if (event.metadata?.tokenType === "output" && reasoning > 0) {
+        event.metadata.reasoningTokens = reasoning;
+        event.metadata.outputTokensExcludingReasoning = output;
+      }
+    }
+    events.push(...events_);
+  }
+  return events;
+}
+
+/** fx model ids carry a vendor prefix ("grok/grok-4.6", "xai/grok-4.1-fast"). */
+export function fxModelName(model) {
+  const raw = typeof model === "string" ? model.trim() : "";
+  const slash = raw.lastIndexOf("/");
+  return slash >= 0 ? raw.slice(slash + 1) : raw;
+}
+
+/**
+ * Parse ~/.fx/usage.jsonl.  Only `kind: "generation"` facts count; `pending`,
+ * `incident` and `coverage` rows are bookkeeping.  Fact ids (gen_...) are
+ * unique, so they are the stable event key.  xAI semantics: input_tokens is
+ * inclusive of cache reads and output_tokens includes reasoning.
+ */
+export function parseFxUsageJsonl(text) {
+  const events = [];
+  const seen = new Set();
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let obj;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (obj?.kind !== "generation") continue;
+    const fact = obj.fact;
+    if (!fact || typeof fact !== "object" || typeof fact.id !== "string" || !fact.id) continue;
+    if (seen.has(fact.id)) continue;
+    seen.add(fact.id);
+    const occurredAtIso = isoTimestamp(Number(fact.created_at_ms), null);
+    if (!occurredAtIso) continue;
+    const model = fxModelName(fact.model);
+    const breakdown = splitInclusiveCache({
+      input: fact.input_tokens,
+      output: fact.output_tokens,
+      cacheRead: fact.cache_read_tokens,
+      cacheCreation: fact.cache_write_tokens,
+    });
+    const reasoning = finiteCount(fact.reasoning_tokens);
+    const searches = finiteCount(fact.billable_web_search_calls);
+    const parsed = tokenEventsFromBreakdown({
+      producerId: FX_PRODUCER_ID,
+      provider: "xai",
+      service: "fx",
+      sessionKey: "fx",
+      occurredAtIso,
+      model: model || undefined,
+      breakdown,
+      extraId: fact.id,
+      extraMetadata: {
+        harness: "fx",
+        billingMode: "payg",
+        ...(typeof fact.model === "string" && fact.model !== model ? { rawModel: fact.model.slice(0, 120) } : {}),
+        ...(searches > 0 ? { billableWebSearchCalls: searches } : {}),
+      },
+    });
+    for (const event of parsed) {
+      event.confidence = "actual";
+      if (event.metadata?.tokenType === "output" && reasoning > 0) {
+        event.metadata.reasoningTokens = reasoning;
+      }
+    }
+    events.push(...parsed);
+  }
+  return events;
+}
+
 export function chunkEvents(events, size = MAX_EVENTS_PER_BATCH) {
   const chunks = [];
   for (let i = 0; i < events.length; i += size) {
@@ -622,44 +981,123 @@ export async function postUsageBatches({
   ingestUrl,
   ingestToken,
   producerId,
+  producerInstanceId,
   dryRun = false,
   log = console.log,
 }) {
   const bodyFor = (batch) => ({
     schemaVersion: 2,
     producerId,
-    producerInstanceId: process.env.USAGE_MACHINE_ID?.trim() || hostname(),
+    producerInstanceId:
+      producerInstanceId || process.env.USAGE_MACHINE_ID?.trim() || hostname(),
     events: batch,
   });
   if (dryRun) {
     log(`--dry-run; would send ${events.length} event(s) as ${chunkEvents(events).length} batch(es)`);
     return { received: 0, persisted: 0, rejected: 0, dryRun: true, events };
   }
-  if (!ingestToken) {
-    throw new Error("Missing ingest token");
+  let sentryRoot;
+  let sentryConfig;
+  let spoolError;
+  try {
+    sentryConfig = collectorSentryConfig(process.env, producerId);
+    if (sentryConfig) sentryRoot = await enqueueCollectorSentry(events, { producerId, producerInstanceId: bodyFor([]).producerInstanceId }, sentryConfig);
+  } catch {
+    spoolError = true;
+    log("WARNING: collector Sentry outbox unavailable; Usage Monitor delivery continues");
   }
+  const sentryDelivery = sentryRoot
+    ? drainCollectorSentry(sentryRoot, sentryConfig).catch(() => ({ pending: true }))
+    : Promise.resolve({ pending: false });
+  if (!ingestToken) { await sentryDelivery; throw new Error("Missing ingest token"); }
   let received = 0;
   let persisted = 0;
   let rejected = 0;
+  let conflicted = 0;
   const batches = chunkEvents(events);
   for (let i = 0; i < batches.length; i += 1) {
     const batch = batches[i];
-    const parsed = await postUsageBatchWithRetry({
+    let parsed;
+    try { parsed = await postBatchIsolatingConflicts({
       ingestUrl,
       ingestToken,
-      body: bodyFor(batch),
+      bodyFor,
+      events: batch,
       log,
-    });
+    }); } catch (error) { await sentryDelivery; throw error; }
     received += parsed.received;
     persisted += parsed.persisted;
     rejected += parsed.rejected;
+    conflicted += parsed.conflicted;
     // Authenticated ingest allows 10 req / 1s.  A 400-day backfill is 100+
     // batches; blasting them trips 429 and aborts the rest of history.
     if (i < batches.length - 1) {
       await sleep(120);
     }
   }
-  return { received, persisted, rejected };
+  if (conflicted > 0) {
+    log(`WARNING: ${conflicted} event(s) skipped as idempotency conflicts (already stored with different content)`);
+  }
+  if (sentryRoot) {
+    const result = await sentryDelivery;
+    if (result.pending) log("WARNING: collector Sentry delivery pending in durable outbox");
+    if (result.quarantined) log(`WARNING: ${result.quarantined} collector Sentry event(s) quarantined in durable outbox`);
+  }
+  // UM has already acknowledged these rows; retaining the source checkpoint
+  // only retries their idempotent replay until the Sentry spool is durable.
+  if (spoolError) throw new Error("Usage Monitor delivered; collector Sentry outbox failed, checkpoint must not advance");
+  return { received, persisted, rejected, conflicted };
+}
+
+/**
+ * The ingest endpoint answers 409 idempotency_conflict for the WHOLE batch when
+ * any one event collides with a stored row that has different content (UM-1469:
+ * a hostname rename did this to every replayed event, and the collector, which
+ * only advances its checkpoint after a clean ack, re-sent the same poisoned
+ * batch for a month).  A conflict means the row is already stored, so the right
+ * response is to isolate the colliding event(s) by halving the batch, log each
+ * key loudly, and let everything else land.
+ */
+async function postBatchIsolatingConflicts({ ingestUrl, ingestToken, bodyFor, events, log }) {
+  try {
+    const parsed = await postUsageBatchWithRetry({
+      ingestUrl,
+      ingestToken,
+      body: bodyFor(events),
+      log,
+    });
+    return {
+      received: parsed.received,
+      persisted: parsed.persisted,
+      rejected: parsed.rejected,
+      conflicted: 0,
+    };
+  } catch (error) {
+    if (error?.code !== "idempotency_conflict") throw error;
+    if (events.length === 1) {
+      log(
+        `skipping event ${events[0].eventId} (${events[0].label ?? events[0].metricType}): ${error.message}`
+      );
+      return { received: 1, persisted: 0, rejected: 0, conflicted: 1 };
+    }
+    const mid = Math.ceil(events.length / 2);
+    const total = { received: 0, persisted: 0, rejected: 0, conflicted: 0 };
+    for (const half of [events.slice(0, mid), events.slice(mid)]) {
+      const part = await postBatchIsolatingConflicts({
+        ingestUrl,
+        ingestToken,
+        bodyFor,
+        events: half,
+        log,
+      });
+      total.received += part.received;
+      total.persisted += part.persisted;
+      total.rejected += part.rejected;
+      total.conflicted += part.conflicted;
+      await sleep(120);
+    }
+    return total;
+  }
 }
 
 function sleep(ms) {
@@ -718,7 +1156,11 @@ async function postUsageBatchWithRetry({ ingestUrl, ingestToken, body, log }) {
       continue;
     }
     if (!response.ok && response.status !== 202) {
-      throw new Error(`Ingest rejected the batch (HTTP ${response.status})`);
+      const detail = parsed?.error?.message ? `: ${String(parsed.error.message).slice(0, 300)}` : "";
+      const failure = new Error(`Ingest rejected the batch (HTTP ${response.status})${detail}`);
+      failure.status = response.status;
+      failure.code = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
+      throw failure;
     }
     if (!isCompleteUsageIngestAck(parsed, body.events.length)) {
       const waitMs = Math.min(60_000, Math.pow(2, attempt) * 1000);

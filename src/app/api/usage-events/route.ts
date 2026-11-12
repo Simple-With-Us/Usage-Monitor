@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { hasValidDashboardSession } from "@/lib/auth";
+import { isUsageReadAuthorized } from "@/lib/ingest-auth";
 import {
   buildDailySpendSeries,
   classifyCostCoverage,
@@ -19,8 +21,20 @@ const DEFAULT_RAW_LIMIT = 50;
  * Summary mode (default): grouped MTD-style rollup for the dashboard.
  * Raw mode (`?raw=1`): cursor-paginated individual events with deterministic
  * orderBy (Wave K / E15) — never unbounded.
+ *
+ * Auth: dashboard session cookie OR the usage read token
+ * (`isUsageReadAuthorized` — USAGE_READ_TOKEN with the documented ingest
+ * fallback), matching GET /api/export/daily-rollups. NOTE: like
+ * `/api/export/daily-rollups`, this route self-authenticates; bearer-token
+ * access additionally requires the path to be excluded from the
+ * dashboard-session middleware (src/middleware.ts's isPublicPath). Dashboard
+ * session access works without that exclusion.
  */
 export async function GET(request: NextRequest) {
+  if (!hasValidDashboardSession(request) && !isUsageReadAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
   const rawDaysParam = searchParams.get("days");
   const rawFrom = searchParams.get("from");
@@ -70,6 +84,7 @@ export async function GET(request: NextRequest) {
     const order =
       searchParams.get("order") === "asc" ? ("asc" as const) : ("desc" as const);
     const metricTypeFilter = searchParams.get("metricType");
+    const sourceAppFilter = searchParams.get("sourceApp")?.trim();
 
     const where = {
       occurredAt: {
@@ -82,6 +97,7 @@ export async function GET(request: NextRequest) {
           : { projectId: projectFilter }
         : {}),
       ...(metricTypeFilter ? { metricType: metricTypeFilter } : {}),
+      ...(sourceAppFilter ? { sourceApp: sourceAppFilter } : {}),
     };
 
     const rows = await prisma.externalUsageEvent.findMany({

@@ -8,7 +8,7 @@ set -Eeuo pipefail
 umask 027
 export LC_ALL=C
 
-readonly REPOSITORY="jaywedgeworth22/Usage-Monitor"
+readonly REPOSITORY="Simple-With-Us/Usage-Monitor"
 readonly REPOSITORY_URL="https://github.com/${REPOSITORY}.git"
 readonly GITHUB_API="https://api.github.com/repos/${REPOSITORY}"
 readonly GITHUB_ACTIONS_APP_ID="15368"

@@ -1,6 +1,6 @@
 # Closeout: CODEX cap-pickup handoff — MONET execution (2026-07-15)
 
-**Seat:** MONET (second session on this handoff; split coordinated on #agent-sync ts 1784141677)
+**Seat:** MONET (second session on this handoff; split coordinated on #ag***-s**c ts 1784141677)
 **Handoff executed:** `docs/rollouts/2026-07-15-pickup-codex-cap-handoff-to-monet.md` (committed to the repo in the same PR as this note — it previously existed only as an untracked file on the `cursor` checkout)
 **Owner directive:** complete the work CLAUDE left at the handoff note, using a team of subagents.
 
@@ -8,7 +8,7 @@
 
 ## 1. Session-split context (why two MONET sessions touched this lane)
 
-The first MONET session claimed the full handoff queue on #agent-sync (sync-1, ts 1784139702)
+The first MONET session claimed the full handoff queue on #ag***-s**c (sync-1, ts 1784139702)
 and was actively mid-flight on the three review-batch fix lanes when this second session was
 spawned by the owner on the same handoff. To avoid a repeat of the same-day Socratic.Trade
 adopt-commit collision, this session posted a split (sync-2, ts 1784141677):
@@ -105,7 +105,7 @@ closeout).
 ## 6. Follow-ups
 
 1. **PR #301 + the auto-refresh PR** — first MONET session lands these; adopt per pickup-seat
-   protocol only if that session caps out (standing offer posted on #agent-sync).
+   protocol only if that session caps out (standing offer posted on #ag***-s**c).
 2. **Eval-sweep MONET lane** — owns dispositioning the 22 REPORT-ONLY worktrees/branches and
    the broader board/mirror reconciliation.
 3. **Owner decision (low priority):** whether to do row-level verification of the 3 applied

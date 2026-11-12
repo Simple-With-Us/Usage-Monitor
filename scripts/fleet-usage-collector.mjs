@@ -224,7 +224,7 @@ async function collectAllSessionEvents(since) {
 /**
  * Scoped ingest token names per producer.  A scoped token authorizes exactly
  * one producerId, so every batch resolves its own token (environment first,
- * then ~/.secrets/global-api-keys) before the unscoped USAGE_INGEST_TOKEN,
+ * then `fleet-secrets get`) before the unscoped USAGE_INGEST_TOKEN,
  * which is refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
  */
 export const FLEET_TOKEN_ENV_BY_PRODUCER = {
@@ -262,6 +262,43 @@ export function fleetIngestJobs({ quotaEvents = [], sessionResults = {} } = {}) 
     { producerId: COPILOT_PRODUCER_ID, events: sessionResults.copilot ?? [] },
     { producerId: DEEPSEEK_PRODUCER_ID, events: sessionResults.deepseek ?? [] },
   ].filter((job) => job.events.length > 0);
+}
+
+/**
+ * Post every fleet seat's batch, isolating per-seat failures.  A throw from
+ * one seat's upload aborts only that seat: later seats are still attempted
+ * (an abort would silently drop their first attempt while earlier seats are
+ * already persisted, forcing duplicate resends on the next pass).  The pass
+ * tallies only successful seats and returns failedSeats so the caller can
+ * fail loudly once every seat has had its attempt.
+ */
+export async function postFleetJobs(jobs, { ingestUrl, dryRun = false, log = () => {}, post = postUsageBatches }) {
+  let received = 0;
+  let persisted = 0;
+  let rejected = 0;
+  let sawDryRun = false;
+  const failedSeats = [];
+  for (const job of jobs) {
+    try {
+      const ack = await post({
+        events: job.events,
+        ingestUrl,
+        ingestToken: resolveCollectorToken(fleetTokenEnvNames(job.producerId)),
+        producerId: job.producerId,
+        dryRun,
+        log,
+      });
+      received += ack.received;
+      persisted += ack.persisted;
+      rejected += ack.rejected;
+      sawDryRun = sawDryRun || Boolean(ack.dryRun);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failedSeats.push({ producerId: job.producerId, error: message });
+      log(`  ! seat ${job.producerId} upload failed: ${message}`);
+    }
+  }
+  return { received, persisted, rejected, dryRun: sawDryRun, failedSeats };
 }
 
 async function main() {
@@ -303,32 +340,22 @@ async function main() {
     return;
   }
 
-  try {
-    let received = 0;
-    let persisted = 0;
-    let rejected = 0;
-    let dryRun = false;
-    for (const job of jobs) {
-      const ack = await postUsageBatches({
-        events: job.events,
-        ingestUrl: INGEST_URL,
-        ingestToken: resolveCollectorToken(fleetTokenEnvNames(job.producerId)),
-        producerId: job.producerId,
-        dryRun: DRY || args.dryRun,
-        log,
-      });
-      received += ack.received;
-      persisted += ack.persisted;
-      rejected += ack.rejected;
-      dryRun = dryRun || Boolean(ack.dryRun);
-    }
-    log(
-      `Pass complete: received=${received} persisted=${persisted} rejected=${rejected}${
-        dryRun ? " (dry-run)" : ""
-      }`
+  const { received, persisted, rejected, dryRun, failedSeats } = await postFleetJobs(jobs, {
+    ingestUrl: INGEST_URL,
+    dryRun: DRY || args.dryRun,
+    log,
+  });
+  log(
+    `Pass complete: seats=${jobs.length} received=${received} persisted=${persisted} rejected=${rejected} failedSeats=${failedSeats.length}${
+      dryRun ? " (dry-run)" : ""
+    }`
+  );
+  if (failedSeats.length > 0) {
+    fail(
+      `Incomplete pass: ${failedSeats.length} of ${jobs.length} seat uploads failed (${failedSeats
+        .map((seat) => seat.producerId)
+        .join(", ")}). Remaining seats were still attempted; rerun to retry the failed seats.`
     );
-  } catch (error) {
-    fail(error instanceof Error ? error.message : String(error));
   }
 }
 
