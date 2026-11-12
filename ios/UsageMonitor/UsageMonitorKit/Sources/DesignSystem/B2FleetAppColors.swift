@@ -11,8 +11,8 @@ public enum B2FleetAppColors {
 
     public static let remaining = Color(red: 0.020, green: 0.588, blue: 0.412)
 
+    /// Never reuses a named app's color, so an extra app such as "other" stays distinct.
     private static let fallbackPalette: [Color] = [
-        Color(red: 0.18, green: 0.78, blue: 0.64),
         Color(red: 0.94, green: 0.35, blue: 0.58),
         Color(red: 0.95, green: 0.68, blue: 0.18),
         Color(red: 0.45, green: 0.55, blue: 0.95),

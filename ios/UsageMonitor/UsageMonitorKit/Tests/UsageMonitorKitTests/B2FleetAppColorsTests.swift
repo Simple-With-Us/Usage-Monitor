@@ -16,4 +16,12 @@ final class B2FleetAppColorsTests: XCTestCase {
             Theme.Colors.accent
         )
     }
+
+    func testOtherAppDoesNotShareFleetInfraColor() {
+        let named = ["socratic-trade", "congress-trade", "usage-monitor", "fleet-infra"]
+            .map { B2FleetAppColors.color(forAppId: $0) }
+        for index in 0..<4 {
+            XCTAssertFalse(named.contains(B2FleetAppColors.color(forAppId: "other", fallbackIndex: index)))
+        }
+    }
 }
