@@ -12,24 +12,9 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
 import { appSettings } from "@/lib/app-settings";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
-/**
- * A scheduler-wide poll outage, not one provider's own HTTP error.
- *
- * Skipped providers were not attempted. One failure beside a full skip set
- * (production: unusual-whales HTTP_ERROR, 27 skipped) is that provider.
- * Page on the first tick only when at least two attempts failed, or when
- * the whole poll set was attempted and every one failed.
- */
-export function isBroadProviderFetchOutage(run: {
-  successes: number;
-  failures: number;
-  skipped?: number;
-}): boolean {
-  if (run.successes !== 0 || run.failures <= 0) return false;
-  if (run.failures >= 2) return true;
-  return run.skipped === 0;
-}
+export { isBroadProviderFetchOutage };
 
 /** Total provider-poll outage: every attempted poll failed, and the miss is broad. */
 export function isZeroSuccessProviderFetchOutage(

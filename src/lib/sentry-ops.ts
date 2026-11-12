@@ -15,7 +15,7 @@
 // DSN-gated by SENTRY_FLEET_DSN; absent = no-op.
 
 import { isCursorAdminPollerEnabled } from "@/lib/cursor-admin-config";
-import { isBroadProviderFetchOutage } from "@/lib/runtime-health";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
 export const SENTRY_CRON_MONITOR_SLUG = "usage-monitor-scheduler";
 

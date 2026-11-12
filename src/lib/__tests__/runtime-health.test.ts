@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isBroadProviderFetchOutage } from "../provider-fetch-outage";
 import {
   captureDatabaseFileBaseline,
   backupLayersGatesOk,
@@ -29,7 +30,6 @@ import {
   getRuntimeIdentity,
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
-  isBroadProviderFetchOutage,
   isSchedulerEnabled,
   recordSchedulerGate,
   getStartupRuntimeStatus,
