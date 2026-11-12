@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   __resetSentryFleetDsnForTests,
+  isFleetInfraFailureMetric,
   isSentryFleetConfigured,
   recordFleetInfraEvent,
   recordFleetInfraMetric,
@@ -172,8 +173,31 @@ describe("recordFleetInfraMetric: failure-class metrics stay issue events", () =
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("ok", { status: 200 }));
-    await recordFleetInfraMetric("ingest.admission_rejected", 1, { route: "ingest/usage" });
+    await recordFleetInfraMetric("ingest.events_rejected", 1, { route: "ingest/usage" });
     expect(JSON.parse(postedLines(fetchSpy)[2]).level).toBe("warning");
+  });
+
+  it("records SQLite admission back-pressure as a metric, not an issue", async () => {
+    process.env.SENTRY_FLEET_DSN = DSN;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    expect(isFleetInfraFailureMetric("ingest.admission_rejected")).toBe(false);
+    expect(isFleetInfraFailureMetric("ingest.events_rejected")).toBe(true);
+    await recordFleetInfraMetric("ingest.admission_rejected", 1, {
+      route: "ingest/usage",
+    });
+    expect(JSON.parse(postedLines(fetchSpy)[1]).type).toBe("trace_metric");
+    const payload = JSON.parse(postedLines(fetchSpy)[2]);
+    expect(payload.items[0]).toMatchObject({
+      name: "ingest.admission_rejected",
+      type: "counter",
+      value: 1,
+    });
+    expect(payload.items[0].attributes.route).toMatchObject({
+      value: "ingest/usage",
+      type: "string",
+    });
   });
 
   it("marks warning level for .failed and .error metrics", async () => {

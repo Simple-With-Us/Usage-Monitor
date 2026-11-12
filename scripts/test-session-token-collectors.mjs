@@ -1539,6 +1539,48 @@ assert(
   }
 }
 
+// AFC-667: the claude-code quota batch must present its ingest bearer, and a
+// route 401 must surface as the collector's "Unauthorized" failure line.
+{
+  const realFetch = globalThis.fetch;
+  let authorization = "";
+  let producerId = "";
+  globalThis.fetch = async (_url, init) => {
+    authorization = init.headers.authorization;
+    producerId = JSON.parse(init.body).producerId;
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        schemaVersion: 2,
+        error: { code: "unauthorized", message: "Unauthorized", retryable: false },
+      }),
+      { status: 401 }
+    );
+  };
+  try {
+    let message = "";
+    try {
+      await postUsageBatches({
+        events: [{ eventId: "subq-five-hour", occurredAt: "2026-11-12T01:00:00.000Z" }],
+        ingestUrl: "https://usage.example/api/ingest/usage",
+        ingestToken: "scoped-ingest-token",
+        producerId: "claude-code",
+        log: () => {},
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    assert(authorization === "Bearer scoped-ingest-token", `ingest bearer: ${authorization}`);
+    assert(producerId === "claude-code", `producer id: ${producerId}`);
+    assert(
+      message === "Ingest rejected the batch (HTTP 401): Unauthorized",
+      `401 line: ${message}`
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 // A failing seat must not abort the remaining seats: earlier persisted seats
 // stay counted, later seats still get their first attempt, and the failure is
 // surfaced in failedSeats so the caller can fail the pass loudly afterwards.
