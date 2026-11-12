@@ -5,9 +5,13 @@ import { computeProjectBudgetStatus, bustBudgetStatusCache } from "@/lib/budget-
 import { canonicalProjectKey } from "@/lib/provider-identity";
 import { backfillProjectIdFromMetadataName } from "@/lib/project-resolver";
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
+import { readJsonBody } from "@/lib/provider-input";
+import { parseProjectCreateInput } from "@/lib/project-input";
+import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
 
 export async function GET(request: NextRequest) {
   try {
+    await ensureFleetProjectsSeeded();
     const status = await computeProjectBudgetStatus();
     if (request.nextUrl.searchParams.get("includeSummary") === "1") {
       return NextResponse.json({ projects: status.projects, summary: status.summary });
@@ -28,24 +32,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  let input;
   try {
-    const body = await request.json();
-    const { name, description, monthlyBudgetUsd } = body;
+    // readJsonBody (vs request.json()) applies the shared byte ceiling from
+    // bounded-request-body.ts, same as PUT /api/projects/:id.
+    input = parseProjectCreateInput(await readJsonBody(request));
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Invalid request" },
+      { status: 400 }
+    );
+  }
 
-    if (!name) {
-      return NextResponse.json(
-        { error: "Project name is required" },
-        { status: 400 }
-      );
-    }
+  try {
+    const { name, description, monthlyBudgetUsd } = input;
 
-    // Case-insensitive uniqueness: Project.name is only BINARY-unique in SQLite,
-    // but project attribution resolves producer-supplied names case-insensitively
-    // (project-resolver.ts). Allowing "Foo" and "foo" to coexist would make that
-    // resolution ambiguous. The app-level check gives a friendly message; the
-    // unique `nameKey` column is the real guarantee (it closes the race two
-    // app-level checks can't — both would pass, but the second insert fails).
-    const nameKey = canonicalProjectKey(String(name));
+    const nameKey = canonicalProjectKey(name);
     const existing = await prisma.project.findMany({ select: { name: true } });
     if (existing.some((p) => canonicalProjectKey(p.name) === nameKey)) {
       return NextResponse.json(
@@ -56,10 +58,10 @@ export async function POST(request: NextRequest) {
 
     const project = await prisma.project.create({
       data: {
-        name,
+        name: input.name,
         nameKey,
-        description,
-        monthlyBudgetUsd,
+        description: input.description,
+        monthlyBudgetUsd: input.monthlyBudgetUsd,
       },
     });
 

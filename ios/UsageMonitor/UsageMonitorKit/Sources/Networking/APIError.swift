@@ -80,4 +80,28 @@ public enum APIError: Error, Equatable, Sendable {
             return true
         }
     }
+
+    /// Computers-tab headline — clarifies monitor auth vs. Mac login.
+    public var computersTitle: String {
+        switch self {
+        case .missingToken: return "Monitor not connected"
+        case .unauthorized: return "Monitor access rejected"
+        case .serverNotConfigured: return "Mac health unavailable"
+        default: return title
+        }
+    }
+
+    /// Computers-tab detail — points users at Settings steps 2/3.
+    public var computersMessage: String {
+        switch self {
+        case .missingToken:
+            return "Add a read token in Settings (step 3) or sign in with your dashboard password (step 2).  Mac heartbeats load through the monitor — this is not a Mac login."
+        case .unauthorized:
+            return "Your read token or dashboard session was rejected.  Reconnect in Settings (steps 2–3).  This tab reads Mac heartbeats from the monitor, not from the Mac directly."
+        case .serverNotConfigured:
+            return "The monitor has not enabled read access for Mac health yet.  Try again later or check server configuration."
+        default:
+            return message
+        }
+    }
 }

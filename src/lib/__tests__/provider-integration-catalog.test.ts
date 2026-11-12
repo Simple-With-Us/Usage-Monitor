@@ -12,7 +12,7 @@ describe("provider integration catalog", () => {
     expect(new Set(names)).toEqual(
       new Set([
         ...BUILT_IN_PROVIDERS.filter((provider) => provider.lifecycle == null).map((provider) => provider.name),
-        "agent-sync-relay",
+        "simple-tools-relay",
         "custom",
         "generic",
       ])
@@ -23,7 +23,7 @@ describe("provider integration catalog", () => {
     const listed = new Set<string>(
       PROVIDER_INTEGRATION_PROFILES.map((profile) => profile.name)
     );
-    for (const name of ["tradier", "intrinio", "alpaca", "robinhood", "vercel", "firecrawl"]) {
+    for (const name of ["tradier", "intrinio", "alpaca", "robinhood", "vercel", "firecrawl", "deno"]) {
       expect(listed.has(name), name).toBe(false);
       expect(getProviderIntegrationProfile(name, "builtin").name).toBe(name);
     }
@@ -58,7 +58,7 @@ describe("provider integration catalog", () => {
     ]) {
       expect(getProviderIntegrationProfile(alias, "builtin").name, alias).toBe("google-ai");
     }
-    expect(getProviderIntegrationProfile("agent_sync_relay").name).toBe("agent-sync-relay");
+    expect(getProviderIntegrationProfile("simple_tools_relay").name).toBe("simple-tools-relay");
     expect(getProviderIntegrationProfile("private-service", "custom").name).toBe("custom");
     expect(getProviderIntegrationProfile("manual-service", "generic").name).toBe("generic");
     expect(getProviderIntegrationProfile("google-gemini", "push").name).toBe("generic");
@@ -93,6 +93,26 @@ describe("provider integration catalog", () => {
     expect(anthropic.shares.join(" ")).toMatch(
       /standard Messages API key is not sent/i
     );
+  });
+
+  it("labels ChatGPT/Codex, SuperGrok, and Antigravity subscriptions as not fetchable", () => {
+    const openai = getProviderIntegrationProfile("openai");
+    const xai = getProviderIntegrationProfile("xai");
+    const google = getProviderIntegrationProfile("google-ai");
+    expect(openai.cannotAdd.join(" ")).toMatch(/MANUALLY ONLY/i);
+    expect(xai.cannotAdd.join(" ")).toMatch(/SuperGrok/i);
+    expect(google.cannotAdd.join(" ")).toMatch(/Antigravity/i);
+  });
+
+  it("says Deno Deploy is retired and Coolify is the Congress.Trade host", () => {
+    const deno = getProviderIntegrationProfile("deno", "builtin");
+
+    expect(deno.summary).toMatch(/retired/i);
+    expect(deno.summary).toMatch(/Coolify/i);
+    expect(deno.summary).toMatch(/Congress\.Trade/i);
+    expect(deno.billing.summary).toMatch(/not a live production host/i);
+    expect(deno.limitations.join(" ")).toMatch(/do not host on Deno Deploy/i);
+    expect(deno.canAdd.join(" ")).not.toMatch(/when Deno Deploy publishes/i);
   });
 
   it("documents Firecrawl history as private, non-money metadata", () => {

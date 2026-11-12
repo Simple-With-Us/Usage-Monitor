@@ -1,19 +1,16 @@
 import Foundation
-import Observation
 import Models
 import DesignSystem
 
 // ---------------------------------------------------------------------------
-// Add / edit a project budget.
+// Add / edit a project budget — draft model and validation.
 //
-// The bearer-token API this app can reach is READ-ONLY (`GET /api/budget-status`
-// is the only authenticated call — see ARCHITECTURE-CONTRACT.md). There is no
-// project-mutation endpoint reachable from the app today, so this lane models
-// add/edit behind a small protocol seam and ships a fully-working *local* store
-// so the UI, previews, and tests are complete. When the backend gains a
-// `POST/PATCH /api/projects` route, the Assemble/backend agent swaps the local
-// store for a networked implementation of `ProjectBudgetEditing` — no view
-// changes required.
+// Project mutations go through the session-gated monitor API
+// (`POST/PUT/DELETE /api/projects`, dashboard-session cookie — the same path
+// as the provider/subscription management already in the app). This file owns
+// only the client-side draft + validation; persistence lives in
+// `ProjectManagementStore`, which calls `APIClient` and then refreshes the
+// shared `BudgetStore` so the list re-reads the server's recomputed budgets.
 // ---------------------------------------------------------------------------
 
 /// A validated, user-editable draft of a project budget.
@@ -67,9 +64,20 @@ public struct ProjectBudgetDraft: Equatable, Sendable {
     }
 
     /// Cheap check for enabling the Save button without surfacing an error.
-    /// `try?` yields `.some(_)` on success (even for a blank/`nil` budget) and
-    /// `nil` when `validate()` throws — so this is `true` only when valid.
-    public var isValid: Bool { (try? validate()) != nil }
+    ///
+    /// Must catch rather than use `try?`: `validate()` returns `Double?`, and
+    /// Swift flattens `try?` on an optional-returning throwing call, so a
+    /// successful validation of a blank budget (`nil` = no cap) is
+    /// indistinguishable from a thrown error. Using `try?` here disabled Save
+    /// for every project without a monthly cap.
+    public var isValid: Bool {
+        do {
+            _ = try validate()
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 /// Typed, user-presentable validation failures.
@@ -109,93 +117,5 @@ public enum CurrencyInputParser {
         guard cleaned.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
         guard let value = Double(cleaned), value.isFinite else { return nil }
         return value
-    }
-}
-
-/// The budget-level thresholds the app derives locally when it must recompute a
-/// project's status after a local edit (the backend owns the authoritative
-/// value on real fetches). Warning at 80% of budget; exceeded past 100%.
-public enum ProjectBudgetLevelRule {
-    public static func level(spent: Double, budget: Double?) -> BudgetLevel {
-        guard let budget, budget > 0 else { return .unconfigured }
-        if spent > budget { return .exceeded }
-        if spent >= budget * 0.8 { return .warning }
-        return .ok
-    }
-}
-
-// MARK: - Persistence seam
-
-/// The write side of project budgets. Implemented locally today; a networked
-/// implementation drops in unchanged when the backend exposes a mutation route.
-public protocol ProjectBudgetEditing: Sendable {
-    /// Create or update a project from a validated draft, returning the stored
-    /// project. `current == nil` creates a new project; otherwise it updates
-    /// `current` in place — preserving its real spend/coverage while applying
-    /// the draft's name/description/budget.
-    func save(_ draft: ProjectBudgetDraft, updating current: ProjectBudgetStatus?) async throws -> ProjectBudgetStatus
-}
-
-/// A local, in-memory implementation that makes add/edit fully functional
-/// without a backend. It keeps an overlay keyed by project id (edits) plus any
-/// newly-created projects, and merges them over the read-only list from
-/// `BudgetStore` so the user sees their change immediately.
-///
-/// Marked `@MainActor` so its `@Observable` overlay drives SwiftUI directly.
-@MainActor
-@Observable
-public final class LocalProjectBudgetStore: ProjectBudgetEditing {
-    /// Edits/creates keyed by project id, applied on top of the fetched list.
-    public private(set) var overlay: [String: ProjectBudgetStatus] = [:]
-    /// Ids of projects created in-app (kept even when absent from the fetch).
-    public private(set) var createdOrder: [String] = []
-
-    public init() {}
-
-    /// Merge local edits/creations over the authoritative fetched projects.
-    public func merged(with fetched: [ProjectBudgetStatus]) -> [ProjectBudgetStatus] {
-        var result: [ProjectBudgetStatus] = fetched.map { overlay[$0.id] ?? $0 }
-        let fetchedIDs = Set(fetched.map(\.id))
-        // Append locally-created projects not present in the fetch, in order.
-        for id in createdOrder where !fetchedIDs.contains(id) {
-            if let project = overlay[id] { result.append(project) }
-        }
-        return result
-    }
-
-    nonisolated public func save(_ draft: ProjectBudgetDraft, updating current: ProjectBudgetStatus?) async throws -> ProjectBudgetStatus {
-        let budget = try draft.validate()
-        return await MainActor.run {
-            // Prefer the freshest known state: an existing overlay edit wins over
-            // the passed-in snapshot, so repeated edits compose correctly.
-            let base = current.flatMap { overlay[$0.id] } ?? current
-            let spent = base?.spentUsd ?? 0
-            let projected = base?.projectedEomUsd ?? spent
-            let id = base?.id ?? "proj_local_\(UUID().uuidString.prefix(8))"
-            let level = ProjectBudgetLevelRule.level(spent: spent, budget: budget)
-            let percent: Double? = {
-                guard let budget, budget > 0 else { return nil }
-                return spent / budget
-            }()
-            let remaining: Double? = budget.map { $0 - spent }
-            let project = ProjectBudgetStatus(
-                id: id,
-                name: draft.trimmedName,
-                description: draft.trimmedDetails.isEmpty ? nil : draft.trimmedDetails,
-                monthlyBudgetUsd: budget,
-                spentUsd: spent,
-                projectedEomUsd: projected,
-                spendCoverage: base?.spendCoverage ?? .unknown,
-                directUsd: base?.directUsd,
-                allocatedUsd: base?.allocatedUsd,
-                incompleteAllocatedProviderCount: base?.incompleteAllocatedProviderCount,
-                remainingUsd: remaining,
-                percentUsed: percent,
-                status: level
-            )
-            overlay[id] = project
-            if current == nil { createdOrder.append(id) }
-            return project
-        }
     }
 }

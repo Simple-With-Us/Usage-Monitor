@@ -234,4 +234,53 @@ describe("POST /api/auth/login", () => {
     const res = await POST(loginRequest(PASSWORD, SAME_TUPLE_IP));
     expect(res.status).toBe(429);
   });
+
+  it("rejects an oversized body with the uniform 401 and consumes rate-limit budget", async () => {
+    const { POST } = await freshRoute();
+    const SAME_TUPLE_IP = "99.99.99.99";
+
+    // {"password":"xxx..."} well past the route's 4 KiB ceiling. The bounded
+    // reader must reject it with the same uniform 401 as a wrong password (no
+    // response oracle) - never a distinct 413 - and each rejection must burn
+    // rate-limit budget so a body flood is not free.
+    const oversized = "x".repeat(8192);
+    for (let i = 0; i < 5; i++) {
+      const res = await POST(loginRequest(oversized, SAME_TUPLE_IP));
+      expect(res.status).toBe(401);
+    }
+    const blocked = await POST(loginRequest(PASSWORD, SAME_TUPLE_IP));
+    expect(blocked.status).toBe(429);
+  });
+
+  it("rejects malformed JSON with the uniform 401 and consumes rate-limit budget", async () => {
+    const { POST } = await freshRoute();
+    const SAME_TUPLE_IP = "111.111.111.111";
+
+    for (let i = 0; i < 5; i++) {
+      const res = await POST(
+        new NextRequest("https://usage.jays.services/api/auth/login", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": SAME_TUPLE_IP,
+          },
+          body: '{"password": not-json',
+        })
+      );
+      expect(res.status).toBe(401);
+    }
+    const blocked = await POST(loginRequest(PASSWORD, SAME_TUPLE_IP));
+    expect(blocked.status).toBe(429);
+  });
+
+  it("still accepts a correct login in a small body after an oversized attempt from a different tuple", async () => {
+    // The oversized rejection must be scoped to the offending tuple's budget,
+    // not break the parser or leak state across clients.
+    const { POST } = await freshRoute();
+    const oversizedRes = await POST(loginRequest("x".repeat(8192), "3.3.3.3"));
+    expect(oversizedRes.status).toBe(401);
+
+    const ok = await POST(loginRequest(PASSWORD, "4.4.4.4"));
+    expect(ok.status).toBe(200);
+  });
 });

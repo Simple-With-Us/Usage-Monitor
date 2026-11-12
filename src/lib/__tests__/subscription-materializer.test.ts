@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -17,6 +17,8 @@ let computeProjectBudgetStatus: typeof import("../budget-status").computeProject
 let computeBudgetStatus: typeof import("../budget-status").computeBudgetStatus;
 let quarantineLegacyMistralSpendLimitSnapshots: typeof import("../mistral-snapshot-quarantine").quarantineLegacyMistralSpendLimitSnapshots;
 let putSubscription: typeof import("@/app/api/subscriptions/[id]/route").PUT;
+let deleteSubscription: typeof import("@/app/api/subscriptions/[id]/route").DELETE;
+let retractSubscriptionCharges: typeof import("../subscription-materializer").retractSubscriptionCharges;
 let geminiBillingConfigFingerprint: typeof import("../gemini-key-status").geminiBillingConfigFingerprint;
 
 const NOW = new Date("2026-07-15T12:00:00.000Z");
@@ -33,6 +35,9 @@ interface FakeSub {
   currentPeriodStart: Date;
   nextRenewalAt: Date;
   lastChargedPeriodStart: Date | null;
+  externalBillingManaged?: boolean;
+  externalBillingSource?: string | null;
+  externalBillingId?: string | null;
   provider: { name: string };
 }
 
@@ -72,16 +77,29 @@ beforeAll(async () => {
   setupPrismaSqliteTestDb(dbPath);
 
   ({ prisma } = await import("@/lib/prisma"));
-  ({ planSubscriptionCharges, materializeDueSubscriptions } = await import(
-    "../subscription-materializer"
-  ));
+  ({
+    planSubscriptionCharges,
+    materializeDueSubscriptions,
+    retractSubscriptionCharges,
+  } = await import("../subscription-materializer"));
   ({ computeProjectBudgetStatus, computeBudgetStatus } = await import("../budget-status"));
   ({ quarantineLegacyMistralSpendLimitSnapshots } = await import(
     "../mistral-snapshot-quarantine"
   ));
   ({ geminiBillingConfigFingerprint } = await import("../gemini-key-status"));
-  ({ PUT: putSubscription } = await import("@/app/api/subscriptions/[id]/route"));
+  ({ PUT: putSubscription, DELETE: deleteSubscription } = await import(
+    "@/app/api/subscriptions/[id]/route"
+  ));
 }, 60_000);
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 afterAll(async () => {
   await prisma?.$disconnect();
@@ -96,6 +114,11 @@ describe("planSubscriptionCharges", () => {
     expect(plan!.inputs[0].metricType).toBe("subscription");
     expect(plan!.inputs[0].projectId).toBe("proj-1");
     expect(plan!.inputs[0].costUsd).toBe(20);
+    expect(plan!.inputs[0].confidence).toBe("estimated");
+    expect(plan!.inputs[0].metadata).toMatchObject({
+      modeled: true,
+      chargeBasis: "modeled",
+    });
     expect(plan!.currentPeriodStart.toISOString()).toBe("2026-07-01T00:00:00.000Z");
     expect(plan!.nextRenewalAt.toISOString()).toBe("2026-08-01T00:00:00.000Z");
   });
@@ -198,6 +221,63 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
       },
     });
   }
+
+  it("skips non-USD subscriptions loudly instead of charging them as USD (S8)", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "eur-provider", displayName: "EUR Provider", type: "push", refreshIntervalMin: 60 },
+    });
+    const { currentPeriodStart, nextRenewalAt } = initialCycle({
+      startDate: new Date("2026-07-01T00:00:00Z"),
+      interval: "monthly",
+      intervalCount: 1,
+      anchorDay: null,
+    });
+    // API validation rejects non-USD creation (subscription-input.ts), so
+    // this row simulates a legacy/direct-DB survivor.
+    await prisma.subscription.create({
+      data: {
+        providerId: provider.id,
+        name: "EUR plan",
+        costUsd: 100,
+        currency: "EUR",
+        interval: "monthly",
+        intervalCount: 1,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart,
+        nextRenewalAt,
+      },
+    });
+    await prisma.subscription.create({
+      data: {
+        providerId: provider.id,
+        name: "USD plan",
+        costUsd: 30,
+        currency: "USD",
+        interval: "monthly",
+        intervalCount: 1,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart,
+        nextRenewalAt,
+      },
+    });
+
+    const result = await materializeDueSubscriptions(NOW);
+
+    // The EUR row is suppressed and counted; the USD sibling still charges.
+    expect(result.nonUsdSkipped).toBe(1);
+    expect(result.charged).toBe(1);
+    expect(result.eventsWritten).toBe(1);
+    const events = await prisma.externalUsageEvent.findMany();
+    expect(events).toHaveLength(1);
+    expect(events[0].service).toBe("USD plan");
+    expect(events[0].costUsd).toBe(30);
+
+    // Re-running keeps the EUR row suppressed (watermark never advances).
+    const second = await materializeDueSubscriptions(NOW);
+    expect(second.nonUsdSkipped).toBe(1);
+    expect(second.charged).toBe(0);
+    expect(await prisma.externalUsageEvent.count()).toBe(1);
+  });
 
   it("materializes one charge per period and attributes it to the project budget", async () => {
     const provider = await prisma.provider.create({
@@ -443,8 +523,10 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
       estimatedApiEquivalentUsd: 9_000,
       // Prepaid receipt cash is funding, not consumption — spentUsd uses usage only.
       spentUsd: 245,
-      // Projection still floors on receipt when funding ≥ observed usage.
-      projectedEomUsd: 247.25,
+      // S2: receipts no longer floor the projection. With usage observed on a
+      // single day (< 5 nonzero days → linear forecast): $45/15.5d*31d = $90
+      // variable + $200 fixed. Pre-fix this was 247.25 (receipt-floored).
+      projectedEomUsd: 290,
       spendCoverage: "complete",
     });
   });
@@ -1403,6 +1485,35 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
     expect(result.eventsWritten).toBe(0);
   });
 
+  it("stamps provider-linked charges as actual cash", () => {
+    const plan = planSubscriptionCharges(
+      fakeSubscription({ externalBillingManaged: true }),
+      new Date("2026-07-15T00:00:00Z")
+    );
+    expect(plan!.inputs[0].confidence).toBe("actual");
+    expect(plan!.inputs[0].metadata).toEqual({
+      subscriptionId: "sub-1",
+      subscriptionName: "Test plan",
+      interval: "monthly",
+      intervalCount: 1,
+      currency: "USD",
+    });
+  });
+
+  it("stamps linked-but-unmanaged Cloudflare-legacy charges as actual cash", () => {
+    const plan = planSubscriptionCharges(
+      fakeSubscription({
+        externalBillingManaged: false,
+        externalBillingSource: "cloudflare-subscriptions",
+        externalBillingId: "workers-paid",
+      }),
+      new Date("2026-07-15T00:00:00Z")
+    );
+    expect(plan!.inputs[0].confidence).toBe("actual");
+    expect(plan!.inputs[0].metadata).not.toHaveProperty("modeled");
+    expect(plan!.inputs[0].metadata).not.toHaveProperty("chargeBasis");
+  });
+
   it("does not reset the cycle for a PUT that leaves an already-active row active", async () => {
     // "Do NOT change behavior for a row that was already active" — a PUT
     // that re-sends status: "active" on an already-active row must not
@@ -1428,6 +1539,112 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
     const updated = await res.json();
     expect(updated.currentPeriodStart).toBe("2026-07-01T00:00:00.000Z");
     expect(updated.lastChargedPeriodStart).toBe("2026-07-01T00:00:00.000Z");
+  });
+
+  it("retracts modeled charges when a PUT leaves active", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "massive-retract",
+        displayName: "Massive Retract",
+        type: "builtin",
+        refreshIntervalMin: 60,
+      },
+    });
+    const subscription = await createSubscription(provider.id, { costUsd: 29 });
+    await materializeDueSubscriptions(NOW);
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { sourceApp: "subscription" },
+      })
+    ).toBe(1);
+
+    const req = new Request(`http://test/api/subscriptions/${subscription.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "considering" }),
+    });
+    const res = await putSubscription(req, {
+      params: Promise.resolve({ id: subscription.id }),
+    });
+    expect(res.status).toBe(200);
+    const updated = await res.json();
+    expect(updated.status).toBe("considering");
+    expect(updated.lastChargedPeriodStart).toBeNull();
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { sourceApp: "subscription" },
+      })
+    ).toBe(0);
+  });
+
+  it("keeps receipt-backed Cloudflare charges when retracting a paused or deleted row", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "cloudflare-handoff",
+        displayName: "Cloudflare Handoff",
+        type: "builtin",
+        refreshIntervalMin: 60,
+      },
+    });
+    const linked = await createSubscription(provider.id, {
+      name: "Workers Paid",
+      costUsd: 5,
+      externalBillingManaged: false,
+      externalBillingSource: "cloudflare-subscriptions",
+      externalBillingId: "workers-paid",
+    });
+    const modeled = await createSubscription(provider.id, {
+      name: "Catalog Ghost",
+      costUsd: 29,
+    });
+    await materializeDueSubscriptions(NOW);
+    const before = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "subscription" },
+      select: { id: true, confidence: true, metadata: true, service: true },
+    });
+    expect(before).toHaveLength(2);
+    const linkedEvent = before.find((event) => event.service === "Workers Paid");
+    const modeledEvent = before.find((event) => event.service === "Catalog Ghost");
+    expect(linkedEvent?.confidence).toBe("actual");
+    expect(linkedEvent?.metadata).not.toMatchObject({ modeled: true });
+    expect(modeledEvent?.confidence).toBe("estimated");
+
+    const retracted = await retractSubscriptionCharges(linked.id);
+    expect(retracted.deleted).toBe(0);
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { id: linkedEvent!.id },
+      })
+    ).toBe(1);
+
+    const req = new Request(`http://test/api/subscriptions/${linked.id}`, {
+      method: "DELETE",
+    });
+    const res = await deleteSubscription(req, {
+      params: Promise.resolve({ id: linked.id }),
+    });
+    expect(res.status).toBe(200);
+    expect(await prisma.subscription.findUnique({ where: { id: linked.id } })).toBeNull();
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { id: linkedEvent!.id },
+      })
+    ).toBe(1);
+
+    const modeledReq = new Request(`http://test/api/subscriptions/${modeled.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "paused" }),
+    });
+    const modeledRes = await putSubscription(modeledReq, {
+      params: Promise.resolve({ id: modeled.id }),
+    });
+    expect(modeledRes.status).toBe(200);
+    expect(
+      await prisma.externalUsageEvent.count({
+        where: { id: modeledEvent!.id },
+      })
+    ).toBe(0);
   });
 
   it("pauses external-managed rows with ambiguous mid-period windows (Wave K / E13)", async () => {
@@ -1470,5 +1687,154 @@ describe("materializeDueSubscriptions + project attribution (integration)", () =
         },
       })
     ).toBe(0);
+  });
+
+  describe("transactional re-check concurrency & race prevention", () => {
+    it("does not charge a subscription that the owner paused mid-run", async () => {
+      const provider = await prisma.provider.create({
+        data: {
+          name: "race-provider-1",
+          displayName: "Race Provider 1",
+          type: "builtin",
+          refreshIntervalMin: 60,
+        },
+      });
+      const subscription = await createSubscription(provider.id, {
+        status: "active",
+        costUsd: 100,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+        lastChargedPeriodStart: null,
+      });
+
+      const result = await materializeDueSubscriptions(NOW, {
+        beforeTransactionalRecheck: async () => {
+          await prisma.subscription.update({
+            where: { id: subscription.id },
+            data: { status: "paused" },
+          });
+        },
+      });
+
+      expect(result.charged).toBe(0);
+      expect(result.eventsWritten).toBe(0);
+
+      const eventsCount = await prisma.externalUsageEvent.count({
+        where: { provider: provider.name },
+      });
+      expect(eventsCount).toBe(0);
+
+      const dbSub = await prisma.subscription.findUniqueOrThrow({
+        where: { id: subscription.id },
+      });
+      expect(dbSub.status).toBe("paused");
+      expect(dbSub.lastChargedPeriodStart).toBeNull();
+    });
+
+    it("charges at the owner's new price, not the price observed before the lock", async () => {
+      const provider = await prisma.provider.create({
+        data: {
+          name: "race-provider-2",
+          displayName: "Race Provider 2",
+          type: "builtin",
+          refreshIntervalMin: 60,
+        },
+      });
+      const subscription = await createSubscription(provider.id, {
+        status: "active",
+        costUsd: 200,
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+        lastChargedPeriodStart: null,
+      });
+
+      const result = await materializeDueSubscriptions(NOW, {
+        beforeTransactionalRecheck: async () => {
+          await prisma.subscription.update({
+            where: { id: subscription.id },
+            data: { costUsd: 20 },
+          });
+        },
+      });
+
+      expect(result.charged).toBe(1);
+      expect(result.eventsWritten).toBe(1);
+
+      const event = await prisma.externalUsageEvent.findFirstOrThrow({
+        where: { provider: provider.name },
+      });
+      expect(event.costUsd).toBe(20);
+    });
+
+    it("re-plans under the owner's new cadence", async () => {
+      const provider = await prisma.provider.create({
+        data: {
+          name: "race-provider-3",
+          displayName: "Race Provider 3",
+          type: "builtin",
+          refreshIntervalMin: 60,
+        },
+      });
+      const subscription = await createSubscription(provider.id, {
+        status: "active",
+        costUsd: 50,
+        interval: "monthly",
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+        lastChargedPeriodStart: null,
+      });
+
+      const result = await materializeDueSubscriptions(NOW, {
+        beforeTransactionalRecheck: async () => {
+          await prisma.subscription.update({
+            where: { id: subscription.id },
+            data: {
+              interval: "yearly",
+              currentPeriodStart: new Date("2027-01-01T00:00:00Z"),
+              nextRenewalAt: new Date("2028-01-01T00:00:00Z"),
+            },
+          });
+        },
+      });
+
+      expect(result.charged).toBe(0);
+      expect(result.eventsWritten).toBe(0);
+    });
+
+    it("suppresses a row the owner switched to a non-USD currency mid-run", async () => {
+      const provider = await prisma.provider.create({
+        data: {
+          name: "race-provider-4",
+          displayName: "Race Provider 4",
+          type: "builtin",
+          refreshIntervalMin: 60,
+        },
+      });
+      const subscription = await createSubscription(provider.id, {
+        status: "active",
+        costUsd: 50,
+        currency: "USD",
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        currentPeriodStart: new Date("2026-07-01T00:00:00Z"),
+        nextRenewalAt: new Date("2026-08-01T00:00:00Z"),
+        lastChargedPeriodStart: null,
+      });
+
+      const result = await materializeDueSubscriptions(NOW, {
+        beforeTransactionalRecheck: async () => {
+          await prisma.subscription.update({
+            where: { id: subscription.id },
+            data: { currency: "EUR" },
+          });
+        },
+      });
+
+      expect(result.nonUsdSkipped).toBe(1);
+      expect(result.charged).toBe(0);
+      expect(result.eventsWritten).toBe(0);
+    });
   });
 });

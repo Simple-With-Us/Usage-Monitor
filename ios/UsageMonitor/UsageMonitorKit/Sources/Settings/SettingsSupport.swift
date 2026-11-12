@@ -5,34 +5,11 @@ import UIKit
 #endif
 
 // ---------------------------------------------------------------------------
-// Small, dependency-light helpers for the Settings lane: haptics, biometry
-// detection (for an accurately-labelled app-lock toggle), and app version info
-// for the About section. Kept internal — these never leak out of the module.
+// Small, dependency-light helpers for the Settings lane: biometry detection
+// (for an accurately-labelled app-lock toggle) and app version info for the
+// About section. Haptics are centralized in DesignSystem — import and use
+// `DesignSystem.Haptics` instead.
 // ---------------------------------------------------------------------------
-
-/// Thin wrapper over `UINotificationFeedbackGenerator` / `UISelectionFeedback`
-/// so key Settings actions (connect, save, remove, toggle) feel tactile and
-/// native. No-ops on platforms without UIKit.
-@MainActor
-enum Haptics {
-    static func success() { notify(.success) }
-    static func warning() { notify(.warning) }
-    static func error() { notify(.error) }
-
-    static func selection() {
-        #if canImport(UIKit)
-        UISelectionFeedbackGenerator().selectionChanged()
-        #endif
-    }
-
-    #if canImport(UIKit)
-    private static func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) {
-        UINotificationFeedbackGenerator().notificationOccurred(type)
-    }
-    #else
-    private static func notify(_ type: Int) {}
-    #endif
-}
 
 /// What biometric hardware (if any) this device has, so the app-lock row can
 /// say "Require Face ID" / "Require Touch ID" instead of a generic label.
@@ -88,24 +65,18 @@ enum AppInfo {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
     }
 
+    /// Plain user-facing app name (Usage Monitor Client / Usage Monitor Local).
     static var displayName: String {
         (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String)
-            ?? "Usage Monitor"
+            ?? "App"
+    }
+
+    /// Last Settings footer.  Two spaces after the first sentence so the
+    /// line stays owner-copy-legal and testable without a running UI.
+    static var aboutFooter: String {
+        "\(displayName) shows your AI provider budgets at a glance.  Data stays on your device and the monitor you point it at."
     }
 }
 
-/// Format a server uptime (seconds) into a compact "3d 4h" / "5m" string.
-enum UptimeFormat {
-    static func string(fromSeconds seconds: Int) -> String {
-        guard seconds > 0 else { return "just started" }
-        let days = seconds / 86_400
-        let hours = (seconds % 86_400) / 3_600
-        let minutes = (seconds % 3_600) / 60
-
-        if days > 0 { return "\(days)d \(hours)h" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        if minutes > 0 { return "\(minutes)m" }
-        return "\(seconds)s"
-    }
-}
+// UptimeFormat / DiskFormat live in DesignSystem (shared with ServerStatus).

@@ -6,11 +6,7 @@ import { canonicalProjectKey } from "@/lib/provider-identity";
 import { bustBudgetStatusCache } from "@/lib/budget-status";
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
-function cleanOptionalString(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
+import { parseProjectUpdateInput } from "@/lib/project-input";
 
 export async function PUT(
   request: NextRequest,
@@ -27,9 +23,10 @@ export async function PUT(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: Record<string, unknown>;
+  let parsedInput;
   try {
-    body = await readJsonBody(request);
+    const raw = await readJsonBody(request);
+    parsedInput = parseProjectUpdateInput(raw);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Invalid request" },
@@ -39,15 +36,8 @@ export async function PUT(
 
   const updateData: Prisma.ProjectUpdateInput = {};
 
-  if (body.name !== undefined) {
-    const name = cleanOptionalString(body.name);
-    if (!name) {
-      return NextResponse.json({ error: "name cannot be empty" }, { status: 400 });
-    }
-    // Reject a rename that case-collides with another project (see the create
-    // route + project-resolver.ts for why case-insensitive uniqueness matters).
-    // The unique `nameKey` column is the atomic guarantee; this is the friendly
-    // pre-check. A P2002 from the update is caught below as a backstop.
+  if (parsedInput.name !== undefined) {
+    const name = parsedInput.name;
     const nameKey = canonicalProjectKey(name);
     const others = await prisma.project.findMany({
       where: { id: { not: id } },
@@ -63,20 +53,12 @@ export async function PUT(
     updateData.nameKey = nameKey;
   }
 
-  if (body.description !== undefined) {
-    updateData.description = cleanOptionalString(body.description) ?? null;
+  if (parsedInput.description !== undefined) {
+    updateData.description = parsedInput.description;
   }
 
-  if (body.monthlyBudgetUsd !== undefined) {
-    if (body.monthlyBudgetUsd === null) {
-      updateData.monthlyBudgetUsd = null;
-    } else {
-      const budget = Number(body.monthlyBudgetUsd);
-      if (!Number.isFinite(budget) || budget < 0) {
-        return NextResponse.json({ error: "monthlyBudgetUsd must be a positive number" }, { status: 400 });
-      }
-      updateData.monthlyBudgetUsd = budget;
-    }
+  if (parsedInput.monthlyBudgetUsd !== undefined) {
+    updateData.monthlyBudgetUsd = parsedInput.monthlyBudgetUsd;
   }
 
   try {

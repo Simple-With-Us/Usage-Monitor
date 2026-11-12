@@ -3,19 +3,42 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import {
   buildProviderAlertState,
+  buildProjectBudgetAlerts,
+  PROVIDER_ALERT_CODES,
   providerSnapshotStaleAt,
   type AlertSeverity,
+  type BudgetAlertTier,
   type ProviderAlert,
+  type ProviderAlertCode,
 } from "@/lib/provider-alerts";
-import { computeBudgetStatus } from "@/lib/budget-status";
+import { computeBudgetStatus, computeProjectBudgetStatus } from "@/lib/budget-status";
 import { providerPollSnapshotExpected } from "@/lib/anthropic-credentials";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
+import { resolveAnomalyConfig } from "@/lib/anomaly-detection";
+import { appSettings } from "@/lib/app-settings";
+import { loadSpendAnomaliesByProjectId } from "@/lib/anomaly-loader";
+import { loadSubscriptionInsightAlerts } from "@/lib/subscription-insights";
+import {
+  PROJECT_BUDGETS_PROVIDER_DISPLAY_NAME as PROJECT_ALERTS_PROVIDER_DISPLAY_NAME,
+  PROJECT_BUDGETS_PROVIDER_NAME as PROJECT_ALERTS_PROVIDER_NAME,
+} from "@/lib/system-providers";
+import { formatAlertEmailHtml } from "@/lib/alert-email";
+import {
+  apnsConfigured,
+  fanOutApnsAlert,
+  loadApnsConfig,
+  type ApnsConfig,
+  type ApnsTransport,
+} from "@/lib/apns";
+import { withSlowScanTiming } from "@/lib/slow-scan-timing";
 
 export type AlertDeliveryChannel =
   | { kind: "slack"; url: string }
   | { kind: "webhook"; url: string }
   | { kind: "email"; apiKey: string; from: string; to: string }
-  | { kind: "pagerduty"; routingKey: string };
+  | { kind: "pagerduty"; routingKey: string }
+  | { kind: "pushover"; userKey: string; apiToken: string }
+  | { kind: "apns"; config: ApnsConfig; transport?: ApnsTransport };
 
 export interface AlertDeliveryConfig {
   channels: AlertDeliveryChannel[];
@@ -27,6 +50,20 @@ export interface AlertDeliveryConfig {
   maxAttempts?: number;
   /** Exponential retry base. Defaults to 250ms; individual waits cap at 5s. */
   retryBaseMs?: number;
+  /**
+   * S12: per-alert-code severity overrides (env ALERT_CODE_SEVERITY_OVERRIDES,
+   * e.g. '{"stale_snapshot":"info"}'). Applied to both the persisted incident
+   * and delivery eligibility so the incident, its text, and policy agree.
+   */
+  severityOverrides?: Partial<Record<ProviderAlertCode, AlertSeverity>>;
+  /**
+   * S12: per-alert-code channel-kind routing (env ALERT_CODE_CHANNEL_ROUTING,
+   * e.g. '{"budget_exceeded":["slack","pagerduty"],"stale_snapshot":[]}').
+   * Trigger-side only: an open incident always RESOLVES on the channel it
+   * originally triggered on, so re-routing never strands a PagerDuty incident.
+   * An empty array suppresses external delivery for that code entirely.
+   */
+  channelRouting?: Partial<Record<ProviderAlertCode, AlertDeliveryChannel["kind"][]>>;
 }
 
 export interface AlertDeliveryResult {
@@ -169,7 +206,82 @@ const SEVERITY_RANK: Record<AlertSeverity, number> = {
   critical: 2,
 };
 
-export function readAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env): AlertDeliveryConfig {
+// --- S1: project budget/anomaly alerts -------------------------------------
+// ProviderAlertNotification.providerId is a REQUIRED foreign key to Provider,
+// so project-scoped alerts cannot persist (and therefore cannot dedup,
+// hysteresis, remind, or resolve) without a real Provider row. This dedicated
+// inactive system row — same pattern as the self-seeded "Simple Tools Relay"
+// catalog row (ensure-simple-tools-provider.ts) — carries every per-project
+// incident with `scope` = project id, reusing the machinery unchanged.
+// Name constants: PROJECT_ALERTS_PROVIDER_* from @/lib/system-providers.
+// S1c: unassigned-spend info alerts only fire above this default floor (and
+// only once at least one project exists — with zero projects, ALL spend is
+// unassigned by definition and alerting would be pure noise).
+const DEFAULT_UNASSIGNED_SPEND_FLOOR_USD = 25;
+const MAX_UNASSIGNED_SPEND_FLOOR_USD = 1_000_000;
+
+// Shared select for alert-evaluation provider rows so the project-budgets
+// system provider can be fetched with the exact same shape as the main query.
+const ALERT_EVALUATION_PROVIDER_SELECT = {
+  id: true,
+  name: true,
+  type: true,
+  displayName: true,
+  apiKey: true,
+  config: true,
+  secretConfig: true,
+  isActive: true,
+  alertConfigGeneration: true,
+  refreshIntervalMin: true,
+  plan: {
+    select: {
+      billingMode: true,
+      fixedMonthlyCostUsd: true,
+      monthlyBudgetUsd: true,
+      monthlyRequestLimit: true,
+      lowBalanceUsd: true,
+      lowCredits: true,
+      renewalDate: true,
+      billingInterval: true,
+      mustKeepFunded: true,
+    },
+  },
+  snapshots: {
+    orderBy: { fetchedAt: "desc" as const },
+    take: 1,
+    select: { balance: true, totalCost: true, totalRequests: true, credits: true, fetchedAt: true },
+  },
+  usageReconciliations: {
+    orderBy: { createdAt: "desc" as const },
+    take: 1,
+    select: { deltaUsd: true, status: true },
+  },
+} satisfies Prisma.ProviderSelect;
+
+type AlertEvaluationProvider = Prisma.ProviderGetPayload<{
+  select: typeof ALERT_EVALUATION_PROVIDER_SELECT;
+}>;
+
+function readBoolEnvValue(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (raw == null || raw === "") return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
+/** Resend costs money.  Drop email when Pushover is already configured. */
+export function suppressEmailWhenPushoverConfigured(
+  channels: AlertDeliveryChannel[]
+): AlertDeliveryChannel[] {
+  return channels.some((c) => c.kind === "pushover")
+    ? channels.filter((c) => c.kind !== "email")
+    : channels;
+}
+
+export function readAlertDeliveryConfig(
+  env: NodeJS.ProcessEnv = appSettings.settingsEnv()
+): AlertDeliveryConfig {
   const channels: AlertDeliveryChannel[] = [];
   const slackUrl = env.ALERT_SLACK_WEBHOOK_URL?.trim();
   const webhookUrl = env.ALERT_WEBHOOK_URL?.trim();
@@ -177,15 +289,35 @@ export function readAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env): A
   const emailFrom = env.ALERT_EMAIL_FROM?.trim();
   const emailTo = env.ALERT_EMAIL_TO?.trim();
   const pagerdutyRoutingKey = env.ALERT_PAGERDUTY_ROUTING_KEY?.trim();
+  const pushoverUserKey = (env.ALERT_PUSHOVER_USER_KEY || env.PUSHOVER_USER_KEY)?.trim();
+  const pushoverApiToken = (
+    env.ALERT_PUSHOVER_API_TOKEN ||
+    env.PUSHOVER_USAGE_API_TOKEN ||
+    env.PUSHOVER_API_TOKEN
+  )?.trim();
 
   if (slackUrl) channels.push({ kind: "slack", url: slackUrl });
   if (webhookUrl) channels.push({ kind: "webhook", url: webhookUrl });
-  if (emailApiKey && emailFrom && emailTo) {
+
+  const emailEnabled =
+    readBoolEnvValue(env, "ALERT_EMAIL_ENABLED", true) &&
+    !readBoolEnvValue(env, "ALERT_DISABLE_EMAIL", false);
+
+  if (emailEnabled && emailApiKey && emailFrom && emailTo) {
     channels.push({ kind: "email", apiKey: emailApiKey, from: emailFrom, to: emailTo });
   }
   if (pagerdutyRoutingKey) {
     channels.push({ kind: "pagerduty", routingKey: pagerdutyRoutingKey });
   }
+  if (pushoverUserKey && pushoverApiToken) {
+    channels.push({ kind: "pushover", userKey: pushoverUserKey, apiToken: pushoverApiToken });
+  }
+  const apns = loadApnsConfig(env);
+  if (apnsConfigured(apns)) {
+    channels.push({ kind: "apns", config: apns });
+  }
+
+  const preferred = suppressEmailWhenPushoverConfigured(channels);
 
   const minSeverity = normalizeSeverity(env.ALERT_MIN_SEVERITY) ?? "warning";
   const reminderHours = normalizePositiveNumber(env.ALERT_REMINDER_HOURS) ?? DEFAULT_REMINDER_HOURS;
@@ -206,7 +338,110 @@ export function readAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env): A
     DEFAULT_RETRY_BASE_MS,
     MAX_RETRY_BASE_MS
   );
-  return { channels, minSeverity, reminderHours, timeoutMs, maxAttempts, retryBaseMs };
+  const severityOverrides = parseCodeSeverityOverrides(env.ALERT_CODE_SEVERITY_OVERRIDES);
+  const channelRouting = parseCodeChannelRouting(env.ALERT_CODE_CHANNEL_ROUTING);
+  return {
+    channels: preferred,
+    minSeverity,
+    reminderHours,
+    timeoutMs,
+    maxAttempts,
+    retryBaseMs,
+    ...(severityOverrides ? { severityOverrides } : {}),
+    ...(channelRouting ? { channelRouting } : {}),
+  };
+}
+
+const PROVIDER_ALERT_CODE_SET: ReadonlySet<string> = new Set(PROVIDER_ALERT_CODES);
+const ALERT_CHANNEL_KIND_SET: ReadonlySet<string> = new Set([
+  "slack",
+  "webhook",
+  "email",
+  "pagerduty",
+  "pushover",
+  "apns",
+]);
+
+function parseJsonObjectEnv(raw: string | undefined, envName: string): Record<string, unknown> | null {
+  if (!raw?.trim()) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    console.warn(`[alert-delivery] ${envName} is not valid JSON; ignoring it`, error);
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.warn(`[alert-delivery] ${envName} must be a JSON object; ignoring it`);
+    return null;
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * S12: parse ALERT_CODE_SEVERITY_OVERRIDES ('{"stale_snapshot":"info"}').
+ * Unknown codes and invalid severities are dropped with a warning so a typo
+ * can never silently change unrelated alert behavior.
+ */
+function parseCodeSeverityOverrides(
+  raw: string | undefined
+): Partial<Record<ProviderAlertCode, AlertSeverity>> | undefined {
+  const parsed = parseJsonObjectEnv(raw, "ALERT_CODE_SEVERITY_OVERRIDES");
+  if (!parsed) return undefined;
+  const overrides: Partial<Record<ProviderAlertCode, AlertSeverity>> = {};
+  for (const [code, value] of Object.entries(parsed)) {
+    if (!PROVIDER_ALERT_CODE_SET.has(code)) {
+      console.warn(`[alert-delivery] ALERT_CODE_SEVERITY_OVERRIDES: unknown alert code "${code}"; ignoring`);
+      continue;
+    }
+    const severity = normalizeSeverity(typeof value === "string" ? value : undefined);
+    if (!severity) {
+      console.warn(
+        `[alert-delivery] ALERT_CODE_SEVERITY_OVERRIDES: invalid severity for "${code}" (want info|warning|critical); ignoring`
+      );
+      continue;
+    }
+    overrides[code as ProviderAlertCode] = severity;
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+/**
+ * S12: parse ALERT_CODE_CHANNEL_ROUTING ('{"budget_exceeded":["pagerduty"]}').
+ * Values must be arrays of known channel kinds; an empty array is meaningful
+ * (suppresses external delivery for that code) and is preserved.
+ */
+function parseCodeChannelRouting(
+  raw: string | undefined
+): Partial<Record<ProviderAlertCode, AlertDeliveryChannel["kind"][]>> | undefined {
+  const parsed = parseJsonObjectEnv(raw, "ALERT_CODE_CHANNEL_ROUTING");
+  if (!parsed) return undefined;
+  const routing: Partial<Record<ProviderAlertCode, AlertDeliveryChannel["kind"][]>> = {};
+  for (const [code, value] of Object.entries(parsed)) {
+    if (!PROVIDER_ALERT_CODE_SET.has(code)) {
+      console.warn(`[alert-delivery] ALERT_CODE_CHANNEL_ROUTING: unknown alert code "${code}"; ignoring`);
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      console.warn(`[alert-delivery] ALERT_CODE_CHANNEL_ROUTING: value for "${code}" must be an array; ignoring`);
+      continue;
+    }
+    const kinds = new Set<AlertDeliveryChannel["kind"]>();
+    for (const entry of value) {
+      if (typeof entry !== "string" || !ALERT_CHANNEL_KIND_SET.has(entry)) {
+        console.warn(
+          `[alert-delivery] ALERT_CODE_CHANNEL_ROUTING: unknown channel kind "${String(entry)}" for "${code}"; ignoring that entry`
+        );
+        continue;
+      }
+      kinds.add(entry as AlertDeliveryChannel["kind"]);
+    }
+    // A non-empty array whose entries were ALL invalid is a misconfiguration,
+    // not a deliberate suppress-all — skip it rather than muting the code.
+    if (value.length > 0 && kinds.size === 0) continue;
+    routing[code as ProviderAlertCode] = [...kinds];
+  }
+  return Object.keys(routing).length > 0 ? routing : undefined;
 }
 
 export function hasAlertDeliveryChannels(config = readAlertDeliveryConfig()): boolean {
@@ -248,7 +483,27 @@ function shouldDeliverSeverity(severity: AlertSeverity, minSeverity: AlertSeveri
 }
 
 function stateKey(providerId: string, alert: ProviderAlert): string {
-  return `${providerId}:${alert.code}`;
+  // Scoped alerts (per-project on the project-budgets provider, per-
+  // subscription insights) get one durable incident EACH; unscoped alerts
+  // keep the legacy `providerId:code` key byte-for-byte.
+  return alert.scope
+    ? `${providerId}:${alert.code}:${alert.scope}`
+    : `${providerId}:${alert.code}`;
+}
+
+/**
+ * Recover a persisted notification's scope segment (the inverse of stateKey).
+ * Needed on the resolve path, where only the notification row is available.
+ */
+function notificationAlertScope(notification: {
+  providerId: string;
+  alertCode: string;
+  stateKey: string;
+}): string | undefined {
+  const prefix = `${notification.providerId}:${notification.alertCode}:`;
+  return notification.stateKey.startsWith(prefix)
+    ? notification.stateKey.slice(prefix.length)
+    : undefined;
 }
 
 const SNAPSHOT_EVIDENCE_ALERT_CODES = new Set<ProviderAlert["code"]>([
@@ -346,8 +601,7 @@ function alertEvidenceTimes(
     snapshots: Array<{ fetchedAt: Date }>;
   },
   alertCode: ProviderAlert["code"],
-  evaluatedAt: Date,
-  state: AlertEvidenceState
+  evaluatedAt: Date
 ): { sourceAt: Date; at: Date } {
   if (
     provider.isActive &&
@@ -365,9 +619,24 @@ function alertEvidenceTimes(
     }
     // A stale alert is a deterministic transition derived from S itself.
     // Source time is compared first, so any newer snapshot wins even when the
-    // older snapshot's stale deadline is later. For the same snapshot, the
-    // deadline follows fetchedAt and permits a fresh -> stale recurrence.
-    if (alertCode === "stale_snapshot" && state === "active") {
+    // older snapshot's stale deadline is later.
+    //
+    // BOTH states stamp the stale deadline, deliberately. The clear case used
+    // to report `fetchedAt`, which is STRICTLY EARLIER than the deadline the
+    // active transition had already persisted; on the same snapshot (equal
+    // sourceAt) compareEvidence then ranked the persisted active watermark
+    // ahead of the clear candidate and rejected the resolution as stale
+    // evidence, so the PagerDuty resolve was never sent and the incident could
+    // never close. Equal watermarks let the "clear" > "active" state rank break
+    // the tie in the resolution's favour — exactly the ordering
+    // EVIDENCE_STATE_RANK exists to express.
+    //
+    // Consequence to know before re-enabling stale_snapshot emission (it is
+    // deliberately NOT emitted today — see provider-alerts.ts): one snapshot
+    // now yields ONE stale incident, because a re-trigger from the identical
+    // (sourceAt, deadline) pair is correctly suppressed by the persisted clear.
+    // A new snapshot or an alert-config generation bump still re-opens.
+    if (alertCode === "stale_snapshot") {
       return {
         sourceAt: snapshot.fetchedAt,
         at: providerSnapshotStaleAt(
@@ -392,7 +661,9 @@ function alertEvidence(
   evaluatedAt: Date,
   state: AlertEvidenceState
 ): AlertEvidence {
-  const times = alertEvidenceTimes(provider, alertCode, evaluatedAt, state);
+  // The times are state-independent by construction: active and clear MUST
+  // stamp the same watermark or compareEvidence deadlocks the transition.
+  const times = alertEvidenceTimes(provider, alertCode, evaluatedAt);
   return {
     configGeneration: provider.alertConfigGeneration,
     ...times,
@@ -436,7 +707,11 @@ function channelKey(channel: AlertDeliveryChannel): string {
       ? `${channel.from}\0${channel.to}`
       : channel.kind === "pagerduty"
         ? channel.routingKey
-        : channel.url;
+        : channel.kind === "pushover"
+          ? `${channel.userKey}\0${channel.apiToken}`
+          : channel.kind === "apns"
+            ? `${channel.config.teamId}\0${channel.config.keyId}\0${channel.config.bundleId}`
+            : channel.url;
   const digest = createHash("sha256")
     .update(`${channel.kind}\0${destination}`)
     .digest("hex");
@@ -447,9 +722,13 @@ function pagerDutyDedupKey(
   providerId: string,
   alertCode: string,
   incidentGeneration: number,
-  auditState: string
+  auditState: string,
+  scope?: string
 ): string {
-  const base = `api-usage-monitor:${providerId}:${alertCode}`;
+  // Scope distinguishes otherwise-identical incidents (e.g. two projects over
+  // budget on the shared project-budgets provider) so PagerDuty never
+  // dedupes one project's incident into another's.
+  const base = `api-usage-monitor:${providerId}:${alertCode}${scope ? `:${scope}` : ""}`;
   return auditState === "legacy_unknown"
     ? base
     : `${base}:incident-${incidentGeneration}`;
@@ -620,6 +899,32 @@ async function postJson(
   if (!ok) throw new ChannelHttpError(`${label} HTTP ${status}`, status);
 }
 
+async function postForm(
+  label: string,
+  url: string,
+  body: URLSearchParams,
+  fetchImpl: typeof fetch,
+  timeoutMs: number
+): Promise<void> {
+  const response = await fetchWithTimeout(
+    fetchImpl,
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    timeoutMs
+  );
+  const { ok, status } = response;
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Delivery outcome is determined by HTTP status; body cleanup is best-effort.
+  }
+  if (!ok) throw new ChannelHttpError(`${label} HTTP ${status}`, status);
+}
+
 async function sendToChannelOnce(
   channel: AlertDeliveryChannel,
   provider: { id: string; name: string; displayName: string },
@@ -656,13 +961,12 @@ async function sendToChannelOnce(
         from: channel.from,
         to: channel.to,
         subject: `[${alert.severity.toUpperCase()}] Alert for ${provider.displayName || provider.name}`,
-        html: `
-          <h2>Usage Monitor Alert</h2>
-          <p><strong>Provider:</strong> ${provider.displayName || provider.name}</p>
-          <p><strong>Severity:</strong> ${alert.severity}</p>
-          <p><strong>Message:</strong> ${alert.message}</p>
-          <p><strong>Detected At:</strong> ${now.toISOString()}</p>
-        `,
+        html: formatAlertEmailHtml({
+          providerLabel: provider.displayName || provider.name,
+          severity: alert.severity,
+          message: alert.message,
+          detectedAtIso: now.toISOString(),
+        }),
       },
       fetchImpl,
       timeoutMs
@@ -705,6 +1009,77 @@ async function sendToChannelOnce(
       timeoutMs
     );
     return;
+  }
+
+  if (channel.kind === "pushover") {
+    const isAnomaly =
+      alert.code === "spend_anomaly" ||
+      alert.code === "request_anomaly" ||
+      alert.code === "project_spend_anomaly";
+    const priority = alert.severity === "critical" ? 1 : 0;
+    const titlePrefix = isAnomaly
+      ? alert.severity === "critical"
+        ? "🚨 [CRITICAL SPIKE]"
+        : "⚠️ [USAGE SPIKE]"
+      : `[${alert.severity.toUpperCase()}]`;
+
+    const params = new URLSearchParams({
+      token: channel.apiToken,
+      user: channel.userKey,
+      title: `${titlePrefix} ${provider.displayName || provider.name}`,
+      message: alert.message,
+      priority: String(priority),
+      url: "https://usage.jays.services/alerts",
+      url_title: "View in Usage Monitor",
+    });
+
+    if (isAnomaly && alert.severity === "critical") {
+      params.set("sound", "siren");
+    }
+
+    await postForm(
+      "Pushover API",
+      "https://api.pushover.net/1/messages.json",
+      params,
+      fetchImpl,
+      timeoutMs
+    );
+    return;
+  }
+
+  if (channel.kind === "apns") {
+    const devices = await prisma.apnsDeviceToken.findMany({
+      where: { isActive: true },
+      select: { deviceToken: true, environment: true },
+    });
+    if (devices.length === 0) return;
+    const fanout = await fanOutApnsAlert({
+      title: `[${alert.severity.toUpperCase()}] ${provider.displayName || provider.name}`,
+      body: alert.message,
+      collapseId: `um-${provider.id}-${alert.code}`.slice(0, 64),
+      data: {
+        tab: "alerts",
+        alertCode: alert.code,
+        providerId: provider.id,
+      },
+      devices,
+      config: channel.config,
+      transport: channel.transport,
+      timeoutMs,
+      retireToken: async (token) => {
+        await prisma.apnsDeviceToken.updateMany({
+          where: { deviceToken: token, isActive: true },
+          data: { isActive: false },
+        });
+      },
+    });
+    if (fanout.delivered > 0 || (fanout.retryable === 0 && fanout.authErrors === 0)) {
+      return;
+    }
+    if (fanout.authErrors > 0) {
+      throw new Error("APNs auth/config failure");
+    }
+    throw new ChannelHttpError("APNs retryable failure", 429);
   }
 
   await postJson(
@@ -1998,7 +2373,9 @@ export async function deliverProviderAlerts(options: {
   // The env reader emits one destination of each kind, but injected test/config
   // objects may repeat a destination. De-duplicate by the same persistent key so
   // one maintenance pass never sends it twice.
-  const channels = [...new Map(config.channels.map((channel) => [channelKey(channel), channel])).values()];
+  const channels = suppressEmailWhenPushoverConfigured(
+    [...new Map(config.channels.map((channel) => [channelKey(channel), channel])).values()]
+  );
   const pagerDutyChannels = channels.filter(
     (channel): channel is Extract<AlertDeliveryChannel, { kind: "pagerduty" }> =>
       channel.kind === "pagerduty"
@@ -2024,42 +2401,165 @@ export async function deliverProviderAlerts(options: {
       ],
     },
     orderBy: { name: "asc" },
-    select: {
-      id: true,
-      name: true,
-      type: true,
-      displayName: true,
-      apiKey: true,
-      config: true,
-      secretConfig: true,
-      isActive: true,
-      alertConfigGeneration: true,
-      refreshIntervalMin: true,
-      plan: {
-        select: {
-          billingMode: true,
-          fixedMonthlyCostUsd: true,
-          monthlyBudgetUsd: true,
-          monthlyRequestLimit: true,
-          lowBalanceUsd: true,
-          lowCredits: true,
-          renewalDate: true,
-          billingInterval: true,
-          mustKeepFunded: true,
-        },
-      },
-      snapshots: {
-        orderBy: { fetchedAt: "desc" },
-        take: 1,
-        select: { balance: true, totalCost: true, totalRequests: true, credits: true, fetchedAt: true },
-      },
-      usageReconciliations: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { deltaUsd: true, status: true },
-      },
-    },
+    select: ALERT_EVALUATION_PROVIDER_SELECT,
   });
+
+  // --- S1: project budget/anomaly alert evaluation (production path only) ---
+  // Injected test DBs skip this entirely (same precedent as computeBudgetStatus
+  // above); the real-DB test suite exercises it end to end.
+  let projectAlertsProvider: AlertEvaluationProvider | null = null;
+  let projectAlerts: ProviderAlert[] = [];
+  // False when evaluation was skipped legitimately (feature disabled or zero
+  // projects — both yield an intentionally empty alert set so previously-open
+  // project incidents resolve) OR when it FAILED (then the project-budgets
+  // provider is excluded from targets so open incidents are preserved, not
+  // falsely resolved by a transient error).
+  let projectAlertsEvaluated = false;
+  if (!options.db) {
+    let existingProjectProvider = await db.provider.findFirst({
+      where: { name: PROJECT_ALERTS_PROVIDER_NAME },
+      select: ALERT_EVALUATION_PROVIDER_SELECT,
+    });
+    // Never an operator connection / poll target — self-heal if someone toggled it on.
+    if (existingProjectProvider?.isActive) {
+      existingProjectProvider = await db.provider.update({
+        where: { id: existingProjectProvider.id },
+        data: {
+          isActive: false,
+          refreshIntervalMin: Math.max(
+            existingProjectProvider.refreshIntervalMin ?? 0,
+            1440
+          ),
+          alertConfigGeneration: { increment: 1 },
+        },
+        select: ALERT_EVALUATION_PROVIDER_SELECT,
+      });
+    }
+    if (!readBoolEnvValue(process.env, "ALERT_PROJECT_BUDGETS_ENABLED", true)) {
+      // Disabled: evaluate as empty so any previously-open incidents resolve.
+      projectAlertsProvider = existingProjectProvider;
+      projectAlertsEvaluated = true;
+    } else {
+      const projects = await prisma.project.findMany({
+        select: { id: true, name: true, monthlyBudgetUsd: true },
+      });
+      if (projects.length === 0) {
+        // No projects configured: nothing to alert on (and unassigned spend is
+        // meaningless — ALL spend is unassigned by definition). Resolve any
+        // stale incidents from a since-deleted project setup.
+        projectAlertsProvider = existingProjectProvider;
+        projectAlertsEvaluated = true;
+      } else {
+        projectAlertsProvider =
+          existingProjectProvider ??
+          (await db.provider.create({
+            data: {
+              name: PROJECT_ALERTS_PROVIDER_NAME,
+              displayName: PROJECT_ALERTS_PROVIDER_DISPLAY_NAME,
+              type: "builtin",
+              // Never a poll target; it exists only to carry project incidents.
+              isActive: false,
+              refreshIntervalMin: 1440,
+            },
+            select: ALERT_EVALUATION_PROVIDER_SELECT,
+          }));
+        try {
+          const anomalyConfig = resolveAnomalyConfig();
+          const [projectStatus, anomaliesByProjectId, openProjectAlerts] =
+            await Promise.all([
+              withSlowScanTiming("[project-budget-scan]", () =>
+                computeProjectBudgetStatus(now)
+              ),
+              loadSpendAnomaliesByProjectId(now, anomalyConfig, projects),
+              db.providerAlertNotification.findMany({
+                where: {
+                  providerId: projectAlertsProvider.id,
+                  resolvedAt: null,
+                  alertCode: { in: ["project_budget_exceeded", "project_budget_warning"] },
+                },
+                select: { alertCode: true, stateKey: true },
+              }),
+            ]);
+          // Per-project prior tier for budget hysteresis (C9 semantics).
+          const previousTierByProjectId = new Map<string, BudgetAlertTier>();
+          for (const row of openProjectAlerts) {
+            const scope = notificationAlertScope({
+              providerId: projectAlertsProvider.id,
+              alertCode: row.alertCode,
+              stateKey: row.stateKey,
+            });
+            if (!scope) continue;
+            const tier: BudgetAlertTier =
+              row.alertCode === "project_budget_exceeded" ? "exceeded" : "warning";
+            if (previousTierByProjectId.get(scope) !== "exceeded") {
+              previousTierByProjectId.set(scope, tier);
+            }
+          }
+          projectAlerts = buildProjectBudgetAlerts({
+            projects: projectStatus.projects,
+            previousTierByProjectId,
+            anomaliesByProjectId,
+            unassignedSpentUsd: projectStatus.summary.unassignedSpentUsd,
+            unassignedSpentFloorUsd: boundedNonNegativeNumber(
+              appSettings.get("ALERT_UNASSIGNED_SPEND_FLOOR_USD"),
+              DEFAULT_UNASSIGNED_SPEND_FLOOR_USD,
+              MAX_UNASSIGNED_SPEND_FLOOR_USD
+            ),
+          });
+          projectAlertsEvaluated = true;
+        } catch (error) {
+          // Transient status/anomaly failure: keep open incidents untouched by
+          // excluding the project-budgets provider from this pass entirely.
+          console.warn(
+            "[alert-delivery] project alert evaluation failed; preserving existing project incidents this pass",
+            error
+          );
+          projectAlerts = [];
+          projectAlertsEvaluated = false;
+        }
+      }
+    }
+  }
+
+  // --- S14: subscription & billing insight alerts (production path only) ---
+  let subscriptionInsightAlerts = new Map<string, ProviderAlert[]>();
+  if (
+    !options.db &&
+    readBoolEnvValue(process.env, "ALERT_SUBSCRIPTION_INSIGHTS_ENABLED", true)
+  ) {
+    try {
+      subscriptionInsightAlerts = await loadSubscriptionInsightAlerts(now);
+    } catch (error) {
+      console.warn(
+        "[alert-delivery] subscription insight evaluation failed; skipping insight alerts this pass",
+        error
+      );
+    }
+  }
+
+  // Alert targets: the evaluated providers, plus the project-budgets system
+  // provider when it has alerts to deliver. When project evaluation failed,
+  // the system provider is EXCLUDED so its open incidents survive the pass.
+  const alertTargets: AlertEvaluationProvider[] = [];
+  for (const provider of providers) {
+    if (
+      projectAlertsProvider &&
+      provider.id === projectAlertsProvider.id &&
+      !projectAlertsEvaluated
+    ) {
+      continue;
+    }
+    alertTargets.push(provider);
+  }
+  if (
+    projectAlertsEvaluated &&
+    projectAlertsProvider &&
+    projectAlerts.length > 0 &&
+    !alertTargets.some((provider) => provider.id === projectAlertsProvider!.id)
+  ) {
+    alertTargets.push(projectAlertsProvider);
+  }
+
   // Production delivery uses the same canonical poll+pushed+subscription
   // computation as /api/budget-status. Tests/callers that inject a partial DB
   // retain the legacy snapshot-only path because that DB may not expose the
@@ -2067,12 +2567,27 @@ export async function deliverProviderAlerts(options: {
   const canonicalByProviderId = options.db
     ? new Map<string, Awaited<ReturnType<typeof computeBudgetStatus>>["providers"][number]>()
     : new Map(
-        (await computeBudgetStatus(now)).providers.map((status) => [status.id, status])
+        (
+          await withSlowScanTiming("[provider-budget-scan]", async () =>
+            computeBudgetStatus(now)
+          )
+        ).providers.map((status) => [status.id, status])
       );
 
-  result.evaluatedProviders = providers.length;
+  result.evaluatedProviders = alertTargets.length;
 
-  for (const provider of providers) {
+  for (const provider of alertTargets) {
+    const isProjectAlertsTarget =
+      projectAlertsEvaluated &&
+      projectAlertsProvider != null &&
+      provider.id === projectAlertsProvider.id;
+    let rawAlerts: ProviderAlert[];
+    if (isProjectAlertsTarget) {
+      // S1: the project-budgets system provider carries the precomputed
+      // per-project alerts (budget tiers with hysteresis, spend anomalies,
+      // unassigned-spend info) — nothing provider-level applies to it.
+      rawAlerts = projectAlerts;
+    } else {
     // Budget hysteresis needs the prior open tier before we re-evaluate (C9).
     const openBudgetCodes = await db.providerAlertNotification.findMany({
       where: {
@@ -2153,16 +2668,31 @@ export async function deliverProviderAlerts(options: {
         ...hystereticBudget,
       ];
     }
-    const rawAlerts = alertState.alerts;
-    const deliverableAlerts = rawAlerts.filter((alert) =>
+    rawAlerts = [
+      ...alertState.alerts,
+      // S14: subscription & billing insights for this provider (info severity).
+      ...(subscriptionInsightAlerts.get(provider.id) ?? []),
+    ];
+    }
+    // S12: per-code severity overrides apply to BOTH the persisted incident
+    // and delivery eligibility so the incident, its text, and policy agree.
+    const effectiveAlerts = config.severityOverrides
+      ? rawAlerts.map((alert) => {
+          const override = config.severityOverrides?.[alert.code];
+          return override && override !== alert.severity
+            ? { ...alert, severity: override }
+            : alert;
+        })
+      : rawAlerts;
+    const deliverableAlerts = effectiveAlerts.filter((alert) =>
       shouldDeliverSeverity(alert.severity, config.minSeverity)
     );
-    result.activeAlerts += rawAlerts.length;
+    result.activeAlerts += effectiveAlerts.length;
 
     // Severity policy controls external delivery eligibility, not whether the
     // underlying condition remains active. Otherwise raising the policy would
     // falsely resolve already-open warning incidents.
-    const activeKeys = new Set(rawAlerts.map((alert) => stateKey(provider.id, alert)));
+    const activeKeys = new Set(effectiveAlerts.map((alert) => stateKey(provider.id, alert)));
     const openNotifications = await db.providerAlertNotification.findMany({
       where: { providerId: provider.id, resolvedAt: null },
       select: {
@@ -2366,14 +2896,24 @@ export async function deliverProviderAlerts(options: {
               provider.id,
               notification.alertCode,
               notification.incidentGeneration,
-              "legacy_unknown"
+              "legacy_unknown",
+              notificationAlertScope({
+                providerId: provider.id,
+                alertCode: notification.alertCode,
+                stateKey: notification.stateKey,
+              })
             )
           : state?.pagerDutyDedupKey ??
             pagerDutyDedupKey(
               provider.id,
               notification.alertCode,
               notification.incidentGeneration,
-              notification.pagerDutyAuditState
+              notification.pagerDutyAuditState,
+              notificationAlertScope({
+                providerId: provider.id,
+                alertCode: notification.alertCode,
+                stateKey: notification.stateKey,
+              })
             );
         const claim = await claimResolveDelivery(
           db,
@@ -2591,6 +3131,20 @@ export async function deliverProviderAlerts(options: {
         await releaseNotificationOperation(db, notification.id, operationClaim);
         continue;
       }
+      // S12: per-code channel routing narrows which configured channels may
+      // TRIGGER this code. The resolve path deliberately does NOT apply
+      // routing: an open incident always resolves on the channel it
+      // originally triggered on, so re-routing a code mid-incident can never
+      // strand a PagerDuty incident.
+      const channelRouting = config.channelRouting?.[alert.code];
+      const routedChannels = channelRouting
+        ? channels.filter((channel) => channelRouting.includes(channel.kind))
+        : channels;
+      if (routedChannels.length === 0) {
+        result.skipped += 1;
+        await releaseNotificationOperation(db, notification.id, operationClaim);
+        continue;
+      }
       try {
 
       const channelStates = await db.providerAlertChannelDelivery.findMany({
@@ -2612,7 +3166,7 @@ export async function deliverProviderAlerts(options: {
         channelStates.map((state) => [state.channelKey, state])
       );
       let hasDeferredDueChannel = false;
-      const dueChannels = channels.filter((channel) => {
+      const dueChannels = routedChannels.filter((channel) => {
         const persisted = stateByChannelKey.get(channelKey(channel));
         if (
           persisted?.triggerClaimToken &&
@@ -2676,7 +3230,7 @@ export async function deliverProviderAlerts(options: {
       });
 
       if (dueChannels.length === 0) {
-        const successfulStates = channels.map((channel) =>
+        const successfulStates = routedChannels.map((channel) =>
           stateByChannelKey.get(channelKey(channel))
         );
         const hasCompleteDurableSuccess =
@@ -2735,7 +3289,8 @@ export async function deliverProviderAlerts(options: {
                 provider.id,
                 alert.code,
                 notification.incidentGeneration,
-                notification.pagerDutyAuditState
+                notification.pagerDutyAuditState,
+                alert.scope
               )
             : null,
           operationClaim,
@@ -2913,5 +3468,296 @@ export async function deliverProviderAlerts(options: {
       errors: [...result.errors],
     });
   }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Provider deletion: close outstanding PagerDuty incidents BEFORE the row goes
+// ---------------------------------------------------------------------------
+
+export interface ProviderDeletionAlertResolution {
+  /** Open incidents this provider still carried when deletion was attempted. */
+  openIncidents: number;
+  /** PagerDuty resolve events accepted during this call. */
+  pagerDutyResolvesSent: number;
+  /**
+   * Incidents whose PagerDuty side could NOT be closed. A non-empty list means
+   * deleting the provider row right now WOULD strand a live PagerDuty incident.
+   */
+  unresolved: Array<{ alertCode: string; reason: string }>;
+}
+
+/**
+ * `ProviderAlertNotification.providerId` cascades on delete, so hard-deleting a
+ * Provider destroys every open incident row — including the dedup keys and
+ * incident generations the resolve path needs. PagerDuty is then left holding a
+ * triggered incident that NOTHING can ever resolve: the maintenance pass only
+ * looks at providers that still exist, so no amount of waiting closes it.
+ *
+ * This closes the PagerDuty side first, using each incident's OWN persisted
+ * dedup key so the resolve lands on the exact incident the trigger opened.
+ * Resolves are idempotent at PagerDuty, so re-running after a partial failure
+ * is safe.
+ *
+ * The caller decides what a non-empty `unresolved` means; the DELETE route
+ * refuses the deletion (with an explicit force override) rather than knowingly
+ * stranding an incident.
+ *
+ * Deliberately narrower than the maintenance resolve path: it does not take the
+ * durable operation claim, and instead REFUSES to act on any incident with a
+ * live claim, leaving that incident for the caller to report and the operator
+ * to retry a moment later.
+ */
+export async function resolveProviderAlertsBeforeDeletion(options: {
+  providerId: string;
+  config?: AlertDeliveryConfig;
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: Date;
+  db?: PrismaLike;
+}): Promise<ProviderDeletionAlertResolution> {
+  const rawDb = options.db ?? prisma;
+  const db = options.db ? rawDb : withAlertPersistenceAdmission(rawDb);
+  const config = options.config ?? readAlertDeliveryConfig();
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleepImpl = options.sleepImpl ?? sleep;
+  const now = options.now ?? new Date();
+  const settings = {
+    timeoutMs: boundedPositiveNumber(config.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS),
+    maxAttempts: Math.max(
+      1,
+      Math.floor(boundedPositiveNumber(config.maxAttempts, DEFAULT_MAX_ATTEMPTS, MAX_ATTEMPTS))
+    ),
+    retryBaseMs: boundedNonNegativeNumber(
+      config.retryBaseMs,
+      DEFAULT_RETRY_BASE_MS,
+      MAX_RETRY_BASE_MS
+    ),
+  };
+  const pagerDutyChannels = [
+    ...new Map(
+      config.channels
+        .filter(
+          (channel): channel is Extract<AlertDeliveryChannel, { kind: "pagerduty" }> =>
+            channel.kind === "pagerduty"
+        )
+        .map((channel) => [channelKey(channel), channel] as const)
+    ).values(),
+  ];
+
+  const result: ProviderDeletionAlertResolution = {
+    openIncidents: 0,
+    pagerDutyResolvesSent: 0,
+    unresolved: [],
+  };
+
+  const provider = await db.provider.findUnique({
+    where: { id: options.providerId },
+    select: { id: true, name: true, displayName: true },
+  });
+  if (!provider) return result;
+
+  const notifications = await db.providerAlertNotification.findMany({
+    where: { providerId: provider.id, resolvedAt: null },
+    select: {
+      id: true,
+      stateKey: true,
+      alertCode: true,
+      severity: true,
+      message: true,
+      firstDetectedAt: true,
+      incidentGeneration: true,
+      pagerDutyAuditState: true,
+      operationClaimToken: true,
+      operationClaimExpiresAt: true,
+      channelDeliveries: {
+        where: { channelKind: "pagerduty" },
+        select: {
+          channelKey: true,
+          pagerDutyDedupKey: true,
+          lastSucceededAt: true,
+          lastSucceededIncidentGeneration: true,
+          lastResolvedAt: true,
+          lastResolvedIncidentGeneration: true,
+          triggerIncidentGeneration: true,
+          triggerClaimToken: true,
+          triggerClaimExpiresAt: true,
+          resolveClaimToken: true,
+          resolveClaimExpiresAt: true,
+          lastError: true,
+        },
+      },
+    },
+  });
+  result.openIncidents = notifications.length;
+
+  const configuredPagerDutyKeys = new Set(
+    pagerDutyChannels.map((channel) => channelKey(channel))
+  );
+
+  for (const notification of notifications) {
+    const legacyAuditPending =
+      notification.pagerDutyAuditState === "legacy_unknown";
+    const resolvedForIncident = (
+      state: (typeof notification.channelDeliveries)[number]
+    ) =>
+      generationMatches(
+        state.lastResolvedIncidentGeneration,
+        notification.incidentGeneration
+      ) &&
+      state.lastResolvedAt !== null &&
+      state.lastResolvedAt >= notification.firstDetectedAt;
+    // Same predicate the maintenance resolve path uses: a PagerDuty
+    // destination is only owed a resolve if THIS incident generation actually
+    // reached it (or a legacy row makes that unknowable).
+    const relevantTriggerStates = notification.channelDeliveries.filter(
+      (state) =>
+        !resolvedForIncident(state) &&
+        (legacyAuditPending ||
+          ((generationMatches(
+            state.triggerIncidentGeneration,
+            notification.incidentGeneration
+          ) ||
+            generationMatches(
+              state.lastSucceededIncidentGeneration,
+              notification.incidentGeneration
+            )) &&
+            ((state.lastSucceededAt !== null &&
+              state.lastSucceededAt >= notification.firstDetectedAt) ||
+              state.lastError === TRIGGER_OUTCOME_UNKNOWN_MARKER ||
+              state.triggerClaimToken !== null)))
+    );
+    if (relevantTriggerStates.length === 0 && !legacyAuditPending) {
+      // Nothing ever reached PagerDuty for this incident, so deleting the row
+      // cannot strand anything there.
+      continue;
+    }
+
+    const claimInFlight =
+      (notification.operationClaimToken !== null &&
+        notification.operationClaimExpiresAt !== null &&
+        notification.operationClaimExpiresAt > now) ||
+      relevantTriggerStates.some(
+        (state) =>
+          (state.triggerClaimToken !== null &&
+            state.triggerClaimExpiresAt !== null &&
+            state.triggerClaimExpiresAt > now) ||
+          (state.resolveClaimToken !== null &&
+            state.resolveClaimExpiresAt !== null &&
+            state.resolveClaimExpiresAt > now)
+      );
+    if (claimInFlight) {
+      // A maintenance worker is mid-delivery on this incident. Resolving under
+      // it could overtake a trigger that has not yet crossed the durable
+      // boundary; the lease is short, so the honest answer is "retry shortly".
+      result.unresolved.push({
+        alertCode: notification.alertCode,
+        reason:
+          "a maintenance worker is mid-delivery on this incident; retry in a moment",
+      });
+      continue;
+    }
+
+    if (
+      relevantTriggerStates.some(
+        (state) => !configuredPagerDutyKeys.has(state.channelKey)
+      ) ||
+      (legacyAuditPending && pagerDutyChannels.length === 0)
+    ) {
+      result.unresolved.push({
+        alertCode: notification.alertCode,
+        reason:
+          "the PagerDuty routing key this incident was raised on is not configured",
+      });
+      continue;
+    }
+
+    const scope = notificationAlertScope({
+      providerId: provider.id,
+      alertCode: notification.alertCode,
+      stateKey: notification.stateKey,
+    });
+    const resolvedAlert: ProviderAlert = {
+      code: notification.alertCode as ProviderAlert["code"],
+      severity: normalizeSeverity(notification.severity) ?? "warning",
+      message: notification.message,
+    };
+    const channelsToResolve = pagerDutyChannels.filter((channel) => {
+      if (legacyAuditPending) return true;
+      const key = channelKey(channel);
+      return relevantTriggerStates.some((state) => state.channelKey === key);
+    });
+
+    let allResolvesSent = true;
+    for (const channel of channelsToResolve) {
+      const key = channelKey(channel);
+      const state = notification.channelDeliveries.find(
+        (entry) => entry.channelKey === key
+      );
+      const exactDedupKey = legacyAuditPending
+        ? pagerDutyDedupKey(
+            provider.id,
+            notification.alertCode,
+            notification.incidentGeneration,
+            "legacy_unknown",
+            scope
+          )
+        : state?.pagerDutyDedupKey ??
+          pagerDutyDedupKey(
+            provider.id,
+            notification.alertCode,
+            notification.incidentGeneration,
+            notification.pagerDutyAuditState,
+            scope
+          );
+      try {
+        await sendToChannel(
+          channel,
+          provider,
+          resolvedAlert,
+          now,
+          fetchImpl,
+          settings,
+          sleepImpl,
+          "resolve",
+          exactDedupKey
+        );
+      } catch (error) {
+        allResolvesSent = false;
+        result.unresolved.push({
+          alertCode: notification.alertCode,
+          reason: failureDetails(error).message,
+        });
+        continue;
+      }
+      result.pagerDutyResolvesSent += 1;
+      try {
+        await db.providerAlertChannelDelivery.updateMany({
+          where: { notificationId: notification.id, channelKey: key },
+          data: {
+            lastResolveAttemptAt: now,
+            lastResolvedAt: now,
+            lastResolvedIncidentGeneration: notification.incidentGeneration,
+            resolveAttemptCount: { increment: 1 },
+            lastResolveError: null,
+          },
+        });
+      } catch (error) {
+        // The resolve already landed at PagerDuty, which is the outcome that
+        // matters here. Bookkeeping on a row that is about to be cascade-deleted
+        // is best-effort; a repeat resolve is idempotent.
+        if (!isPrismaModelTimeout(error, "ProviderAlertChannelDelivery")) throw error;
+      }
+    }
+
+    if (!allResolvesSent) continue;
+    // Close the local incident too, so an abandoned deletion leaves consistent
+    // state and a concurrent maintenance pass does not re-notify.
+    await db.providerAlertNotification.updateMany({
+      where: { id: notification.id, resolvedAt: null },
+      data: { resolvedAt: now },
+    });
+  }
+
   return result;
 }

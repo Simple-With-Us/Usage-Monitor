@@ -5,8 +5,16 @@ import { decrypt, encrypt, encryptJson } from "@/lib/crypto";
 import { parseProviderUpdateInput, readJsonBody } from "@/lib/provider-input";
 import { isDecommissionedProviderName } from "@/lib/provider-definitions";
 import { buildProviderAlertState } from "@/lib/provider-alerts";
+import {
+  resolveProviderAlertsBeforeDeletion,
+  type ProviderDeletionAlertResolution,
+} from "@/lib/alert-delivery";
 import { computeBudgetStatus, bustBudgetStatusCache } from "@/lib/budget-status";
-import { toPrismaProviderPlanData } from "@/lib/provider-plan";
+import {
+  PlanSubscriptionExclusivityError,
+  planFixedCostConflicts,
+  toPrismaProviderPlanData,
+} from "@/lib/provider-plan";
 import { canonicalProviderKey } from "@/lib/provider-identity";
 import { buildKeyPreview } from "@/lib/provider-key-preview";
 import { getProviderComplianceSummary } from "@/lib/provider-compliance";
@@ -15,7 +23,7 @@ import {
   hasProviderSecrets,
   mergeProviderConfig,
   providerConfigForClient,
-  providerConfigForServer,
+  providerConfigForServerOrNull,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 import {
@@ -35,28 +43,19 @@ import {
   providerCredentialManagementForClient,
 } from "@/lib/managed-provider-credential";
 import { snapshotCostCoverageCaveat } from "@/lib/snapshot-sync-status";
+import { parseSentryCategoriesFromRawData } from "@/lib/sentry-usage-categories";
 import {
   authoritativeProviderBillingCredential,
   hashProviderBillingAccountId,
   projectProviderBillingAccountMatches,
 } from "@/lib/provider-billing-account";
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
+import { isInternalSystemProviderName } from "@/lib/system-providers";
 
 function decryptKey(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
   try {
     return decrypt(encryptedKey);
-  } catch {
-    return null;
-  }
-}
-
-function serverConfig(
-  config: unknown,
-  encryptedSecretConfig: string | null
-): Record<string, unknown> | null {
-  try {
-    return providerConfigForServer(config, encryptedSecretConfig);
   } catch {
     return null;
   }
@@ -143,6 +142,10 @@ export async function GET(
   if (!provider) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+  // Internal system anchors (project-budgets alert carrier) are not operator-facing.
+  if (isInternalSystemProviderName(provider.name)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   const geminiStatusSnapshot =
     provider.type.trim().toLowerCase() === "builtin" &&
@@ -196,6 +199,13 @@ export async function GET(
   const costCoverageCaveat = snapshotCostCoverageCaveat(
     latestSnapshotWithRawData?.rawData ?? null
   );
+  const sentryCategories =
+    canonicalProviderKey(provider.name) === "sentry"
+      ? parseSentryCategoriesFromRawData(latestSnapshotWithRawData?.rawData ?? null)
+      : null;
+  const sentryUsage = sentryCategories
+    ? { byCategory: sentryCategories.byCategory, billingCost: false as const }
+    : null;
   // Display-only read-back of the §3c/§3d audit layer. Never feeds budgets,
   // alerts, or the max() spend logic; a failure here must not take down the
   // provider page, so it degrades to null.
@@ -208,7 +218,7 @@ export async function GET(
     return null;
   });
   const decryptedKey = decryptKey(apiKey);
-  const adapterConfig = serverConfig(config, secretConfig);
+  const adapterConfig = providerConfigForServerOrNull(config, secretConfig);
   const billingAccount = projectProviderBillingAccountMatches([
     {
       id: provider.id,
@@ -303,6 +313,7 @@ export async function GET(
     // CostCoverageCaveat in adapters/helpers.ts for why these must not be
     // conflated.
     costCoverageCaveat,
+    sentryUsage,
     compliance,
     alerts,
     estimatedMonthlyCostUsd:
@@ -352,6 +363,9 @@ export async function GET(
   });
 }
 
+const SUBSCRIPTION_EXCLUSIVITY_ERROR =
+  "This provider already has an active/considering Subscription. Clear Plan price / mo or cancel the Subscription — modeling the same fee both ways double-counts spend.";
+
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -368,6 +382,15 @@ export async function PUT(
   });
   if (!existing) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (isInternalSystemProviderName(existing.name)) {
+    return NextResponse.json(
+      {
+        error:
+          "This is an internal system provider (not a connection) and cannot be edited",
+      },
+      { status: 403 }
+    );
   }
 
   let input;
@@ -501,13 +524,17 @@ export async function PUT(
   if (input.apiKey !== undefined) {
     updateData.apiKey = input.apiKey === null ? null : encrypt(input.apiKey);
   }
+  // Hoisted so the transaction below can re-derive the effective fixed cost
+  // under the writer lock instead of trusting the pre-parse `existing` read.
+  let planData: Prisma.ProviderPlanCreateWithoutProviderInput | undefined;
   if (input.plan !== undefined) {
-    const planData = toPrismaProviderPlanData(input.plan);
+    planData = toPrismaProviderPlanData(input.plan);
     const nextFixed =
       planData.fixedMonthlyCostUsd === undefined
         ? existing.plan?.fixedMonthlyCostUsd
         : planData.fixedMonthlyCostUsd;
-    if (nextFixed != null && Number(nextFixed) > 0) {
+    // Cheap fast-fail; the authoritative check is inside the transaction.
+    if (planFixedCostConflicts(nextFixed)) {
       const activeSubscription = await prisma.subscription.findFirst({
         where: {
           providerId: id,
@@ -517,10 +544,7 @@ export async function PUT(
       });
       if (activeSubscription) {
         return NextResponse.json(
-          {
-            error:
-              "This provider already has an active/considering Subscription. Clear Plan price / mo or cancel the Subscription — modeling the same fee both ways double-counts spend.",
-          },
+          { error: SUBSCRIPTION_EXCLUSIVITY_ERROR },
           { status: 400 }
         );
       }
@@ -554,28 +578,73 @@ export async function PUT(
     updateData.alertConfigGeneration = { increment: 1 };
   }
 
-  const provider = await prisma.provider.update({
-    where: { id },
-    data: updateData,
-    select: {
-      id: true,
-      name: true,
-      displayName: true,
-      type: true,
-      isActive: true,
-      refreshIntervalMin: true,
-      groupId: true,
-      label: true,
-      allocations: {
+  let provider;
+  try {
+    provider = await prisma.$transaction(async (tx) => {
+      // SQLite begins interactive transactions deferred; this harmless write
+      // takes the one durable writer lock before the exclusivity re-read, the
+      // same trick external-billing-subscription-adoption.ts uses so a
+      // concurrent POST /api/subscriptions cannot land between check and write.
+      await tx.$executeRaw`
+        UPDATE "Provider"
+        SET "name" = "name"
+        WHERE "id" = ${id}
+      `;
+      if (planData) {
+        // Re-read the stored plan under the lock so the "fixedMonthlyCostUsd
+        // omitted" branch no longer relies on the `existing` read taken before
+        // the body was even parsed.
+        const lockedPlan = await tx.providerPlan.findUnique({
+          where: { providerId: id },
+          select: { fixedMonthlyCostUsd: true },
+        });
+        const lockedNextFixed =
+          planData.fixedMonthlyCostUsd === undefined
+            ? lockedPlan?.fixedMonthlyCostUsd
+            : planData.fixedMonthlyCostUsd;
+        if (planFixedCostConflicts(lockedNextFixed)) {
+          const raced = await tx.subscription.findFirst({
+            where: {
+              providerId: id,
+              status: { in: ["active", "considering"] },
+            },
+            select: { id: true },
+          });
+          if (raced) throw new PlanSubscriptionExclusivityError();
+        }
+      }
+      return tx.provider.update({
+        where: { id },
+        data: updateData,
         select: {
-          projectId: true,
-          percentage: true,
+          id: true,
+          name: true,
+          displayName: true,
+          type: true,
+          isActive: true,
+          refreshIntervalMin: true,
+          groupId: true,
+          label: true,
+          allocations: {
+            select: {
+              projectId: true,
+              percentage: true,
+            },
+          },
+          plan: true,
+          createdAt: true,
         },
-      },
-      plan: true,
-      createdAt: true,
-    },
-  });
+      });
+    });
+  } catch (error) {
+    if (error instanceof PlanSubscriptionExclusivityError) {
+      return NextResponse.json(
+        { error: SUBSCRIPTION_EXCLUSIVITY_ERROR },
+        { status: 400 }
+      );
+    }
+    throw error;
+  }
 
   bustBudgetStatusCache();
 
@@ -595,6 +664,15 @@ export async function DELETE(
   const existing = await prisma.provider.findUnique({ where: { id } });
   if (!existing) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (isInternalSystemProviderName(existing.name)) {
+    return NextResponse.json(
+      {
+        error:
+          "This is an internal system provider (not a connection) and cannot be deleted",
+      },
+      { status: 403 }
+    );
   }
 
   if (hasStPrimaryCredentialOwnership(
@@ -621,7 +699,61 @@ export async function DELETE(
     );
   }
 
+  // Deleting the Provider row cascades its ProviderAlertNotification rows away,
+  // taking the PagerDuty dedup keys with them — after which NOTHING can ever
+  // resolve an incident this provider opened. Close the PagerDuty side first.
+  // `force=true` is the deliberate operator override for the case where the
+  // resolve genuinely cannot complete (e.g. the original routing key is gone)
+  // and the operator will close the incident by hand.
+  const force = request.nextUrl.searchParams.get("force") === "true";
+  let alertResolution: ProviderDeletionAlertResolution;
+  try {
+    alertResolution = await resolveProviderAlertsBeforeDeletion({
+      providerId: id,
+    });
+  } catch (error) {
+    if (force) {
+      alertResolution = {
+        openIncidents: 0,
+        pagerDutyResolvesSent: 0,
+        unresolved: [
+          {
+            alertCode: "unknown",
+            reason: error instanceof Error ? error.message : "resolve failed",
+          },
+        ],
+      };
+    } else {
+      return NextResponse.json(
+        {
+          error:
+            "Could not close this provider's open PagerDuty incidents, so deleting it would strand them.  Retry, or delete with ?force=true to accept that and close them by hand.",
+          detail: error instanceof Error ? error.message : String(error),
+        },
+        { status: 409 }
+      );
+    }
+  }
+  if (alertResolution.unresolved.length > 0 && !force) {
+    return NextResponse.json(
+      {
+        error:
+          "Could not close this provider's open PagerDuty incidents, so deleting it would strand them.  Retry, or delete with ?force=true to accept that and close them by hand.",
+        unresolved: alertResolution.unresolved,
+      },
+      { status: 409 }
+    );
+  }
+
   await prisma.provider.delete({ where: { id } });
   bustBudgetStatusCache();
-  return NextResponse.json({ success: true });
+  return NextResponse.json({
+    success: true,
+    ...(alertResolution.pagerDutyResolvesSent > 0
+      ? { pagerDutyResolvesSent: alertResolution.pagerDutyResolvesSent }
+      : {}),
+    ...(alertResolution.unresolved.length > 0
+      ? { strandedPagerDutyIncidents: alertResolution.unresolved }
+      : {}),
+  });
 }

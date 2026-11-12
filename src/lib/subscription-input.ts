@@ -53,6 +53,7 @@ export interface SubscriptionUpdateInput {
   intervalCount?: number;
   anchorDay?: number | null;
   startDate?: Date;
+  canceledAt?: Date | null;
   knobEnv?: Record<string, string> | null;
 }
 
@@ -303,6 +304,12 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   if (record.anchorDay !== undefined) update.anchorDay = parseAnchorDay(record.anchorDay);
   if (record.startDate !== undefined) {
     update.startDate = parseDate(record.startDate, "startDate", () => new Date());
+  }
+  if (record.canceledAt !== undefined) {
+    update.canceledAt =
+      record.canceledAt === null || record.canceledAt === ""
+        ? null
+        : parseDate(record.canceledAt, "canceledAt", () => new Date());
   }
   if (record.knobEnv !== undefined) update.knobEnv = parseKnobEnv(record.knobEnv, "knobEnv");
 

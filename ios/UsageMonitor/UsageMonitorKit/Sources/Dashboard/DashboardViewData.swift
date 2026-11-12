@@ -55,8 +55,33 @@ struct DashboardViewData: Equatable, Sendable {
     /// Projected end-of-month spend for the whole account — the sum of each
     /// provider's own projection. The summary has no aggregate projection, so
     /// it is rolled up here.
+    ///
+    /// Server composition (per provider): paced variable usage + fixed accrued
+    /// MTD + known remaining subscription renewals this UTC month. The parts
+    /// below surface that split so subscription bills are never invisible.
     var projectedEom: Double {
         providers.reduce(0) { $0 + $1.projectedEomUsd }
+    }
+
+    /// Usage-based portion: extrapolated variable spend to month end.
+    var projectedVariableUsage: Double {
+        providers.reduce(0) { $0 + $1.resolvedProjectedVariableUsageUsd }
+    }
+
+    /// Fixed / subscription charges already on the books this month.
+    var projectedFixedAccrued: Double {
+        providers.reduce(0) { $0 + $1.resolvedFixedAccruedUsd }
+    }
+
+    /// Known remaining subscription renewals still due this UTC month.
+    var projectedKnownRenewals: Double {
+        providers.reduce(0) { $0 + $1.resolvedForecastedSubscriptionRenewalsUsd }
+    }
+
+    /// True when any subscription/fixed component contributes to the projection
+    /// (so the UI can call out that EOM is not pure usage pacing).
+    var hasSubscriptionProjectionComponent: Bool {
+        projectedFixedAccrued > 0.005 || projectedKnownRenewals > 0.005
     }
 
     var projectedFraction: Double {
@@ -89,8 +114,20 @@ struct DashboardViewData: Equatable, Sendable {
     }
 
     /// Status the *projection* implies (may be worse than today's status).
+    ///
+    /// Prefers the server's per-provider `projectedStatus` (computed from the
+    /// same projected-vs-budget thresholds the web uses — WARNING_RATIO 0.8)
+    /// rolled up worst-first, so the dashboard agrees with the server's
+    /// throttle consumers. Only when the payload predates the field does it
+    /// fall back to the local aggregate math below.
     var projectionStatus: BudgetLevel {
         guard hasBudget else { return .unconfigured }
+        let budgeted = providers.filter(\.hasBudget)
+        if !budgeted.isEmpty, budgeted.allSatisfy({ $0.projectedStatus != nil }) {
+            if budgeted.contains(where: { $0.projectedStatus == .exceeded }) { return .exceeded }
+            if budgeted.contains(where: { $0.projectedStatus == .warning }) { return .warning }
+            return .ok
+        }
         if projectedEom > totalBudget { return .exceeded }
         if projectedFraction >= 0.9 { return .warning }
         return .ok

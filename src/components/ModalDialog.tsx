@@ -11,23 +11,26 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-interface ModalDialogProps {
-  title: string;
+interface DialogA11yOptions {
   onClose: () => void;
-  children: ReactNode;
-  maxWidthClass?: string;
   closeDisabled?: boolean;
+  /**
+   * Capture-phase handling with stopImmediatePropagation. Required when this
+   * dialog can stack ABOVE another dialog that registered its own document
+   * keydown listener first (e.g. the integration drawer over AddProviderModal)
+   * — without it, Escape/Tab would reach the underlying dialog's handler.
+   */
+  capture?: boolean;
 }
 
-export default function ModalDialog({
-  title,
-  onClose,
-  children,
-  maxWidthClass = "max-w-lg",
-  closeDisabled = false,
-}: ModalDialogProps) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
+/**
+ * Shared dialog accessibility machinery (U10): initial focus, focus trap,
+ * Escape-to-close, body scroll lock, and focus restoration on unmount.
+ */
+function useDialogA11y(
+  dialogRef: React.RefObject<HTMLElement | null>,
+  { onClose, closeDisabled = false, capture = false }: DialogA11yOptions
+) {
   const onCloseRef = useRef(onClose);
   const closeDisabledRef = useRef(closeDisabled);
 
@@ -48,6 +51,10 @@ export default function ModalDialog({
     initial?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (capture && (event.key === "Escape" || event.key === "Tab")) {
+        // Intercept before any underlying dialog's document-level handler.
+        event.stopImmediatePropagation();
+      }
       if (event.key === "Escape" && !closeDisabledRef.current) {
         event.preventDefault();
         onCloseRef.current();
@@ -75,13 +82,84 @@ export default function ModalDialog({
       }
     };
 
-    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keydown", handleKeyDown, capture);
     return () => {
-      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keydown", handleKeyDown, capture);
       document.body.style.overflow = previousOverflow;
       previouslyFocused?.focus();
     };
+    // `dialogRef` is stable; capture changes require a remount by design.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+}
+
+interface ModalDialogProps {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  maxWidthClass?: string;
+  closeDisabled?: boolean;
+  /**
+   * "modal" (default) renders the centered card with a built-in header.
+   * "side-panel" renders a right-side drawer: full height, no built-in
+   * header, and capture-phase key handling so it can stack above a modal.
+   */
+  variant?: "modal" | "side-panel";
+  /**
+   * Id of an element INSIDE `children` that names the dialog (side-panels
+   * render their own header). Falls back to an internal visually-hidden
+   * heading built from `title`.
+   */
+  labelledBy?: string;
+  /** Optional id of an element that describes the dialog (aria-describedby). */
+  describedBy?: string;
+}
+
+export default function ModalDialog({
+  title,
+  onClose,
+  children,
+  maxWidthClass,
+  closeDisabled = false,
+  variant = "modal",
+  labelledBy,
+  describedBy,
+}: ModalDialogProps) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef, {
+    onClose,
+    closeDisabled,
+    capture: variant === "side-panel",
+  });
+
+  if (variant === "side-panel") {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex justify-end bg-gray-950/40"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !closeDisabled) onClose();
+        }}
+      >
+        <div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={labelledBy ?? titleId}
+          aria-describedby={describedBy}
+          tabIndex={-1}
+          className={`h-full w-full overflow-y-auto bg-white shadow-2xl outline-none dark:bg-gray-800 ${maxWidthClass ?? "max-w-xl"}`}
+        >
+          {labelledBy ? null : (
+            <h2 id={titleId} className="sr-only">
+              {title}
+            </h2>
+          )}
+          {children}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -95,8 +173,9 @@ export default function ModalDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={describedBy}
         tabIndex={-1}
-        className={`relative max-h-[calc(100dvh-1.5rem)] w-full overflow-y-auto rounded-2xl bg-white shadow-xl dark:bg-gray-800 sm:max-h-[90vh] ${maxWidthClass}`}
+        className={`relative max-h-[calc(100dvh-1.5rem)] w-full overflow-y-auto rounded-2xl bg-white shadow-xl dark:bg-gray-800 sm:max-h-[90vh] ${maxWidthClass ?? "max-w-lg"}`}
       >
         <div className="p-4 sm:p-6">
           <div className="mb-6 flex items-center justify-between gap-4">

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import ModalDialog from "@/components/ModalDialog";
 import {
   getProviderIntegrationProfile,
   type BillingVisibility,
@@ -53,8 +54,8 @@ export interface ProviderIntegrationInstanceState {
 const MODE_LABELS: Record<IntegrationMode, string> = {
   direct: "Direct API",
   partial: "Partial API",
-  "push-only": "Push / manual",
-  manual: "Manual",
+  "push-only": "Manually only",
+  manual: "Manually only",
   "health-only": "Health only",
   configurable: "Custom endpoint",
 };
@@ -66,15 +67,6 @@ const BILLING_LABELS: Record<BillingVisibility, string> = {
   manual: "Manual billing",
   none: "No billing",
 };
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
 
 function Section({
   title,
@@ -112,8 +104,6 @@ export default function ProviderIntegrationDrawer({
   onClose,
 }: ProviderIntegrationDrawerProps) {
   const profile = getProviderIntegrationProfile(providerName, providerType);
-  const panelRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
   const headingId = useId();
   const summaryId = useId();
   const keyPreview = instanceState?.keyPreview ?? null;
@@ -212,67 +202,19 @@ export default function ProviderIntegrationDrawer({
                     : "Not checked for the current configuration"
     : null;
 
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    closeRef.current?.focus();
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" || event.key === "Tab") {
-        // This drawer can be opened above AddProviderModal. Capture and stop
-        // the underlying dialog's global focus/escape handler while active.
-        event.stopImmediatePropagation();
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab" || !panelRef.current) return;
-
-      const focusable = Array.from(
-        panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
-      ).filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        panelRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown, true);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [onClose]);
-
+  // Accessibility machinery (focus trap, Escape, scroll lock, capture-phase
+  // interception above any underlying modal) is shared via ModalDialog's
+  // side-panel variant — the layout below is the drawer's own visual chrome.
   const content = (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-gray-950/40"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+    <ModalDialog
+      title={`${displayName} integration details`}
+      onClose={onClose}
+      variant="side-panel"
+      labelledBy={headingId}
+      describedBy={summaryId}
     >
-      <aside
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        aria-describedby={summaryId}
-        tabIndex={-1}
-        className="h-full w-full max-w-xl overflow-y-auto bg-white shadow-2xl outline-none dark:bg-gray-800"
-      >
-        <header className="sticky top-0 z-10 border-b border-gray-200 bg-white/95 px-5 py-4 backdrop-blur sm:px-7 dark:border-gray-700 dark:bg-gray-800/95">
+      <header className="sticky top-0 z-10 border-b border-gray-200 bg-white/95 px-5 py-4 backdrop-blur sm:px-7 dark:border-gray-700 dark:bg-gray-800/95">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <p className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
@@ -286,11 +228,11 @@ export default function ProviderIntegrationDrawer({
               </p>
             </div>
             <button
-              ref={closeRef}
               type="button"
               onClick={onClose}
+              data-dialog-initial-focus
               aria-label={`Close ${displayName} integration details`}
-              className="flex h-10 w-10 flex-none items-center justify-center rounded-lg border border-gray-200 text-xl text-gray-500 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-100"
+              className="flex h-11 w-11 flex-none items-center justify-center rounded-lg border border-gray-200 text-xl text-gray-500 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-100"
             >
               <span aria-hidden="true">×</span>
             </button>
@@ -324,14 +266,16 @@ export default function ProviderIntegrationDrawer({
             </p>
           </div>
 
-          {isManualProvider && (
-            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm leading-6 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-              <p className="font-semibold">No API Configuration</p>
+          {pollingNotApplicable || anthropicWithoutAdmin ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+              <p className="font-semibold">Manually only</p>
               <p className="mt-1">
-                This provider is currently running as a manual/no-op service because no API credentials have been configured. Fetch actions are disabled.
+                {anthropicWithoutAdmin
+                  ? "Individual Anthropic accounts have no billing poll. An Admin API key exists only for organizations. A Messages API key will not unlock fetch."
+                  : "This account cannot be fetched. Enter plan or receipt numbers yourself, or push telemetry. Adding a key will not unlock polling."}
               </p>
             </div>
-          )}
+          ) : null}
 
           {instanceState ? (
             <Section title="Current configured state">
@@ -341,10 +285,8 @@ export default function ProviderIntegrationDrawer({
                   <dd className="mt-1 font-medium text-gray-900 dark:text-gray-100">
                     {!instanceState.isActive
                       ? "Inactive"
-                      : pollingNotApplicable
-                        ? "Not applicable · push/manual"
-                      : anthropicWithoutAdmin
-                        ? "Skipped · no organization Admin API"
+                      : pollingNotApplicable || anthropicWithoutAdmin
+                        ? "Manually only · no fetch"
                         : "Active"}
                   </dd>
                 </div>
@@ -553,8 +495,7 @@ export default function ProviderIntegrationDrawer({
             </ul>
           </Section>
         </div>
-      </aside>
-    </div>
+    </ModalDialog>
   );
 
   return typeof document === "undefined" ? content : createPortal(content, document.body);

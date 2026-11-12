@@ -145,6 +145,55 @@ export function forecastMonthlyUsageFromSeries(
  * `calculateEomForecast`'s return contract: fixed accrued cost plus projected
  * variable usage.
  */
+/**
+ * Budget runout projection (S9): the day the cumulative forecast crosses the
+ * monthly budget — "budget exhausts ~Aug 22 at current burn".
+ *
+ * Derived from the already-computed MTD spend and EOM projection, so it
+ * inherits whichever forecast produced `projectedEomUsd` (linear or the
+ * recency-weighted trend). The burn rate is the AVERAGE projected daily
+ * growth left in the month; the crossing day is where MTD + burn·d reaches
+ * the budget. Returns nulls when there is no configured budget or the
+ * projection never crosses it.
+ *
+ * Pure and deterministic — the only clock input is the explicit `now`.
+ */
+export interface BudgetRunoutProjection {
+  /** Instant the cumulative forecast crosses the budget; `now` when already exhausted; null when never projected to cross. */
+  runoutDate: Date | null;
+  /** Fractional days (1-decimal) from `now` until exhaustion; 0 when already exhausted; null when never projected. */
+  daysUntilBudgetExhausted: number | null;
+}
+
+const MS_PER_DAY_RUNOUT = 24 * 60 * 60 * 1000;
+
+export function projectBudgetRunout(input: {
+  spentUsd: number;
+  projectedEomUsd: number;
+  monthlyBudgetUsd: number | null;
+  now: Date;
+}): BudgetRunoutProjection {
+  const { spentUsd, projectedEomUsd, monthlyBudgetUsd, now } = input;
+  const never: BudgetRunoutProjection = {
+    runoutDate: null,
+    daysUntilBudgetExhausted: null,
+  };
+  if (monthlyBudgetUsd == null || !(monthlyBudgetUsd > 0)) return never;
+  if (!Number.isFinite(spentUsd) || !Number.isFinite(projectedEomUsd)) return never;
+  if (spentUsd >= monthlyBudgetUsd) {
+    return { runoutDate: new Date(now.getTime()), daysUntilBudgetExhausted: 0 };
+  }
+  const remainingSpan = Math.max(0, daysInUtcMonth(now) - fractionalDayOfMonth(now));
+  if (remainingSpan <= 0) return never;
+  const dailyBurn = (projectedEomUsd - spentUsd) / remainingSpan;
+  if (!(dailyBurn > 0)) return never;
+  const days = (monthlyBudgetUsd - spentUsd) / dailyBurn;
+  return {
+    runoutDate: new Date(now.getTime() + days * MS_PER_DAY_RUNOUT),
+    daysUntilBudgetExhausted: Math.round(days * 10) / 10,
+  };
+}
+
 export function calculateEomForecastFromSeries(
   dailyUsage: readonly number[] | null | undefined,
   fixedAccruedUsd: number,

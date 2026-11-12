@@ -9,8 +9,10 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    background_color: "#111827",
-    theme_color: "#111827",
+    // Light default UI (body bg-gray-50); dark scheme is class-based, so the
+    // manifest stays aligned with the light palette.
+    background_color: "#f9fafb",
+    theme_color: "#f9fafb",
     categories: ["finance", "productivity", "utilities"],
     icons: [
       {

@@ -23,6 +23,23 @@ final class ManagementAPIClientTests: XCTestCase {
         XCTAssertEqual(response.summary.totalSpentUsd, 12.5)
     }
 
+    func testSubscriptionsListDecodes() async throws {
+        let harness = makeHarness(token: "read-token")
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/subscriptions")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer read-token")
+            return .json(Self.subscriptionsJSON)
+        }
+
+        let subscriptions = try await harness.client.subscriptions()
+
+        XCTAssertEqual(subscriptions.count, 1)
+        XCTAssertEqual(subscriptions[0].id, "subscription-1")
+        XCTAssertEqual(subscriptions[0].name, "OpenAI Plus")
+        XCTAssertEqual(subscriptions[0].effectiveStatus, "active")
+        XCTAssertEqual(subscriptions[0].provider.title, "OpenAI")
+    }
+
     func testSessionCookieCanReadAndManageWithoutBearer() async throws {
         let harness = makeHarness()
         installSessionCookie(in: harness)
@@ -31,9 +48,12 @@ final class ManagementAPIClientTests: XCTestCase {
             switch request.url?.path {
             case "/api/budget-status":
                 return .json(Self.budgetJSON)
-            case "/api/providers":
-                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query, "view=dashboard")
-                return .json(Self.providersJSON)
+            case "/api/usage-events":
+                // The session probe must be the lightweight bounded query, not
+                // the heavy `?view=dashboard` inventory.
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+                XCTAssertEqual(query, "raw=1&limit=1&days=1")
+                return .json(Self.sessionProbeJSON)
             default:
                 return .json(["error": "unexpected"], status: 404)
             }
@@ -43,9 +63,47 @@ final class ManagementAPIClientTests: XCTestCase {
         let capabilities = try await harness.client.accessCapabilities()
 
         XCTAssertEqual(capabilities.bearerRead, .notConfigured)
-        XCTAssertEqual(capabilities.sessionManagement, .active(providerCount: 1))
+        XCTAssertEqual(capabilities.sessionManagement, .active(providerCount: nil))
         XCTAssertTrue(capabilities.canRead)
         XCTAssertTrue(capabilities.canManage)
+    }
+
+    func testSessionStatusCachesProbeBriefly() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        var probeCount = 0
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/usage-events")
+            probeCount += 1
+            return .json(Self.sessionProbeJSON)
+        }
+
+        let first = try await harness.client.sessionStatus()
+        let second = try await harness.client.sessionStatus()
+
+        XCTAssertEqual(first, .active(providerCount: nil))
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(probeCount, 1, "Repeated Settings appears must reuse the cached probe.")
+    }
+
+    func testSessionProbeCacheInvalidatesOnLogout() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        var probeCount = 0
+        ManagementURLProtocol.handler = { request in
+            if request.url?.path == "/api/auth/logout" {
+                return .json(["ok": true])
+            }
+            probeCount += 1
+            return .json(Self.sessionProbeJSON)
+        }
+
+        _ = try await harness.client.sessionStatus()
+        _ = try await harness.client.logout()
+        let signedOut = try await harness.client.sessionStatus()
+
+        XCTAssertEqual(signedOut, .signedOut)
+        XCTAssertEqual(probeCount, 1, "No cookie means no probe at all after logout.")
     }
 
     func testVerifyTokenRequiresBearerEvenWithSessionCookie() async throws {
@@ -99,16 +157,16 @@ final class ManagementAPIClientTests: XCTestCase {
                 )
             }
 
-            XCTAssertEqual(request.url?.path, "/api/providers")
+            XCTAssertEqual(request.url?.path, "/api/usage-events")
             XCTAssertNil(request.httpBody)
             XCTAssertFalse(String(data: request.httpBody ?? Data(), encoding: .utf8)?.contains("correct horse") ?? false)
-            return .json(Self.providersJSON)
+            return .json(Self.sessionProbeJSON)
         }
 
         _ = try await harness.client.login(password: "correct horse")
         let status = try await harness.client.sessionStatus()
 
-        XCTAssertEqual(status, .active(providerCount: 1))
+        XCTAssertEqual(status, .active(providerCount: nil))
         XCTAssertTrue(hasSessionCookie(in: harness))
     }
 
@@ -205,6 +263,325 @@ final class ManagementAPIClientTests: XCTestCase {
 
         _ = try await harness.client.setProviderActive(id: "provider-1", isActive: false)
         _ = try await harness.client.pauseSubscription(id: "subscription-1")
+    }
+
+    func testSubscriptionResumeSendsActivationMode() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/subscriptions/subscription-1")
+            XCTAssertEqual(request.httpMethod, "PUT")
+            let body = Self.jsonObject(request)
+            XCTAssertEqual(body["status"] as? String, "active")
+            XCTAssertEqual(body["activationMode"] as? String, "resume")
+            XCTAssertNil(body["autoRenew"], "autoRenew must be omitted unless the caller flips it.")
+            return .json(Self.subscriptionMutationJSON)
+        }
+
+        let receipt = try await harness.client.activateSubscription(id: "subscription-1", mode: .resume)
+        XCTAssertEqual(receipt.nextRenewalAt, "2026-08-01T00:00:00.000Z")
+    }
+
+    func testSubscriptionRepurchaseOfExpiredTermSendsAutoRenew() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            let body = Self.jsonObject(request)
+            XCTAssertEqual(body["status"] as? String, "active")
+            XCTAssertEqual(body["activationMode"] as? String, "repurchase")
+            XCTAssertEqual(body["autoRenew"] as? Bool, true)
+            return .json(Self.subscriptionMutationJSON)
+        }
+
+        _ = try await harness.client.activateSubscription(
+            id: "subscription-1",
+            mode: .repurchase,
+            renewAutomatically: true
+        )
+    }
+
+    func testPlanPatchEncodesEditableNullsAndPreservesUnmanagedFields() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        let provider = try JSONDecoder().decode(
+            [ProviderManagementItem].self,
+            from: Self.data(Self.providersJSON)
+        )[0]
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/providers/provider-1")
+            XCTAssertEqual(request.httpMethod, "PUT")
+            let plan = (Self.jsonObject(request)["plan"] as? [String: Any]) ?? [:]
+            // Edited fields land as values…
+            XCTAssertEqual(plan["fixedMonthlyCostUsd"] as? Double, 25)
+            XCTAssertEqual(plan["notes"] as? String, "primary org")
+            XCTAssertEqual(plan["renewalDate"] as? String, "2026-08-15")
+            XCTAssertEqual(plan["billingInterval"] as? String, "monthly")
+            XCTAssertEqual(plan["monthlyBudgetUsd"] as? Double, 100)
+            // …cleared fields are explicit JSON null, not omitted keys…
+            XCTAssertTrue(plan.keys.contains("billingInterval"))
+            // …and unmanaged fields round-trip from the inventory item.
+            XCTAssertEqual(plan["billingMode"] as? String, "manual")
+            XCTAssertEqual(plan["monthlyRequestLimit"] as? Int, 5000)
+            XCTAssertEqual(plan["lowBalanceUsd"] as? Double, 10)
+            XCTAssertEqual(plan["mustKeepFunded"] as? Bool, true)
+            return .json(Self.providerMutationJSON)
+        }
+
+        _ = try await harness.client.updateProviderPlan(
+            provider: provider,
+            patch: ProviderPlanPatch(
+                monthlyBudgetUsd: 100,
+                fixedMonthlyCostUsd: 25,
+                notes: "primary org",
+                renewalDate: "2026-08-15",
+                billingInterval: "monthly"
+            )
+        )
+    }
+
+    func testPlanPatchSendsExplicitNullForClearedEditableFields() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        let provider = try JSONDecoder().decode(
+            [ProviderManagementItem].self,
+            from: Self.data(Self.providersJSON)
+        )[0]
+        ManagementURLProtocol.handler = { request in
+            let plan = (Self.jsonObject(request)["plan"] as? [String: Any]) ?? [:]
+            for key in ["fixedMonthlyCostUsd", "renewalDate", "billingInterval", "notes", "monthlyBudgetUsd"] {
+                XCTAssertTrue(plan.keys.contains(key), "\(key) must be sent")
+                XCTAssertTrue(plan[key] is NSNull, "\(key) clear must be JSON null, not an omitted key")
+            }
+            return .json(Self.providerMutationJSON)
+        }
+
+        _ = try await harness.client.updateProviderPlan(
+            provider: provider,
+            patch: ProviderPlanPatch()
+        )
+    }
+
+    func testFetchProviderNowPostsToFetchRoute() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/providers/provider-1/fetch")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(Self.fetchReceiptJSON, status: 201)
+        }
+
+        let receipt = try await harness.client.fetchProviderNow(id: "provider-1")
+        XCTAssertEqual(receipt.providerId, "provider-1")
+        XCTAssertEqual(receipt.totalCost, 182.4)
+        XCTAssertNotNil(receipt.fetchedDate)
+    }
+
+    func testProjectCreatePostsSessionOnlyBoundedPayload() async throws {
+        let harness = makeHarness(token: "read-token")
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/projects")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertNil(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Project mutations are session-only; the bearer must not be attached."
+            )
+            let body = Self.jsonObject(request)
+            XCTAssertEqual(body["name"] as? String, "Socratic Trade")
+            XCTAssertEqual(body["description"] as? String, "Trading loop")
+            XCTAssertEqual(body["monthlyBudgetUsd"] as? Double, 400)
+            return .json(Self.projectMutationJSON)
+        }
+
+        let receipt = try await harness.client.createProject(
+            name: "Socratic Trade",
+            description: "Trading loop",
+            monthlyBudgetUsd: 400
+        )
+        XCTAssertEqual(receipt.id, "project-1")
+        XCTAssertEqual(receipt.backfilledEvents, 3)
+    }
+
+    func testProjectUpdateSendsExplicitNullToClearBudget() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/projects/project-1")
+            XCTAssertEqual(request.httpMethod, "PUT")
+            let body = Self.jsonObject(request)
+            XCTAssertEqual(body["name"] as? String, "Renamed")
+            // Blank description is SENT (the server trims it to null); a cleared
+            // budget is an explicit JSON null, never an omitted key.
+            XCTAssertEqual(body["description"] as? String, "")
+            XCTAssertTrue(body.keys.contains("monthlyBudgetUsd"))
+            XCTAssertTrue(body["monthlyBudgetUsd"] is NSNull)
+            return .json(Self.projectMutationJSON)
+        }
+
+        _ = try await harness.client.updateProject(
+            id: "project-1",
+            name: "Renamed",
+            description: "",
+            monthlyBudgetUsd: nil
+        )
+    }
+
+    func testProjectDeleteIssuesSessionOnlyDelete() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/projects/project-1")
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(["success": true])
+        }
+
+        let receipt = try await harness.client.deleteProject(id: "project-1")
+        XCTAssertTrue(receipt.success)
+    }
+
+    func testProviderDeleteIssuesSessionOnlyDelete() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/providers/provider-1")
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(["success": true])
+        }
+
+        let receipt = try await harness.client.deleteProvider(id: "provider-1")
+        XCTAssertTrue(receipt.success)
+    }
+
+    func testSubscriptionDeleteIssuesSessionOnlyDelete() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/subscriptions/subscription-1")
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(["ok": true])
+        }
+
+        let receipt = try await harness.client.deleteSubscription(id: "subscription-1")
+        XCTAssertTrue(receipt.ok)
+    }
+
+    func testProviderCanDeleteHidesManagedCredentials() {
+        let free = ProviderManagementItem(
+            id: "p1",
+            name: "openrouter",
+            displayName: "OpenRouter",
+            type: "openrouter",
+            isActive: true,
+            refreshIntervalMin: 15,
+            createdAt: "2026-08-01T00:00:00.000Z"
+        )
+        XCTAssertTrue(free.canDelete)
+
+        let managed = ProviderManagementItem(
+            id: "p2",
+            name: "anthropic",
+            displayName: "Anthropic",
+            type: "anthropic",
+            isActive: true,
+            refreshIntervalMin: 15,
+            credentialManagement: .init(
+                source: "infisical",
+                scope: "st",
+                label: "Primary",
+                status: "ok",
+                alias: false,
+                readOnlyFields: ["isActive"]
+            ),
+            createdAt: "2026-08-01T00:00:00.000Z"
+        )
+        XCTAssertFalse(managed.canDelete)
+    }
+
+    func testUsageSnapshotsSendsBoundedQuerySessionOnly() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/snapshots")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+            XCTAssertEqual(query, "providerId=provider-1&days=30")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(Self.snapshotsJSON)
+        }
+
+        let snapshots = try await harness.client.usageSnapshots(providerID: "provider-1")
+
+        XCTAssertEqual(snapshots.count, 2)
+        XCTAssertEqual(snapshots[0].totalCost, 120.5)
+        XCTAssertFalse(snapshots[0].isRollup)
+        XCTAssertTrue(snapshots[1].isRollup)
+        XCTAssertEqual(snapshots[1].sampleCount, 4)
+        XCTAssertNotNil(snapshots[0].fetchedDate)
+    }
+
+    func testUsageSnapshotsHonorsExplicitDayWindow() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+            XCTAssertEqual(query, "providerId=provider-1&days=365")
+            return .json(Self.snapshotsJSON)
+        }
+
+        _ = try await harness.client.usageSnapshots(
+            providerID: "provider-1",
+            days: SnapshotHistoryRange.oneYear.days
+        )
+    }
+
+    func testAgentsOverviewSendsWindowAsQueryItem() async throws {
+        let harness = makeHarness(token: "read-token")
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/agents-overview")
+            XCTAssertFalse(
+                (request.url?.absoluteString ?? "").contains("%3F"),
+                "window must be a query item; appendingPathComponent encodes an inlined ?"
+            )
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+            XCTAssertEqual(query, "window=5h")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer read-token")
+            return .json(Self.agentsOverviewJSON)
+        }
+
+        let response = try await harness.client.agentsOverview(window: "5h")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.windowDays, 0.2083, accuracy: 0.0001)
+        XCTAssertEqual(response.summary.totalAgentCount, 1)
+    }
+
+    func testProviderDetailDecodesExternalBilling() async throws {
+        let harness = makeHarness()
+        installSessionCookie(in: harness)
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/providers/provider-1")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return .json(Self.providerDetailJSON)
+        }
+
+        let detail = try await harness.client.providerDetail(id: "provider-1")
+
+        XCTAssertEqual(detail.id, "provider-1")
+        let records = try XCTUnwrap(detail.externalBilling)
+        XCTAssertEqual(records.count, 1)
+        let record = records[0]
+        XCTAssertEqual(record.source, "stripe")
+        XCTAssertEqual(record.displayName, "Workers Paid")
+        XCTAssertEqual(record.amountUsd, 5)
+        XCTAssertEqual(record.status, "active")
+        XCTAssertNotNil(record.currentPeriodStartDate)
+        XCTAssertNotNil(record.syncedDate)
     }
 
     // MARK: - Harness
@@ -320,6 +697,134 @@ final class ManagementAPIClientTests: XCTestCase {
         "status": "paused",
         "nextRenewalAt": "2026-08-01T00:00:00.000Z",
     ]
+
+    private static let sessionProbeJSON: [String: Any] = [
+        "mode": "raw",
+        "days": 1,
+        "limit": 1,
+        "order": "desc",
+        "nextCursor": NSNull(),
+        "hasMore": false,
+        "events": [],
+    ]
+
+    private static let fetchReceiptJSON: [String: Any] = [
+        "id": "snapshot-1",
+        "providerId": "provider-1",
+        "fetchedAt": "2026-07-29T12:00:00.000Z",
+        "balance": NSNull(),
+        "totalCost": 182.4,
+        "totalRequests": 910,
+        "credits": NSNull(),
+        "createdAt": "2026-07-29T12:00:00.000Z",
+    ]
+
+    private static let projectMutationJSON: [String: Any] = [
+        "id": "project-1",
+        "name": "Socratic Trade",
+        "nameKey": "socratic trade",
+        "description": "Trading loop",
+        "monthlyBudgetUsd": 400,
+        "backfilledEvents": 3,
+    ]
+
+    private static let snapshotsJSON: [[String: Any]] = [
+        [
+            "id": "snapshot-1",
+            "providerId": "provider-1",
+            "fetchedAt": "2026-07-28T12:00:00.000Z",
+            "balance": NSNull(),
+            "totalCost": 120.5,
+            "totalRequests": 610,
+            "credits": NSNull(),
+            "createdAt": "2026-07-28T12:00:00.000Z",
+        ],
+        [
+            "id": "rollup:rollup-1",
+            "providerId": "provider-1",
+            "fetchedAt": "2026-07-01T23:59:00.000Z",
+            "balance": NSNull(),
+            "totalCost": 40.25,
+            "totalRequests": 200,
+            "credits": NSNull(),
+            "createdAt": "2026-07-02T00:10:00.000Z",
+            "rollup": true,
+            "sampleCount": 4,
+        ],
+    ]
+
+    private static let providerDetailJSON: [String: Any] = [
+        "id": "provider-1",
+        "name": "openai",
+        "displayName": "OpenAI",
+        "type": "openai",
+        "isActive": true,
+        "refreshIntervalMin": 15,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "externalBilling": [[
+            "source": "stripe",
+            "externalId": "sub_123",
+            "kind": "subscription",
+            "serviceName": "Workers Paid",
+            "planName": NSNull(),
+            "status": "active",
+            "amountUsd": 5,
+            "currency": "USD",
+            "billingInterval": "monthly",
+            "currentPeriodStart": "2026-07-17T00:00:00.000Z",
+            "currentPeriodEnd": "2026-08-17T00:00:00.000Z",
+            "nextRenewalAt": "2026-08-17T00:00:00.000Z",
+            "syncedAt": "2026-07-29T08:00:00.000Z",
+        ]],
+    ]
+
+    private static let agentsOverviewJSON: [String: Any] = [
+        "ok": true,
+        "windowDays": 0.2083,
+        "windowLabel": "Last 24 Hours",
+        "generatedAt": "2026-09-18T08:00:00.000Z",
+        "macHostname": "jays.services",
+        "macChip": "Apple M5",
+        "summary": [
+            "activeAgentCount": 0,
+            "totalAgentCount": 1,
+            "totalTokens": 0,
+            "totalApiEquivalentCostUsd": 0,
+            "totalSubscriptionCostUsd": 0,
+            "totalNetSavingsUsd": 0,
+            "savingsMultiplier": 1,
+            "topModel": NSNull(),
+        ],
+        "burn5h": [
+            "tokens5h": 0,
+            "costEstimate5hUsd": 0,
+            "burnRateTokensPerHour": 0,
+            "burnRateUsdPerHour": 0,
+        ],
+        "platforms": [],
+        "modelDistribution": [],
+    ]
+
+    private static let subscriptionsJSON: [[String: Any]] = [[
+        "id": "subscription-1",
+        "name": "OpenAI Plus",
+        "costUsd": 20,
+        "currency": "USD",
+        "interval": "month",
+        "intervalCount": 1,
+        "monthlyEquivalentUsd": 20,
+        "startDate": "2026-01-01T00:00:00.000Z",
+        "currentPeriodStart": "2026-07-01T00:00:00.000Z",
+        "nextRenewalAt": "2026-08-01T00:00:00.000Z",
+        "autoRenew": true,
+        "status": "active",
+        "effectiveStatus": "active",
+        "provider": [
+            "id": "provider-1",
+            "name": "openai",
+            "displayName": "OpenAI",
+        ],
+    ]]
 }
 
 private final class ManagementURLProtocol: URLProtocol {
@@ -333,7 +838,7 @@ private final class ManagementURLProtocol: URLProtocol {
             guard let handler = Self.handler else {
                 throw URLError(.badServerResponse)
             }
-            let stub = try handler(request)
+            let stub = try handler(Self.materializingBody(of: request))
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: stub.status,
@@ -349,6 +854,35 @@ private final class ManagementURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// `URLSession` converts a request's `httpBody` into an `httpBodyStream`
+    /// before handing it to a custom `URLProtocol`, so `httpBody` reads back as
+    /// nil inside the stub and every payload assertion silently passes over an
+    /// empty dictionary. Drain the stream once here and give the handler a
+    /// request whose `httpBody` is populated, so body assertions are real and
+    /// can be made repeatedly without re-reading a consumed stream.
+    private static func materializingBody(of request: URLRequest) -> URLRequest {
+        guard request.httpBody == nil, let stream = request.httpBodyStream else {
+            return request
+        }
+
+        var body = Data()
+        let bufferSize = 4_096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        stream.open()
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            guard read > 0 else { break }
+            body.append(buffer, count: read)
+        }
+        stream.close()
+
+        guard !body.isEmpty else { return request }
+        var materialized = request
+        materialized.httpBodyStream = nil
+        materialized.httpBody = body
+        return materialized
+    }
 }
 
 private struct ManagementStubResponse {

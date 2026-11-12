@@ -19,7 +19,10 @@ import type {
 } from "@/components/ProviderCard";
 
 export type BillingMode = "actual" | "estimated" | "manual";
-type SettingsTab = "connections" | "services" | "projects";
+type SettingsTab = "connections" | "services" | "projects" | "notifications";
+import NotificationsSettingsPanel from "@/components/NotificationsSettingsPanel";
+import WorkspaceCopyCard from "@/components/WorkspaceCopyCard";
+import InfisicalSettingsPanel from "@/components/InfisicalSettingsPanel";
 
 export interface ProviderPlan {
   billingMode: BillingMode;
@@ -107,6 +110,7 @@ export interface Provider {
 }
 
 function parseSettingsTab(value: string | null): SettingsTab {
+  if (value === "notifications" || value === "alerts") return "notifications";
   if (value === "projects") return "projects";
   if (value === "services" || value === "billing") return "services";
   return "connections";
@@ -115,6 +119,7 @@ function parseSettingsTab(value: string | null): SettingsTab {
 function SettingsPageContent() {
   const searchParams = useSearchParams();
   const activeTab = parseSettingsTab(searchParams.get("tab"));
+  const editProviderId = searchParams.get("edit");
   const [providers, setProviders] = useState<Provider[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
@@ -136,6 +141,7 @@ function SettingsPageContent() {
   const providersLoaded = useRef(false);
   const projectsLoaded = useRef(false);
   const subscriptionsLoaded = useRef(false);
+  const deepLinkEditConsumed = useRef<string | null>(null);
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -144,6 +150,9 @@ function SettingsPageContent() {
       const res = await fetch("/api/providers");
       if (!res.ok) throw new Error("Failed to fetch providers");
       const data = await res.json();
+      // A 200 carrying a non-array body (auth/proxy interstitial) must land in
+      // the error path, not be stored as if it were the provider list.
+      if (!Array.isArray(data)) throw new Error("Unexpected providers response");
       setProviders(data);
       providersLoaded.current = true;
     } catch (err) {
@@ -163,6 +172,7 @@ function SettingsPageContent() {
       const res = await fetch("/api/projects");
       if (!res.ok) throw new Error("Failed to fetch projects");
       const data = await res.json();
+      if (!Array.isArray(data)) throw new Error("Unexpected projects response");
       setProjects(data);
       projectsLoaded.current = true;
     } catch (err) {
@@ -182,6 +192,7 @@ function SettingsPageContent() {
       const res = await fetch("/api/subscriptions");
       if (!res.ok) throw new Error("Failed to fetch subscriptions");
       const data = await res.json();
+      if (!Array.isArray(data)) throw new Error("Unexpected subscriptions response");
       setSubscriptions(data);
       subscriptionsLoaded.current = true;
     } catch (err) {
@@ -194,12 +205,33 @@ function SettingsPageContent() {
     }
   }, []);
 
+  // Fetch only what the visible tab renders. Tab links are same-route <Link>s,
+  // so activeTab changes without unmounting and the *Loaded refs keep tab
+  // ping-pong from refetching. A failed load leaves its ref false, so
+  // revisiting the tab retries on its own.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- data fetching on mount
-    fetchProviders();
-    fetchProjects();
-    fetchSubscriptions();
-  }, [fetchProviders, fetchProjects, fetchSubscriptions]);
+    // Connections and services both render provider rows.
+    if (activeTab !== "projects" && !providersLoaded.current) void fetchProviders();
+    if (activeTab === "services" && !subscriptionsLoaded.current) void fetchSubscriptions();
+    if (activeTab === "projects" && !projectsLoaded.current) void fetchProjects();
+  }, [activeTab, fetchProviders, fetchProjects, fetchSubscriptions]);
+
+  // Deep-link: /settings?tab=connections&edit=<providerId> opens the edit modal.
+  useEffect(() => {
+    if (!editProviderId || activeTab !== "connections") return;
+    if (deepLinkEditConsumed.current === editProviderId) return;
+    if (providers.length === 0) return;
+    const match = providers.find((provider) => provider.id === editProviderId);
+    if (!match) return;
+    deepLinkEditConsumed.current = editProviderId;
+    setEditProvider(match);
+    setModalOpen(true);
+  }, [editProviderId, activeTab, providers]);
+
+  // AddSubscriptionModal needs the project list for its allocation dropdown.
+  useEffect(() => {
+    if (subscriptionModalOpen && !projectsLoaded.current) void fetchProjects();
+  }, [subscriptionModalOpen, fetchProjects]);
 
   const handleSave = async (provider: {
     id?: string;
@@ -252,7 +284,15 @@ function SettingsPageContent() {
     setActionLoading(id);
     try {
       const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete");
+      if (!res.ok) {
+        // The refusals here are actionable (attribution history, Infisical
+        // ownership, an open PagerDuty incident that could not be closed), so
+        // show what the server actually said instead of "Failed to delete".
+        const body = await res.json().catch(() => null);
+        throw new Error(
+          typeof body?.error === "string" ? body.error : "Failed to delete"
+        );
+      }
       await fetchProviders();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete");
@@ -409,13 +449,15 @@ function SettingsPageContent() {
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
       </div>
 
+      <WorkspaceCopyCard />
+
       <div className="sticky top-16 z-30 bg-gray-50 dark:bg-gray-900 pt-2 pb-px border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-4">
         <nav aria-label="Settings sections" className="flex overflow-x-auto min-w-0 flex-1">
           <Link
             href="/settings?tab=connections"
             id="settings-tab-connections"
             aria-current={activeTab === "connections" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "connections"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -427,25 +469,37 @@ function SettingsPageContent() {
             href="/settings?tab=services"
             id="settings-tab-services"
             aria-current={activeTab === "services" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "services"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             }`}
           >
-            Paid services
+            Paid Services
           </Link>
           <Link
             href="/settings?tab=projects"
             id="settings-tab-projects"
             aria-current={activeTab === "projects" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "projects"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             }`}
           >
             Projects
+          </Link>
+          <Link
+            href="/settings?tab=notifications"
+            id="settings-tab-notifications"
+            aria-current={activeTab === "notifications" ? "page" : undefined}
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+              activeTab === "notifications"
+                ? "border-blue-500 text-blue-600 dark:text-blue-400"
+                : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            }`}
+          >
+            Notifications & Alerts
           </Link>
         </nav>
         <div className="flex-shrink-0 pb-2">
@@ -456,9 +510,9 @@ function SettingsPageContent() {
                 setEditProvider(null);
                 setModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Add provider
+              Add Provider
             </button>
           ) : activeTab === "services" ? (
             <button
@@ -467,9 +521,9 @@ function SettingsPageContent() {
                 setEditSubscription(null);
                 setSubscriptionModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Track paid service
+              Track Paid Service
             </button>
           ) : activeTab === "projects" ? (
             <button
@@ -478,9 +532,9 @@ function SettingsPageContent() {
                 setEditProject(null);
                 setProjectModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Add project
+              Add Project
             </button>
           ) : null}
         </div>
@@ -525,24 +579,37 @@ function SettingsPageContent() {
       <section id={`settings-panel-${activeTab}`} aria-label={`${activeTab} settings`}>
         {activeTab === "connections" ? (
           <div className="space-y-6">
+            <InfisicalSettingsPanel />
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-800 dark:bg-blue-900/30">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
-                How data gets here
+                How Data Gets Here
               </h2>
-              <div className="grid gap-4 text-sm text-blue-800 dark:text-blue-200 sm:grid-cols-3">
+              <div className="grid gap-4 text-sm text-blue-800 dark:text-blue-200 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic account sync</p>
-                  <p className="text-xs opacity-90">Read-only provider adapters fetch authoritative usage, billing, plan, and quota fields whenever the provider exposes them.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic Account Sync</p>
+                  <p className="text-xs opacity-90">Usage Monitor reads usage, billing, and plan details when the provider account allows it.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed telemetry</p>
-                  <p className="text-xs opacity-90">Apps send metered usage and cost when a provider has no suitable account API or when project-level detail is needed.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed Usage</p>
+                  <p className="text-xs opacity-90">Apps can send usage and cost when the provider has no account report, or when you need cost by project.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual plan tracking</p>
-                  <p className="text-xs opacity-90">Dashboard-only subscriptions stay explicit instead of being inferred from API traffic, balances, or portfolio assets.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Claude Code Metrics</p>
+                  <p className="text-xs opacity-90">Claude Code can send usage from its metrics feed.{"\u00A0 "}Those figures show up with Anthropic (Claude Code) cost.</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual Plan Tracking</p>
+                  <p className="text-xs opacity-90">Plans you add here stay as you entered them.{"\u00A0 "}They are not guessed from traffic or balances.</p>
                 </div>
               </div>
+              <p className="mt-4 text-xs text-blue-800 dark:text-blue-200">
+                <span className="font-medium text-blue-900 dark:text-blue-100">Plan price vs paid service:</span>{" "}
+                record a recurring fee either as the provider&apos;s fixed monthly price or as a paid service.
+                {"\u00A0 "}
+                Using both counts the same fee twice.
+                {"\u00A0 "}
+                Project budgets use directly tagged spend first, then split what is left by the percentages you set.
+              </p>
             </div>
             <ProviderTable
               providers={providers}
@@ -561,20 +628,15 @@ function SettingsPageContent() {
               }}
               onToggleActive={handleToggleActive}
               onFetchNow={handleFetchNow}
+              loadError={loadErrors.connections ?? null}
+              onRetryLoad={() => void fetchProviders()}
             />
           </div>
         ) : activeTab === "services" ? (
           <div className="space-y-8">
-            <PaidServicesPanel
-              providers={providers}
-              subscriptions={subscriptions}
-              variant="settings"
-              showCoverage
-            />
-
             <div className="space-y-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked recurring costs</h2>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked Recurring Costs</h2>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Edit dashboard-only subscriptions or link them to an automatically discovered provider record. Linked records render once and charge once.
                 </p>
@@ -604,6 +666,7 @@ function SettingsPageContent() {
                     notes: sub.notes,
                     externalBillingSource: sub.externalBillingSource,
                     externalBillingId: sub.externalBillingId,
+                    externalBillingManaged: sub.externalBillingManaged ?? false,
                   });
                   setSubscriptionModalOpen(true);
                 }}
@@ -611,26 +674,62 @@ function SettingsPageContent() {
                 deleteConfirm={deleteSubscriptionConfirm}
                 setDeleteConfirm={setDeleteSubscriptionConfirm}
                 actionLoading={actionLoading}
+                loadError={loadErrors.services ?? null}
+                onRetryLoad={() => void fetchSubscriptions()}
               />
             </div>
+
+            {/* Never print a recurring-cost total derived from a provider list
+                that failed to load — the figure would silently understate. */}
+            {loadErrors.connections && providers.length === 0 ? (
+              <div
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-6 py-5 text-sm text-red-600 dark:border-gray-700 dark:bg-gray-800 dark:text-red-300"
+              >
+                <span>
+                  Provider billing rows couldn&apos;t be loaded, so service totals are
+                  unavailable.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void fetchProviders()}
+                  className="font-semibold underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <PaidServicesPanel
+                providers={providers}
+                subscriptions={subscriptions}
+                variant="settings"
+                showCoverage
+              />
+            )}
+          </div>
+        ) : activeTab === "projects" ? (
+          <div className="space-y-4">
+            <ProjectTable
+              projects={projects}
+              actionLoading={actionLoading}
+              deleteProjectConfirm={deleteProjectConfirm}
+              onEdit={(project) => {
+                setEditProject(project);
+                setProjectModalOpen(true);
+              }}
+              onDeleteConfirmStart={setDeleteProjectConfirm}
+              onDeleteConfirmCancel={() => setDeleteProjectConfirm(null)}
+              onDelete={handleDeleteProject}
+              onAddProject={() => {
+                setEditProject(null);
+                setProjectModalOpen(true);
+              }}
+              loadError={loadErrors.projects ?? null}
+              onRetryLoad={() => void fetchProjects()}
+            />
           </div>
         ) : (
-          <ProjectTable
-            projects={projects}
-            actionLoading={actionLoading}
-            deleteProjectConfirm={deleteProjectConfirm}
-            onEdit={(project) => {
-              setEditProject(project);
-              setProjectModalOpen(true);
-            }}
-            onDeleteConfirmStart={setDeleteProjectConfirm}
-            onDeleteConfirmCancel={() => setDeleteProjectConfirm(null)}
-            onDelete={handleDeleteProject}
-            onAddProject={() => {
-              setEditProject(null);
-              setProjectModalOpen(true);
-            }}
-          />
+          <NotificationsSettingsPanel />
         )}
       </section>
 
@@ -682,10 +781,10 @@ function SettingsPageFallback() {
   return (
     <div className="space-y-6 animate-pulse" aria-label="Loading settings">
       <div className="flex items-center justify-between">
-        <div className="h-8 w-32 bg-gray-200 rounded" />
-        <div className="h-10 w-32 bg-gray-200 rounded-lg" />
+        <div className="h-8 w-32 bg-gray-200 dark:bg-gray-700 rounded" />
+        <div className="h-10 w-32 bg-gray-200 dark:bg-gray-700 rounded-lg" />
       </div>
-      <div className="h-12 rounded bg-gray-100" />
+      <div className="h-12 rounded bg-gray-100 dark:bg-gray-800" />
       <div className="h-64 rounded-xl border border-gray-200 bg-white" />
     </div>
   );

@@ -1,4 +1,5 @@
 import { adapterHttpAbortStorage } from "@/lib/adapters/helpers";
+import { appSettings } from "@/lib/app-settings";
 import { prisma } from "@/lib/prisma";
 import { fetchProviderUsage } from "@/lib/adapters";
 import { AdapterError, type AdapterErrorCode } from "@/lib/adapters/helpers";
@@ -6,7 +7,16 @@ import {
   isUsageMaintenanceHealthy,
   runUsageMaintenance,
 } from "@/lib/usage-maintenance";
-import { ensureAgentSyncProviderSeeded } from "@/lib/ensure-agent-sync-provider";
+import { ensureSimpleToolsProviderSeeded } from "@/lib/ensure-simple-tools-provider";
+import { ensureCloudflareFleetProvidersSeeded } from "@/lib/ensure-cloudflare-fleet-providers";
+import { ensureRoicProviderSeeded } from "@/lib/ensure-roic-provider";
+import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
+import {
+  effectivePollDueIntervalMs,
+  resolveProviderSyncMode,
+} from "@/lib/provider-sync-mode";
+import { listStalePollableProviderIds } from "@/lib/refresh-stale-providers";
+import { providerPollSnapshotExpected } from "@/lib/anthropic-credentials";
 import {
   bootstrapStGeminiCredentialToInfisical,
   syncProviderCredentialsFromInfisical,
@@ -28,7 +38,20 @@ import {
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { redactProviderRawData } from "@/lib/data-privacy";
 import { budgetPollingPaused } from "@/lib/budget-controls";
+import {
+  assertCursorAdminPollerConfigured,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
+import { pollCursorAdminUsage } from "@/lib/cursor-admin-poller";
 import { isDecommissionedProviderName } from "@/lib/provider-definitions";
+import {
+  logSchedulerDegraded,
+  logSchedulerOutcome,
+  recordSentryCronHeartbeat,
+  recordSchedulerDuration,
+} from "@/lib/sentry-ops";
+import * as Sentry from "@sentry/nextjs";
+import { fanoutPollSnapshot } from "@/lib/usage-fanout";
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
 const providerAttemptTokens = new Map<string, symbol>();
 
@@ -46,7 +69,7 @@ function assertProviderAttemptCurrent(
 }
 
 function resolveProviderTimeoutMs(): number {
-  const raw = process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_PROVIDER_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -112,6 +135,10 @@ export async function recordProviderUsage(
       });
     });
     if (usage.postPersistError) throw usage.postPersistError;
+    void fanoutPollSnapshot(provider.name, {
+      totalCost: snapshot.totalCost,
+      balance: snapshot.balance,
+    });
     return snapshot;
   } finally {
     if (providerAttemptTokens.get(provider.id) === attemptToken) {
@@ -166,6 +193,10 @@ export interface ProviderFetchOutcome {
   status: "success" | "failure" | "skipped";
   durationMs: number;
   errorCode?: AdapterErrorCode | "UNKNOWN";
+  // E5: why a skip happened, when the reason matters operationally. Only set
+  // for total-tick-budget skips today (other skips are interval/backoff/pause
+  // gates whose meaning is already implied by cadence).
+  skipReason?: "tick_budget" | "manual_no_poll";
 }
 
 export interface FetchAllProvidersResult {
@@ -175,6 +206,10 @@ export interface FetchAllProvidersResult {
   skipped: number;
   errors: ProviderFetchError[];
   outcomes: ProviderFetchOutcome[];
+  // E5: true when the total-tick time budget stopped new provider fetches
+  // before the poll set was exhausted. Surfaced through the existing
+  // providerFetchDegraded scheduler signal in runUsagePollingSchedulerTick.
+  tickBudgetExceeded: boolean;
   // Safe status/code only. The one-time bootstrap never returns credential
   // material or an upstream response body.
   credentialBootstrap?: StGeminiInfisicalBootstrapResult;
@@ -207,12 +242,146 @@ export function isProviderFetchTickDegraded(
 ): boolean {
   const attempted = result.successes + result.failures;
   if (attempted === 0) return false; // nothing attempted (all skipped) - no signal either way
-  // Total-outage fast path: everything attempted failed. Kept as an explicit
-  // check (not just relying on the ratio below) so a complete outage is
-  // always caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is ever
-  // misconfigured above its intended 0-1 range.
+  // Everything attempted failed, so the tick is degraded. Kept as an explicit
+  // check (not just relying on the ratio below) so a complete miss is always
+  // caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is misconfigured.
+  // Fleet paging and the readiness fast path use isBroadProviderFetchOutage,
+  // which does not treat one failure beside a skip set as an outage.
   if (result.successes === 0 && result.failures > 0) return true;
   return result.failures / attempted >= resolveProviderFetchDegradedFailureRatio();
+}
+
+// E5: total-tick time budget for the provider-fetch phase. Worst case the
+// sequential loop used to be ~39 providers x the 90s per-provider timeout,
+// far past the 15-minute cadence, so one slow-tick pileup could starve
+// maintenance and the next tick. Past this budget the loop stops STARTING
+// new provider fetches; remaining providers are marked skipped
+// (skipReason "tick_budget") and the tick is flagged providerFetchDegraded.
+const DEFAULT_PROVIDER_FETCH_TICK_BUDGET_MS = 10 * 60 * 1000;
+
+function resolveProviderFetchTickBudgetMs(): number {
+  const raw = process.env.PROVIDER_FETCH_TICK_BUDGET_MS;
+  if (raw == null || raw.trim() === "") return DEFAULT_PROVIDER_FETCH_TICK_BUDGET_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROVIDER_FETCH_TICK_BUDGET_MS;
+  return parsed;
+}
+
+interface LatestPollSnapshotMarker {
+  fetchedAt: Date;
+  retryable: boolean;
+}
+
+/**
+ * E4: per-provider latest poll snapshot (fetchedAt + retryable-partial
+ * marker) WITHOUT selecting rawData blobs. Re-selecting every provider's
+ * rawData (a full adapter raw-API-response payload) every 15 minutes was the
+ * pattern removed elsewhere after the #392 OOM. The only consumer is the
+ * retry gate below, so this pulls just the tiny __apiUsageMonitor
+ * partialFailure sub-object via SQLite json_extract - the same pattern as
+ * api/providers/route.ts's batchSnapshotCostCoverageCaveats.
+ *
+ * "Latest poll snapshot" means the latest snapshot with a non-null rawData
+ * (pushed quota/credit events intentionally write rawData-less rows). That
+ * is exactly what the old two-step logic resolved to: snapshots[0] when it
+ * had rawData is trivially the latest non-null-rawData row, and the fallback
+ * findFirst asked for the same thing when it didn't.
+ */
+async function loadLatestPollSnapshotMarkers(
+  providerIds: string[]
+): Promise<Map<string, LatestPollSnapshotMarker>> {
+  const result = new Map<string, LatestPollSnapshotMarker>();
+  if (providerIds.length === 0) return result;
+
+  const latestByProvider = await prisma.usageSnapshot.groupBy({
+    by: ["providerId"],
+    where: {
+      providerId: { in: providerIds },
+      rawData: { not: Prisma.DbNull },
+    },
+    _max: { fetchedAt: true },
+  });
+  const pairs = latestByProvider.filter(
+    (row): row is typeof row & { _max: { fetchedAt: Date } } =>
+      row._max.fetchedAt != null
+  );
+  if (pairs.length === 0) return result;
+
+  // Resolve (providerId, maxFetchedAt) pairs to concrete snapshot ids. Rows
+  // carry only scalars - never the rawData blob. A fetchedAt tie can return
+  // more than one row per provider; keep the first, matching the old
+  // orderBy(fetchedAt desc), take-1 semantics' arbitrary tie-break.
+  const rows = await prisma.usageSnapshot.findMany({
+    where: {
+      OR: pairs.map((row) => ({
+        providerId: row.providerId,
+        fetchedAt: row._max.fetchedAt,
+      })),
+    },
+    select: { id: true, providerId: true, fetchedAt: true },
+  });
+  const rowByProviderId = new Map<string, { id: string; fetchedAt: Date }>();
+  for (const row of rows) {
+    if (!rowByProviderId.has(row.providerId)) {
+      rowByProviderId.set(row.providerId, row);
+    }
+  }
+  if (rowByProviderId.size === 0) return result;
+
+  const markers = await prisma.$queryRaw<
+    Array<{
+      id: string;
+      version: unknown;
+      code: unknown;
+      status: unknown;
+      retryable: unknown;
+    }>
+  >(Prisma.sql`
+    SELECT
+      "id" AS "id",
+      json_extract("rawData", '$.__apiUsageMonitor.version') AS "version",
+      json_extract("rawData", '$.__apiUsageMonitor.partialFailure.code') AS "code",
+      json_extract("rawData", '$.__apiUsageMonitor.partialFailure.status') AS "status",
+      json_extract("rawData", '$.__apiUsageMonitor.partialFailure.retryable') AS "retryable"
+    FROM "UsageSnapshot"
+    WHERE "id" IN (${Prisma.join(
+      Array.from(rowByProviderId.values(), (row) => row.id)
+    )})
+  `);
+  const markerBySnapshotId = new Map(markers.map((marker) => [marker.id, marker]));
+
+  for (const [providerId, row] of rowByProviderId) {
+    const marker = markerBySnapshotId.get(row.id);
+    // json_extract surfaces JSON integers/booleans as SQL values that Prisma
+    // returns as BigInt; coerce them back, rebuild the tiny metadata bag, and
+    // run it through the SAME validator the rawData path used
+    // (snapshot-sync-status.ts) so malformed markers fail closed identically.
+    const hasPartialFailure =
+      marker != null &&
+      (marker.code != null || marker.status != null || marker.retryable != null);
+    const syntheticRawData = {
+      __apiUsageMonitor: {
+        version: marker?.version == null ? null : Number(marker.version),
+        ...(hasPartialFailure
+          ? {
+              partialFailure: {
+                code: marker.code ?? undefined,
+                status: marker.status == null ? null : Number(marker.status),
+                retryable:
+                  marker.retryable == null
+                    ? undefined
+                    : Number(marker.retryable) === 1,
+              },
+            }
+          : {}),
+      },
+    };
+    result.set(providerId, {
+      fetchedAt: row.fetchedAt,
+      retryable: isRetryablePartialSnapshot(syntheticRawData),
+    });
+  }
+  return result;
 }
 
 let fetchAllInFlight: Promise<FetchAllProvidersResult> | null = null;
@@ -225,7 +394,17 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 
   const run = (async () => {
-    await withInternalUsageWriteAdmission(() => ensureAgentSyncProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureSimpleToolsProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureRoicProviderSeeded());
+    await withInternalUsageWriteAdmission(() =>
+      ensureCloudflareFleetProvidersSeeded()
+    );
+    try {
+      await withInternalUsageWriteAdmission(() => ensureFleetProjectsSeeded());
+    } catch {
+      // Poll tests mock a provider-only Prisma surface. Missing Project
+      // must not block usage snapshots.
+    }
     // The default-off, exact ST Gemini bootstrap must run before the normal
     // one-way Infisical pull so a successful create can be adopted and bound
     // in this same provider-maintenance pass.
@@ -265,13 +444,9 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
     }
     const storedProviders = await prisma.provider.findMany({
       where: { isActive: true },
-      include: {
-        snapshots: {
-          orderBy: { fetchedAt: "desc" },
-          take: 1,
-          select: { fetchedAt: true, rawData: true },
-        },
-      },
+      // E4: the snapshots include (latest row's rawData blob per provider) is
+      // gone - the retry marker it fed is loaded below via
+      // loadLatestPollSnapshotMarkers, which never touches rawData.
     });
 
     // A startup failure or a row created by an older client must not turn a
@@ -281,15 +456,28 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
       (provider) => !isDecommissionedProviderName(provider.name)
     );
 
+    const latestPollByProviderId = await loadLatestPollSnapshotMarkers(
+      providers.map((provider) => provider.id)
+    );
+
     let successes = 0;
     let failures = 0;
     let skipped = 0;
     const errors: ProviderFetchError[] = [];
     const outcomes: ProviderFetchOutcome[] = [];
     const now = Date.now();
+    let staleDueIds = new Set<string>();
+    try {
+      staleDueIds = new Set(await listStalePollableProviderIds(now, 50));
+    } catch {
+      staleDueIds = new Set();
+    }
     const providerTimeoutMs = resolveProviderTimeoutMs();
+    const tickStartedAtMs = now;
+    const tickBudgetMs = resolveProviderFetchTickBudgetMs();
+    let tickBudgetExceeded = false;
 
-    for (const { snapshots, ...provider } of providers) {
+    for (const provider of providers) {
       const startedAt = Date.now();
       // Budget-breach control: a provider paused by the (default-off) automated
       // control layer is cleanly skipped here, exactly like an interval-gated
@@ -306,26 +494,36 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
         });
         continue;
       }
-      const latestSnapshot = snapshots[0];
-      const intervalMs = provider.refreshIntervalMin * 60 * 1000;
+      // Never-pollable (voyage, ROIC, push/generic, …): skip quietly. They are
+      // Manually only — not "stale" and not missing a snapshot we can fetch.
+      const syncMode = resolveProviderSyncMode(provider);
+      const snapshotExpected = providerPollSnapshotExpected(provider);
+      if (syncMode === "manual" || !snapshotExpected) {
+        skipped++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "skipped",
+          durationMs: Date.now() - startedAt,
+          skipReason: "manual_no_poll",
+        });
+        continue;
+      }
+      // Cap due interval at 60m so pollable providers refresh at least hourly
+      // (scheduler ticks every 15m; configured interval still wins when shorter).
+      const intervalMs = effectivePollDueIntervalMs(provider.refreshIntervalMin);
       // Pushed quota/credit events intentionally create rawData-less
       // snapshots. They may be newer than the last poll snapshot, but must not
-      // hide its retry marker or make an old/missing poll look fresh.
-      const latestPollSnapshot =
-        latestSnapshot?.rawData == null
-          ? await prisma.usageSnapshot.findFirst({
-              where: {
-                providerId: provider.id,
-                rawData: { not: Prisma.DbNull },
-              },
-              orderBy: { fetchedAt: "desc" },
-              select: { fetchedAt: true, rawData: true },
-            })
-          : latestSnapshot;
-      const latestPollFetchedAt = latestPollSnapshot?.fetchedAt.getTime();
+      // hide its retry marker or make an old/missing poll look fresh. The
+      // marker here comes from the json_extract batch above (E4), not from a
+      // re-selected rawData blob.
+      const latestPoll = latestPollByProviderId.get(provider.id);
+      const latestPollFetchedAt = latestPoll?.fetchedAt.getTime();
+      const forceDueForStale = staleDueIds.has(provider.id);
       if (
         latestPollFetchedAt &&
-        !isRetryablePartialSnapshot(latestPollSnapshot?.rawData) &&
+        !latestPoll?.retryable &&
+        !forceDueForStale &&
         now - latestPollFetchedAt < intervalMs
       ) {
         skipped++;
@@ -351,6 +549,22 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
           name: provider.name,
           status: "skipped",
           durationMs: Date.now() - startedAt,
+        });
+        continue;
+      }
+
+      // E5: total-tick budget. Stop STARTING new provider fetches once the
+      // tick has consumed its budget; remaining providers are marked as
+      // budget-skipped (they stay "due" and are picked up on the next tick).
+      if (Date.now() - tickStartedAtMs >= tickBudgetMs) {
+        tickBudgetExceeded = true;
+        skipped++;
+        outcomes.push({
+          providerId: provider.id,
+          name: provider.name,
+          status: "skipped",
+          durationMs: Date.now() - startedAt,
+          skipReason: "tick_budget",
         });
         continue;
       }
@@ -446,6 +660,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
       skipped,
       errors,
       outcomes,
+      tickBudgetExceeded,
       credentialBootstrap,
       credentialSync,
     };
@@ -463,7 +678,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 }
 
-const POLL_INTERVAL_MS = 15 * 60 * 1000; // matches the old external cron's */15 schedule exactly - don't change the cadence, only where it runs
+export const POLL_INTERVAL_MS = 15 * 60 * 1000; // matches the old external cron's */15 schedule exactly - don't change the cadence, only where it runs. Sentry cron monitor config in sentry-ops.ts must stay in lockstep.
 let schedulerStarted = false;
 
 // The first tick does real work immediately (provider polling + retention
@@ -490,17 +705,61 @@ export interface UsagePollingSchedulerTickDependencies {
   runMaintenance?: typeof runUsageMaintenance;
   markTickStarted?: typeof markSchedulerTickStarted;
   markTickCompleted?: typeof markSchedulerTickCompleted;
+  pollCursorAdmin?: () => Promise<unknown>;
+  /** Test override.  Production reads CURSOR_ADMIN_POLLER_ENABLED. */
+  cursorAdminEnabled?: boolean;
 }
 
 export async function runUsagePollingSchedulerTick(
   dependencies: UsagePollingSchedulerTickDependencies = {}
 ): Promise<void> {
+  // Root transaction so child fetch/maintenance spans are not dropped as
+  // no_parent_span. forceTransaction is required because the in-process
+  // scheduler is not an HTTP request and otherwise has no active span.
+  return Sentry.startSpan(
+    { name: "usage-scheduler.tick", op: "task", forceTransaction: true },
+    () => runUsagePollingSchedulerTickBody(dependencies)
+  );
+}
+
+async function runUsagePollingSchedulerTickBody(
+  dependencies: UsagePollingSchedulerTickDependencies
+): Promise<void> {
   const markTickStarted = dependencies.markTickStarted ?? markSchedulerTickStarted;
   const markTickCompleted = dependencies.markTickCompleted ?? markSchedulerTickCompleted;
   markTickStarted();
+  const tickStartedAt = Date.now();
   try {
-    const result = await (dependencies.fetchProviders ?? fetchAllDueProviders)();
-    const maintenance = await (dependencies.runMaintenance ?? runUsageMaintenance)();
+    const result = await Sentry.startSpan(
+      { name: "usage-scheduler.fetch-providers", op: "task" },
+      () => (dependencies.fetchProviders ?? fetchAllDueProviders)()
+    );
+    const maintenance = await Sentry.startSpan(
+      { name: "usage-scheduler.maintenance", op: "task" },
+      () => (dependencies.runMaintenance ?? runUsageMaintenance)()
+    );
+    // Billed Cursor usage.  Off unless CURSOR_ADMIN_POLLER_ENABLED is set,
+    // in which case the job is not entered at all (no span, no log, no
+    // Sentry cron check-in).  When it is on, a runtime poll failure stays
+    // isolated so a 429 cannot fail maintenance or readiness.  Enabled
+    // without CURSOR_ADMIN_API_KEY fails in startUsagePollingScheduler
+    // before this interval is armed.
+    const cursorAdminEnabled =
+      dependencies.cursorAdminEnabled ?? isCursorAdminPollerEnabled();
+    if (cursorAdminEnabled) {
+      try {
+        await Sentry.startSpan(
+          { name: "usage-scheduler.cursor-admin-poll", op: "task" },
+          () => (dependencies.pollCursorAdmin ?? pollCursorAdminUsage)()
+        );
+      } catch (error) {
+        console.error(
+          "[cursor-admin] poll failed",
+          error instanceof Error ? error.name : "unknown"
+        );
+      }
+    }
+    const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a
     // provider-fetch outage is upstream (third-party credentials/network/API),
@@ -510,7 +769,8 @@ export async function runUsagePollingSchedulerTick(
     // restarting. It is tracked as its own consecutive-tick streak in
     // runtime-health so a single flaky provider can't flap readiness, and
     // surfaced as a distinct scheduler.providerFetchDegraded signal instead.
-    const providerFetchDegraded = isProviderFetchTickDegraded(result);
+    const providerFetchDegraded =
+      isProviderFetchTickDegraded(result) || result.tickBudgetExceeded === true;
     markTickCompleted(maintenanceHealthy, {
       total: result.total,
       successes: result.successes,
@@ -521,8 +781,45 @@ export async function runUsagePollingSchedulerTick(
       cloudflareLegacyHandoff:
         maintenance.subscriptionAdoption.cloudflareLegacyHandoff,
     });
+    void recordSentryCronHeartbeat("ok");
+    void logSchedulerOutcome("ok", {
+      total: result.total,
+      successes: result.successes,
+      failures: result.failures,
+      skipped: result.skipped,
+      providerFetchDegraded,
+    });
+    void recordSchedulerDuration(tickDurationMs, {
+      outcome: "ok",
+      total: result.total,
+      providerFetchDegraded,
+    });
+    if (providerFetchDegraded) {
+      // Sentry log only — never exposed on unauthenticated /api/ready.
+      const failingNames = result.errors
+        .slice(0, 5)
+        .map((entry) => `${entry.name}:${entry.code}`)
+        .join(",");
+      void logSchedulerDegraded({
+        total: result.total,
+        successes: result.successes,
+        failures: result.failures,
+        skipped: result.skipped,
+        tickBudgetExceeded: result.tickBudgetExceeded === true,
+        failingProviders: failingNames || undefined,
+      });
+    }
   } catch (error) {
+    const tickDurationMs = Date.now() - tickStartedAt;
     markTickCompleted(false, null);
+    void recordSentryCronHeartbeat("error");
+    void logSchedulerOutcome("error", {
+      reason: error instanceof Error ? error.name : "unknown",
+    });
+    void recordSchedulerDuration(tickDurationMs, {
+      outcome: "error",
+      reason: error instanceof Error ? error.name : "unknown",
+    });
     console.error("[usage-scheduler] tick failed", error);
   }
 }
@@ -531,6 +828,10 @@ export function startUsagePollingScheduler(
   tick: () => Promise<void> = runUsagePollingSchedulerTick
 ): void {
   if (schedulerStarted) return; // instrumentation.register() can fire more than once in some Next.js scenarios - guard against double-scheduling
+  // Assert before arming the interval.  A throw leaves schedulerStarted
+  // false so a misconfigured opt-in fails Next register() instead of
+  // leaving a half-started scheduler.  The default (flag unset) no-ops.
+  assertCursorAdminPollerConfigured();
   schedulerStarted = true;
   markSchedulerStarted();
   setInterval(() => void tick(), POLL_INTERVAL_MS);

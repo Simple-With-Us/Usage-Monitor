@@ -1,5 +1,27 @@
 # Plan
 
+## Current (2026-08-25) — hosted ios-ship ASC import
+
+`ios-ship.yml` on GitHub-hosted `macos-latest` imports the existing team
+ASC/P12 GitHub secrets and writes `~/.secrets/appstore-connect.env` the same
+way Socratic.Trade #3089 / Congress.Trade do.  LocalUsageMonitor stays skipped.
+See `docs/rollouts/2026-08-25-ios-hosted-asc-import.md`.
+
+## Current (2026-08-20) — cross-app coordination follow-ups
+
+Usage-Monitor implements the UM slice of Socratic.Trade audit #2802 §7.  The
+shared-package pin check compares this repo and Socratic.Trade npm pins to
+Congress.Trade vendor provenance and fails on unreadability, version skew, or
+a CT npm dep.  Operations health probes `https://congress.trade/api/health` as
+liveness only (same last-resort exclusion as FilingAPI).  The pin-check
+workflow is intentionally not a required merge check.  See
+`docs/rollouts/2026-08-20-cross-app-coordination-followups.md`.
+
+> **Historical snapshot — 2026-07-21.** This plan tracked the unmerged side
+> branch `codex/mobile-first-ios-parity-20260721` (native iOS parity worktree).
+> It is retained as a dated record only and does not describe current `main`;
+> see `docs/EFFORT-LOG.md` and the live effort board for current work.
+
 Updated: 2026-07-21
 
 ## Objective

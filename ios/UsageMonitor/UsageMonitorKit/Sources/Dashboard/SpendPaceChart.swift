@@ -17,7 +17,7 @@ struct SpendPaceChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionHeader("Month pace", subtitle: "Projected from spend so far") {
+            SectionHeader("Month Pace", subtitle: "Projected from spend so far") {
                 Text("Day \(pace.currentDay) of \(pace.daysInMonth)")
                     .font(Theme.Typography.captionEmphasis)
                     .monospacedDigit()

@@ -1,3 +1,5 @@
+import { formatCurrency, NULL_DISPLAY } from "@/lib/format";
+
 export default function BalanceBadge({
   amount,
   className = "",
@@ -7,16 +9,12 @@ export default function BalanceBadge({
 }) {
   if (amount == null) {
     return (
-      <span className={`text-sm text-gray-400 dark:text-gray-500 ${className}`}>--</span>
+      <span className={`text-sm text-gray-500 dark:text-gray-400 ${className}`}>{NULL_DISPLAY}</span>
     );
   }
 
   const isPositive = amount >= 0;
-  const formatted = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  }).format(Math.abs(amount));
+  const formatted = formatCurrency(Math.abs(amount), { minimumFractionDigits: 2 });
 
   return (
     <span

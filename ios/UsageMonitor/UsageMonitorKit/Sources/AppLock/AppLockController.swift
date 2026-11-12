@@ -43,11 +43,14 @@ public final class AppLockController {
     ///   - initialPhase: starting state; `.locked` (fail-closed) in production.
     public init(
         authenticator: AppLockAuthenticator = BiometricAuthenticator(),
-        reason: String = "Unlock Usage Monitor to view your spending.",
+        reason: String? = nil,
         initialPhase: Phase = .locked
     ) {
         self.authenticator = authenticator
-        self.reason = reason
+        // Plain app name from the host target's CFBundleDisplayName
+        // (Usage Monitor Client / Usage Monitor Local).
+        let name = AppProductName.displayName
+        self.reason = reason ?? "Unlock \(name) to view your spending."
         self.phase = initialPhase
     }
 

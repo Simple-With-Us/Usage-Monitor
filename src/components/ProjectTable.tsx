@@ -1,4 +1,6 @@
 import { type Project } from "@/components/AddProjectModal";
+import ListLoadErrorPanel from "@/components/ListLoadErrorPanel";
+import { formatCurrency } from "@/lib/format";
 
 interface ProjectTableProps {
   projects: Project[];
@@ -9,6 +11,9 @@ interface ProjectTableProps {
   onDeleteConfirmCancel: () => void;
   onDelete: (id: string) => void;
   onAddProject: () => void;
+  /** Message from a failed project load; suppresses the empty-state CTA. */
+  loadError?: string | null;
+  onRetryLoad?: () => void;
 }
 
 export default function ProjectTable({
@@ -20,24 +25,28 @@ export default function ProjectTable({
   onDeleteConfirmCancel,
   onDelete,
   onAddProject,
+  loadError,
+  onRetryLoad,
 }: ProjectTableProps) {
-  const formatUsd = (amount: number | null | undefined) => {
-    if (amount == null) return "--";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 2,
-    }).format(amount);
-  };
+  const formatUsd = (amount: number | null | undefined) => formatCurrency(amount);
 
   if (projects.length === 0) {
+    if (loadError) {
+      return (
+        <ListLoadErrorPanel
+          message="Projects couldn't be loaded."
+          detail={loadError}
+          onRetry={onRetryLoad}
+        />
+      );
+    }
     return (
-      <div className="flex flex-col items-center justify-center py-16 gap-4 text-center bg-white rounded-xl border border-gray-200">
-        <p className="text-gray-500">No projects configured yet.</p>
+      <div className="flex flex-col items-center justify-center py-16 gap-4 text-center bg-white rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800">
+        <p className="text-gray-500 dark:text-gray-400">No projects configured yet.</p>
         <button
           type="button"
           onClick={onAddProject}
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+          className="inline-flex min-h-11 items-center px-4 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
         >
           Add your first project
         </button>
@@ -69,15 +78,15 @@ export default function ProjectTable({
           {projects.map((project) => (
             <tr
               key={project.id!}
-              className="border-b border-gray-50 hover:bg-gray-50"
+              className="border-b border-gray-50 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-700/40"
             >
               <td data-label="Name" className="px-6 py-4">
-                <p className="font-medium text-gray-900">{project.name}</p>
+                <p className="font-medium text-gray-900 dark:text-gray-100">{project.name}</p>
               </td>
               <td data-label="Description" className="px-6 py-4">
-                <p className="text-gray-500">{project.description || "--"}</p>
+                <p className="text-gray-500 dark:text-gray-400">{project.description || "--"}</p>
               </td>
-              <td data-label="Monthly budget" className="px-6 py-4 text-gray-500">
+              <td data-label="Monthly budget" className="px-6 py-4 text-gray-500 dark:text-gray-400">
                 {formatUsd(project.monthlyBudgetUsd)}
               </td>
               <td data-label="Actions" className="px-6 py-4">
@@ -86,7 +95,7 @@ export default function ProjectTable({
                     type="button"
                     aria-label={`Edit ${project.name}`}
                     onClick={() => onEdit(project)}
-                    className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors"
+                    className="inline-flex min-h-11 items-center rounded-md bg-gray-50 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
                   >
                     Edit
                   </button>
@@ -97,7 +106,7 @@ export default function ProjectTable({
                         aria-label={`Confirm deletion of ${project.name}`}
                         onClick={() => onDelete(project.id!)}
                         disabled={actionLoading === project.id}
-                        className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50"
+                        className="inline-flex min-h-11 items-center rounded-md bg-red-600 px-3 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
                       >
                         Confirm
                       </button>
@@ -105,7 +114,7 @@ export default function ProjectTable({
                         type="button"
                         aria-label={`Cancel deletion of ${project.name}`}
                         onClick={() => onDeleteConfirmCancel()}
-                        className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-600"
+                        className="inline-flex min-h-11 items-center px-2 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
                       >
                         Cancel
                       </button>
@@ -115,7 +124,7 @@ export default function ProjectTable({
                       type="button"
                       aria-label={`Delete ${project.name}`}
                       onClick={() => onDeleteConfirmStart(project.id!)}
-                      className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
+                      className="inline-flex min-h-11 items-center rounded-md bg-red-50 px-3 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60"
                     >
                       Delete
                     </button>

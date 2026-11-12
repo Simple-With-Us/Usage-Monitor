@@ -1,8 +1,13 @@
-import { createElement } from "react";
-import { ImageResponse } from "next/og";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 const SUPPORTED_SIZES = new Set([192, 512]);
 
+/**
+ * PWA install icons — serve the same orange circuit/sync mark as the iOS
+ * client AppIcon (files under public/brand/). Kept at /pwa-icon/:size so
+ * the web manifest and middleware public-path allowlist stay stable.
+ */
 export async function GET(
   _request: Request,
   context: { params: Promise<{ size: string }> }
@@ -13,41 +18,22 @@ export async function GET(
     return new Response("Not found", { status: 404 });
   }
 
-  const icon = createElement(
-    "div",
-    {
-      style: {
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "linear-gradient(135deg, #f97316 0%, #d97706 100%)",
-        borderRadius: Math.round(size * 0.2),
-      },
-    },
-    createElement(
-      "svg",
-      {
-        width: Math.round(size * 0.68),
-        height: Math.round(size * 0.68),
-        viewBox: "0 0 24 24",
-        fill: "none",
-        stroke: "#ffffff",
-        strokeWidth: 2,
-        strokeLinecap: "round",
-        strokeLinejoin: "round",
-      },
-      createElement("path", {
-        d: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z",
-      })
-    )
+  const filePath = path.join(
+    process.cwd(),
+    "public",
+    "brand",
+    `icon-${size}.png`
   );
+  let body: Buffer;
+  try {
+    body = await readFile(filePath);
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
 
-  return new ImageResponse(icon, {
-    width: size,
-    height: size,
+  return new Response(new Uint8Array(body), {
     headers: {
+      "Content-Type": "image/png",
       "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
     },
   });

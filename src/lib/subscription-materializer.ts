@@ -34,12 +34,35 @@ import {
 // unbounded backfill in one pass.
 const MAX_PERIODS_PER_RUN = 240;
 
+function isReceiptBackedSubscriptionCharge(
+  subscription: Pick<
+    SubscriptionChargePlanInput,
+    "externalBillingManaged" | "externalBillingSource" | "externalBillingId"
+  >
+): boolean {
+  if (subscription.externalBillingManaged === true) return true;
+  return Boolean(
+    subscription.externalBillingSource?.trim() &&
+      subscription.externalBillingId?.trim()
+  );
+}
+
 export interface MaterializeSubscriptionsResult {
   examined: number;
   charged: number;
   eventsWritten: number;
   /** Managed rows paused because their stored period window is not an exact cadence. */
   ambiguousPaused: number;
+  /**
+   * S8: active rows skipped because they are denominated in a non-USD
+   * currency. Non-USD amounts are NEVER materialized as USD; creation is
+   * rejected at the API layer (subscription-input.ts), so any such row is a
+   * legacy/direct-DB survivor and its suppression is surfaced loudly (warn
+   * log + this count + a billing_sync_incomplete budget alert). Optional so
+   * partial maintenance-result mocks in other lanes' tests keep compiling;
+   * materializeDueSubscriptions always populates it.
+   */
+  nonUsdSkipped?: number;
 }
 
 interface SubscriptionChargePlanInput {
@@ -54,6 +77,11 @@ interface SubscriptionChargePlanInput {
   currentPeriodStart: Date;
   nextRenewalAt: Date;
   lastChargedPeriodStart: Date | null;
+  /** Provider-linked rows are receipt-backed.  Catalog/seeded rows are modeled. */
+  externalBillingManaged?: boolean;
+  /** Linked-but-unmanaged (Cloudflare legacy handoff) is also receipt-backed. */
+  externalBillingSource?: string | null;
+  externalBillingId?: string | null;
   provider: { name: string; refreshIntervalMin?: number };
 }
 
@@ -115,6 +143,7 @@ export function planSubscriptionCharges(
     const periodEnd = nextRenewalAt;
 
     if (!lastCharged || periodStart.getTime() > lastCharged.getTime()) {
+      const providerLinked = isReceiptBackedSubscriptionCharge(subscription);
       inputs.push({
         idempotencyKey: subscriptionChargeIdempotencyKey(
           subscription.id,
@@ -129,7 +158,11 @@ export function planSubscriptionCharges(
         metricType: "subscription",
         unit: "usd",
         costUsd: subscription.costUsd,
-        confidence: "actual",
+        // Only an authoritative provider period (or an already-linked
+        // Cloudflare legacy row waiting for handoff) is cash.  Seeded /
+        // owner-typed catalog rows stay estimated so the dashboard cannot
+        // call them paid.
+        confidence: providerLinked ? "actual" : "estimated",
         occurredAt: periodStart,
         windowStart: periodStart,
         windowEnd: periodEnd,
@@ -139,6 +172,11 @@ export function planSubscriptionCharges(
           interval,
           intervalCount,
           currency: subscription.currency,
+          // Extra keys stay off receipt-backed rows: Cloudflare handoff
+          // proof requires the exact 5-key metadata set.
+          ...(providerLinked
+            ? {}
+            : { modeled: true, chargeBasis: "modeled" }),
         },
       });
       lastCharged = periodStart;
@@ -205,14 +243,16 @@ function conflictingManagedPeriodStarts(
   return periodStarts;
 }
 
-async function resolveGuardedChargePlan(
+export type SettleSubscriptionResult =
+  | { outcome: "skipped" }
+  | { outcome: "non_usd"; name: string; currency: string }
+  | { outcome: "ambiguous_paused" }
+  | { outcome: "charged"; charged: number; eventsWritten: number };
+
+export async function settleSubscriptionCharges(
   subscriptionId: string,
   now: Date
-): Promise<
-  | { subscription: DueSubscription; plan: ChargePlan }
-  | { settled: true; charged: number; eventsWritten: number }
-  | null
-> {
+): Promise<SettleSubscriptionResult> {
   return prisma.$transaction(
     async (tx) => {
       // SQLite interactive transactions begin deferred. Take the writer lock
@@ -243,6 +283,7 @@ async function resolveGuardedChargePlan(
           intervalCount: true,
           projectId: true,
           autoRenew: true,
+          status: true,
           currentPeriodStart: true,
           nextRenewalAt: true,
           lastChargedPeriodStart: true,
@@ -251,197 +292,155 @@ async function resolveGuardedChargePlan(
           },
         },
       });
-      if (!subscription) return null;
+      if (!subscription) return { outcome: "skipped" };
+
+      // S8: never charge a non-USD-denominated subscription AS USD.
+      if (subscription.currency.toUpperCase() !== "USD") {
+        return {
+          outcome: "non_usd",
+          name: subscription.name,
+          currency: subscription.currency,
+        };
+      }
+
+      // External-managed rows with a non-exact period window are mid-period /
+      // provider-skew evidence — pause and skip inventing charges.
+      if (subscription.externalBillingManaged) {
+        const interval: SubscriptionInterval = isSubscriptionInterval(
+          subscription.interval
+        )
+          ? subscription.interval
+          : "monthly";
+        const intervalCount = Math.max(1, Math.trunc(subscription.intervalCount));
+        const legacyHandoffId =
+          process.env.CLOUDFLARE_LEGACY_HANDOFF_SUBSCRIPTION_ID?.trim() ?? "";
+        const allowUtcMidnightCalendarException =
+          legacyHandoffId.length > 0 && legacyHandoffId === subscription.id;
+        if (
+          isAmbiguousSubscriptionPeriodWindow(
+            subscription.currentPeriodStart,
+            subscription.nextRenewalAt,
+            interval,
+            intervalCount,
+            { allowUtcMidnightCalendarException }
+          )
+        ) {
+          await tx.subscription.update({
+            where: { id: subscription.id },
+            data: { status: "paused", canceledAt: null, autoRenew: false },
+          });
+          return { outcome: "ambiguous_paused" };
+        }
+      }
 
       const plan = planSubscriptionCharges(subscription, now);
-      if (!plan) return null;
-      if (!subscription.externalAdoptionGuardKey) {
-        return { subscription, plan };
-      }
+      if (!plan) return { outcome: "skipped" };
 
-      // A provider/price/cadence guard is not a billing identity. Only an
-      // owner-declared exact source + external ID can spend correction proof;
-      // absent identity fails open so unrelated paid services stay additive.
+      let inputsToPersist = plan.inputs;
       if (
-        subscription.externalBillingManaged !== false ||
-        !subscription.externalBillingSource ||
-        !subscription.externalBillingId
+        subscription.externalAdoptionGuardKey &&
+        subscription.externalBillingManaged === false &&
+        subscription.externalBillingSource &&
+        subscription.externalBillingId
       ) {
-        return { subscription, plan };
+        const correctionProofs =
+          await tx.externalBillingChargeCorrection.findMany({
+            where: {
+              providerId: subscription.providerId,
+              correctedGuardKey: subscription.externalAdoptionGuardKey,
+              source: subscription.externalBillingSource,
+              externalId: subscription.externalBillingId,
+            },
+            select: {
+              managedSubscriptionId: true,
+              source: true,
+              externalId: true,
+              correctedPeriodStart: true,
+              correctedPeriodEnd: true,
+              correctedGuardKey: true,
+            },
+          });
+        const settledPeriodStarts = conflictingManagedPeriodStarts(
+          subscription,
+          plan,
+          correctionProofs
+        );
+        if (settledPeriodStarts.size > 0) {
+          inputsToPersist = plan.inputs.filter(
+            (input) =>
+              !settledPeriodStarts.has(input.windowStart?.getTime() ?? Number.NaN)
+          );
+        }
       }
 
-      const correctionProofs = await tx.externalBillingChargeCorrection.findMany({
-        where: {
-          providerId: subscription.providerId,
-          correctedGuardKey: subscription.externalAdoptionGuardKey,
-          source: subscription.externalBillingSource,
-          externalId: subscription.externalBillingId,
-        },
-        select: {
-          managedSubscriptionId: true,
-          source: true,
-          externalId: true,
-          correctedPeriodStart: true,
-          correctedPeriodEnd: true,
-          correctedGuardKey: true,
-        },
-      });
-      const settledPeriodStarts = conflictingManagedPeriodStarts(
-        subscription,
-        plan,
-        correctionProofs
-      );
-      if (settledPeriodStarts.size === 0) return { subscription, plan };
-
-      // Suppress only the proven overlapping input. Any earlier/non-overlap
-      // inputs must materialize before the monotonic watermark advances past
-      // them, or a June+July plan could permanently omit June when only July
-      // overlaps. Persistence and watermark/cycle advancement share this
-      // writer-locked transaction, so failure rolls both back and replay stays
-      // idempotent.
-      const nonOverlappingInputs = plan.inputs.filter(
-        (input) =>
-          !settledPeriodStarts.has(input.windowStart?.getTime() ?? Number.NaN)
-      );
       const persisted = await persistExternalUsageEventsInTransaction(
         tx,
-        nonOverlappingInputs
+        inputsToPersist
       );
-      await tx.subscription.update({
-        where: { id: subscription.id },
+
+      // Optimistic revision predicate: ensure status is still active and
+      // lastChargedPeriodStart matches what was read under the writer lock.
+      const applied = await tx.subscription.updateMany({
+        where: {
+          id: subscription.id,
+          status: "active",
+          lastChargedPeriodStart: subscription.lastChargedPeriodStart,
+        },
         data: {
           currentPeriodStart: plan.currentPeriodStart,
           nextRenewalAt: plan.nextRenewalAt,
           lastChargedPeriodStart: plan.lastChargedPeriodStart,
         },
       });
+
+      if (applied.count !== 1) {
+        throw new Error("subscription changed under materializer");
+      }
+
       return {
-        settled: true,
-        charged: nonOverlappingInputs.length > 0 ? 1 : 0,
+        outcome: "charged",
+        charged: inputsToPersist.length > 0 ? 1 : 0,
         eventsWritten: persisted.persisted,
       };
     },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       maxWait: 5_000,
-      timeout: 20_000,
+      timeout: 30_000,
     }
   );
 }
 
 export async function materializeDueSubscriptions(
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: { beforeTransactionalRecheck?: () => Promise<void> } = {}
 ): Promise<MaterializeSubscriptionsResult> {
   const subscriptions = await prisma.subscription.findMany({
     where: { status: "active", currentPeriodStart: { lte: now } },
-    select: {
-      id: true,
-      providerId: true,
-      externalAdoptionGuardKey: true,
-      externalBillingSource: true,
-      externalBillingId: true,
-      externalBillingManaged: true,
-      name: true,
-      costUsd: true,
-      currency: true,
-      interval: true,
-      intervalCount: true,
-      projectId: true,
-      autoRenew: true,
-      currentPeriodStart: true,
-      nextRenewalAt: true,
-      lastChargedPeriodStart: true,
-      provider: { select: { name: true } },
-    },
+    select: { id: true },
   });
 
   let charged = 0;
   let eventsWritten = 0;
   let ambiguousPaused = 0;
+  let nonUsdSkipped = 0;
 
-  for (const observedSubscription of subscriptions) {
-    let subscription: DueSubscription = observedSubscription;
-
-    // Wave K / E13: external-managed rows with a non-exact period window are
-    // mid-period / provider-skew evidence — pause and skip inventing charges
-    // until reconcile rewrites exact bounds (never invent later terms).
-    // UTC-midnight calendar exception is only for the exact Cloudflare legacy
-    // handoff subscription id (env-gated), never general managed rows.
-    if (subscription.externalBillingManaged) {
-      const interval: SubscriptionInterval = isSubscriptionInterval(
-        subscription.interval
-      )
-        ? subscription.interval
-        : "monthly";
-      const intervalCount = Math.max(1, Math.trunc(subscription.intervalCount));
-      const legacyHandoffId =
-        process.env.CLOUDFLARE_LEGACY_HANDOFF_SUBSCRIPTION_ID?.trim() ?? "";
-      const allowUtcMidnightCalendarException =
-        legacyHandoffId.length > 0 && legacyHandoffId === subscription.id;
-      if (
-        isAmbiguousSubscriptionPeriodWindow(
-          subscription.currentPeriodStart,
-          subscription.nextRenewalAt,
-          interval,
-          intervalCount,
-          { allowUtcMidnightCalendarException }
-        )
-      ) {
-        await prisma.subscription.update({
-          where: { id: subscription.id },
-          data: { status: "paused", canceledAt: null, autoRenew: false },
-        });
-        ambiguousPaused += 1;
-        continue;
-      }
+  for (const { id } of subscriptions) {
+    if (options.beforeTransactionalRecheck) {
+      await options.beforeTransactionalRecheck();
     }
-
-    let plan = planSubscriptionCharges(subscription, now);
-    if (!plan) continue;
-
-    // An explicitly linked owner-controlled row can take over an identity after
-    // a provider corrects a charged term (for example $5 -> $6). Preserve its
-    // terms/status/guard, but avoid a duplicate only when immutable proof
-    // matches that exact source + external ID and window. The writer-locked
-    // recheck records only a settlement watermark; unlinked/unrelated rows and
-    // an owner reanchor remain independently billable.
-    if (subscription.externalAdoptionGuardKey) {
-      const guarded = await resolveGuardedChargePlan(subscription.id, now);
-      if (!guarded) continue;
-      if ("settled" in guarded) {
-        charged += guarded.charged;
-        eventsWritten += guarded.eventsWritten;
-        continue;
-      }
-      subscription = guarded.subscription;
-      plan = guarded.plan;
+    const result = await settleSubscriptionCharges(id, now);
+    if (result.outcome === "non_usd") {
+      console.warn(
+        `[subscription-materializer] suppressing non-USD subscription ${id} (${result.name}, currency=${result.currency}): charges are skipped, never charged as USD, until authoritative FX conversion exists`
+      );
+      nonUsdSkipped += 1;
+    } else if (result.outcome === "ambiguous_paused") {
+      ambiguousPaused += 1;
+    } else if (result.outcome === "charged") {
+      charged += result.charged;
+      eventsWritten += result.eventsWritten;
     }
-
-    // Wave G / E13: persist charges + advance watermark in one writer-locked
-    // transaction (same guarantee as the guarded settlement path above). A
-    // crash between event insert and watermark update can no longer leave a
-    // charged period re-eligible while events already exist (idempotent, but
-    // brittle for ops).
-    const persistResult = await prisma.$transaction(
-      async (tx) => {
-        const persisted = await persistExternalUsageEventsInTransaction(
-          tx,
-          plan.inputs
-        );
-        await tx.subscription.update({
-          where: { id: subscription.id },
-          data: {
-            currentPeriodStart: plan.currentPeriodStart,
-            nextRenewalAt: plan.nextRenewalAt,
-            lastChargedPeriodStart: plan.lastChargedPeriodStart,
-          },
-        });
-        return persisted;
-      },
-      { timeout: 30_000 }
-    );
-    eventsWritten += persistResult.persisted;
-    charged += 1;
   }
 
   return {
@@ -449,5 +448,104 @@ export async function materializeDueSubscriptions(
     charged,
     eventsWritten,
     ambiguousPaused,
+    nonUsdSkipped,
   };
+}
+
+const MANUAL_ADJUSTMENT_SOURCE_APP = "manual-billing-adjustment";
+
+function metadataString(
+  metadata: Prisma.JsonValue | null | undefined,
+  key: string
+): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function metadataFlag(
+  metadata: Prisma.JsonValue | null | undefined,
+  key: string
+): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return (metadata as Record<string, unknown>)[key] === true;
+}
+
+/** Catalog / seed charges.  Receipt-backed Cloudflare-legacy rows stay cash. */
+function isModeledSubscriptionCharge(
+  metadata: Prisma.JsonValue | null | undefined,
+  confidence: string
+): boolean {
+  return (
+    confidence === "estimated" ||
+    metadataFlag(metadata, "modeled") ||
+    metadataString(metadata, "chargeBasis") === "modeled"
+  );
+}
+
+export interface RetractSubscriptionChargesOptions {
+  /**
+   * One-time ghost repair may delete invented pre-#1307 `actual` seed
+   * charges.  Pause / delete must not: those paths keep receipt-backed
+   * 5-key Cloudflare handoff rows.
+   */
+  includeReceiptBacked?: boolean;
+}
+
+/**
+ * Remove modeled materializer rows (and matching owner void adjustments) for
+ * one subscription.  Pause / cancel / considering must not leave invented
+ * cash in month-to-date spend.  Caller decides the new status / watermark.
+ */
+export async function retractSubscriptionChargesInTransaction(
+  tx: Prisma.TransactionClient,
+  subscriptionId: string,
+  options: RetractSubscriptionChargesOptions = {}
+): Promise<{ deleted: number }> {
+  const includeReceiptBacked = options.includeReceiptBacked === true;
+  const candidates = await tx.externalUsageEvent.findMany({
+    where: {
+      sourceApp: { in: [SUBSCRIPTION_SOURCE_APP, MANUAL_ADJUSTMENT_SOURCE_APP] },
+    },
+    select: { id: true, sourceApp: true, confidence: true, metadata: true },
+  });
+  const ids = candidates
+    .filter((event) => {
+      if (event.sourceApp === SUBSCRIPTION_SOURCE_APP) {
+        if (metadataString(event.metadata, "subscriptionId") !== subscriptionId) {
+          return false;
+        }
+        return (
+          includeReceiptBacked ||
+          isModeledSubscriptionCharge(event.metadata, event.confidence)
+        );
+      }
+      if (metadataString(event.metadata, "voidsSubscriptionId") !== subscriptionId) {
+        return false;
+      }
+      return (
+        includeReceiptBacked ||
+        isModeledSubscriptionCharge(event.metadata, event.confidence) ||
+        metadataFlag(event.metadata, "estimate")
+      );
+    })
+    .map((event) => event.id);
+  if (ids.length === 0) return { deleted: 0 };
+  const deleted = await tx.externalUsageEvent.deleteMany({
+    where: { id: { in: ids } },
+  });
+  return { deleted: deleted.count };
+}
+
+export async function retractSubscriptionCharges(
+  subscriptionId: string,
+  options: RetractSubscriptionChargesOptions = {}
+): Promise<{ deleted: number }> {
+  return prisma.$transaction((tx) =>
+    retractSubscriptionChargesInTransaction(tx, subscriptionId, options)
+  );
 }

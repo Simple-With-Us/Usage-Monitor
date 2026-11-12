@@ -101,7 +101,7 @@ export default function AddProjectModal({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g., Data Platform"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
 
@@ -115,7 +115,7 @@ export default function AddProjectModal({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="e.g., Core data engineering team tools"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
 
@@ -131,7 +131,7 @@ export default function AddProjectModal({
                 value={monthlyBudgetUsd}
                 onChange={(e) => setMonthlyBudgetUsd(e.target.value)}
                 placeholder="e.g., 500"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
           </div>

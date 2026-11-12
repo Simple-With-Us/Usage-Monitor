@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createSessionToken,
+  isCsrfSafeRequest,
   verifyPassword,
   verifySessionToken,
 } from "../auth";
@@ -32,6 +33,17 @@ describe("verifyPassword", () => {
     process.env.DASHBOARD_PASSWORD = "correct-horse-battery-staple";
     expect(verifyPassword("correct-horse-battery-staple")).toBe(true);
     expect(verifyPassword("wrong")).toBe(false);
+  });
+
+  it("rejects length-mismatched candidates without throwing (hash-then-compare)", () => {
+    // safeEqual hashes both sides before timingSafeEqual, so candidates whose
+    // byte length differs from the configured password must return false —
+    // never throw (raw timingSafeEqual throws on unequal lengths) and never
+    // short-circuit on length before the constant-time compare.
+    process.env.DASHBOARD_PASSWORD = "correct-horse-battery-staple";
+    expect(verifyPassword("")).toBe(false);
+    expect(verifyPassword("c")).toBe(false);
+    expect(verifyPassword("correct-horse-battery-staple-and-then-some")).toBe(false);
   });
 });
 
@@ -93,5 +105,75 @@ describe("createSessionToken / verifySessionToken", () => {
       .digest("hex");
 
     expect(sig).not.toBe(naiveSig);
+  });
+});
+
+describe("isCsrfSafeRequest", () => {
+  it("allows safe GET/HEAD requests regardless of Origin or Sec-Fetch-Site", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "GET",
+        headers: new Headers({ origin: "https://evil.jays.services", host: "usage.jays.services" }),
+      })
+    ).toBe(true);
+  });
+
+  it("allows same-origin POST requests matching host", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "POST",
+        headers: new Headers({
+          origin: "https://usage.jays.services",
+          host: "usage.jays.services",
+          "sec-fetch-site": "same-origin",
+        }),
+      })
+    ).toBe(true);
+  });
+
+  it("rejects POST requests with sibling-subdomain or cross-site Sec-Fetch-Site", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "POST",
+        headers: new Headers({
+          origin: "https://evil.jays.services",
+          host: "usage.jays.services",
+          "sec-fetch-site": "same-site",
+        }),
+      })
+    ).toBe(false);
+  });
+
+  it("rejects POST requests with mismatched Origin host", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "POST",
+        headers: new Headers({
+          origin: "https://evil.jays.services",
+          host: "usage.jays.services",
+        }),
+      })
+    ).toBe(false);
+  });
+
+  it("rejects POST requests with null Origin string", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "POST",
+        headers: new Headers({
+          origin: "null",
+          host: "usage.jays.services",
+        }),
+      })
+    ).toBe(false);
+  });
+
+  it("allows header-absent POST requests (iOS URLSession client regression guard)", () => {
+    expect(
+      isCsrfSafeRequest({
+        method: "POST",
+        headers: new Headers({ host: "usage.jays.services" }),
+      })
+    ).toBe(true);
   });
 });

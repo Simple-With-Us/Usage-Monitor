@@ -1,5 +1,10 @@
 "use client";
 
+import { useState } from "react";
+import ListLoadErrorPanel from "@/components/ListLoadErrorPanel";
+import { formatCurrency } from "@/lib/format";
+import { STATUS_SORT_ORDER, statusBadgeStyle } from "@/lib/status-vocab";
+
 export interface SubscriptionRow {
   id: string;
   name: string;
@@ -19,6 +24,7 @@ export interface SubscriptionRow {
   notes: string | null;
   externalBillingSource: string | null;
   externalBillingId: string | null;
+  externalBillingManaged?: boolean | null;
   // Effective knobEnv (this subscription's own override if set, else the
   // provider's free-tier ProviderPlan.knobEnv) and the provider's free-tier
   // map on its own (always present when the provider has one, regardless of
@@ -38,33 +44,17 @@ interface SubscriptionsPanelProps {
   deleteConfirm: string | null;
   setDeleteConfirm: (id: string | null) => void;
   actionLoading: string | null;
+  /** Message from a failed subscription load; suppresses the empty-state CTA. */
+  loadError?: string | null;
+  onRetryLoad?: () => void;
 }
-
-const STATUS_STYLES: Record<string, string> = {
-  active: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
-  paused: "bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
-  canceled: "bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-400",
-  considering: "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300",
-  expired: "bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300",
-};
-const STATUS_ORDER: Record<string, number> = {
-  active: 0,
-  considering: 1,
-  paused: 2,
-  canceled: 3,
-  expired: 4,
-};
 
 function displayStatus(subscription: SubscriptionRow): string {
   return subscription.effectiveStatus ?? subscription.status;
 }
 
 function formatUsd(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
+  return formatCurrency(amount, { currency });
 }
 
 function formatCadence(intervalCount: number, interval: string): string {
@@ -79,8 +69,21 @@ export default function SubscriptionsPanel({
   deleteConfirm,
   setDeleteConfirm,
   actionLoading,
+  loadError,
+  onRetryLoad,
 }: SubscriptionsPanelProps) {
+  const [searchQuery, setSearchQuery] = useState("");
+
   if (subscriptions.length === 0) {
+    if (loadError) {
+      return (
+        <ListLoadErrorPanel
+          message="Subscriptions couldn't be loaded."
+          detail={loadError}
+          onRetry={onRetryLoad}
+        />
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-gray-200 bg-white py-16 text-center dark:border-gray-700 dark:bg-gray-800">
         <p className="text-gray-500 dark:text-gray-400">No subscriptions tracked yet.</p>
@@ -95,20 +98,47 @@ export default function SubscriptionsPanel({
     );
   }
 
-  const orderedSubscriptions = [...subscriptions].sort((left, right) => {
+  const filteredSubscriptions = subscriptions.filter((sub) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      sub.name.toLowerCase().includes(q) ||
+      (sub.description && sub.description.toLowerCase().includes(q)) ||
+      sub.provider.displayName.toLowerCase().includes(q) ||
+      (sub.project && sub.project.name.toLowerCase().includes(q)) ||
+      (sub.externalBillingSource && sub.externalBillingSource.toLowerCase().includes(q))
+    );
+  });
+
+  const orderedSubscriptions = [...filteredSubscriptions].sort((left, right) => {
     const statusDifference =
-      (STATUS_ORDER[displayStatus(left)] ?? 99) -
-      (STATUS_ORDER[displayStatus(right)] ?? 99);
+      (STATUS_SORT_ORDER[displayStatus(left)] ?? 99) -
+      (STATUS_SORT_ORDER[displayStatus(right)] ?? 99);
     return statusDifference || left.nextRenewalAt.localeCompare(right.nextRenewalAt) || left.name.localeCompare(right.name);
   });
 
   return (
-    // overflow-x-clip (not auto/hidden) does not create a scroll container, so the
-    // sticky <thead> below stays pinned during page scroll. This table is only ever
-    // rendered on the Settings services tab, so the top offset can be the fixed
-    // top-28 (global nav h-16 + the settings sticky tabs/Add bar) rather than a
-    // variant-conditional value like PaidServicesPanel uses.
-    <div className="overflow-x-clip rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+    <div className="space-y-3">
+      <div className="relative">
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Filter subscriptions by name, provider, or project..."
+          className="w-full rounded-lg border border-gray-200 bg-white px-4 py-2 text-base sm:text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
+        />
+        {searchQuery && (
+          <button
+            type="button"
+            onClick={() => setSearchQuery("")}
+            className="absolute right-3 top-2.5 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      <div className="overflow-x-clip rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <table className="responsive-table w-full text-sm">
         <caption className="sr-only">Tracked subscriptions</caption>
         <thead>
@@ -131,7 +161,7 @@ export default function SubscriptionsPanel({
               <td data-label="Name" className="px-6 py-4">
                 <p className="font-medium text-gray-900 dark:text-gray-100">{sub.name}</p>
                 {sub.description && <p className="mt-0.5 max-w-xs text-xs text-gray-500 dark:text-gray-400">{sub.description}</p>}
-                {!sub.autoRenew && <p className="text-[10px] text-gray-400 dark:text-gray-500">does not auto-renew</p>}
+                {!sub.autoRenew && <p className="text-[10px] text-gray-500 dark:text-gray-400">does not auto-renew</p>}
                 {sub.externalBillingSource && sub.externalBillingId && (
                   <p className="mt-1 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                     Linked to {sub.externalBillingSource}
@@ -145,12 +175,12 @@ export default function SubscriptionsPanel({
                     {sub.project.name}
                   </span>
                 ) : (
-                  <span className="text-xs text-gray-400">Unattributed</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Unattributed</span>
                 )}
               </td>
               <td data-label="Cost" className="px-6 py-4">
                 <p className="font-medium text-gray-900 dark:text-gray-100">{formatUsd(sub.costUsd, sub.currency)}</p>
-                <p className="text-xs text-gray-400">{formatCadence(sub.intervalCount, sub.interval)}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{formatCadence(sub.intervalCount, sub.interval)}</p>
                 {sub.currency !== "USD" && (
                   <p className="mt-1 text-[10px] font-medium text-red-600">Convert to USD before activation</p>
                 )}
@@ -171,9 +201,7 @@ export default function SubscriptionsPanel({
               </td>
               <td data-label="Status" className="px-6 py-4">
                 <span
-                  className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${
-                    STATUS_STYLES[effectiveStatus] ?? "bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400"
-                  }`}
+                  className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusBadgeStyle(effectiveStatus)}`}
                 >
                   {effectiveStatus}
                 </span>
@@ -184,7 +212,7 @@ export default function SubscriptionsPanel({
                     type="button"
                     aria-label={`Edit ${sub.name}`}
                     onClick={() => onEdit(sub)}
-                    className="rounded-md bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                    className="inline-flex min-h-11 items-center rounded-md bg-gray-50 px-3 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
                   >
                     Edit
                   </button>
@@ -195,7 +223,7 @@ export default function SubscriptionsPanel({
                         aria-label={`Confirm deletion of ${sub.name}`}
                         onClick={() => onDelete(sub.id)}
                         disabled={actionLoading === sub.id}
-                        className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50"
+                        className="inline-flex min-h-11 items-center rounded-md bg-red-600 px-3 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
                       >
                         Confirm
                       </button>
@@ -203,7 +231,7 @@ export default function SubscriptionsPanel({
                         type="button"
                         aria-label={`Cancel deletion of ${sub.name}`}
                         onClick={() => setDeleteConfirm(null)}
-                        className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                        className="inline-flex min-h-11 items-center px-2 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
                       >
                         Cancel
                       </button>
@@ -213,7 +241,7 @@ export default function SubscriptionsPanel({
                       type="button"
                       aria-label={`Delete ${sub.name}`}
                       onClick={() => setDeleteConfirm(sub.id)}
-                      className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60"
+                      className="inline-flex min-h-11 items-center rounded-md bg-red-50 px-3 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60"
                     >
                       Delete
                     </button>
@@ -225,6 +253,7 @@ export default function SubscriptionsPanel({
           })}
         </tbody>
       </table>
+    </div>
     </div>
   );
 }

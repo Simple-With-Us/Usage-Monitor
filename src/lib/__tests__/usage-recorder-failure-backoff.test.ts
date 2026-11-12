@@ -6,20 +6,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the usage-recorder module graph.
 
 const findMany = vi.fn();
-const findFirst = vi.fn();
+const snapshotGroupBy = vi.fn();
+const snapshotFindMany = vi.fn();
+const queryRaw = vi.fn();
 const create = vi.fn();
 const fetchProviderUsage = vi.fn();
 const bootstrapStGeminiCredentialToInfisical = vi.fn();
 const syncProviderCredentialsFromInfisical = vi.fn();
-const ensureAgentSyncProviderSeeded = vi.fn();
+const ensureSimpleToolsProviderSeeded = vi.fn();
+const ensureRoicProviderSeeded = vi.fn();
+const ensureCloudflareFleetProvidersSeeded = vi.fn();
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     provider: { findMany: () => findMany(), create: vi.fn() },
     usageSnapshot: {
       create: (args: unknown) => create(args),
-      findFirst: (args: unknown) => findFirst(args),
+      groupBy: (args: unknown) => snapshotGroupBy(args),
+      findMany: (args: unknown) => snapshotFindMany(args),
     },
+    $queryRaw: (args: unknown) => queryRaw(args),
     $transaction: (run: (tx: unknown) => unknown) =>
       run({ usageSnapshot: { create: (args: unknown) => create(args) } }),
   },
@@ -29,8 +35,17 @@ vi.mock("@/lib/adapters", () => ({
   fetchProviderUsage: (provider: unknown) => fetchProviderUsage(provider),
 }));
 
-vi.mock("@/lib/ensure-agent-sync-provider", () => ({
-  ensureAgentSyncProviderSeeded: () => ensureAgentSyncProviderSeeded(),
+vi.mock("@/lib/ensure-simple-tools-provider", () => ({
+  ensureSimpleToolsProviderSeeded: () => ensureSimpleToolsProviderSeeded(),
+}));
+
+vi.mock("@/lib/ensure-roic-provider", () => ({
+  ensureRoicProviderSeeded: () => ensureRoicProviderSeeded(),
+}));
+
+vi.mock("@/lib/ensure-cloudflare-fleet-providers", () => ({
+  ensureCloudflareFleetProvidersSeeded: () =>
+    ensureCloudflareFleetProvidersSeeded(),
 }));
 
 vi.mock("@/lib/infisical-provider-sync", () => ({
@@ -60,7 +75,9 @@ const OK_USAGE = {
 };
 
 function stubBootstrapMocks() {
-  ensureAgentSyncProviderSeeded.mockResolvedValue(undefined);
+  ensureSimpleToolsProviderSeeded.mockResolvedValue(undefined);
+  ensureRoicProviderSeeded.mockResolvedValue(undefined);
+  ensureCloudflareFleetProvidersSeeded.mockResolvedValue(undefined);
   bootstrapStGeminiCredentialToInfisical.mockResolvedValue({
     enabled: false,
     attempted: false,
@@ -78,18 +95,23 @@ function stubBootstrapMocks() {
     failed: 0,
     suppressed: 0,
   });
-  findFirst.mockResolvedValue(null);
+  snapshotGroupBy.mockResolvedValue([]);
+  snapshotFindMany.mockResolvedValue([]);
+  queryRaw.mockResolvedValue([]);
   create.mockResolvedValue({ id: "snap" });
 }
-
 describe("fetchAllDueProviders failure backoff (C7)", () => {
   beforeEach(() => {
     vi.resetModules();
     findMany.mockReset();
-    findFirst.mockReset();
+    snapshotGroupBy.mockReset();
+    snapshotFindMany.mockReset();
+    queryRaw.mockReset();
     create.mockReset();
     fetchProviderUsage.mockReset();
-    ensureAgentSyncProviderSeeded.mockReset();
+    ensureSimpleToolsProviderSeeded.mockReset();
+    ensureRoicProviderSeeded.mockReset();
+    ensureCloudflareFleetProvidersSeeded.mockReset();
     bootstrapStGeminiCredentialToInfisical.mockReset();
     syncProviderCredentialsFromInfisical.mockReset();
     stubBootstrapMocks();

@@ -42,6 +42,9 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(status, {
     headers: {
       "cache-control": "no-store",
+      // Read-surface version marker (X4; see docs/api-contract.md). Additive
+      // changes keep "1"; a breaking change bumps it.
+      "x-api-version": "1",
       // Wave F / E7: throttle consumers can prefer fresh snapshots without
       // parsing the full body, and can back off when Age is high.
       "x-budget-generated-at": generatedAt,

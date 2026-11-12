@@ -23,6 +23,15 @@ export interface ProviderMoneyMember {
   fixedMonthlyCostUsd?: number;
   linkedFixedDedupeUsd?: number;
   forecastedSubscriptionRenewalsUsd?: number;
+  /**
+   * S6: the AUTHORITATIVE per-provider fixed-cost accrual from
+   * computeBudgetStatus (plan fixed vs subscription dedup, linked external
+   * billing periods, charge corrections). When present on every member of an
+   * account, the family math consumes it instead of re-deriving fixed-cost
+   * reconciliation locally. Absent (legacy callers), the legacy derivation
+   * below is kept as a fallback.
+   */
+  fixedAccruedUsd?: number | null;
 }
 
 export interface ProviderFamilyMoney {
@@ -37,6 +46,27 @@ function money(value: number | null | undefined): number {
   return Number.isFinite(value) ? (value as number) : 0;
 }
 
+/**
+ * The part of a member's fixed accrual that is REPRESENTED IN ITS OWN
+ * SNAPSHOT: snapshot-declared fixed (clamped to the snapshot total) minus the
+ * linked-subscription dedupe. When several members share one billing account
+ * (and therefore one canonical snapshot), this slice must be counted once per
+ * account, not once per member.
+ */
+function netSnapshotFixedUsd(member: ProviderMoneyMember): number {
+  const snapshotFixed = Math.max(
+    0,
+    Math.min(
+      money(member.snapshotFixedCostIncludedUsd),
+      money(member.snapshotCostUsd)
+    )
+  );
+  return Math.max(
+    0,
+    snapshotFixed - Math.max(0, money(member.linkedFixedDedupeUsd))
+  );
+}
+
 function aggregateExactAccount(
   members: ProviderMoneyMember[],
   now: Date
@@ -44,6 +74,7 @@ function aggregateExactAccount(
   const snapshots = members
     .filter((member) => member.snapshotCostUsd != null)
     .map((member) => ({
+      member,
       costUsd: money(member.snapshotCostUsd),
       fixedUsd: Math.max(0, money(member.snapshotFixedCostIncludedUsd)),
       fetchedAt: Date.parse(member.snapshotCostFetchedAt ?? ""),
@@ -52,6 +83,7 @@ function aggregateExactAccount(
       scope: member.snapshotCostScope?.trim().toLowerCase() || null,
     }));
   let canonicalSnapshot: (typeof snapshots)[number] = {
+    member: members[0],
     costUsd: 0,
     fixedUsd: 0,
     fetchedAt: Number.NaN,
@@ -89,6 +121,8 @@ function aggregateExactAccount(
       }
     }
   }
+  const canonicalMember =
+    snapshots.length > 0 ? canonicalSnapshot.member : null;
 
   const canonicalFixedUsd = Math.min(
     canonicalSnapshot.fixedUsd,
@@ -108,10 +142,6 @@ function aggregateExactAccount(
       ),
     0
   );
-  const receiptCashUsd = members.reduce(
-    (sum, member) => sum + money(member.receiptCashPaidUsd),
-    0
-  );
   // Variable *consumption* only: prepaid receipt cash is funding evidence,
   // not usage. max(snapshot, push) remains the usage merge (same-account
   // multi-app: push is summed, snapshot is canonical once).
@@ -121,32 +151,55 @@ function aggregateExactAccount(
   );
   const variableSpendUsd = observedVariableUsd;
 
-  // Prefer subscription events over plan fixed when both appear on a family
-  // member (double-count guard aligned with budget-status).
-  const localFixedUsd = members.reduce((sum, member) => {
-    const subscriptionUsd = money(member.subscriptionMonthToDateUsd);
-    const planFixedUsd =
-      subscriptionUsd > 0 ? 0 : money(member.fixedMonthlyCostUsd);
-    return sum + planFixedUsd + subscriptionUsd;
-  }, 0);
-  const linkedFixedDedupeUsd = Math.min(
-    canonicalFixedUsd,
-    members.reduce(
-      (sum, member) => sum + Math.max(0, money(member.linkedFixedDedupeUsd)),
+  let fixedAccruedUsd: number;
+  if (members.every((member) => Number.isFinite(member.fixedAccruedUsd))) {
+    // S6: consume computeBudgetStatus's authoritative per-provider fixed-cost
+    // reconciliation (linked external billing periods + charge corrections +
+    // plan-vs-subscription dedup) instead of re-deriving a simplified version
+    // here. Each member's accrual already contains its snapshot-represented
+    // fixed slice; strip that slice per member and add the CANONICAL
+    // snapshot's slice back exactly once so the shared account snapshot is
+    // never double-counted across members of one billing account.
+    const nonSnapshotFixedUsd = members.reduce(
+      (sum, member) =>
+        sum +
+        Math.max(
+          0,
+          money(member.fixedAccruedUsd) - netSnapshotFixedUsd(member)
+        ),
       0
-    )
+    );
+    fixedAccruedUsd =
+      nonSnapshotFixedUsd +
+      (canonicalMember ? netSnapshotFixedUsd(canonicalMember) : 0);
+  } else {
+    // Legacy fallback for callers that do not pass authoritative accruals:
+    // prefer subscription events over plan fixed when both appear on a family
+    // member (double-count guard aligned with budget-status).
+    const localFixedUsd = members.reduce((sum, member) => {
+      const subscriptionUsd = money(member.subscriptionMonthToDateUsd);
+      const planFixedUsd =
+        subscriptionUsd > 0 ? 0 : money(member.fixedMonthlyCostUsd);
+      return sum + planFixedUsd + subscriptionUsd;
+    }, 0);
+    const linkedFixedDedupeUsd = Math.min(
+      canonicalFixedUsd,
+      members.reduce(
+        (sum, member) => sum + Math.max(0, money(member.linkedFixedDedupeUsd)),
+        0
+      )
+    );
+    fixedAccruedUsd =
+      localFixedUsd + canonicalFixedUsd - linkedFixedDedupeUsd;
+  }
+  // S2: prepaid receipt cash is funding coverage, NEVER projected
+  // consumption. Floor the projection at max(observed, linear forecast)
+  // only — a large top-up over small usage must not project a fabricated
+  // end-of-month breach.
+  const projectedVariableUsd = Math.max(
+    observedVariableUsd,
+    calculateEomForecast(observedVariableUsd, 0, now)
   );
-  const fixedAccruedUsd =
-    localFixedUsd + canonicalFixedUsd - linkedFixedDedupeUsd;
-  // Receipt funding is a lumpy deposit: use it as a projection floor only,
-  // never as annualized consumption.
-  const projectedVariableUsd =
-    receiptCashUsd >= observedVariableUsd
-      ? Math.max(receiptCashUsd, observedVariableUsd)
-      : Math.max(
-          receiptCashUsd,
-          calculateEomForecast(observedVariableUsd, 0, now)
-        );
   const futureRenewalsUsd = members.reduce(
     (sum, member) => sum + money(member.forecastedSubscriptionRenewalsUsd),
     0

@@ -54,10 +54,14 @@ public struct ProviderAlert: Codable, Hashable, Sendable, Identifiable {
         case "renewal_overdue": return "Renewal overdue"
         case "renewal_due": return "Renewal due soon"
         case "missing_balance_visibility": return "Balance not visible"
-        case "stale_snapshot": return "Stale data"
+        case "stale_snapshot": return "Sync lag" // legacy code; no longer emitted
         case "missing_snapshot": return "No recent data"
         case "unconfigured_budget": return "Budget not configured"
         case "usage_reconciliation_discrepancy": return "Usage discrepancy"
+        case "spend_anomaly": return "Spend anomaly"
+        case "request_anomaly": return "Request anomaly"
+        case "budget_control_paused": return "Auto-paused on budget breach"
+        case "key_disable_recommended": return "Key disable recommended"
         default: return code.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
@@ -73,6 +77,10 @@ public struct ProviderAlert: Codable, Hashable, Sendable, Identifiable {
         case "billing_sync_incomplete": return "arrow.triangle.2.circlepath"
         case "fixed_cost_conflict": return "arrow.triangle.merge"
         case "usage_reconciliation_discrepancy": return "scalemass"
+        case "spend_anomaly": return "chart.line.uptrend.xyaxis"
+        case "request_anomaly": return "chart.bar.fill"
+        case "budget_control_paused": return "pause.circle.fill"
+        case "key_disable_recommended": return "key.fill"
         default: return "bell.badge"
         }
     }

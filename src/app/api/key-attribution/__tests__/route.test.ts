@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { createSessionToken } from "@/lib/auth";
 import { setupPrismaSqliteTestDb } from "@/lib/__tests__/setup-test-db";
@@ -44,6 +44,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
   process.env.ATTRIBUTION_IDENTITY_HMAC_KEY = "test-attribution-key-material-longer-than-32-characters";
   delete process.env.ATTRIBUTION_IDENTITY_HMAC_PREVIOUS_KEYS;
   await prisma.providerKeyBinding.deleteMany();
@@ -51,6 +53,10 @@ beforeEach(async () => {
   await prisma.externalUsageEvent.deleteMany();
   await prisma.project.deleteMany();
   await prisma.provider.deleteMany();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("provider key attribution API", () => {
@@ -118,7 +124,11 @@ describe("provider key attribution API", () => {
     }));
     expect(identityResponse.status).toBe(201);
     expect(JSON.stringify(await identityResponse.json())).not.toContain(rawProviderKeyId);
-    const storedIdentity = await prisma.providerKeyIdentity.findFirstOrThrow();
+    let storedIdentity = await prisma.providerKeyIdentity.findFirstOrThrow();
+    storedIdentity = await prisma.providerKeyIdentity.update({
+      where: { id: storedIdentity.id },
+      data: { createdAt: monthStart },
+    });
     const directEventTime = new Date();
     expect(storedIdentity.providerReportedKeyIdFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(storedIdentity)).not.toContain(rawProviderKeyId);
@@ -201,7 +211,7 @@ describe("provider key attribution API", () => {
           provider: "openai",
           keyRef: adminProducerKeyRef,
           costUsd: 4,
-          occurredAt: directEventTime,
+          occurredAt: eventTime,
           metadata: {
             _usageTelemetrySchemaVersion: 2,
             _coverageDeclared: true,
@@ -330,6 +340,8 @@ describe("provider key attribution API", () => {
   });
 
   it("rehashes an identity fingerprint through HMAC rotation so previous keys can be removed", async () => {
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const provider = await prisma.provider.create({
       data: { name: "openai", displayName: "OpenAI", type: "builtin" },
     });
@@ -344,6 +356,10 @@ describe("provider key attribution API", () => {
       providerReportedKeyId: rawProviderKeyId,
     }))).status).toBe(201);
     const identity = await prisma.providerKeyIdentity.findFirstOrThrow();
+    await prisma.providerKeyIdentity.update({
+      where: { id: identity.id },
+      data: { createdAt: monthStart },
+    });
     const oldFingerprint = identity.providerReportedKeyIdFingerprint;
     expect(oldFingerprint).toMatch(/^[a-f0-9]{64}$/);
 
@@ -636,10 +652,16 @@ describe("provider key attribution API", () => {
   it("leaves window cost unclassified when the window spans a binding reassignment", async () => {
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const reassignmentAt = new Date(Math.max(monthStart.getTime() + 3 * 86_400_000, now.getTime() - 3 * 86_400_000));
-    const windowStart = new Date(reassignmentAt.getTime() - 2 * 86_400_000);
-    const windowEnd = new Date(reassignmentAt.getTime() + 2 * 86_400_000);
-    const eventTime = new Date(Math.min(windowEnd.getTime() - 1_000, now.getTime() - 1_000));
+    const isEarlyInMonth = (now.getTime() - monthStart.getTime()) < 3 * 86_400_000;
+    const reassignmentAt = isEarlyInMonth
+      ? new Date(now.getTime() - 60_000)
+      : new Date(now.getTime() - 3 * 86_400_000);
+    const windowStart = new Date(reassignmentAt.getTime() - 120_000);
+    const windowEnd = isEarlyInMonth
+      ? new Date(now.getTime() - 10_000)
+      : new Date(reassignmentAt.getTime() + 2 * 86_400_000);
+    const eventTime = new Date(windowEnd.getTime() - 1_000);
+    const pointControlTime = new Date(windowEnd.getTime() - 500);
     const provider = await prisma.provider.create({
       data: { name: "openai", displayName: "OpenAI", type: "builtin" },
     });
@@ -693,7 +715,7 @@ describe("provider key attribution API", () => {
         provider: "openai",
         keyRef: "openai-primary",
         costUsd: 1,
-        occurredAt: new Date(reassignmentAt.getTime() + 60_000),
+        occurredAt: pointControlTime,
         metadata: {
           _usageTelemetrySchemaVersion: 2,
           _coverageDeclared: true,
@@ -714,11 +736,12 @@ describe("provider key attribution API", () => {
   it("attributes point costs at each event timestamp across a binding reassignment", async () => {
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const reassignmentAt = new Date(
-      Math.max(monthStart.getTime() + 2 * 86_400_000, now.getTime() - 2 * 86_400_000)
-    );
-    const before = new Date(reassignmentAt.getTime() - 60_000);
-    const after = new Date(Math.min(reassignmentAt.getTime() + 60_000, now.getTime() - 1_000));
+    const isEarlyInMonth = (now.getTime() - monthStart.getTime()) < 2 * 86_400_000;
+    const reassignmentAt = isEarlyInMonth
+      ? new Date(now.getTime() - 60_000)
+      : new Date(Math.max(monthStart.getTime() + 60_000, now.getTime() - 2 * 86_400_000));
+    const before = new Date(reassignmentAt.getTime() - 30_000);
+    const after = new Date(Math.min(reassignmentAt.getTime() + 30_000, now.getTime() - 1_000));
     const provider = await prisma.provider.create({
       data: { name: "openai", displayName: "OpenAI", type: "builtin" },
     });

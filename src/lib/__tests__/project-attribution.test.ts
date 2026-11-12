@@ -16,6 +16,8 @@ describe("project attribution (integration)", () => {
   let computeProjectBudgetStatus: typeof import("../budget-status").computeProjectBudgetStatus;
   let resolveProjectIdsByName: typeof import("../project-resolver").resolveProjectIdsByName;
   let backfillProjectIdFromMetadataName: typeof import("../project-resolver").backfillProjectIdFromMetadataName;
+  let backfillUnattributedProjectIds: typeof import("../project-resolver").backfillUnattributedProjectIds;
+  let __resetProjectBackfillResumeForTests: typeof import("../project-resolver").__resetProjectBackfillResumeForTests;
   let createProject: typeof import("@/app/api/projects/route").POST;
   let createSessionToken: typeof import("../auth").createSessionToken;
   let SESSION_COOKIE_NAME: typeof import("../auth").SESSION_COOKIE_NAME;
@@ -45,9 +47,12 @@ describe("project attribution (integration)", () => {
     ({ prisma } = await import("@/lib/prisma"));
     ({ persistExternalUsageEvents } = await import("../external-usage-events"));
     ({ computeProjectBudgetStatus } = await import("../budget-status"));
-    ({ resolveProjectIdsByName, backfillProjectIdFromMetadataName } = await import(
-      "../project-resolver"
-    ));
+    ({
+      resolveProjectIdsByName,
+      backfillProjectIdFromMetadataName,
+      backfillUnattributedProjectIds,
+      __resetProjectBackfillResumeForTests,
+    } = await import("../project-resolver"));
     ({ POST: createProject } = await import("@/app/api/projects/route"));
     ({ createSessionToken, SESSION_COOKIE_NAME } = await import("../auth"));
   }, 60_000);
@@ -64,6 +69,7 @@ describe("project attribution (integration)", () => {
       await import("../budget-status");
     __resetBudgetStatusCacheForTests();
     __resetProjectBudgetStatusCacheForTests();
+    __resetProjectBackfillResumeForTests();
     await prisma.externalUsageEvent.deleteMany();
     await prisma.providerProjectAllocation.deleteMany();
     await prisma.providerPlan.deleteMany();
@@ -652,5 +658,159 @@ describe("project attribution (integration)", () => {
       unpricedEventCount: 1,
       unclassifiedCostEventCount: 0,
     });
+  });
+
+  it("attributes metadata containing project.name dotted spelling", async () => {
+    const project = await prisma.project.create({
+      data: { name: "Dotted Project", nameKey: "dotted project" },
+    });
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "dotted-spelling-1",
+        sourceApp: "claude-code",
+        provider: "anthropic",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 5,
+        occurredAt,
+        metadata: { "project.name": "Dotted Project" },
+      },
+    ]);
+
+    const res = await backfillUnattributedProjectIds({ batchSize: 10 });
+    expect(res.updated).toBe(1);
+
+    const event = await prisma.externalUsageEvent.findUniqueOrThrow({
+      where: { idempotencyKey: "dotted-spelling-1" },
+      select: { projectId: true },
+    });
+    expect(event.projectId).toBe(project.id);
+  });
+
+  it("paginates and resumes keyset sweep over multiple batches without re-scanning head", async () => {
+    const projA = await prisma.project.create({
+      data: { name: "Project Alpha", nameKey: "project alpha" },
+    });
+
+    const events = [];
+    for (let i = 1; i <= 5; i++) {
+      events.push({
+        idempotencyKey: `paged-event-${i}`,
+        sourceApp: "socratic-trade",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 1,
+        occurredAt,
+        metadata: { project: "Project Alpha" },
+      });
+    }
+    await persistExternalUsageEvents(events);
+
+    // Call 1: batchSize 2, maxBatches 1 -> scans 2, updates 2, truncated true
+    const pass1 = await backfillUnattributedProjectIds({ batchSize: 2, maxBatches: 1 });
+    expect(pass1.scanned).toBe(2);
+    expect(pass1.updated).toBe(2);
+    expect(pass1.truncated).toBe(true);
+
+    // Call 2: batchSize 2, maxBatches 1 -> scans 2, updates 2, truncated true
+    const pass2 = await backfillUnattributedProjectIds({ batchSize: 2, maxBatches: 1 });
+    expect(pass2.scanned).toBe(2);
+    expect(pass2.updated).toBe(2);
+    expect(pass2.truncated).toBe(true);
+
+    // Call 3: batchSize 2, maxBatches 1 -> scans 1, updates 1, truncated false
+    const pass3 = await backfillUnattributedProjectIds({ batchSize: 2, maxBatches: 1 });
+    expect(pass3.scanned).toBe(1);
+    expect(pass3.updated).toBe(1);
+    expect(pass3.truncated).toBe(false);
+
+    expect(await prisma.externalUsageEvent.count({ where: { projectId: projA.id } })).toBe(5);
+  });
+
+  it("attributes events for multiple projects in one pass while leaving unknown names null", async () => {
+    const proj1 = await prisma.project.create({ data: { name: "Project One" } });
+    const proj2 = await prisma.project.create({ data: { name: "Project Two" } });
+
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "multi-1",
+        sourceApp: "app",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 2,
+        occurredAt,
+        metadata: { project: "Project One" },
+      },
+      {
+        idempotencyKey: "multi-2",
+        sourceApp: "app",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 3,
+        occurredAt,
+        metadata: { project: "Project Two" },
+      },
+      {
+        idempotencyKey: "multi-unknown",
+        sourceApp: "app",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 4,
+        occurredAt,
+        metadata: { project: "Unknown Project" },
+      },
+    ]);
+
+    const res = await backfillUnattributedProjectIds();
+    expect(res.updated).toBe(2);
+
+    expect(
+      (await prisma.externalUsageEvent.findUniqueOrThrow({ where: { idempotencyKey: "multi-1" } })).projectId
+    ).toBe(proj1.id);
+    expect(
+      (await prisma.externalUsageEvent.findUniqueOrThrow({ where: { idempotencyKey: "multi-2" } })).projectId
+    ).toBe(proj2.id);
+    expect(
+      (await prisma.externalUsageEvent.findUniqueOrThrow({ where: { idempotencyKey: "multi-unknown" } })).projectId
+    ).toBeNull();
+  });
+
+  it("executes project attribution backfill BEFORE retention pruning during maintenance", async () => {
+    const { runDataRetentionMaintenance } = await import("../data-retention");
+    const proj = await prisma.project.create({
+      data: { name: "Retention Project", nameKey: "retention-project" },
+    });
+
+    const oldDate = new Date(Date.now() - 100 * 86_400_000);
+    await persistExternalUsageEvents([
+      {
+        idempotencyKey: "retention-order-1",
+        sourceApp: "test-app",
+        provider: "openai",
+        projectId: null,
+        billingMode: "actual",
+        metricType: "cost",
+        costUsd: 10,
+        occurredAt: oldDate,
+        metadata: { project: "Retention Project" },
+      },
+    ]);
+
+    await runDataRetentionMaintenance();
+
+    const rollups = await prisma.externalUsageEventDailyRollup.findMany({
+      where: { sourceApp: "test-app" },
+    });
+    expect(rollups.length).toBeGreaterThan(0);
+    expect(rollups[0].projectId).toBe(proj.id);
   });
 });

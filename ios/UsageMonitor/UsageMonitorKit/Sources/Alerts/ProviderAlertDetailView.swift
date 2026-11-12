@@ -38,6 +38,13 @@ struct ProviderAlertDetailView: View {
 
             statsGrid
 
+            if let records = provider.externalBilling, !records.isEmpty {
+                ProviderAlertBreakdownCard(
+                    providerTitle: provider.title,
+                    records: records
+                )
+            }
+
             alertsSection
         }
         .navigationTitle(provider.title)
@@ -111,12 +118,19 @@ struct ProviderAlertDetailView: View {
                 value: CurrencyFormat.usd(provider.projectedEomUsd),
                 systemImage: "chart.line.uptrend.xyaxis"
             )
-            if let remaining = provider.remainingUsd {
+            if provider.hasBudget, let remaining = provider.remainingUsd {
                 StatTile(
-                    label: remaining < 0 ? "Over budget" : "Remaining",
+                    label: remaining < 0 ? "Over Budget" : "Remaining",
                     value: CurrencyFormat.usd(abs(remaining)),
                     systemImage: remaining < 0 ? "exclamationmark.triangle.fill" : "banknote",
                     status: remaining < 0 ? .danger : .ok
+                )
+            } else if !provider.hasBudget {
+                StatTile(
+                    label: "Budget",
+                    value: "no budget set",
+                    systemImage: "banknote",
+                    status: .neutral
                 )
             }
             if let budget = provider.monthlyBudgetUsd, budget > 0 {
@@ -172,10 +186,10 @@ struct ProviderAlertDetailView: View {
 
     private var statusLabel: String {
         switch provider.status {
-        case .ok: return "On track"
-        case .warning: return "Approaching budget"
-        case .exceeded: return "Over budget"
-        case .unconfigured: return "No budget set"
+        case .ok: return "On Track"
+        case .warning: return "Approaching Budget"
+        case .exceeded: return "Over Budget"
+        case .unconfigured: return "No Budget Set"
         }
     }
 

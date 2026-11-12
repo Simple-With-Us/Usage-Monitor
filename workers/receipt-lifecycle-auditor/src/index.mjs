@@ -1,4 +1,5 @@
 import { validateReceiptLifecycleRules } from "../../receipt-lifecycle.mjs";
+import { guardOff, guardOffResponse } from "./budget-guard.mjs";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const AUDIT_TIMEOUT_MS = 8_000;
@@ -59,11 +60,15 @@ export async function auditReceiptLifecycle(env) {
           Authorization: `Bearer ${env.RECEIPT_LIFECYCLE_AUDIT_TOKEN}`,
           Accept: "application/json",
         },
-        redirect: "error",
+        // Workers fetch does not implement redirect:"error"; use manual and fail on 3xx.
+        redirect: "manual",
         signal: AbortSignal.timeout(AUDIT_TIMEOUT_MS),
       },
     );
-    if (!response.ok) throw new Error("lifecycle_api_failure");
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`lifecycle_api_redirect:${response.status}`);
+    }
+    if (!response.ok) throw new Error(`lifecycle_api_failure:${response.status}`);
 
     const body = await readBoundedJson(response);
     return {
@@ -128,6 +133,7 @@ export class LifecycleAuditState {
 }
 
 async function handleFetch(request, env) {
+  if (guardOff(env)) return guardOffResponse();
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/status") {
     const response = await auditStateStub(env).fetch(`https://receipt-lifecycle-auditor.internal${AUDIT_STATE_PATH}`);
@@ -148,6 +154,7 @@ async function handleFetch(request, env) {
 }
 
 async function handleScheduled(_controller, env, context) {
+  if (guardOff(env)) return;
   context.waitUntil(auditAndPersist(env));
 }
 

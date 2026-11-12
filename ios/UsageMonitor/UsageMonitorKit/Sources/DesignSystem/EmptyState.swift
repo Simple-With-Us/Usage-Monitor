@@ -26,7 +26,7 @@ public struct EmptyState: View {
 
     public var body: some View {
         VStack(spacing: Theme.Spacing.lg) {
-            Image(systemName: systemImage)
+            Image(safeSystemName: systemImage, fallback: "tray")
                 .font(.system(size: 34, weight: .semibold))
                 .foregroundStyle(Theme.Colors.accent)
                 .frame(width: 76, height: 76)

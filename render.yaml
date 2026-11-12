@@ -1,3 +1,18 @@
+# =============================================================================
+# RETIRED — ROLLBACK HOST ONLY.
+#
+# Production runs on the Oracle A1 VM (Docker + Caddy) and deploys via the
+# host's auto-deploy timer; see DEPLOY.md and deploy/oracle/README.md. This
+# Blueprint is kept functional solely so the suspended Render service
+# `api-usage-monitor` can be revived in a deliberate, owner-directed rollback.
+# The Oracle deploy gate verifies on every deploy that the live service stays
+# user-suspended, auto-deploy stays disabled, and USAGE_SCHEDULER_ENABLED
+# stays "false" — do not resume the service or re-enable auto-deploy outside
+# a rollback, and never point DNS back at its stale database without
+# restoring the latest verified Garage lineage first. Historical runbook:
+# deploy/render/RETIRED-rollback.md.
+# =============================================================================
+#
 # Custom domain: usage.jays.services
 # DNS is managed by Cloudflare (CNAME to api-usage-monitor.onrender.com, proxied)
 # SSL: Cloudflare "Full (strict)" mode + Render's own cert

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { isClaudeCodeAnalyticsTelemetry } from "@/lib/external-usage-events";
+import { isSubscriptionAnalyticsTelemetry } from "@/lib/external-usage-events";
 import { isReceiptCashEvent } from "@/lib/receipt-cash";
 import { resolveProviderIdentity } from "@/lib/provider-identity";
 
@@ -24,7 +24,7 @@ export type DailySeriesProviderIdentity = {
  * **provider id**, using the same `resolveProviderIdentity` ownership as
  * budget-status pushed-cost attribution (exact name before alias).
  *
- * Excludes subscription charges, prepaid receipt cash, Claude Code
+ * Excludes subscription charges, prepaid receipt cash, subscription-seat
  * API-equivalent estimates, and status metrics.
  *
  * Returns dense arrays from day 1 of the UTC month through `now`'s UTC day
@@ -56,6 +56,15 @@ export async function loadMtdDailyVariableUsageByProviderId(
       label: true,
       metricType: true,
       billingMode: true,
+      // Receipt identity needs the FULL marker set (keyRef + unit +
+      // confidence + idempotencyKey) — passing only sourceApp/service/label
+      // to isReceiptCashEvent can never match and silently leaked prepaid
+      // receipt deposits into the "variable usage" daily series, inflating
+      // trend forecasts after every top-up (S2 regression class).
+      keyRef: true,
+      unit: true,
+      confidence: true,
+      idempotencyKey: true,
       costUsd: true,
       occurredAt: true,
     },
@@ -74,7 +83,7 @@ export async function loadMtdDailyVariableUsageByProviderId(
   for (const row of rows) {
     if (row.costUsd == null || !(row.costUsd > 0)) continue;
     if (row.metricType === SUBSCRIPTION_METRIC_TYPE) continue;
-    if (isClaudeCodeAnalyticsTelemetry(row)) continue;
+    if (isSubscriptionAnalyticsTelemetry(row)) continue;
     if (
       isReceiptCashEvent({
         sourceApp: row.sourceApp,
@@ -82,6 +91,10 @@ export async function loadMtdDailyVariableUsageByProviderId(
         label: row.label,
         metricType: row.metricType,
         billingMode: row.billingMode,
+        keyRef: row.keyRef,
+        unit: row.unit,
+        confidence: row.confidence,
+        idempotencyKey: row.idempotencyKey,
       })
     ) {
       continue;
@@ -102,6 +115,47 @@ export async function loadMtdDailyVariableUsageByProviderId(
   }
 
   return byProviderId;
+}
+
+/**
+ * Input sample for buildSnapshotVariableDayPeaks — scalar-only (never the
+ * rawData blob, see the #392 OOM notes in budget-status.ts).
+ */
+export interface SnapshotVariableCostSample {
+  providerId: string;
+  fetchedAt: Date;
+  totalCost: number | null;
+  fixedCostIncludedUsd: number | null;
+}
+
+/**
+ * Collapse cumulative MTD poll snapshots into one VARIABLE-cost peak per
+ * (providerId, UTC day) — the input shape `dailyIncrementsFromSnapshotPeaks`
+ * diffs into a daily incremental series for trend-aware EOM forecasting
+ * (S4). Variable = totalCost minus the fixed-cost portion the adapter
+ * declared (clamped the same way budget-status clamps it), so subscription
+ * / fixed fees never leak into the usage trend.
+ */
+export function buildSnapshotVariableDayPeaks(
+  rows: readonly SnapshotVariableCostSample[]
+): Map<string, Map<string, number>> {
+  const byProvider = new Map<string, Map<string, number>>();
+  for (const row of rows) {
+    if (row.totalCost == null) continue;
+    const fixed = Math.max(
+      0,
+      Math.min(row.fixedCostIncludedUsd ?? 0, row.totalCost)
+    );
+    const variable = Math.max(0, row.totalCost - fixed);
+    const dayKey = row.fetchedAt.toISOString().slice(0, 10);
+    let days = byProvider.get(row.providerId);
+    if (!days) {
+      days = new Map();
+      byProvider.set(row.providerId, days);
+    }
+    days.set(dayKey, Math.max(days.get(dayKey) ?? 0, variable));
+  }
+  return byProvider;
 }
 
 /**

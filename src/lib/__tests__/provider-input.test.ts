@@ -127,3 +127,39 @@ describe("self-burning probe refresh floors (E20)", () => {
     ).toBe(1440);
   });
 });
+
+describe("provider allocations input", () => {
+  it("accepts valid distinct allocation entries on create and update", () => {
+    const allocations = [
+      { projectId: "proj-1", percentage: 40 },
+      { projectId: "proj-2", percentage: 60 },
+    ];
+    expect(
+      parseProviderCreateInput({ name: "openai", displayName: "OpenAI", allocations }).allocations
+    ).toEqual(allocations);
+    expect(parseProviderUpdateInput({ allocations }).allocations).toEqual(allocations);
+  });
+
+  it("rejects duplicate projectIds on create and update", () => {
+    const allocations = [
+      { projectId: "proj-1", percentage: 30 },
+      { projectId: "proj-1", percentage: 20 },
+    ];
+    expect(() =>
+      parseProviderCreateInput({ name: "openai", displayName: "OpenAI", allocations })
+    ).toThrow("allocations[1].projectId is duplicated");
+    expect(() => parseProviderUpdateInput({ allocations })).toThrow(
+      "allocations[1].projectId is duplicated"
+    );
+  });
+
+  it("rejects arrays exceeding MAX_PROVIDER_ALLOCATIONS (100 entries)", () => {
+    const allocations = Array.from({ length: 101 }, (_, i) => ({
+      projectId: `proj-${i}`,
+      percentage: 0.5,
+    }));
+    expect(() =>
+      parseProviderCreateInput({ name: "openai", displayName: "OpenAI", allocations })
+    ).toThrow("allocations cannot contain more than 100 entries");
+  });
+});

@@ -82,7 +82,7 @@ describe("ProviderIntegrationDrawer", () => {
       })
     );
 
-    expect(html).toContain("Not applicable · push/manual");
+    expect(html).toContain("Manually only · no fetch");
     expect(html).not.toContain(">Active<");
   });
 
@@ -108,7 +108,7 @@ describe("ProviderIntegrationDrawer", () => {
       })
     );
 
-    expect(html).toContain("Skipped · no organization Admin API");
+    expect(html).toContain("Manually only · no fetch");
     expect(html).toContain("Legacy Messages credential");
     expect(html).toContain("not polled");
   });

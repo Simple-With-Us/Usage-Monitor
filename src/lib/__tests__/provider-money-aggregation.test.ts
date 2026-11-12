@@ -304,3 +304,101 @@ describe("provider billing-account money aggregation", () => {
     expect(result.spentUsd).toBeCloseTo(20);
   });
 });
+
+describe("S2/S6: receipt floor removal + authoritative fixed accrual", () => {
+  it("does not floor family projection at receipt cash after a top-up (S2)", () => {
+    // Two members of one billing account: $5 observed usage, $500 prepaid
+    // top-up. Pre-fix the family projection floored at $500; now receipts are
+    // funding coverage only and the projection follows the usage forecast.
+    const result = aggregateProviderFamilyMoney(
+      [
+        member("a", {
+          snapshotCostUsd: 5,
+          spentUsd: 5,
+          receiptCashPaidUsd: 500,
+        }),
+        member("b", {
+          snapshotCostUsd: null,
+          snapshotCostFetchedAt: null,
+          spentUsd: 0,
+          receiptCashPaidUsd: 0,
+        }),
+      ],
+      NOW // 2026-07-18T12:00Z → day 18.5 of 31
+    );
+    expect(result.exact).toBe(true);
+    // Linear usage forecast: 5 / 18.5 * 31 ≈ 8.38 — nowhere near $500.
+    expect(result.projectedEomUsd).toBeCloseTo((5 / 18.5) * 31, 6);
+    expect(result.projectedEomUsd!).toBeLessThan(100);
+  });
+
+  it("consumes authoritative fixedAccruedUsd so portfolio totals equal budget-status totals (S6)", () => {
+    // Fixture shaped after linked subscriptions + a charge correction:
+    // member A's $25 snapshot fixed is fully deduped against its linked
+    // materialized subscription (linkedFixedDedupeUsd=25); budget-status's
+    // authoritative reconcile yields fixedAccruedUsd=25 for A. Member B has
+    // no snapshot and a correction-adjusted accrual of $7 that the legacy
+    // local re-derivation cannot see (it would compute $0 for B).
+    const authoritative = [
+      member("account-a", {
+        billingAccount: {
+          matchKey: "billing-account-a",
+          evidence: "explicit_account",
+        },
+        snapshotCostUsd: 30,
+        snapshotFixedCostIncludedUsd: 25,
+        linkedFixedDedupeUsd: 25,
+        subscriptionMonthToDateUsd: 25,
+        pushedMonthToDateUsd: 25,
+        fixedAccruedUsd: 25,
+        spentUsd: 30,
+        projectedEomUsd: 34,
+      }),
+      member("account-b", {
+        billingAccount: {
+          matchKey: "billing-account-b",
+          evidence: "explicit_account",
+        },
+        snapshotCostUsd: null,
+        snapshotCostFetchedAt: null,
+        fixedAccruedUsd: 7,
+        spentUsd: 7,
+        projectedEomUsd: 9,
+      }),
+    ];
+    const family = aggregateProviderFamilyMoney(authoritative, NOW);
+    // A: fixed 25 + variable max(30-25, 0) = 30 (A's own spentUsd).
+    // B: fixed 7 (authoritative) + variable 0 = 7 (B's own spentUsd).
+    expect(family.spentUsd).toBe(30 + 7);
+
+    // The portfolio rollup over the same members equals the sum of the
+    // per-provider budget-status spend — no drift between the two
+    // implementations.
+    const portfolio = aggregateProviderPortfolioMoney(authoritative, NOW);
+    expect(portfolio.totalCost).toBeCloseTo(30 + 7);
+    expect(portfolio.ambiguousCostFamilyCount).toBe(0);
+  });
+
+  it("keeps the legacy fixed derivation when members lack authoritative accruals", () => {
+    const legacy = aggregateProviderFamilyMoney(
+      [
+        member("a", {
+          fixedMonthlyCostUsd: 20,
+          subscriptionMonthToDateUsd: 20,
+          snapshotCostUsd: 0,
+          spentUsd: 20,
+          fixedAccruedUsd: undefined,
+        }),
+        member("b", {
+          snapshotCostUsd: 0,
+          spentUsd: 0,
+          fixedAccruedUsd: undefined,
+        }),
+      ],
+      NOW
+    );
+    // Same result as the pre-S6 simplified derivation: plan fixed suppressed
+    // by subscription MTD → $20.
+    expect(legacy.spentUsd).toBeCloseTo(20);
+  });
+});

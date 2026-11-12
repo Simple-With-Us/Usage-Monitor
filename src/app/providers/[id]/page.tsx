@@ -5,7 +5,11 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import UsageChart from "@/components/UsageChart";
 import BalanceBadge from "@/components/BalanceBadge";
-import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import ExternalBillingDetails, {
+  type ExternalBillingRecord,
+} from "@/components/ExternalBillingDetails";
+import { SentryUsageTable } from "@/components/SentryUsageCard";
+import type { SentryCategoryTotal } from "@/lib/sentry-usage-categories";
 import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 import PaidServicesPanel from "@/components/PaidServicesPanel";
 import type { SubscriptionRow } from "@/components/SubscriptionsPanel";
@@ -16,6 +20,13 @@ import type {
 import { usageUnitLabelForProvider } from "@/lib/provider-definitions";
 import { useDisplayDensity } from "@/lib/display-density";
 import { costCoverageHelpText } from "@/lib/cost-coverage-help";
+import {
+  formatBudgetRunout,
+  formatCurrency,
+  formatNumber,
+  projectedStatusLabel,
+  type ProviderBudgetIntel,
+} from "@/lib/format";
 import { CostCoverageCaveatBanner, spendCoverageNoteText } from "./cost-coverage-caveat";
 import ProviderConnectionChecklist, {
   buildProviderConnectionChecklist,
@@ -99,6 +110,10 @@ interface Provider {
   linkedFixedDedupeUsd?: number;
   fixedCostConflict?: boolean;
   externalBilling?: ExternalBillingRecord[];
+  sentryUsage?: {
+    byCategory: SentryCategoryTotal[];
+    billingCost: false;
+  } | null;
   latestSnapshot?: {
     balance: number | null;
     totalCost: number | null;
@@ -148,6 +163,9 @@ export default function ProviderDetailPage() {
   const [provider, setProvider] = useState<Provider | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
+  // S9/S10: projection intelligence (pace + budget runout) from the
+  // budget-status DTO; best-effort, the page renders fine without it.
+  const [budgetIntel, setBudgetIntel] = useState<ProviderBudgetIntel | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -164,10 +182,14 @@ export default function ProviderDetailPage() {
     setError("");
     setSnapshotWarning("");
     try {
-      const [providerResult, snapshotsResult, subscriptionsResult] = await Promise.allSettled([
+      const [providerResult, snapshotsResult, subscriptionsResult, budgetStatusResult] = await Promise.allSettled([
         fetchJson<Provider>(`/api/providers/${id}`, "provider"),
         fetchJson<Snapshot[]>(`/api/snapshots?providerId=${id}&days=${rangeDays}`, "snapshots"),
         fetchJson<SubscriptionRow[]>("/api/subscriptions", "paid services"),
+        fetchJson<{ providers?: Array<{ id?: string } & ProviderBudgetIntel> }>(
+          "/api/budget-status",
+          "budget status"
+        ),
       ]);
 
       if (providerResult.status === "fulfilled") {
@@ -196,6 +218,22 @@ export default function ProviderDetailPage() {
           [current, "Tracked subscriptions are temporarily unavailable."].filter(Boolean).join(" ")
         );
       }
+
+      // Projection intelligence is additive — never warn when it is missing.
+      if (budgetStatusResult.status === "fulfilled") {
+        const row = (budgetStatusResult.value.providers ?? []).find(
+          (entry) => entry.id === id
+        );
+        setBudgetIntel(
+          row
+            ? {
+                projectedStatus: row.projectedStatus ?? null,
+                projectedRunoutDate: row.projectedRunoutDate ?? null,
+                daysUntilBudgetExhausted: row.daysUntilBudgetExhausted ?? null,
+              }
+            : null
+        );
+      }
     } finally {
       loadedOnce.current = true;
       setLoading(false);
@@ -215,13 +253,11 @@ export default function ProviderDetailPage() {
     return severityRank[left.severity] - severityRank[right.severity] || left.message.localeCompare(right.message);
   });
 
-  const formatUsd = (amount: number | null | undefined) => {
-    if (amount == null) return "--";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(amount);
-  };
+  const formatUsd = (amount: number | null | undefined) => formatCurrency(amount);
+
+  // S9/S10 display strings (null when the budget-status DTO has no signal).
+  const paceLabel = projectedStatusLabel(budgetIntel?.projectedStatus ?? null);
+  const runoutLabel = budgetIntel ? formatBudgetRunout(budgetIntel) : null;
 
   if (loading) {
     return (
@@ -391,6 +427,27 @@ export default function ProviderDetailPage() {
         variant="provider"
       />
 
+      {provider.sentryUsage && (
+        <section className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+          <div className="border-b border-gray-100 px-4 py-3 sm:px-6 dark:border-gray-700">
+            <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+              Sentry Usage
+            </h2>
+            <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Month-to-date accepted and rate-limited counts.&nbsp; Not invoice spend or prepaid credits.
+            </p>
+          </div>
+          <SentryUsageTable rows={provider.sentryUsage.byCategory} />
+        </section>
+      )}
+
+      {provider.externalBilling && provider.externalBilling.length > 0 && (
+        <ExternalBillingDetails
+          records={provider.externalBilling}
+          refreshIntervalMin={provider.refreshIntervalMin}
+        />
+      )}
+
       {/* Summary stats */}
       <div
         className={`grid grid-cols-1 sm:grid-cols-2 ${
@@ -487,8 +544,22 @@ export default function ProviderDetailPage() {
               ? formatUsd(provider.projectedEomUsd ?? provider.estimatedMonthlyCostUsd)
               : "Unavailable"}
           </p>
+          {paceLabel && (
+            <p
+              className={`mt-1 text-[10px] font-medium ${
+                budgetIntel?.projectedStatus === "exceeded"
+                  ? "text-red-600 dark:text-red-300"
+                  : "text-amber-600 dark:text-amber-300"
+              }`}
+            >
+              {paceLabel}
+            </p>
+          )}
+          {runoutLabel && (
+            <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">{runoutLabel}</p>
+          )}
           {density === "comfortable" && (
-            <p className="text-[10px] uppercase text-gray-400 dark:text-gray-500">
+            <p className="text-[10px] uppercase text-gray-500 dark:text-gray-400">
               {spendCoverage === "partial" ? "excludes unpriced usage" : provider.billingMode}
             </p>
           )}
@@ -497,18 +568,14 @@ export default function ProviderDetailPage() {
           <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Credits</p>
             <p className="text-lg font-semibold text-purple-600 dark:text-purple-300">
-              {latestReading?.credits != null
-                ? new Intl.NumberFormat("en-US").format(latestReading.credits)
-                : "--"}
+              {formatNumber(latestReading?.credits ?? null)}
             </p>
           </div>
         )}
         <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
           <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Latest reported {usageUnitLabel}</p>
           <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {latestReading?.totalRequests != null
-              ? new Intl.NumberFormat("en-US").format(latestReading.totalRequests)
-              : "--"}
+            {formatNumber(latestReading?.totalRequests ?? null)}
           </p>
         </div>
       </div>
@@ -516,10 +583,10 @@ export default function ProviderDetailPage() {
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & alert policy</h2>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & Alert Policy</h2>
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Owner-defined guardrails; these are not provider-reported plan terms.</p>
           </div>
-          <Link href="/settings?tab=connections" className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+          <Link href={`/settings?tab=connections&edit=${encodeURIComponent(provider.id)}`} className="text-xs font-semibold text-accent hover:opacity-90">
             Edit connection
           </Link>
         </div>
@@ -533,11 +600,7 @@ export default function ProviderDetailPage() {
           <div>
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Request alert</p>
             <p className="font-medium text-gray-900 dark:text-gray-100">
-              {provider.plan?.monthlyRequestLimit != null
-                ? new Intl.NumberFormat("en-US").format(
-                    provider.plan.monthlyRequestLimit
-                  )
-                : "--"}
+              {formatNumber(provider.plan?.monthlyRequestLimit ?? null)}
             </p>
           </div>
           <div>
@@ -547,9 +610,7 @@ export default function ProviderDetailPage() {
           <div>
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Low credits alert</p>
             <p className="font-medium text-gray-900 dark:text-gray-100">
-              {provider.plan?.lowCredits != null
-                ? new Intl.NumberFormat("en-US").format(provider.plan.lowCredits)
-                : "--"}
+              {formatNumber(provider.plan?.lowCredits ?? null)}
             </p>
           </div>
         </div>
@@ -591,7 +652,10 @@ export default function ProviderDetailPage() {
               {formatUsd(provider.receiptCashPaidUsd ?? 0)}
             </dd>
             <dd className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
-              {provider.receiptCashEventCount ?? 0} exact receipt{provider.receiptCashEventCount === 1 ? "" : "s"}
+              {provider.receiptCashEventCount ?? 0} exact receipt
+              {provider.receiptCashEventCount === 1 ? "" : "s"}
+              {" · "}
+              matches existing cash are evidence-only (no double-count)
             </dd>
           </div>
           <div>
@@ -673,7 +737,7 @@ export default function ProviderDetailPage() {
           </div>
         </div>
         {snapshots.length === 0 ? (
-          <div className="px-6 py-8 text-center text-sm text-gray-400 dark:text-gray-500">
+          <div className="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
             No snapshots recorded yet
           </div>
         ) : (
@@ -714,24 +778,15 @@ export default function ProviderDetailPage() {
                       <BalanceBadge amount={s.balance} />
                     </td>
                     <td data-label="Reported cost" className="px-6 py-3 text-right text-amber-600 dark:text-amber-300">
-                      {s.totalCost != null
-                        ? new Intl.NumberFormat("en-US", {
-                            style: "currency",
-                            currency: "USD",
-                          }).format(s.totalCost)
-                        : "--"}
+                      {formatCurrency(s.totalCost)}
                     </td>
                     {hasCredits && (
                       <td data-label="Credits" className="px-6 py-3 text-right text-purple-600 dark:text-purple-300">
-                        {s.credits != null
-                          ? new Intl.NumberFormat("en-US").format(s.credits)
-                          : "--"}
+                        {formatNumber(s.credits)}
                       </td>
                     )}
                     <td data-label={`Reported ${usageUnitLabel}`} className="px-6 py-3 text-right text-gray-600 dark:text-gray-300">
-                      {s.totalRequests != null
-                        ? new Intl.NumberFormat("en-US").format(s.totalRequests)
-                        : "--"}
+                      {formatNumber(s.totalRequests)}
                     </td>
                   </tr>
                 ))}

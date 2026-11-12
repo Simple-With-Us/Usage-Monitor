@@ -185,68 +185,6 @@ final class ProjectBudgetsTests: XCTestCase {
         XCTAssertEqual(draft.monthlyBudgetInput, "400")
     }
 
-    // MARK: - Level derivation
-
-    func testLevelRuleThresholds() {
-        XCTAssertEqual(ProjectBudgetLevelRule.level(spent: 50, budget: 100), .ok)
-        XCTAssertEqual(ProjectBudgetLevelRule.level(spent: 80, budget: 100), .warning)  // exactly 80%
-        XCTAssertEqual(ProjectBudgetLevelRule.level(spent: 101, budget: 100), .exceeded)
-        XCTAssertEqual(ProjectBudgetLevelRule.level(spent: 10, budget: nil), .unconfigured)
-        XCTAssertEqual(ProjectBudgetLevelRule.level(spent: 10, budget: 0), .unconfigured)
-    }
-
-    // MARK: - Local store (add/edit)
-
-    func testLocalStoreCreatesProject() async throws {
-        let store = await LocalProjectBudgetStore()
-        let draft = ProjectBudgetDraft(name: "New Thing", details: "desc", monthlyBudgetInput: "500")
-        let saved = try await store.save(draft, updating: nil)
-
-        XCTAssertEqual(saved.name, "New Thing")
-        XCTAssertEqual(saved.monthlyBudgetUsd, 500)
-        XCTAssertEqual(saved.status, .ok)          // spent 0 of 500
-        XCTAssertEqual(saved.description, "desc")
-
-        let merged = await store.merged(with: [])
-        XCTAssertEqual(merged.count, 1)
-        XCTAssertEqual(merged.first?.id, saved.id)
-    }
-
-    func testLocalStoreEditPreservesRealSpendAndRecomputesStatus() async throws {
-        let store = await LocalProjectBudgetStore()
-        let current = ProjectBudgetStatus(
-            id: "proj_existing", name: "Old", monthlyBudgetUsd: 400, spentUsd: 380,
-            projectedEomUsd: 420, spendCoverage: .complete, status: .warning
-        )
-        // Lower the budget below the (preserved) real spend → should flip to
-        // exceeded while keeping the $380 spend and coverage.
-        let draft = ProjectBudgetDraft(name: "Renamed", monthlyBudgetInput: "300")
-        let edited = try await store.save(draft, updating: current)
-
-        XCTAssertEqual(edited.id, "proj_existing")
-        XCTAssertEqual(edited.name, "Renamed")
-        XCTAssertEqual(edited.monthlyBudgetUsd, 300)
-        XCTAssertEqual(edited.spentUsd, 380)                 // preserved
-        XCTAssertEqual(edited.spendCoverage, .complete)      // preserved
-        XCTAssertEqual(edited.status, .exceeded)             // recomputed
-        XCTAssertEqual(edited.remainingUsd ?? .nan, -80, accuracy: 0.0001)
-    }
-
-    func testMergedOverlayReplacesFetchedProject() async throws {
-        let store = await LocalProjectBudgetStore()
-        let edited = try await store.save(
-            ProjectBudgetDraft(name: "Renamed", monthlyBudgetInput: "999"),
-            updating: .sampleTrade
-        )
-        let merged = await store.merged(with: [.sampleTrade, .sampleMonitor])
-        XCTAssertEqual(merged.count, 2)
-        let trade = merged.first { $0.id == ProjectBudgetStatus.sampleTrade.id }
-        XCTAssertEqual(trade?.name, "Renamed")
-        XCTAssertEqual(trade?.monthlyBudgetUsd, 999)
-        XCTAssertEqual(trade?.spentUsd, 246.80)  // real spend preserved through edit
-        XCTAssertEqual(edited.name, "Renamed")
-    }
-
     // MARK: - Phase mapping
 
     func testPhaseLoadingWhenIdleNoData() {

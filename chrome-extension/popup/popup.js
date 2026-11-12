@@ -64,6 +64,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   openAppBtn.addEventListener('click', () => {
-    window.location.href = 'usagemonitor://dashboard';
+    window.location.href = 'usageclientmonitor://dashboard';
   });
 });

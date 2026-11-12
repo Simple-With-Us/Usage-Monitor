@@ -27,6 +27,7 @@ public struct SectionHeader<Accessory: View>: View {
                     Text(subtitle)
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: Theme.Spacing.sm)

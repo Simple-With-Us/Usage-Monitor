@@ -8,9 +8,10 @@ import Networking
 ///
 /// Per-project budget tracking: a list of projects with spend-vs-budget meters
 /// and a project detail screen. Budget data comes from the shared
-/// `BudgetStore` (the single authenticated fetch). **Add/edit is disabled**
-/// until a bearer-reachable mutation API exists — local-only Save previously
-/// looked real but never hit the monitor (money-path hazard).
+/// `BudgetStore` (the single authenticated fetch). Add/edit/delete run through
+/// the session-gated monitor API (`POST/PUT/DELETE /api/projects`) via
+/// `ProjectManagementStore` — offered only while a dashboard session is active,
+/// exactly like the provider/subscription management in Settings.
 ///
 /// Public entry point — keep `ProjectBudgetsRootView` + `public init()` stable.
 public struct ProjectBudgetsRootView: View {
@@ -18,6 +19,8 @@ public struct ProjectBudgetsRootView: View {
     /// Optional so previews (store-only) don't trap; the app injects it.
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
     @State private var detailID: String?
+    @State private var managementStore = ProjectManagementStore()
+    @State private var editorContext: ProjectEditorContext?
 
     public init() {}
 
@@ -39,14 +42,42 @@ public struct ProjectBudgetsRootView: View {
                 onRetry: { Task { await store.load() } },
                 onConnect: { env?.selectTab?(.settings) },
                 onSelect: { detailID = $0.id },
-                onAdd: { /* mutations disabled until server write path exists */ }
+                onAdd: managementStore.canManage ? { editorContext = .add } : nil
             )
             .navigationTitle(AppTab.projects.title)
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $detailID) { id in
                 projectDetail(id: id)
             }
+            .toolbar {
+                if managementStore.canManage {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            Haptics.tap()
+                            editorContext = .add
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .accessibilityLabel("Add project")
+                    }
+                }
+            }
+            .sheet(item: $editorContext) { context in
+                if let env {
+                    ProjectBudgetEditView(
+                        existing: context.existing,
+                        store: managementStore,
+                        client: env.apiClient,
+                        budgetStore: store
+                    )
+                }
+            }
             .task { await store.loadIfNeeded() }
+            .task(id: env?.accessIdentityRevision ?? 0) { [apiClient = env?.apiClient] in
+                if let apiClient {
+                    await managementStore.probeCapabilities(using: apiClient)
+                }
+            }
         }
     }
 
@@ -55,7 +86,7 @@ public struct ProjectBudgetsRootView: View {
         if let project = mergedProjects.first(where: { $0.id == id }) {
             ProjectBudgetDetailView(
                 presentation: ProjectBudgetPresentation(project),
-                onEdit: nil
+                onEdit: managementStore.canManage ? { editorContext = .edit(project) } : nil
             )
         } else {
             EmptyState(
@@ -66,6 +97,24 @@ public struct ProjectBudgetsRootView: View {
         }
     }
 
+}
+
+/// What the add/edit sheet is editing: a new project, or an existing one.
+private enum ProjectEditorContext: Identifiable {
+    case add
+    case edit(ProjectBudgetStatus)
+
+    var id: String {
+        switch self {
+        case .add: return "add"
+        case .edit(let project): return project.id
+        }
+    }
+
+    var existing: ProjectBudgetStatus? {
+        guard case .edit(let project) = self else { return nil }
+        return project
+    }
 }
 
 // MARK: - Content (pure, value-driven — previewable without a live store)
@@ -83,7 +132,7 @@ struct ProjectBudgetsContentView: View {
     /// in previews.
     var onConnect: (() -> Void)? = nil
     let onSelect: (ProjectBudgetPresentation) -> Void
-    let onAdd: () -> Void
+    var onAdd: (() -> Void)? = nil
 
     var body: some View {
         switch phase {
@@ -117,13 +166,17 @@ struct ProjectBudgetsContentView: View {
     }
 
     private var emptyState: some View {
-        EmptyState(
-            systemImage: "folder.badge.plus",
-            title: "No project budgets yet",
-            message: "Track spend per project. Add your first project to set a monthly budget and watch it against actual usage.",
-            actionTitle: "Add a project",
-            action: onAdd
-        )
+        VStack(spacing: Theme.Spacing.md) {
+            EmptyState(
+                systemImage: "folder.badge.plus",
+                title: "No project budgets yet",
+                message: onAdd != nil
+                    ? "Track spend per project. Add your first project to start budgeting."
+                    : "Track spend per project. Sign in for full access in Settings to manage projects here, or use the web dashboard.",
+                actionTitle: onAdd != nil ? "Add project" : nil,
+                action: onAdd
+            )
+        }
         .frame(maxHeight: .infinity)
         .dsScreenBackground()
     }
@@ -138,14 +191,19 @@ struct ProjectBudgetsContentView: View {
                 ProjectsRollupCard(rollup: rollup)
             }
 
-            SectionHeader(
-                "Projects",
-                subtitle: "Month to date"
-            ) {
+            // Do not repeat the tab title ("Projects") as an in-content header;
+            // the navigation bar already names the screen.
+            HStack {
+                Text("Month to Date")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.secondaryText)
+                Spacer()
                 Text("\(items.count)")
                     .font(Theme.Typography.captionEmphasis)
                     .foregroundStyle(Theme.Colors.secondaryText)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(items.count) projects, month to date")
 
             VStack(spacing: Theme.Spacing.md) {
                 ForEach(items) { item in
@@ -170,7 +228,7 @@ struct ProjectsRollupCard: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                    Text("All projects")
+                    Text("All Projects")
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.secondaryText)
                     Text(rollup.totalSpentDisplay)
@@ -323,9 +381,10 @@ struct ProjectBudgetCard: View {
             phase: .loaded(ProjectBudgetStatus.sampleList.map(ProjectBudgetPresentation.init)),
             rollup: ProjectBudgetsRollup(projects: ProjectBudgetStatus.sampleList),
             lastError: nil,
-            onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
+            onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -335,9 +394,10 @@ struct ProjectBudgetCard: View {
             phase: .loaded(ProjectBudgetStatus.sampleList.map(ProjectBudgetPresentation.init)),
             rollup: ProjectBudgetsRollup(projects: ProjectBudgetStatus.sampleList),
             lastError: .offline,
-            onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
+            onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
     .preferredColorScheme(.dark)
 }
@@ -348,9 +408,10 @@ struct ProjectBudgetCard: View {
             phase: .empty,
             rollup: ProjectBudgetsRollup(projects: []),
             lastError: nil,
-            onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
+            onRefresh: {}, onRetry: {}, onSelect: { _ in }
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -361,6 +422,7 @@ struct ProjectBudgetCard: View {
             lastError: nil, onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -371,6 +433,7 @@ struct ProjectBudgetCard: View {
             lastError: nil, onRefresh: {}, onRetry: {}, onSelect: { _ in }, onAdd: {}
         )
         .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
     }
     .preferredColorScheme(.dark)
 }

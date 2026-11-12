@@ -1,89 +1,238 @@
 # Deployment Guide
 
-## Prerequisites
-- Render workspace with a Starter web service (persistent disks are not a free-tier feature)
-- Cloudflare account managing `jays.services` zone
-- Git repository pushed to GitHub
+**Production (2026-08-07+):** Production fleet box running Coolify (see private `Simple-With-Us/fleet-ops:ATTACK-MAP.md`).
+SSH: `ssh coolify` (see `~/.ssh/config` Host `coolify` / `host.jays.services`).
+Public edge: Cloudflare → `usage.jays.services`.
 
-## Step 1: Deploy to Render
-1. Go to https://dashboard.render.com
-2. Click "New +" > "Blueprint"
-3. Connect your GitHub repo
-4. Render will read `render.yaml` and create a single resource:
-   - `api-usage-monitor` web service, with a 1GB persistent disk mounted at
-     `/data` holding a SQLite database file. Usage polling that used to run
-     as a separate `fetch-all-usage` cron job now runs in-process inside
-     this web service on a 15-minute interval (see
-     `src/instrumentation.ts` / `src/lib/usage-recorder.ts`).
-5. Sync the Blueprint and confirm the service settings match `render.yaml`:
-   Node `24.14.1`, `npm ci` build, `scripts/start-with-litestream.sh` start,
-   `/api/health` liveness check, and auto-deploy only after CI checks pass.
-   Strict database/scheduler/backup diagnostics remain at `/api/ready`, but
-   must not be the process restart trigger: restarting during an exclusive
-   SQLite operation can repeat the operation and livelock the sole instance.
-6. Wait for the first deploy. At runtime, the startup wrapper optionally
-   restores a missing database, creates a transaction-consistent SQLite Online
-   Backup API snapshot of any existing database, verifies it with
-   `PRAGMA integrity_check`, and only then runs `scripts/migrate-safe.mjs`.
-   Backup or verification failure stops startup before schema changes. The
-   migration applies additive changes and refuses destructive drift; there is
-   no `--accept-data-loss` startup path.
+Fleet ops sheet: `/Users/jay/apps/COOLIFY.md` and Socratic
+`docs/rollouts/2026-08-07-hetzner-fleet-cutover.md`.
 
-## Step 2: Add Custom Domain on Render
-1. Go to the `api-usage-monitor` service in Render Dashboard
-2. Click "Settings" > "Custom Domain"
-3. Add: `usage.jays.services`
-4. Render will give you a verification value (e.g., `render-verify=abc123`)
+**Legacy Oracle** runbook (auto-deploy timer, preflight, litestream host
+scripts) remains under **[`deploy/retired/oracle/`](deploy/retired/oracle/)**
+for history / emergency reference — **Oracle is not the live writer** after the
+Hetzner cutover.  See `deploy/README.md` for the canonical deploy index and
+the entry-point banner at `deploy/retired/oracle/RETIRED.md` for the explicit
+"Do not enable the Oracle auto-deploy timer on any host" warning.
 
-## Step 3: Add DNS CNAME Record on Cloudflare
-1. Go to Cloudflare Dashboard > `jays.services` > DNS > Records
-2. Add record:
-   - Type: CNAME
-   - Name: usage
-   - Target: api-usage-monitor.onrender.com
-   - Proxy status: **Proxied (orange cloud)**
-   - TTL: Auto
-3. Wait for DNS propagation (~1-5 minutes)
+The former Render deployment is **retired and suspended as a rollback host
+only**; its historical runbook lives in
+[`deploy/retired/render/RETIRED-rollback.md`](deploy/retired/render/RETIRED-rollback.md)
+and `render.yaml` is kept functional solely so that host can be revived in a
+deliberate rollback.
 
-Cloudflare terminates the public connection and uses Render as the HTTPS
-origin. Keep Cloudflare SSL/TLS mode at **Full (strict)**. The current live
-hostname is proxied; changing this should be an explicit networking decision,
-not copied from the obsolete gray-cloud setup.
+## Operational invariants
 
-## Step 4: Verify
-1. `curl -fsS https://usage.jays.services/api/health | jq` and confirm the
+1. **Sole writer.** Exactly one app container may run against the SQLite
+   database at any time. Only `usage-monitor.service` starts the app (the
+   container's Docker restart policy is permanently `no` so the daemon can
+   never start a writer before the `/data` block volume mounts), and the
+   deploy transaction stops the old writer before accepting the new one.
+   Never run a second instance — including a Render resume — against
+   production data.
+2. **Infisical is the source of truth for runtime config; secrets materialize
+   only to tmpfs.** All runtime secrets and non-secret runtime config live in
+   the Infisical `usage-monitor` project (env `prod`, path `/`) and are synced
+   to `/run/usage-monitor/usage-monitor.env` (tmpfs, root-only, mode 0600) by
+   `usage-monitor-env-sync`. The only secret kept on disk is the Infisical
+   machine-identity bootstrap at
+   `/etc/usage-monitor/infisical-bootstrap.env` (root-owned, mode 0600). The
+   legacy `/etc/usage-monitor/usage-monitor.env` remains only as the
+   pre-migration fallback/rollback path (see "Runtime env" below).
+   `/etc/usage-monitor/host.env` holds only deploy-written host state
+   (`USAGE_MONITOR_REVISION`). No production SSH key or cloud credential is
+   stored in GitHub; the deploy model is pull-based.
+3. **Backups replicate to Backblaze B2** (bucket `jays-usage-monitor-eu`,
+   endpoint `https://s3.eu-central-003.backblazeb2.com`). Litestream continuously
+   replicates `/data/prod.db` there. **Cloudflare R2 is weekly archive only**
+   (`weekly/` on `usage-monitor-prod-v3`).  Historic Litestream LTX on that
+   bucket was deleted 2026-08-16. **Hetzner/Coolify Garage is
+   retired** (PR #869). Layered backup story: same-disk pre-migration snapshots
+   (retention 1) → deploy-time offline snapshots → Litestream/B2 DR with
+   external verification. R2 free-tier monitoring still watches the weekly
+   bucket; the 70% kill switch only stops litestream when the endpoint is R2, not B2.
+   See `docs/litestream.md`.
+4. **Deploys are automatic; the live Coolify path is not CI-gated (known
+   gap, board `d0f5f1db`).** The preflight-gated `usage-monitor-auto-deploy.timer`
+   (exact `main` SHA with valid signature, merged-PR provenance, green GitHub
+   Actions, healthy current database / sole scheduler / backup replica /
+   `/data` headroom / public readiness, Render retirement proof) was the
+   **retired Oracle host's** mechanism — see
+   [`deploy/retired/oracle/`](deploy/retired/oracle/) — and is **not** what
+   runs on the live Coolify host. Coolify's own GitHub auto-deploy fires on
+   every push to `main` via a per-app webhook (`/Users/jay/apps/COOLIFY.md`
+   "GitHub auto-deploy" row), independent of GitHub Actions outcome.
+   `production-deploy-verify.yml` only **observes** after the fact — it
+   confirms production reaches a SHA once CI on that SHA is green, but it
+   cannot block or delay the webhook-triggered deploy that already started.
+   A commit that lands on `main` with CI still red (or not yet dispatched)
+   can therefore reach production before anyone is paged. There is no
+   `/etc/usage-monitor/auto-deploy.paused`-equivalent freeze switch or
+   host-side eligibility check on this host today; restoring one (or gating
+   the Coolify trigger itself on a `workflow_run`-dispatched deploy call)
+   needs Coolify dashboard/API access to implement and verify — tracked on
+   the board rather than assumed fixed by this note. The historical
+   `usage-monitor-auto-deploy.timer` from the Oracle era is preserved under
+   [`deploy/retired/oracle/`](deploy/retired/oracle/) for forensic reference
+   only and must not be `enable --now`'d on any host — see
+   `deploy/retired/oracle/RETIRED.md`.
+5. **Rollback never restores an old database over new writes.** Automatic
+   rollback changes code/image only. A full host rollback requires quiescing
+   the writer and restoring the latest verified **B2** lineage (or the weekly
+   R2 archive if B2 is gone) before transferring writer authority — never just re-point
+   DNS at a stale host.
+
+## Sentry Build Release Prerequisite
+
+The production Docker build creates the Sentry bundler release and uploads its
+sourcemaps; the Sentry Deploy workflow only attaches deployment evidence to that
+existing release.  Its GitHub Actions token does not reach Coolify's separate
+Docker build.  Runtime Infisical injection also happens after compilation.
+
+Configure the production builder to supply `SENTRY_AUTH_TOKEN` as a BuildKit secret
+from the existing authorized Infisical source.  The Dockerfile mounts that secret
+only into the build command's environment.  Do not pass the token as a Docker
+build argument, persist it with `ENV`, or put it in the build context.
+
+An already-authorized build process with the token in its process environment can
+use `docker build --secret id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN` alongside
+`--build-arg SOURCE_COMMIT=<full-40-character-source-SHA>`.  Non-secret routing
+defaults to organization `simple-with-us` and project `usage-monitor`; override
+with the `SENTRY_ORG` and `SENTRY_SELF_PROJECT` build arguments only when the
+deployment reporter targets the same destination.  Keep
+`NEXT_PUBLIC_SENTRY_DSN` configured at build time for browser telemetry.
+Coolify's **Docker BuildKit secrets** mode supplies every build variable as a
+secret instead of a build argument.  Enable source-commit availability during
+build and supply the public secret IDs `SOURCE_COMMIT`, `GIT_COMMIT_SHA`,
+`NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ORG`, and `SENTRY_SELF_PROJECT` as applicable.
+The Dockerfile reads non-empty public secret files only; absent or empty files
+preserve its argument/environment defaults.  All mounts are explicitly optional.
+Coolify separately injects the deployed `SOURCE_COMMIT` into the runtime
+environment, which `/api/health` prefers for its revision.  A different builder
+using only a source-commit secret must also inject that SHA at runtime or pass
+the public `SOURCE_COMMIT` build argument to bake it into the runtime image;
+the builder's temporary secret export is not persisted in that image.
+
+With an upload token present, a missing or invalid source SHA fails configuration
+before the plugin loads, preventing a fallback to an automatically inferred release.
+Authenticated release creation or sourcemap upload failures also fail the build
+with a fixed message that excludes provider error details.
+
+Credential-free Docker/CI builds continue without upload.  This code path alone
+does not establish that Coolify supplies the secret, that its token can upload,
+or that a release exists.  After an authorized rebuild, verify the exact source
+SHA release and sourcemap upload in Sentry before rerunning the deployment
+reporter.  The reporter intentionally refuses to invent a parallel release.
+When enabling or replacing the secret for an already-built SHA, force the build
+stage to rerun (`--no-cache-filter build` with buildx, or `--no-cache` with
+`docker build`); secret contents do not invalidate Docker's layer cache.
+
+## Verify a deployment
+
+1. `curl -fsS https://usage.jays.services/api/health | jq` — confirm the
    expected `revision`.
-2. `curl -fsS https://usage.jays.services/api/ready | jq` and confirm database,
-   scheduler, startup, and backup checks. A non-ready dependency returns 503.
-3. Visit https://usage.jays.services
-4. You'll be redirected to `/login`. Go to the `api-usage-monitor` service in Render Dashboard > Environment, copy the auto-generated `DASHBOARD_PASSWORD` value, and use it to log in.
-5. Confirm the dashboard, Settings, provider detail, subscription, and budget
-   views load and show the same combined month-to-date spend.
+2. `curl -fsS "https://usage.jays.services/api/ready?strict=1" | jq` —
+   confirm database, scheduler, startup, and backup checks; observability
+   blocks (`disk`, `budgetControls`, `admission`, `usageReadToken`) never
+   gate `ok`. A non-ready dependency returns 503 with `strict=1`.
+3. On the host: `sudo cat /var/lib/usage-monitor-deploy/current.json` for the
+   deployment receipt, and
+   `sudo journalctl -u usage-monitor-auto-deploy.service --since today` for
+   gate decisions.
+4. Visit https://usage.jays.services and log in at `/login` with
+   `DASHBOARD_PASSWORD` (sourced from the Infisical `usage-monitor` project,
+   synced to `/run/usage-monitor/usage-monitor.env` on the host).
 
-## Environment Variables
-- `DATABASE_URL` set to a static path on the service's Render disk
-  (`file:/data/prod.db`) - not a secret, just a file path
+## Runtime env: Infisical is the source of truth
+
+All production runtime config — secrets **and** non-secrets — lives in the
+Infisical `usage-monitor` project, environment `prod`, path `/`. The host
+never edits a runtime `.env` file; it materializes one:
+
+- `/usr/local/sbin/usage-monitor-env-sync` is installed on the Hetzner box.
+  The reference implementation lives at
+  [`deploy/retired/oracle/infisical-env-sync.sh`](deploy/retired/oracle/infisical-env-sync.sh)
+  (Oracle-era, byte-identical to the Hetzner install); the historical
+  filename is preserved so anyone diffing against the retired Oracle stack
+  can see the script is unchanged.  The script logs in with the `automation`
+  universal-auth machine identity, exports the project as JSON, validates the
+  required keys, and atomically writes
+  `/run/usage-monitor/usage-monitor.env` (tmpfs, root-owned, mode 0600, raw
+  `KEY=value` lines) plus `/run/usage-monitor/sync-metadata.json` (counts and
+  scope only, never values). `/run` is tmpfs, so no secret ever persists on
+  disk and every boot starts from a fresh sync.
+- **The one on-disk secret** is `/etc/usage-monitor/infisical-bootstrap.env`
+  (root-owned, mode 0600): the machine identity's client ID/secret, the
+  project ID, and optional `INFISICAL_BASE_URL` / `INFISICAL_UM_SECRET_PATH` /
+  `INFISICAL_ENV` overrides. A single shared machine identity is used because
+  of the owner's Infisical machine-identity cap; it is read-only on this one
+  project/path/env.
+- **Boot wiring:** `usage-monitor-env-sync.service` (oneshot) is
+  `Requires`/`Before` `usage-monitor.service`, so Docker Compose never
+  evaluates `env_file` against a missing tmpfs file. A 15-minute
+  `usage-monitor-env-sync.timer` keeps the file fresh between deploys. The
+  auto-deploy service is only `Wants`/`After` the sync unit because the
+  deploy transaction re-runs the sync itself (see fallback below). On hosts
+  without the bootstrap file the sync unit is condition-skipped and the
+  legacy flow is untouched.
+- **Fallback semantics:** if the sync fails during a deploy, the transaction
+  continues only when a previous `/run/usage-monitor/usage-monitor.env` exists
+  and is younger than 25 hours (so container restarts between deploys survive
+  an Infisical outage); otherwise it fails closed before any preflight. A
+  failed boot-time sync stops `usage-monitor.service` rather than starting
+  the app on stale or missing config.
+- **Adding or changing a variable:** edit it in the Infisical project (env
+  `prod`, path `/`), then either run
+  `sudo /usr/local/sbin/usage-monitor-env-sync` or wait for the 15-minute
+  timer. Changed values reach the app only on the next container recreate
+  (next deploy, or `sudo systemctl restart usage-monitor` for an immediate
+  pickup of non-image changes).
+- **`USAGE_MONITOR_REVISION` stays host-side.** It is deploy-written state
+  (the accepted exact-SHA reboot pointer), not configuration, so it is never
+  in Infisical; `host.env` now holds only that key.
+- **Rollback:** point `env_file` back at the legacy disk file and restore the
+  previous systemd units (all in git history), or simply remove
+  `/etc/usage-monitor/infisical-bootstrap.env` — its absence makes the deploy
+  transaction and the sync unit fall back to
+  `/etc/usage-monitor/usage-monitor.env` with no other changes. Keep that
+  legacy file (renamed `usage-monitor.env.legacy`, root-owned mode 0600)
+  until the Infisical path has survived several deploys.
+
+## Environment variables
+
+All of these are set in the Infisical `usage-monitor` project (env `prod`,
+path `/`) and synced to `/run/usage-monitor/usage-monitor.env`; on
+unmigrated hosts they live in `/etc/usage-monitor/usage-monitor.env`.
+`USAGE_MONITOR_REVISION` is the exception: it stays in `host.env` as
+deploy-written state. `.env.example` documents
+defaults and valid values for local development.
+
+- `DATABASE_URL` — `file:/data/prod.db` on the dedicated block volume (not a
+  secret, just a file path)
 - `SQLITE_PRE_MIGRATION_BACKUP_RETENTION` (defaults to `3`, valid `1`-`10`;
   newest verified local snapshots retained under
   `/data/.pre-migration-backups` before startup schema synchronization)
-- `ENCRYPTION_KEY` (auto-generated 64-char hex)
-- `CRON_SECRET` (auto-generated; the `/api/cron/fetch-all` route still checks
-  this, kept as an authenticated manual-trigger/debug endpoint even though
-  nothing calls it on a schedule anymore)
-- `USAGE_INGEST_TOKEN` (auto-generated; copy this into reporting apps as their usage monitor ingest
-  token — this is also the token Claude Code's OTLP exporter authenticates with against
-  `POST /api/otlp/v1/metrics`, see AGENTS.md's "Claude Code OTLP ingest" section)
-- `USAGE_READ_TOKEN` (optional distinct read-only token for `/api/budget-status`;
-  falls back to `USAGE_INGEST_TOKEN`)
-- `DASHBOARD_PASSWORD` (auto-generated; after the first deploy, copy this value from Render's Environment tab to log in at `/login`)
-- `SESSION_SECRET` (auto-generated; session cookies are HKDF-derived from this instead
+- `ENCRYPTION_KEY` (64-char hex)
+- `CRON_SECRET` (the `/api/cron/fetch-all` route still checks this, kept as
+  an authenticated manual-trigger/debug endpoint even though nothing calls it
+  on a schedule anymore)
+- `USAGE_INGEST_TOKEN` (legacy shared ingest token — used by default unless
+  scoped producer tokens are configured)
+- `USAGE_INGEST_PRODUCER_TOKENS` (optional comma-separated `producerId:token` pairs
+  for per-producer isolation and dedicated rate-limit buckets)
+- `USAGE_INGEST_REQUIRE_SCOPED_TOKENS` (optional `true`/`false`; when `true`, denies
+  unscoped `USAGE_INGEST_TOKEN` ingest)
+- `USAGE_READ_TOKEN` (**required in production** — the deploy preflight
+  hard-fails without it; read-only token for `/api/budget-status` and
+  `GET /api/subscriptions`)
+- `DASHBOARD_PASSWORD` (gates `/login` and all non-ingest routes)
+- `SESSION_SECRET` (session cookies are HKDF-derived from this instead
   of `DASHBOARD_PASSWORD`, so a leaked session token can't be used to verify password guesses and the
   password can be rotated without invalidating existing sessions. Setting or changing it invalidates
   all existing sessions at once (the owner just re-logs in); it does not revoke individual sessions.)
 - `SENTRY_READ_TOKEN` (optional; enables the read-only Sentry Health dashboard card, an org-auth
   token or internal integration token with `project:read`/`event:read` scope — never sent to the
   client, absent by default)
-- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `jays-services`)
+- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `simple-with-us`)
 - `ALERT_SLACK_WEBHOOK_URL` / `ALERT_WEBHOOK_URL` / `ALERT_RESEND_API_KEY` +
   `ALERT_EMAIL_FROM` + `ALERT_EMAIL_TO` / `ALERT_PAGERDUTY_ROUTING_KEY` (optional delivery
   destinations; Resend needs all three email values)
@@ -109,6 +258,13 @@ not copied from the obsolete gray-cloud setup.
   opt-in compaction above)
 - `ADAPTER_HTTP_TIMEOUT_MS` / `ADAPTER_PROVIDER_TIMEOUT_MS` (optional bounded
   upstream-request and per-provider polling budgets)
+- `READY_DISK_WARN_FREE_BYTES` (optional; free-bytes warn threshold for the
+  observability-only `checks.disk` block in `/api/ready`, default 5 GiB —
+  aligned with the deploy preflight's `MIN_DATA_FREE_BYTES`)
+- `STARTUP_WRAPPER_REQUIRED` (optional opt-out; in production,
+  `/api/ready?strict=1` fails unless the process booted through
+  `scripts/start-with-litestream.sh`. Set `false` only for disposable
+  throwaway containers that never write to SQLite)
 - `INFISICAL_ST_GEMINI_BOOTSTRAP_ENABLED` (optional, defaults to `false`;
   one-time create-only bootstrap for the fixed current SocraticTrade.com Gemini
   provider into the fixed ST `prod` `/` `GEMINI_API_KEY`). It never updates or
@@ -132,119 +288,54 @@ not copied from the obsolete gray-cloud setup.
   requests receive `429` with the same backoff. Generic `/api/ingest/usage`
   remains available. Restore `true` only after the database stays healthy and a
   controlled OTLP ingest/replay succeeds.
-- `LITESTREAM_S3_*` (optional replica credentials; set all four required values
-  together or none—partial configuration fails startup)
-- `LITESTREAM_REQUIRED` (`false` initially; set `true` only after credentials are
-  installed and a restore drill succeeds; then readiness fails if replication is absent)
+- `LITESTREAM_S3_*` (Backblaze B2 replica credentials; set all four required
+  values together or none—partial configuration fails startup. Production
+  targets bucket `jays-usage-monitor-eu` on
+  `https://s3.eu-central-003.backblazeb2.com`; see `litestream.yml` and
+  `docs/litestream.md`. Optional unified `AWS_*` names are normalized at startup.)
+- `LITESTREAM_REQUIRED` (production: `true`; readiness fails if replication
+  is absent or the replica side-channel is unhealthy)
+- `R2_USAGE_ACCOUNT_ID` / `R2_USAGE_API_TOKEN` (optional; watches **historic** R2
+  free-tier; kill switch only stops litestream when endpoint is R2, not B2.
+  Fallbacks: `CLOUDFLARE_JAY_*` or `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`)
 
 ## SSL/TLS
 - Cloudflare proxy: enabled for `usage.jays.services`
-- Cloudflare mode: **Full (strict)**
-- Render origin certificate: enabled
+- Cloudflare terminates public TLS; Caddy renews its origin certificate via
+  HTTP-01 (TLS-ALPN disabled) and keeps ports 80/443 reachable
 - HTTP is redirected to HTTPS; application responses also set HSTS, CSP,
   framing, MIME-sniffing, referrer, and permissions headers
 
-## Migrating from the old Postgres + cron setup
-
-This app used to run as 3 billed Render resources (web service + a separate
-Postgres database + a separate cron job). It now runs as a single web
-service with a SQLite database on a Render disk, to cut hosting cost. If
-you're moving an existing deployment from the old architecture to this one,
-follow these steps IN ORDER - this involves real production data, so don't
-skip the verification step before deleting anything.
-
-1. **Land a fully verified change and sync the Blueprint.** Render will read
-   `render.yaml` and provision the new disk for the `api-usage-monitor` web
-   service. **Render Blueprint sync does NOT auto-delete resources that were
-   removed from `render.yaml`** - the old `databases:` and `cron:` entries
-   are gone from the file, but the actual `api-usage-monitor-db` Postgres
-   database and `fetch-all-usage` cron job resources keep existing (and keep
-   running/billing) in your Render dashboard until you manually delete/suspend
-   them. The runtime's safe migration wrapper creates/synchronizes a fresh
-   SQLite database on a new disk; it never accepts destructive data loss.
-2. **Immediately suspend the old `fetch-all-usage` cron job** (Render
-   dashboard -> select the cron job -> Settings -> Suspend, or delete it
-   outright). Do this right after step 1, before doing anything else below.
-   Until you do, the old cron keeps firing on its own schedule against the
-   old Postgres database at the same time the new web service's in-process
-   scheduler (see `src/instrumentation.ts` / `src/lib/usage-recorder.ts`)
-   starts polling providers from SQLite - two independent pollers hitting
-   the same provider APIs concurrently, causing duplicate external API calls
-   and, once you cut over, duplicate/conflicting usage data. Do not skip
-   this step or delay it until after the migration.
-3. **Before deleting the old Postgres database**, run the one-time migration
-   script once to copy every row over. Open the Render dashboard's **Shell**
-   tab for the `api-usage-monitor` web service and run:
-   ```
-   SOURCE_DATABASE_URL="<copy the old Postgres connection string from Render's dashboard for api-usage-monitor-db>" node scripts/migrate-postgres-to-sqlite.mjs
-   ```
-   `DATABASE_URL` is already set correctly in that shell's environment, so
-   you only need to supply `SOURCE_DATABASE_URL`. This must be run from
-   Render's Shell for the web service - the destination SQLite file lives on
-   a disk that's only reachable from that Render instance itself, so this
-   cannot be run from a local machine or CI. The script writes to SQLite
-   inside a single transaction, so if it fails partway through it's safe to
-   just fix the underlying issue and re-run it from the top (see
-   "Migration script failure/resume" below).
-4. **Verify in the dashboard UI** that providers, plans, and usage history
-   all look correct (visit https://usage.jays.services and check Settings
-   and the provider detail pages).
-5. **Only after confirming step 4**, delete the `api-usage-monitor-db`
-   Postgres database in Render's dashboard (Databases -> select it ->
-   Delete) to actually stop that recurring charge. If you haven't already
-   deleted the `fetch-all-usage` cron resource itself (as opposed to just
-   suspending it in step 2), delete it now too.
-
-### Migration script failure/resume
-
-`scripts/migrate-postgres-to-sqlite.mjs` writes all destination rows inside
-a single `prisma.$transaction`. If it fails partway through (network blip,
-a bad row, etc.), Prisma rolls back every row written so far, so the
-destination SQLite database is left exactly as it was before that run (empty,
-on a first attempt) - there's no partially-migrated state to clean up.
-
-To retry after a failed run, just fix whatever caused the failure (check the
-error output) and re-run the same command again from the top:
-```
-SOURCE_DATABASE_URL="..." node scripts/migrate-postgres-to-sqlite.mjs
-```
-
-### SQLite backup layers
+## SQLite backup layers
 
 Every startup with an existing DB runs
 `scripts/backup-sqlite-before-migrate.mjs` before `migrate-safe.mjs`. It opens
 the source read-only, uses SQLite's Online Backup API (safe with WAL), checks
 the destination with `PRAGMA integrity_check`, atomically promotes only a
 verified file, and retains the newest
-`SQLITE_PRE_MIGRATION_BACKUP_RETENTION` snapshots. The default three files live
-under `/data/.pre-migration-backups`. Failure to create, verify, or bound the
+`SQLITE_PRE_MIGRATION_BACKUP_RETENTION` snapshots under
+`/data/.pre-migration-backups`. Failure to create, verify, or bound the
 backup stops production startup before migration. These same-disk snapshots
 are schema rollback protection, not protection from disk loss.
 
-Render automatically takes an encrypted disk snapshot every 24 hours and keeps
-snapshots for at least seven days. Render also warns against restoring a disk
-snapshot for a custom database because the filesystem image might not be
-transaction-consistent. Treat those snapshots as last-resort infrastructure
-recovery, not a SQLite logical/PITR backup. [Litestream](https://litestream.io/)
-continuously replicates `/data/prod.db` to Cloudflare R2 with transaction-aware
-restore points. It is opt-in until credentials and a restore drill exist. With
-all replica vars unset and `LITESTREAM_REQUIRED=false`, the wrapper still takes
-the verified local pre-migration snapshot, then runs the safe migration and app
-without Litestream. Partial credentials or a configured replica with no
-verified binary fail closed.
+Every deploy transaction additionally keeps the previous full-SHA image and
+up to five verified offline SQLite snapshots for automatic code rollback.
 
-To enable it: create an R2 bucket + token and set the `LITESTREAM_S3_*`
-vars in the Render dashboard's Environment tab (they already exist in
-`render.yaml` with `sync: false` so Render won't prompt for or generate
-them). The four of `LITESTREAM_S3_BUCKET` / `_ENDPOINT` / `_ACCESS_KEY_ID` /
-`_SECRET_ACCESS_KEY` must all be set to enable replication;
-`LITESTREAM_S3_REGION` is optional (an empty region is fine for R2). After a
-successful restore drill, set `LITESTREAM_REQUIRED=true`. Full setup,
-verification, and disaster-recovery restore steps
-(including a restore-drill runbook) live in `docs/litestream.md`. Relevant
-files: `scripts/fetch-litestream.sh` (build-time binary download),
-`litestream.yml` (replica config), `scripts/start-with-litestream.sh` (the
-new `startCommand`), `scripts/litestream-restore.sh` (manual restore).
+[Litestream](https://litestream.io/) continuously replicates `/data/prod.db`
+to **Backblaze B2** (bucket `jays-usage-monitor-eu`) with disaster-recovery
+restore points (72 h snapshot retention, 24 h snapshot interval, 1 h
+sync-interval — not continuous second-scale PITR; see `litestream.yml`).
+**Cloudflare R2 remains historic** until the owner deletes it after B2 is
+proven. The external singleton at
+`/Users/jay/apps/fleet-sentry-monitor/monitor.py` verifies replica freshness
+and restorability (see "Backup monitoring" in `deploy/README.md`'s
+"Live production" table — the script is machine-level, not per-app; the
+retired Oracle-era runbook lives under `deploy/retired/oracle/README.md`
+and is not the source of operational truth anymore). Full setup and
+disaster-recovery restore steps live in `docs/litestream.md`.
+Relevant files: `scripts/fetch-litestream.sh` (build-time binary download),
+`scripts/start-with-litestream.sh` (startup wrapper),
+`scripts/litestream-restore.sh` (manual restore).
 
 ## Release-time data maintenance
 

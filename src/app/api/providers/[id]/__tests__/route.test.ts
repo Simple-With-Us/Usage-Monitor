@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -73,6 +82,126 @@ describe("DELETE /api/providers/:id attribution history", () => {
     expect(response.status).toBe(409);
     expect(await prisma.provider.count({ where: { id: provider.id } })).toBe(1);
     expect(await prisma.providerKeyIdentity.count({ where: { providerId: provider.id } })).toBe(1);
+  });
+});
+
+describe("DELETE /api/providers/:id PagerDuty incident closure", () => {
+  const ROUTING_KEY = "delete-route-pd-key";
+
+  async function seedProviderWithOpenPagerDutyIncident(name: string) {
+    const provider = await prisma.provider.create({
+      data: { name, displayName: name, type: "builtin" },
+    });
+    const openedAt = new Date("2026-07-19T08:00:00.000Z");
+    const notification = await prisma.providerAlertNotification.create({
+      data: {
+        providerId: provider.id,
+        stateKey: `${provider.id}:balance_low`,
+        alertCode: "balance_low",
+        severity: "warning",
+        providerName: provider.name,
+        providerDisplayName: provider.displayName,
+        message: "Balance is low.",
+        firstDetectedAt: openedAt,
+        lastDetectedAt: openedAt,
+        incidentGeneration: 1,
+        pagerDutyAuditState: "generation_scoped",
+      },
+    });
+    const digest = createHash("sha256")
+      .update(`pagerduty\0${ROUTING_KEY}`)
+      .digest("hex");
+    await prisma.providerAlertChannelDelivery.create({
+      data: {
+        notificationId: notification.id,
+        channelKey: `pagerduty:${digest}`,
+        channelKind: "pagerduty",
+        lastAttemptAt: openedAt,
+        lastSucceededAt: openedAt,
+        lastSucceededIncidentGeneration: 1,
+        triggerIncidentGeneration: 1,
+        pagerDutyDedupKey: `api-usage-monitor:${provider.id}:balance_low:incident-1`,
+        attemptCount: 1,
+        successCount: 1,
+      },
+    });
+    return { provider, notification };
+  }
+
+  beforeEach(() => {
+    process.env.ALERT_PAGERDUTY_ROUTING_KEY = ROUTING_KEY;
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    delete process.env.ALERT_PAGERDUTY_ROUTING_KEY;
+    await prisma.providerAlertChannelDelivery.deleteMany();
+    await prisma.providerAlertNotification.deleteMany();
+  });
+
+  it("resolves the open PagerDuty incident before deleting the row", async () => {
+    const { provider } = await seedProviderWithOpenPagerDutyIncident(
+      "pd-delete-resolves"
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 202 }));
+
+    const response = await DELETE(
+      new NextRequest(`https://usage.jays.services/api/providers/${provider.id}`, {
+        method: "DELETE",
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+
+    expect(response.status).toBe(200);
+    const resolves = fetchSpy.mock.calls
+      .filter(
+        // Host equality, not a substring match: `.includes()` on a URL would
+        // also accept https://evil.example/?x=events.pagerduty.com.
+        (call) => new URL(String(call[0])).hostname === "events.pagerduty.com"
+      )
+      .map((call) => JSON.parse(String(call[1]?.body ?? "{}")));
+    expect(resolves).toHaveLength(1);
+    expect(resolves[0]).toMatchObject({
+      event_action: "resolve",
+      dedup_key: `api-usage-monitor:${provider.id}:balance_low:incident-1`,
+    });
+    expect(await prisma.provider.count({ where: { id: provider.id } })).toBe(0);
+  });
+
+  it("refuses the delete when the incident cannot be closed, and honours ?force=true", async () => {
+    const { provider } = await seedProviderWithOpenPagerDutyIncident(
+      "pd-delete-blocked"
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("nope", { status: 500 })
+    );
+
+    const blocked = await DELETE(
+      new NextRequest(`https://usage.jays.services/api/providers/${provider.id}`, {
+        method: "DELETE",
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(blocked.status).toBe(409);
+    // Refusing is the point: the row must survive so the incident stays
+    // resolvable rather than being orphaned in PagerDuty forever.
+    expect(await prisma.provider.count({ where: { id: provider.id } })).toBe(1);
+
+    const forced = await DELETE(
+      new NextRequest(
+        `https://usage.jays.services/api/providers/${provider.id}?force=true`,
+        { method: "DELETE" }
+      ),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(forced.status).toBe(200);
+    expect(await forced.json()).toMatchObject({
+      success: true,
+      strandedPagerDutyIncidents: [{ alertCode: "balance_low" }],
+    });
+    expect(await prisma.provider.count({ where: { id: provider.id } })).toBe(0);
   });
 });
 
@@ -153,6 +282,114 @@ function managedBinding() {
     fingerprint: createHash("sha256").update("managed-key").digest("hex"),
   };
 }
+
+describe("provider plan.mustKeepFunded editing", () => {
+  // The owner remains free to turn Must keep funded back on for an LLM/AI
+  // provider from the dashboard whenever they choose to — PUT and POST no
+  // longer reject it.  See src/lib/provider-funding-policy.ts for the
+  // one-time boot cleanup this replaces.
+  it("accepts mustKeepFunded=true plan edits for an LLM/AI provider", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "anthropic",
+        displayName: "Anthropic",
+        type: "builtin",
+        plan: { create: { lowBalanceUsd: 10 } },
+      },
+    });
+
+    const response = await PUT(
+      updateRequest(provider.id, { plan: { mustKeepFunded: true } }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+
+    expect(response.status).toBe(200);
+    const stored = await prisma.provider.findUniqueOrThrow({
+      where: { id: provider.id },
+      include: { plan: true },
+    });
+    expect(stored.plan).toMatchObject({
+      mustKeepFunded: true,
+      lowBalanceUsd: 10,
+    });
+  });
+
+  it("still accepts mustKeepFunded=false plan edits for an LLM/AI provider", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "openai", displayName: "OpenAI", type: "builtin" },
+    });
+
+    const response = await PUT(
+      updateRequest(provider.id, {
+        plan: { mustKeepFunded: false, lowBalanceUsd: 25 },
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      await prisma.provider.findUniqueOrThrow({
+        where: { id: provider.id },
+        include: { plan: true },
+      })
+    ).toMatchObject({ plan: { mustKeepFunded: false, lowBalanceUsd: 25 } });
+  });
+
+  it("keeps mustKeepFunded available for non-LLM providers like twilio", async () => {
+    const provider = await prisma.provider.create({
+      data: { name: "twilio", displayName: "Twilio", type: "builtin" },
+    });
+
+    const response = await PUT(
+      updateRequest(provider.id, { plan: { mustKeepFunded: true } }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      await prisma.provider.findUniqueOrThrow({
+        where: { id: provider.id },
+        include: { plan: true },
+      })
+    ).toMatchObject({ plan: { mustKeepFunded: true } });
+  });
+
+  it("accepts the same flag at creation for an LLM/AI provider", async () => {
+    const created = await POST_COLLECTION(
+      new NextRequest("https://usage.jays.services/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "deepseek",
+          displayName: "DeepSeek",
+          type: "builtin",
+          plan: { mustKeepFunded: true },
+        }),
+      })
+    );
+    expect(created.status).toBe(201);
+    expect(
+      await prisma.provider.findFirstOrThrow({
+        where: { name: "deepseek" },
+        include: { plan: true },
+      })
+    ).toMatchObject({ plan: { mustKeepFunded: true } });
+
+    const allowed = await POST_COLLECTION(
+      new NextRequest("https://usage.jays.services/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "twilio",
+          displayName: "Twilio",
+          type: "builtin",
+          plan: { mustKeepFunded: true },
+        }),
+      })
+    );
+    expect(allowed.status).toBe(201);
+  });
+});
 
 describe("Infisical-managed provider API boundaries", () => {
   it("returns only safe ownership metadata and redacts key/binding details", async () => {

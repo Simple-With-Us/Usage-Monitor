@@ -141,6 +141,23 @@ export function providerConfigForServer(
   );
 }
 
+/**
+ * Fail-closed variant of providerConfigForServer for read paths that must not
+ * take down a response when stored config cannot be decrypted: returns null
+ * instead of throwing. Hoisted here from the three former per-call-site
+ * `serverConfig` copies (api/providers, api/providers/[id], budget-status).
+ */
+export function providerConfigForServerOrNull(
+  config: unknown,
+  encryptedSecretConfig: string | null
+): Record<string, unknown> | null {
+  try {
+    return providerConfigForServer(config, encryptedSecretConfig);
+  } catch {
+    return null;
+  }
+}
+
 function collectFieldPaths(
   value: Record<string, unknown>,
   prefix = ""

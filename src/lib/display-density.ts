@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 
 /**
- * Global display-density preference shared by Nav and the provider workspace
- * (Wave D / D3 — one storage key, one default).
+ * Global display-density preference set from the Nav toggle and read by the
+ * density-aware surfaces (ProviderTable, the provider detail page) — one
+ * storage key, one default.
  *
  * - "compact": reduced row padding/height; secondary detail collapsed into
  *   title/`<details>` fallbacks (never removed outright).
@@ -57,11 +58,10 @@ export function setStoredDisplayDensity(density: DisplayDensity): void {
 
 /**
  * Reads the current display-density preference. Always starts at
- * DISPLAY_DENSITY_DEFAULT ("comfortable") on the server and on first client
- * render - matching the pre-hydration DOM the inline layout.tsx script
- * produces for non-default cases only after that script runs - so React
- * never sees a server/client markup mismatch; the real stored value (if
- * any) is applied a moment later in the effect below, same pattern as
+ * DISPLAY_DENSITY_DEFAULT ("compact") on the server and on first client
+ * render - the layout.tsx pre-hydration script applies any stored override
+ * to the <html> class before paint, and the real stored value (if any) is
+ * applied to React state a moment later in the effect below, same pattern as
  * Nav.tsx's `mounted` flag elsewhere in this file tree.
  */
 export function useDisplayDensity(): DisplayDensity {

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import copy
+import http.client
 import importlib.util
+import io
+import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 
 
@@ -174,6 +178,165 @@ class OrphanReconciliationTests(unittest.TestCase):
         client = FakeClient([existing_current, orphan], fail_on_update=True)
         stats = sync.reconcile([current], client, "o/r", "sha", None)
         self.assertIn("test budget exhausted", stats["partial"])
+
+
+class BodyIdempotencyTests(unittest.TestCase):
+    def test_build_body_source_link_is_stable_across_refs(self) -> None:
+        item = sync.BoardItem("planned", "Stable row")
+        a = sync.build_body(item, "o/r", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        b = sync.build_body(item, "o/r", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        self.assertEqual(a, b)
+        self.assertIn(f"/blob/{sync.BOARD_SOURCE_REF}/{sync.BOARD_PATH}", a)
+        self.assertNotIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", a)
+
+    def test_unchanged_rows_make_zero_updates_across_refs(self) -> None:
+        item = sync.BoardItem("in-progress", "Unchanged board row")
+        existing = current_issue(item, 7)
+        # Body was previously built with an arbitrary SHA; rebuild with another.
+        existing["body"] = sync.build_body(item, "o/r", "oldsha")
+        client = FakeClient([existing])
+        stats = sync.reconcile([item], client, "o/r", "brand-new-sha", None)
+        self.assertEqual(client.updates, [])
+        self.assertEqual(stats["unchanged"], 1)
+        self.assertEqual(stats["updated"], 0)
+
+
+class LinkPaginationTests(unittest.TestCase):
+    def test_next_link_url_parses_rel_next(self) -> None:
+        headers = {
+            "Link": '<https://api.github.com/repos/o/r/issues?after=abc&page=2>; rel="next", '
+            '<https://api.github.com/repos/o/r/issues?after=xyz&page=1>; rel="prev"',
+        }
+        self.assertEqual(
+            sync._next_link_url(headers),
+            "https://api.github.com/repos/o/r/issues?after=abc&page=2",
+        )
+
+    def test_next_link_url_absent(self) -> None:
+        self.assertIsNone(sync._next_link_url({"Content-Type": "application/json"}))
+
+
+class _FakeResponse:
+    """Minimal stand-in for the urlopen context manager."""
+
+    status = 200
+
+    def __init__(self, body: bytes = b'{"ok": true}', headers: dict | None = None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class HttpTransportRetryTests(unittest.TestCase):
+    """http_request must survive transport failures without replaying POSTs.
+
+    A truncated body raises http.client.IncompleteRead out of resp.read()
+    *after* a 200, so it never reaches the rate-limit retry in
+    GitHubClient._request; before this retry existed, one mid-body disconnect
+    while paging issues?state=all aborted the whole sync.
+    """
+
+    def setUp(self) -> None:
+        self._real_urlopen = sync.urllib.request.urlopen
+        self._real_sleep = sync.time.sleep
+        self.calls = 0
+        sync.time.sleep = lambda _seconds: None  # no real backoff waits under test
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        sync.urllib.request.urlopen = self._real_urlopen
+        sync.time.sleep = self._real_sleep
+
+    def _install(self, handler) -> None:
+        def wrapped(req, timeout=None):
+            self.calls += 1
+            self.timeout = timeout
+            return handler(self.calls)
+
+        sync.urllib.request.urlopen = wrapped
+
+    def test_get_retries_incomplete_read_then_succeeds(self) -> None:
+        def handler(call: int):
+            if call < 3:
+                raise http.client.IncompleteRead(b"partial", 6207)
+            return _FakeResponse()
+
+        self._install(handler)
+        status, payload, _headers = sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual((status, payload), (200, {"ok": True}))
+        self.assertEqual(self.calls, 3)
+
+    def test_get_retries_are_bounded(self) -> None:
+        def handler(_call: int):
+            raise http.client.IncompleteRead(b"partial", 1)
+
+        self._install(handler)
+        with self.assertRaises(http.client.IncompleteRead):
+            sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual(self.calls, sync.TRANSPORT_RETRY_ATTEMPTS)
+
+    def test_post_is_never_replayed(self) -> None:
+        """A POST whose body was truncated may already have filed the issue."""
+
+        def handler(_call: int):
+            raise http.client.IncompleteRead(b"partial", 1)
+
+        self._install(handler)
+        with self.assertRaises(http.client.IncompleteRead):
+            sync.http_request("POST", "https://api/x", "tok", {"title": "t"})
+        self.assertEqual(self.calls, 1)
+        self.assertNotIn("POST", sync.TRANSPORT_RETRY_METHODS)
+
+    def test_get_retries_url_error(self) -> None:
+        def handler(call: int):
+            if call < 2:
+                raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+            return _FakeResponse()
+
+        self._install(handler)
+        status, _payload, _headers = sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls, 2)
+
+    def test_get_retries_truncated_json_body(self) -> None:
+        def handler(call: int):
+            if call < 2:
+                return _FakeResponse(b'{"ok": tr')
+            return _FakeResponse()
+
+        self._install(handler)
+        status, payload, _headers = sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual((status, payload), (200, {"ok": True}))
+        self.assertEqual(self.calls, 2)
+
+    def test_http_error_still_reaches_the_rate_limit_handler(self) -> None:
+        """HTTPError subclasses URLError; it must not be eaten as a transport failure."""
+
+        body = json.dumps({"message": "You have exceeded a secondary rate limit"}).encode()
+
+        def handler(_call: int):
+            raise urllib.error.HTTPError(
+                "https://api/x", 403, "rate limited", {"Retry-After": "1"}, io.BytesIO(body)
+            )
+
+        self._install(handler)
+        status, payload, headers = sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual(status, 403)
+        self.assertEqual(self.calls, 1)
+        self.assertTrue(sync._rate_limited(status, payload, dict(headers)))
+
+    def test_urlopen_gets_a_timeout(self) -> None:
+        self._install(lambda _call: _FakeResponse())
+        sync.http_request("GET", "https://api/x", "tok")
+        self.assertEqual(self.timeout, sync.HTTP_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":

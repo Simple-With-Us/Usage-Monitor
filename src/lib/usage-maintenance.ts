@@ -36,6 +36,13 @@ import {
   applyBudgetControls,
   type BudgetControlsResult,
 } from "@/lib/budget-controls";
+import { runB2UsageCheck, type B2UsageCheckResult } from "@/lib/b2-app-usage";
+import { runR2UsageCheck, type R2UsageAssessment } from "@/lib/r2-usage";
+import { pauseGmailUnverifiedSeedSubscriptions } from "@/lib/gmail-ledger-ghosts";
+import {
+  runProducerStalenessCheck,
+  type ProducerStalenessResult,
+} from "@/lib/producer-staleness";
 
 export interface UsageMaintenanceResult {
   subscriptionAdoption: SubscriptionAdoptionMaintenanceResult;
@@ -50,6 +57,9 @@ export interface UsageMaintenanceResult {
   // deliberately NOT folded into isUsageMaintenanceHealthy — a control-layer
   // problem must never flip scheduler/readiness health.
   budgetControls?: BudgetControlsResult;
+  r2UsageCheck?: R2UsageAssessment;
+  b2UsageCheck?: B2UsageCheckResult;
+  producerStaleness?: ProducerStalenessResult;
 }
 
 export interface SubscriptionAdoptionMaintenanceError {
@@ -76,6 +86,7 @@ export interface AlertMaintenanceResult extends AlertDeliveryResult {
 
 export interface UsageMaintenanceDependencies {
   quarantineMistralSnapshots?: typeof quarantineLegacyMistralSpendLimitSnapshots;
+  pauseSeededGhosts?: typeof pauseGmailUnverifiedSeedSubscriptions;
   adoptSubscriptions?: typeof adoptExternalBillingSubscriptions;
   materializeSubscriptions?: typeof materializeDueSubscriptions;
   rollForwardRenewals?: typeof rollForwardProviderRenewals;
@@ -182,6 +193,14 @@ export async function runUsageMaintenance(
             },
           };
         }
+        const ghostRepair = await (
+          dependencies.pauseSeededGhosts ?? pauseGmailUnverifiedSeedSubscriptions
+        )();
+        if (ghostRepair.paused > 0) {
+          console.warn(
+            `[gmail-ledger-ghosts] paused=${ghostRepair.paused} retracted=${ghostRepair.retracted}`
+          );
+        }
         const subscriptions = await (
           dependencies.materializeSubscriptions ?? materializeDueSubscriptions
         )();
@@ -277,6 +296,28 @@ export async function runUsageMaintenance(
       );
     }
 
+    let r2UsageCheck: R2UsageAssessment | undefined;
+    try {
+      r2UsageCheck = await runR2UsageCheck();
+    } catch (error) {
+      console.error("[usage-maintenance] R2 free tier usage check failed:", error);
+    }
+
+    let b2UsageCheck: B2UsageCheckResult | undefined;
+    try {
+      b2UsageCheck = await runB2UsageCheck();
+    } catch (error) {
+      console.error("[usage-maintenance] B2 app usage check failed:", error);
+    }
+
+    // UM-1594: a quiet collector must page, not just leave a stale number.
+    let producerStaleness: ProducerStalenessResult | undefined;
+    try {
+      producerStaleness = await runProducerStalenessCheck();
+    } catch (error) {
+      console.error("[usage-maintenance] producer staleness check failed:", error);
+    }
+
     return {
       subscriptionAdoption,
       subscriptions,
@@ -286,6 +327,9 @@ export async function runUsageMaintenance(
       openrouterVerification,
       reconciliation,
       budgetControls,
+      r2UsageCheck,
+      b2UsageCheck,
+      producerStaleness,
     };
   })();
 

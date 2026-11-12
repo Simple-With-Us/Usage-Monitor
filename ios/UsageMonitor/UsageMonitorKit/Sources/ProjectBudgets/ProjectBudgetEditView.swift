@@ -1,33 +1,40 @@
 import SwiftUI
+import AppCore
 import DesignSystem
 import Models
+import Networking
 
 /// Add or edit a project budget. Presented as a sheet. Collects name, an
 /// optional description, and a monthly budget (blank = no cap), validates, and
-/// persists through the injected `ProjectBudgetEditing` store.
+/// persists through the session-gated monitor API via `ProjectManagementStore`
+/// (`POST/PUT/DELETE /api/projects`). A successful save refreshes the shared
+/// `BudgetStore`, so spend/coverage/status come back server-recomputed.
 struct ProjectBudgetEditView: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focus: Field?
 
     /// The project being edited, or `nil` when adding.
     private let existing: ProjectBudgetStatus?
-    private let editStore: any ProjectBudgetEditing
-    private let onSaved: (ProjectBudgetStatus) -> Void
+    private let store: ProjectManagementStore
+    private let client: APIClient
+    private let budgetStore: BudgetStore
 
     @State private var draft: ProjectBudgetDraft
     @State private var errorMessage: String?
-    @State private var isSaving = false
+    @State private var showDeleteConfirmation = false
 
     private enum Field: Hashable { case name, details, budget }
 
     init(
         existing: ProjectBudgetStatus?,
-        editStore: any ProjectBudgetEditing,
-        onSaved: @escaping (ProjectBudgetStatus) -> Void
+        store: ProjectManagementStore,
+        client: APIClient,
+        budgetStore: BudgetStore
     ) {
         self.existing = existing
-        self.editStore = editStore
-        self.onSaved = onSaved
+        self.store = store
+        self.client = client
+        self.budgetStore = budgetStore
         _draft = State(initialValue: existing.map(ProjectBudgetDraft.init(editing:)) ?? ProjectBudgetDraft())
     }
 
@@ -50,7 +57,7 @@ struct ProjectBudgetEditView: View {
                 } header: {
                     Text("Project")
                 } footer: {
-                    Text("A short name you'll recognize in the list.")
+                    Text("A short name you'll recognize in the list. Names must be unique — case-insensitive equivalents are rejected.")
                 }
 
                 Section {
@@ -85,9 +92,23 @@ struct ProjectBudgetEditView: View {
 
                 if isEditing {
                     Section {
-                        Text("Editing updates this project's budget locally. Actual spend continues to come from the monitor on refresh.")
-                            .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.Colors.tertiaryText)
+                        Button(role: .destructive) {
+                            showDeleteConfirmation = true
+                        } label: {
+                            if store.isSaving {
+                                HStack {
+                                    ProgressView()
+                                    Text("Working…")
+                                        .foregroundStyle(Theme.Colors.secondaryText)
+                                }
+                            } else {
+                                Label("Delete project", systemImage: "trash")
+                            }
+                        }
+                        .disabled(store.isSaving)
+                        .accessibilityHint("Removes the project. Recorded usage history is kept.")
+                    } footer: {
+                        Text("Deleting removes the project and its budget. Usage already recorded is kept and becomes unattributed.")
                     }
                 }
             }
@@ -100,10 +121,20 @@ struct ProjectBudgetEditView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isEditing ? "Save" : "Add") { save() }
                         .fontWeight(.semibold)
-                        .disabled(!draft.isValid || isSaving)
+                        .disabled(!draft.isValid || store.isSaving)
                 }
             }
             .onAppear { if !isEditing { focus = .name } }
+            .confirmationDialog(
+                "Delete this project?",
+                isPresented: $showDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete project", role: .destructive) { deleteProject() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("“\(draft.trimmedName)” and its budget are removed. Recorded usage history is kept.")
+            }
         }
     }
 
@@ -126,22 +157,49 @@ struct ProjectBudgetEditView: View {
         }
 
         errorMessage = nil
-        isSaving = true
         Task {
-            do {
-                let saved = try await editStore.save(draft, updating: existing)
+            let succeeded: Bool
+            if let existing {
+                succeeded = await store.update(
+                    draft,
+                    projectID: existing.id,
+                    using: client,
+                    refreshing: budgetStore
+                )
+            } else {
+                succeeded = await store.create(
+                    draft,
+                    using: client,
+                    refreshing: budgetStore
+                ) != nil
+            }
+            if succeeded {
                 Haptics.success()
-                isSaving = false
-                onSaved(saved)
                 dismiss()
-            } catch let error as ProjectBudgetDraftError {
-                errorMessage = error.message
-                Haptics.warning()
-                isSaving = false
-            } catch {
-                errorMessage = "Couldn't save the project. Please try again."
-                Haptics.warning()
-                isSaving = false
+            } else {
+                errorMessage = store.actionError.map { "\($0.title). \($0.message)" }
+                    ?? "Couldn't save the project. Please try again."
+                Haptics.error()
+            }
+        }
+    }
+
+    private func deleteProject() {
+        guard let existing else { return }
+        errorMessage = nil
+        Task {
+            let succeeded = await store.delete(
+                projectID: existing.id,
+                using: client,
+                refreshing: budgetStore
+            )
+            if succeeded {
+                Haptics.success()
+                dismiss()
+            } else {
+                errorMessage = store.actionError.map { "\($0.title). \($0.message)" }
+                    ?? "Couldn't delete the project. Please try again."
+                Haptics.error()
             }
         }
     }
@@ -149,11 +207,23 @@ struct ProjectBudgetEditView: View {
 
 // MARK: - Previews
 
+#if DEBUG
 #Preview("Add") {
-    ProjectBudgetEditView(existing: nil, editStore: LocalProjectBudgetStore(), onSaved: { _ in })
+    ProjectBudgetEditView(
+        existing: nil,
+        store: .preview(),
+        client: APIClient(tokenStore: InMemoryTokenStore()),
+        budgetStore: AppEnvironment.preview().budgetStore
+    )
 }
 
 #Preview("Edit (dark)") {
-    ProjectBudgetEditView(existing: .sampleTrade, editStore: LocalProjectBudgetStore(), onSaved: { _ in })
-        .preferredColorScheme(.dark)
+    ProjectBudgetEditView(
+        existing: .sampleTrade,
+        store: .preview(),
+        client: APIClient(tokenStore: InMemoryTokenStore()),
+        budgetStore: AppEnvironment.preview().budgetStore
+    )
+    .preferredColorScheme(.dark)
 }
+#endif

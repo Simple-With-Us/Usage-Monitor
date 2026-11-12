@@ -9,14 +9,23 @@ on:
     - cron: "41 10 * * 1"
   workflow_dispatch: {}
 
+env:
+  # Pinned to match the CT/ST engines after gitleaks-action's POST-scan
+  # phase hung for ~6.5min on runner contention (job summary / PR annotation
+  # writes). The weekly sweep reported "leaks found: 6" with no actionable
+  # detail anywhere; this rewrite goes through the binary directly so the
+  # scan itself stays structured.
+  GITLEAKS_VERSION: "8.24.3"
+  GITLEAKS_SHA256_X64: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
+  GITLEAKS_SHA256_ARM64: "5f2edbe1f49f7b920f9e06e90759947d3c5dfc16f752fb93aaafc17e9d14cf07"
+
 jobs:
   gitleaks:
-    # Self-hosted CI with hosted fallback; dependabot forced hosted. See ci.yml
-    # for the full rationale/runbook. Clear UM_CI_RUNNER for instant fallback.
-    runs-on: ${{ (github.actor != 'dependabot[bot]' && vars.UM_CI_RUNNER) || 'ubuntu-latest' }}
+    # Runs on GitHub-hosted ubuntu-latest, deliberately.  See ci.yml's verify
+    # job for the full history.  Do not reintroduce a self-hosted label here.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - name: Refuse untrusted PR source
         if: github.event_name == 'pull_request'
@@ -29,7 +38,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -38,18 +47,115 @@ jobs:
                 ;;
             esac
           fi
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Clean stale gitleaks installer temp files
+
+      - name: Install pinned gitleaks
+        # The retry budget below can spend up to 180 seconds waiting out a
+        # degraded release-asset CDN, so the step timeout has to leave room
+        # for that on top of the transfer itself.
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
-          tmp_root="${TMPDIR:-/tmp}"
-          tmp_root="${tmp_root%/}"
+          tmp_root="${TMPDIR:-/tmp}"; tmp_root="${tmp_root%/}"
           rm -f "$tmp_root/gitleaks.tmp"
-          rm -rf "$tmp_root/gitleaks-8.24.3"
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+          rm -rf "$tmp_root/gitleaks-${GITLEAKS_VERSION}"
+
+          case "$(uname -m)" in
+            x86_64|amd64)  arch="x64";   want="$GITLEAKS_SHA256_X64" ;;
+            aarch64|arm64) arch="arm64"; want="$GITLEAKS_SHA256_ARM64" ;;
+            *) echo "::error::unsupported runner arch $(uname -m)"; exit 1 ;;
+          esac
+
+          tarball="$tmp_root/gitleaks.tar.gz"
+          # --http1.1 + --retry-all-errors match the pattern the other two
+          # pinned-asset downloads in this repo already use (the Dockerfile's
+          # Infisical CLI fetch and scripts/fetch-litestream.sh); both were
+          # hardened after the same GitHub-CDN flake killed production
+          # deploys.  This step was the one that still lacked it.
+          #
+          # The retry BUDGET matters as much as the flags.  Measured on
+          # 2026-11-09, the release-asset CDN degrades in rotating windows of
+          # roughly 20 seconds to 2 minutes, and the window moves between
+          # assets.  The previous 3x2s budget spans about 6 seconds and
+          # cannot survive one of those windows, so this required check
+          # failed on every PR that happened to run inside one.  180 seconds
+          # is the bound.  The pinned checksum below still rejects a wrong
+          # or tampered tarball, and a genuinely missing asset still fails.
+          curl -fsSL --http1.1 --retry 10 --retry-delay 10 --retry-max-time 180 --retry-all-errors --max-time 300 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${arch}.tar.gz" \
+            -o "$tarball"
+
+          got="$(sha256sum "$tarball" | cut -d' ' -f1)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::gitleaks checksum mismatch (expected $want, got $got)"
+            exit 1
+          fi
+
+          mkdir -p "$tmp_root/gitleaks-${GITLEAKS_VERSION}"
+          tar -xzf "$tarball" -C "$tmp_root/gitleaks-${GITLEAKS_VERSION}" gitleaks
+          echo "$tmp_root/gitleaks-${GITLEAKS_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Scan for secrets
+        timeout-minutes: 8
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.before }}
+          PUSH_AFTER: ${{ github.after }}
+        run: |
+          set -euo pipefail
+          gitleaks version
+
+          case "$EVENT" in
+            pull_request)
+              range="${PR_BASE}..${PR_HEAD}"
+              ;;
+            push)
+              if [ -z "${PUSH_BEFORE:-}" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                range=""
+              else
+                range="${PUSH_BEFORE}..${PUSH_AFTER}"
+              fi
+              ;;
+            *)
+              # schedule / manual / workflow_dispatch: full history.
+              range=""
+              ;;
+          esac
+
+          report="${RUNNER_TEMP:-/tmp}/gitleaks-report.json"
+          rm -f "$report"
+
+          if [ -n "$range" ]; then
+            echo "scanning commit range: $range"
+            gitleaks git --no-banner --redact --exit-code 0 \
+              --report-format json --report-path "$report" --log-opts "$range" .
+          else
+            echo "scanning full history"
+            gitleaks git --no-banner --redact --exit-code 0 \
+              --report-format json --report-path "$report" .
+          fi
+
+          count=0
+          if [ -s "$report" ]; then
+            count="$(jq 'length' "$report")"
+          fi
+
+          if [ "$count" -gt 0 ]; then
+            echo "::error::gitleaks found ${count} finding(s).  Structural details below; secret values are never printed."
+            jq -r '.[] | "  rule=\(.RuleID) file=\(.File) line=\(.StartLine) commit=\(.Commit[0:12]) date=\(.Date[0:10])\n    fingerprint=\(.Fingerprint)"' "$report"
+            echo
+            echo "A finding that is a confirmed false positive goes in .gitleaksignore as its"
+            echo "fingerprint line, with a comment saying why.  A finding that is a real secret"
+            echo "means ROTATE FIRST, then decide about history — never the other way round."
+            rm -f "$report"
+            exit 1
+          fi
+
+          rm -f "$report"
+          echo "No leaks detected."

@@ -17,7 +17,7 @@ const ITEMS: ReadonlyArray<{
   },
   {
     kind: "unknown",
-    label: "Not reported",
+    label: "not reported",
     chipClass: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
   },
   {
@@ -29,7 +29,9 @@ const ITEMS: ReadonlyArray<{
 
 /**
  * Always-visible cost-coverage legend (Wave D / D4). Reuses
- * `costCoverageHelpText` so wording matches tooltips elsewhere.
+ * `costCoverageHelpText` so wording matches tooltips elsewhere. Each chip is
+ * a `<details>` disclosure (same pattern as ProviderTable.tsx coverage
+ * caveats) so touch users without hover can read the full definition.
  */
 export default function CostCoverageLegend() {
   return (
@@ -40,20 +42,22 @@ export default function CostCoverageLegend() {
       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
         Cost coverage
       </p>
-      <ul className="mt-2 flex flex-wrap gap-2">
+      <ul className="mt-2 flex flex-wrap items-start gap-2">
         {ITEMS.map((item) => (
           <li key={item.kind}>
-            <span
-              className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${item.chipClass}`}
-              title={costCoverageHelpText(item.kind)}
-            >
-              {item.label}
-            </span>
+            <details className={`rounded-full text-xs font-medium ${item.chipClass}`}>
+              <summary className="inline-flex min-h-7 cursor-pointer list-none items-center rounded-full px-2.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 [&::-webkit-details-marker]:hidden">
+                {item.label}
+              </summary>
+              <p className="max-w-56 px-2.5 pb-2 pt-0.5 font-normal leading-relaxed">
+                {costCoverageHelpText(item.kind)}
+              </p>
+            </details>
           </li>
         ))}
       </ul>
       <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-        Hover a chip for the full definition. “Known” is a priced subtotal, not
+        Tap a chip for the full definition. “Known” is a priced subtotal, not
         a complete bill.
       </p>
     </section>

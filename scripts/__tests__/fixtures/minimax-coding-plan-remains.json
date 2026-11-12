@@ -1,0 +1,21 @@
+{
+  "base_resp": { "status_code": 0, "status_msg": "success" },
+  "model_remains": [
+    {
+      "model_name": "MiniMax-M2",
+      "current_interval_usage_count": 40,
+      "current_interval_total_count": 200,
+      "remains_time": 14400,
+      "start_time": "2026-09-12T00:00:00Z",
+      "end_time": "2026-09-13T00:00:00Z"
+    },
+    {
+      "model_name": "MiniMax-Text-01",
+      "current_interval_usage_count": 10,
+      "current_interval_total_count": 100,
+      "remains_time": 14400,
+      "start_time": "2026-09-12T00:00:00Z",
+      "end_time": "2026-09-13T00:00:00Z"
+    }
+  ]
+}

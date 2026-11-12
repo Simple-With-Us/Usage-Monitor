@@ -39,10 +39,13 @@ export interface SubscriptionFormValue {
   startDate: string;
   autoRenew: boolean;
   status: string;
+  canceledAt?: string | null;
   effectiveStatus?: string;
   notes: string | null;
   externalBillingSource?: string | null;
   externalBillingId?: string | null;
+  /** When true, owner edits (including pause) permanently relinquish auto-management. */
+  externalBillingManaged?: boolean | null;
   activationMode?: "repurchase" | "resume";
 }
 
@@ -90,6 +93,7 @@ export default function AddSubscriptionModal({
   const [startDate, setStartDate] = useState(todayIso());
   const [autoRenew, setAutoRenew] = useState(true);
   const [status, setStatus] = useState("considering");
+  const [canceledAt, setCanceledAt] = useState(todayIso());
   const [notes, setNotes] = useState("");
   const [activationDateReset, setActivationDateReset] = useState(false);
   const [externalBillingKey, setExternalBillingKey] = useState("");
@@ -110,6 +114,7 @@ export default function AddSubscriptionModal({
     setStartDate(editSubscription?.startDate ? editSubscription.startDate.slice(0, 10) : todayIso());
     setAutoRenew(editSubscription?.autoRenew ?? true);
     setStatus(editSubscription?.status || "considering");
+    setCanceledAt(editSubscription?.canceledAt ? editSubscription.canceledAt.slice(0, 10) : todayIso());
     setNotes(editSubscription?.notes || "");
     setExternalBillingKey(
       editSubscription?.externalBillingSource && editSubscription.externalBillingId
@@ -158,6 +163,7 @@ export default function AddSubscriptionModal({
         startDate,
         autoRenew,
         status,
+        canceledAt: status === "canceled" ? canceledAt : null,
         notes: notes.trim() || null,
         externalBillingSource,
         externalBillingId,
@@ -172,7 +178,7 @@ export default function AddSubscriptionModal({
   };
 
   const inputClass =
-    "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
+    "w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
   const labelClass = "block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200";
 
   const handleStatusChange = (nextStatus: string) => {
@@ -194,6 +200,18 @@ export default function AddSubscriptionModal({
   const canResumeExistingTerm =
     isActivating &&
     (editSubscription?.status === "paused" || editSubscription?.status === "canceled");
+  const pausingManaged =
+    Boolean(editSubscription?.externalBillingManaged) &&
+    status === "paused" &&
+    editSubscription?.status !== "paused";
+  const editingManagedLinked =
+    Boolean(editSubscription?.externalBillingManaged) ||
+    Boolean(
+      editSubscription?.externalBillingSource &&
+        editSubscription?.externalBillingId &&
+        (status === "paused" || status === "canceled") &&
+        editSubscription?.status === "active"
+    );
   const selectedProvider = providers.find((provider) => provider.id === providerId);
   const isLinkCandidate = (record: ExternalBillingRecord) =>
     isExternalBillingLinkCandidate(record, {
@@ -269,6 +287,20 @@ export default function AddSubscriptionModal({
           {editSubscription?.effectiveStatus === "expired" && (
             <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
               This term ended. Notes-only edits preserve its history. Enabling Auto-renews starts a new term now, anchored to current provider billing data when linked; for a one-term repurchase, unlink this record and track the new term separately.
+            </div>
+          )}
+
+          {pausingManaged && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+              This plan is auto-managed from the provider&apos;s billing records. Pausing
+              <strong> permanently converts it to owner-managed</strong>: the monitor will no longer
+              reconcile, pause, or reprice it from billing syncs. Future charges stop until you
+              reactivate it.
+            </div>
+          )}
+          {!pausingManaged && editingManagedLinked && editSubscription?.externalBillingManaged && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+              Auto-managed from provider billing. Any owner edit permanently relinquishes auto-management.
             </div>
           )}
 
@@ -402,6 +434,7 @@ export default function AddSubscriptionModal({
                 <input
                   id="subscription-cost"
                   type="number"
+                  inputMode="decimal"
                   min="0"
                   step="0.01"
                   value={costUsd}
@@ -511,6 +544,24 @@ export default function AddSubscriptionModal({
               </div>
             </div>
 
+            {status === "canceled" && (
+              <div className="mt-3">
+                <label htmlFor="subscription-canceled-date" className={labelClass}>
+                  Effective Canceled Date
+                </label>
+                <input
+                  id="subscription-canceled-date"
+                  type="date"
+                  value={canceledAt}
+                  onChange={(e) => setCanceledAt(e.target.value)}
+                  className={inputClass}
+                />
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Specify the date this subscription was canceled to prevent synthetic charges after that day.
+                </p>
+              </div>
+            )}
+
             {canResumeExistingTerm && (
               <fieldset className="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                 <legend className="px-1 text-sm font-medium text-gray-700 dark:text-gray-200">Reactivation billing</legend>
@@ -587,7 +638,7 @@ export default function AddSubscriptionModal({
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600 dark:hover:bg-gray-700"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600 dark:hover:bg-gray-700"
             >
               Cancel
             </button>
@@ -595,7 +646,7 @@ export default function AddSubscriptionModal({
               type="button"
               onClick={handleSave}
               disabled={saving || providers.length === 0}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-lg hover:bg-blue-700 disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save Subscription"}
             </button>

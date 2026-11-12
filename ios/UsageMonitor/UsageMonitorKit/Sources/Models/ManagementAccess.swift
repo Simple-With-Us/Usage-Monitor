@@ -10,7 +10,9 @@ public enum BearerReadCapability: String, Codable, Hashable, Sendable {
 /// Server-validated dashboard-session state.
 public enum DashboardSessionStatus: Hashable, Sendable {
     case signedOut
-    case active(providerCount: Int)
+    /// `providerCount` is only known when the validation probe was the rich
+    /// provider inventory; the lightweight session probe leaves it `nil`.
+    case active(providerCount: Int?)
 
     public var isActive: Bool {
         if case .active = self { return true }

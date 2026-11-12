@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodically refresh the Usage Monitor runtime env from Infisical
+
+[Timer]
+# Keeps /run/usage-monitor/usage-monitor.env fresh between deploys so a
+# container restart always sees recent config. Changed values only reach the
+# running container on its next recreate (deploy or systemctl restart).
+OnBootSec=3min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=30s
+AccuracySec=10s
+Persistent=true
+Unit=usage-monitor-env-sync.service
+
+[Install]
+WantedBy=timers.target

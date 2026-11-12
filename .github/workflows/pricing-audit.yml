@@ -1,0 +1,31 @@
+name: Weekly Model Pricing Audit
+
+on:
+  schedule:
+    # Run every Sunday at midnight UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-pricing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      # The audit script imports zod, so it needs the lockfile's packages.
+      # Install scripts are skipped: the audit uses no generated client.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Run Pricing Audit
+        run: node scripts/audit-model-pricing.mjs

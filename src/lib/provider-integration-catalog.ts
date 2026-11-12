@@ -24,7 +24,7 @@ export type IntegrationConfidence = "high" | "medium";
 
 export type CatalogProviderName =
   | BuiltInProviderName
-  | "agent-sync-relay"
+  | "simple-tools-relay"
   | "custom"
   | "generic";
 
@@ -132,8 +132,8 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     credentialInputs: ["Primary API key.", "Optional Organization Admin key, encrypted separately, for organization cost access."],
     billing: { visibility: "actual", summary: "Actual organization MTD cost is direct with an Admin key; legacy credit/limit endpoints are best-effort, not subscription authority." },
     canAdd: ["Usage-only reporting can separately add project, user, model, or API-key activity without treating it as canonical cash spend."],
-    cannotAdd: ["This monitor never infers a key secret or name: it retains only provider-returned API key IDs as non-additive components, separate from one canonical cash total.", "ChatGPT consumer subscriptions, payment methods, and invoice PDFs are not exposed to project API keys."],
-    limitations: ["A normal project key may validate and show partial legacy data but cannot read authoritative organization cost."],
+    cannotAdd: ["This monitor never infers a key secret or name: it retains only provider-returned API key IDs as non-additive components, separate from one canonical cash total.", "ChatGPT Plus/Pro, Codex CLI, and ChatGPT consumer subscriptions are MANUALLY ONLY. They are a separate billing product from the Organization Costs API."],
+    limitations: ["A normal project key may validate and show partial legacy data but cannot read authoritative organization cost.", "Codex / ChatGPT subscription quota is not fetchable. Do not add a provider row hoping setup will unlock it."],
     source: "src/lib/adapters/openai.ts",
   }),
   anthropic: defineProfile({
@@ -157,7 +157,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     credentialInputs: ["Gemini API key managed in Google Cloud Console or Google AI Studio; the request uses the official x-goog-api-key header.", "Exact Gemini project ID plus one encrypted service-account JSON credential with Monitoring Viewer; OAuth is restricted to monitoring.read.", "Optional standard billing dataset; the same service account separately uses BigQuery read-only access for actual cash cost."],
     billing: { visibility: "actual", summary: "Actual calendar-month Gemini API net cost is direct when Cloud Billing export is configured; AI Studio prepaid balance, paid tier, transactions, and renewal remain unavailable." },
     canAdd: ["Producer telemetry can supplement delayed project metrics and billing export while Cloud Monitoring remains the quota authority and BigQuery remains the cash-cost authority."],
-    cannotAdd: ["The Gemini API key itself has no public AI Studio balance, transaction, tier, or renewal endpoint.", "Cloud Monitoring quotas apply at project/model/location dimensions rather than to one API key."],
+    cannotAdd: ["The Gemini API key itself has no public AI Studio balance, transaction, tier, or renewal endpoint.", "Cloud Monitoring quotas apply at project/model/location dimensions rather than to one API key.", "Google Antigravity / Gemini Code Assist consumer subscription quota is MANUALLY ONLY. It is not the Gemini API or Cloud Billing export path."],
     limitations: ["Native Gemini quota metrics can be ALPHA or BETA and are currently documented with up to 150 seconds of visibility delay. Aggregate Service Runtime request_count can be delayed by up to 30 minutes; an empty response remains unknown rather than false zero.", "Cloud Billing export is delayed, can take days to backfill initially, and requires an exact Gemini project when the dataset contains more than one.", "A replacement key is shown as unchecked until Verify & fetch binds a fresh validation result to that credential."],
     source: "src/lib/adapters/google-ai.ts",
   }),
@@ -179,9 +179,14 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     credentialInputs: ["Team ID.", "Management API key; it can be stored separately from the normal API key."],
     billing: { visibility: "actual", summary: "Current invoice preview and spending limits are direct; finalized invoices and payment methods are not stored." },
     canAdd: ["Additional team-level billing breakdowns can be mapped if the Management API exposes them."],
-    cannotAdd: ["A standard inference key without Management API access cannot read team billing."],
-    limitations: ["Requires an exact team ID and billing-capable management credential."],
+    cannotAdd: ["A standard inference key without Management API access cannot read team billing.", "SuperGrok, Grok.com, and Grok Build CLI subscription quota are MANUALLY ONLY. They are a separate product from xAI Management API prepaid/postpaid billing."],
+    limitations: ["Requires an exact team ID and billing-capable management credential.", "Do not treat a SuperGrok seat as a fetchable xAI connection."],
     source: "src/lib/adapters/xai.ts",
+  }),
+  minimax: defineBlindProfile({
+    name: "minimax", displayName: "MiniMax", category: "LLM/AI",
+    reason: "MiniMax exposes no documented account/billing API here; subscription quota is read by the Mac-side quota collector, or entered manually.",
+    source: "src/lib/provider-definitions.ts",
   }),
   mistral: defineProfile({
     name: "mistral", displayName: "Mistral AI", category: "LLM/AI", mode: "partial",
@@ -206,6 +211,18 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     cannotAdd: ["OpenRouter has no subscription or invoice-cycle concept; credits are a lifetime-cumulative prepaid balance, not a billing period.", "A standard inference key cannot read account-wide credits, the per-key breakdown, or activity under any configuration."],
     limitations: ["GET /api/v1/keys returns only the default workspace; accounts with additional workspaces need per-workspace enumeration, not implemented here.", "Derived month-to-date cost trusts activity data being complete for every day since the 1st of the month and is withheld when that cannot be proven."],
     source: "src/lib/adapters/openrouter.ts",
+  }),
+  kimi: defineBlindProfile({
+    name: "kimi", displayName: "Kimi", category: "LLM/AI",
+    reason: "Kimi is accessed exclusively through OpenRouter in this fleet; the retired definition exists only so boot-time retirement deactivates stray rows using this name.",
+    cannotAdd: ["The provider is retired: no direct Kimi connection, key, or polling is supported."],
+    source: "src/lib/provider-definitions.ts",
+  }),
+  moonshot: defineBlindProfile({
+    name: "moonshot", displayName: "Moonshot AI", category: "LLM/AI",
+    reason: "Moonshot (Kimi) is accessed exclusively through OpenRouter in this fleet; the retired definition exists only so boot-time retirement deactivates stray rows using this name.",
+    cannotAdd: ["The provider is retired: no direct Moonshot connection, key, or polling is supported."],
+    source: "src/lib/provider-definitions.ts",
   }),
   github: defineProfile({
     name: "github", displayName: "GitHub", category: "Developer Platform", mode: "direct",
@@ -268,6 +285,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     source: "src/lib/adapters/pinecone.ts",
   }),
   voyage: defineBlindProfile({ name: "voyage", displayName: "Voyage AI", category: "Vector DB", reason: "No documented non-billable account, credit, invoice, or subscription endpoint is available.", source: "src/lib/adapters/voyage.ts" }),
+  roic: defineBlindProfile({ name: "roic", displayName: "ROIC.ai", category: "Market Data", reason: "No documented non-billable ROIC.ai usage/billing API is wired; track plan cost via Subscription or push telemetry.", source: "src/lib/adapters/index.ts" }),
   fmp: defineBlindProfile({ name: "fmp", displayName: "FMP", category: "Market Data", reason: "Usage and billing are dashboard-only; the monitor does not consume a market-data call to test the key.", source: "src/lib/adapters/fmp.ts" }),
   finnhub: defineBlindProfile({ name: "finnhub", displayName: "Finnhub", category: "Market Data", reason: "No documented account usage or billing endpoint is available.", source: "src/lib/adapters/finnhub.ts" }),
   alphavantage: defineBlindProfile({ name: "alphavantage", displayName: "Alpha Vantage", category: "Market Data", reason: "No documented account usage or billing endpoint is available.", source: "src/lib/adapters/alphavantage.ts" }),
@@ -417,6 +435,41 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["Non-USD plan prices remain in their owner currency and are never mislabeled as USD; discounts, tax, and accrued invoice totals are unavailable.", "Automatic backup images are not priced again because the server backup add-on already represents that charge."],
     source: "src/lib/adapters/hetzner.ts",
   }),
+  backblaze: defineProfile({
+    name: "backblaze", displayName: "Backblaze B2", category: "Infrastructure", mode: "partial",
+    summary: "Inventories B2 buckets and file versions for storage footprint and estimates storage MTD from public B2 pricing without claiming invoice spend or download charges.",
+    reads: [
+      "Buckets visible to the application key (listBuckets or a single scoped bucket).",
+      "File version inventory per bucket via list_file_versions, including hidden versions that still bill until permanently deleted.",
+      "Derived storage bytes/GB, free-allowance-adjusted billable GB, and pro-rated catalog storage MTD.",
+    ],
+    stores: [
+      "Minimized bucket identity, file-version counts, and storage totals; credentials, object payloads, and full list responses are not persisted as content.",
+    ],
+    credentialInputs: [
+      "Application Key ID.",
+      "Application Key (prefer a dedicated read-only key with listBuckets + listFiles; do not reuse write/delete backup keys).",
+      "Optional soft storage cap GB and catalog price / free-allowance overrides.",
+    ],
+    billing: {
+      visibility: "metadata",
+      summary: "Storage MTD is a public-catalog estimate pro-rated by UTC month; download bandwidth and Class A/B transactions are not included. Not an invoice.",
+    },
+    canAdd: [
+      "Download and Class A/B transaction usage if Backblaze exposes a supported account usage API.",
+      "Invoice totals if a billing-history endpoint becomes available.",
+    ],
+    cannotAdd: [
+      "Console Caps & Alerts hard limits cannot be set or read via the public API.",
+      "Download egress and Class A/B API transaction spend cannot be reconstructed from inventory APIs alone.",
+    ],
+    limitations: [
+      "totalCost is public storage price × billable GB × UTC month fraction only.",
+      "totalRequests is whole megabytes of storage so request-limit budgets can soft-cap footprint; as a storage gauge it is excluded from request-anomaly detection.",
+      "Very large buckets may truncate inventory at a safety max file-version count.",
+    ],
+    source: "src/lib/adapters/backblaze.ts",
+  }),
   coolify: defineProfile({
     name: "coolify", displayName: "Coolify", category: "Infrastructure", mode: "health-only",
     summary: "Reads server reachability/usability and application deployment status from a Coolify instance's REST API; this is service-health monitoring of self-hosted infrastructure, not a third-party billing account.",
@@ -453,6 +506,18 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["The current endpoint does not report credits used. The monitor never subtracts remaining credits from the plan allowance because add-on credits can make the balance exceed that allowance.", "Historical usage is bounded, rejects a malformed/overlapping collection as a whole, and is omitted on optional endpoint failure so prior valid rows are not pruned.", "Billing-period start and end are independently nullable, and a period end is not claimed as a quota reset or subscription renewal."],
     source: "src/lib/adapters/firecrawl.ts",
   }),
+  deno: defineProfile({
+    name: "deno", displayName: "Deno Deploy", category: "Developer Platform", mode: "partial",
+    summary: "Retired.  Legacy Deno Deploy records remain for a dead host.  Congress.Trade and other Jay apps now run on Coolify, not Deno Deploy.",
+    reads: ["Historical user ID, name, email, and organization billing metadata when a leftover token is still present."],
+    stores: ["User name/email and external billing account identity from leftover rows."],
+    credentialInputs: ["Optional leftover Deno Deploy Personal Access Token (ddp_...).", "Optional historical organization slug."],
+    billing: { visibility: "partial", summary: "Deno Deploy is retired and is not a live production host.  Leftover identity metadata may still exist on historical rows; Coolify is the Congress.Trade host now." },
+    canAdd: ["Nothing further — Deno Deploy is retired.  Track Congress.Trade host cost on Coolify."],
+    cannotAdd: ["Inference or code execution is not performed.", "This connector must not be treated as a current hosting target."],
+    limitations: ["Deno Deploy is retired.  The leftover adapter exists only so historical rows stay legible; Jay apps do not host on Deno Deploy."],
+    source: "src/lib/adapters/deno.ts",
+  }),
   llamaindex: defineProfile({
     name: "llamaindex", displayName: "LlamaIndex Cloud", category: "Data", mode: "partial",
     summary: "Discovers accessible organizations and reads paginated UTC calendar-month-to-date product-credit usage without running parsing or inference.",
@@ -477,6 +542,18 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["Only USD fees are included in the normalized total."],
     source: "src/lib/adapters/stripe.ts",
   }),
+  namecheap: defineProfile({
+    name: "namecheap", displayName: "Namecheap", category: "Infrastructure", mode: "direct",
+    summary: "Reads prepaid account balance, funds required for auto-renewal, and active domain inventory with upcoming expiration dates from the official Namecheap XML API.",
+    reads: ["Account balance, available balance, earned/withdrawable funds, funds required for auto-renew, and active domains with expiration dates."],
+    stores: ["Prepaid balance, total active domain count, and domain renewal metadata; billing payment methods and registrar contact details are not requested."],
+    credentialInputs: ["Namecheap API key.", "Account username.", "Optional whitelisted client IP."],
+    billing: { visibility: "actual", summary: "Prepaid available balance is direct. Domain renewals and auto-renew required funds are visible in snapshot metadata." },
+    canAdd: ["Domain auto-renewal status, expiration timeline, and DNS host inspection."],
+    cannotAdd: ["Domains registered with third-party registrars are not visible through Namecheap API."],
+    limitations: ["Namecheap API requires IP address whitelisting in the account security settings."],
+    source: "src/lib/adapters/namecheap.ts",
+  }),
   robinhood: defineBlindProfile({ name: "robinhood", displayName: "Robinhood", category: "Brokerage", reason: "Robinhood has no supported public retail account usage or billing API for this monitor.", source: "src/lib/adapters/robinhood.ts", canAdd: ["The trading app can push operational usage/cost telemetry that does not expose brokerage credentials or holdings."], cannotAdd: ["Unofficial, reverse-engineered, or browser-session access is not suitable for unattended billing sync."] }),
   alpaca: defineProfile({
     name: "alpaca", displayName: "Alpaca", category: "Brokerage", mode: "partial",
@@ -490,8 +567,8 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     limitations: ["One row represents one credential/environment pair."],
     source: "src/lib/adapters/alpaca.ts",
   }),
-  "agent-sync-relay": defineProfile({
-    name: "agent-sync-relay", displayName: "Agent Sync Relay", category: "Operations", mode: "health-only",
+  "simple-tools-relay": defineProfile({
+    name: "simple-tools-relay", displayName: "Simple Tools Relay", category: "Operations", mode: "health-only",
     summary: "Checks the relay health endpoint; this is service availability monitoring, not a third-party billing account.",
     reads: ["Health response and HTTP availability."],
     stores: ["UP/error state and returned health metadata."],
@@ -501,7 +578,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
     canAdd: ["Authenticated health or service-level metrics could be added if the relay exposes them safely."],
     cannotAdd: ["Slack message content and agent coordination data are not read by this adapter."],
     limitations: ["A custom endpoint is treated as untrusted and SSRF-checked."],
-    source: "src/lib/adapters/agent-sync-relay.ts",
+    source: "src/lib/adapters/simple-tools-relay.ts",
   }),
   custom: defineProfile({
     name: "custom", displayName: "Custom API", category: "Custom", mode: "configurable",
@@ -532,7 +609,7 @@ const CATALOG: Record<CatalogProviderName, ProviderIntegrationProfile> = {
 };
 
 const ALIASES: Readonly<Record<string, CatalogProviderName>> = {
-  agent_sync_relay: "agent-sync-relay",
+  simple_tools_relay: "simple-tools-relay",
 };
 
 // The connection catalog is intentionally narrower than CATALOG: CATALOG

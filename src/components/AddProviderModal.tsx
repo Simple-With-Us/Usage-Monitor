@@ -11,6 +11,22 @@ import {
   PROVIDER_CATEGORIES,
   type ProviderDefinition,
 } from "@/lib/provider-definitions";
+import { isMustKeepFundedOptionVisible } from "@/lib/provider-funding-policy";
+import {
+  FIXED_FEE_SUBSCRIPTION_WARNING,
+  PROVIDER_WIZARD_STEPS,
+  formatWizardProgress,
+  hasFixedMonthlyCostSet,
+  isFirstWizardStep,
+  isLastWizardStep,
+  nextWizardStep,
+  prevWizardStep,
+  validateBudgetStep,
+  validateCredentialsStep,
+  validateTypeStep,
+  wizardStepById,
+  type WizardStepId,
+} from "@/lib/provider-wizard";
 
 type BillingMode = "actual" | "estimated" | "manual";
 
@@ -174,13 +190,18 @@ export default function AddProviderModal({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [wizardStep, setWizardStep] = useState<WizardStepId>("type");
 
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [allocations, setAllocations] = useState<{ projectId: string; percentage: number }[]>(
     editProvider?.allocations || []
   );
 
+  // Gated on `open` (same convention as the effect below) — this modal is
+  // always mounted by the settings page, so an ungated fetch duplicated the
+  // page's own /api/projects request on every visit.
   useEffect(() => {
+    if (!open) return;
     fetch("/api/projects")
       .then((res) => {
         if (!res.ok) throw new Error("Failed to fetch projects");
@@ -188,7 +209,7 @@ export default function AddProviderModal({
       })
       .then((data) => setProjects(data))
       .catch((err) => console.error("Error fetching projects:", err));
-  }, []);
+  }, [open]);
 
   const [selectedBuiltin, setSelectedBuiltin] = useState(editProvider?.name || "");
   const [builtinDisplayName, setBuiltinDisplayName] = useState(editProvider?.displayName || "");
@@ -314,9 +335,56 @@ export default function AddProviderModal({
     setMustKeepFunded(editProvider?.plan?.mustKeepFunded ?? false);
     setPlanNotes(editProvider?.plan?.notes ?? "");
     setAllocations(editProvider?.allocations || []);
+    setWizardStep("type");
   }, [editProvider, open]);
 
   if (!open) return null;
+
+  const validateCurrentWizardStep = (): string | null => {
+    if (wizardStep === "type") {
+      return validateTypeStep({
+        tab,
+        selectedBuiltin,
+        builtinDisplayName,
+        customName,
+        customDisplayName,
+      });
+    }
+    if (wizardStep === "credentials") {
+      return validateCredentialsStep({
+        tab,
+        customEndpoint,
+        missingRequiredConfigLabels: [],
+      });
+    }
+    if (wizardStep === "budget") {
+      return validateBudgetStep({
+        fixedMonthlyCostUsd,
+        monthlyBudgetUsd,
+        monthlyRequestLimit,
+        lowBalanceUsd,
+        lowCredits,
+      });
+    }
+    return null;
+  };
+
+  const goNextStep = () => {
+    const stepError = validateCurrentWizardStep();
+    if (stepError) {
+      setError(stepError);
+      return;
+    }
+    setError("");
+    const next = nextWizardStep(wizardStep);
+    if (next) setWizardStep(next);
+  };
+
+  const goPrevStep = () => {
+    setError("");
+    const prev = prevWizardStep(wizardStep);
+    if (prev) setWizardStep(prev);
+  };
 
   const parseNumberField = (value: string, labelText: string, integer = false) => {
     const trimmed = value.trim();
@@ -330,6 +398,9 @@ export default function AddProviderModal({
     }
     return parsed;
   };
+
+  const stayFundedVisible =
+    tab !== "builtin" || isMustKeepFundedOptionVisible(selectedBuiltin);
 
   const buildPlan = (): ProviderPlan => ({
     billingMode,
@@ -347,7 +418,9 @@ export default function AddProviderModal({
     lowCredits: parseNumberField(lowCredits, "Low credit alert"),
     renewalDate: renewalDate || null,
     billingInterval,
-    mustKeepFunded,
+    // LLM/AI accounts hide the option; do not persist a stale true from a
+    // previous provider selection. API still accepts true if re-enabled later.
+    mustKeepFunded: stayFundedVisible ? mustKeepFunded : false,
     notes: planNotes.trim() || null,
   });
 
@@ -522,7 +595,7 @@ export default function AddProviderModal({
           aria-label="Cost visibility"
           value={billingMode}
           onChange={(e) => setBillingMode(e.target.value as BillingMode)}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
         >
           <option value="actual">Actual from provider</option>
           <option value="estimated">Estimated from usage</option>
@@ -537,17 +610,26 @@ export default function AddProviderModal({
           <input
             aria-label="Fixed cost add-on per month (not a Subscription)"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={fixedMonthlyCostUsd}
             onChange={(e) => setFixedMonthlyCostUsd(e.target.value)}
             placeholder="49"
             title="Use this OR a Paid service Subscription for the same fee — not both. Both would double-count spend."
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
           <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
             Not a Subscription. Do not also Track a paid service for the same fee.
           </p>
+          {hasFixedMonthlyCostSet(fixedMonthlyCostUsd) && (
+            <p
+              role="status"
+              className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+            >
+              {FIXED_FEE_SUBSCRIPTION_WARNING}
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
@@ -556,12 +638,13 @@ export default function AddProviderModal({
           <input
             aria-label="Monthly budget"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={monthlyBudgetUsd}
             onChange={(e) => setMonthlyBudgetUsd(e.target.value)}
             placeholder="100"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
       </div>
@@ -578,7 +661,7 @@ export default function AddProviderModal({
             value={monthlyRequestLimit}
             onChange={(e) => setMonthlyRequestLimit(e.target.value)}
             placeholder="100000"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
@@ -590,7 +673,7 @@ export default function AddProviderModal({
             type="date"
             value={renewalDate}
             onChange={(e) => setRenewalDate(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
@@ -601,7 +684,7 @@ export default function AddProviderModal({
             aria-label="Renewal cadence"
             value={billingInterval}
             onChange={(e) => setBillingInterval(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           >
             <option value="weekly">Weekly</option>
             <option value="monthly">Monthly</option>
@@ -618,12 +701,13 @@ export default function AddProviderModal({
           <input
             aria-label="Low balance alert"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={lowBalanceUsd}
             onChange={(e) => setLowBalanceUsd(e.target.value)}
             placeholder="10"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
@@ -638,19 +722,21 @@ export default function AddProviderModal({
             value={lowCredits}
             onChange={(e) => setLowCredits(e.target.value)}
             placeholder="1000"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
       </div>
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={mustKeepFunded}
-          onChange={(e) => setMustKeepFunded(e.target.checked)}
-          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900"
-        />
-        <span className="text-sm text-gray-700 dark:text-gray-200">Must stay funded</span>
-      </label>
+      {stayFundedVisible ? (
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={mustKeepFunded}
+            onChange={(e) => setMustKeepFunded(e.target.checked)}
+            className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900"
+          />
+          <span className="text-sm text-gray-700 dark:text-gray-200">Must stay funded</span>
+        </label>
+      ) : null}
       <div>
         <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Notes</label>
         <textarea
@@ -659,7 +745,7 @@ export default function AddProviderModal({
           onChange={(e) => setPlanNotes(e.target.value)}
           rows={2}
           placeholder="Plan name, billing owner, pricing caveats"
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
         />
       </div>
     </fieldset>
@@ -674,7 +760,7 @@ export default function AddProviderModal({
         id="provider-refresh-interval"
         value={refreshIntervalMin}
         onChange={(event) => setRefreshIntervalMin(Number(event.target.value))}
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base sm:text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
       >
         {![15, 60, 360, 1440].includes(refreshIntervalMin) && (
           <option value={refreshIntervalMin}>Every {refreshIntervalMin} minutes (custom)</option>
@@ -684,7 +770,7 @@ export default function AddProviderModal({
         <option value={360}>Every 6 hours</option>
         <option value={1440}>Daily</option>
       </select>
-      <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
         Use a longer interval for quota-bearing provider endpoints.
       </p>
     </div>
@@ -806,7 +892,7 @@ export default function AddProviderModal({
               onChange={(event) =>
                 setExtraFields((previous) => ({ ...previous, [field.key]: event.target.value }))
               }
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
             >
               {field.options?.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -829,7 +915,7 @@ export default function AddProviderModal({
                 setExtraFields((previous) => ({ ...previous, [field.key]: event.target.value }))
               }
               placeholder={configuredSecret ? "Configured — leave blank to keep current" : field.placeholder}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
             />
           )}
           {configuredSecret && !value && (
@@ -928,7 +1014,7 @@ export default function AddProviderModal({
                     )
                   );
                 }}
-                className="min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                className="min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               >
                 <option value="">Select project...</option>
                 {projects.map((p) => (
@@ -945,6 +1031,7 @@ export default function AddProviderModal({
                 <input
                   aria-label={`Percentage for allocation ${idx + 1}`}
                   type="number"
+                  inputMode="decimal"
                   min="0.01"
                   max="100"
                   step="0.01"
@@ -958,7 +1045,7 @@ export default function AddProviderModal({
                     );
                   }}
                   placeholder="0"
-                  className="w-full rounded-lg border border-gray-300 py-2 pl-3 pr-7 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full rounded-lg border border-gray-300 py-2 pl-3 pr-7 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
                 <span className="pointer-events-none absolute right-2 top-2 text-sm text-gray-500 dark:text-gray-400">%</span>
               </div>
@@ -1031,7 +1118,43 @@ export default function AddProviderModal({
       onClose={onClose}
       closeDisabled={saving}
     >
-          <div className="flex border-b border-gray-200 mb-6 dark:border-gray-700">
+          <nav aria-label="Provider setup steps" className="mb-5">
+            <ol className="flex flex-wrap items-center gap-1 sm:gap-2">
+              {PROVIDER_WIZARD_STEPS.map((step, index) => {
+                const active = step.id === wizardStep;
+                const done = wizardStepById(wizardStep).index > step.index;
+                return (
+                  <li key={step.id} className="flex items-center gap-1 sm:gap-2">
+                    {index > 0 && (
+                      <span aria-hidden="true" className="mx-0.5 h-px w-3 sm:w-5 bg-gray-200 dark:bg-gray-600" />
+                    )}
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium ${
+                        active
+                          ? "bg-accent text-white"
+                          : done
+                            ? "bg-accent-soft text-gray-900 dark:text-gray-100"
+                            : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                      }`}
+                      aria-current={active ? "step" : undefined}
+                    >
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold bg-white/20">
+                        {step.index}
+                      </span>
+                      <span className="hidden sm:inline">{step.label}</span>
+                      <span className="sm:hidden">{step.shortLabel}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Step {formatWizardProgress(wizardStep)}
+              {editProvider ? " · editing existing provider" : ""}
+            </p>
+          </nav>
+
+          <div className={`flex border-b border-gray-200 mb-6 dark:border-gray-700 ${wizardStep === "type" ? "" : "hidden"}`}>
             <button
               type="button"
               onClick={() => setTab("builtin")}
@@ -1109,7 +1232,7 @@ export default function AddProviderModal({
                       setExtraFields(stringFieldsFromConfig(editProvider.config));
                     }
                   }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                 >
                   <option value="">Select a provider...</option>
                   {PROVIDER_CATEGORIES.map((cat) => (
@@ -1152,7 +1275,7 @@ export default function AddProviderModal({
                   value={builtinDisplayName}
                   onChange={(e) => setBuiltinDisplayName(e.target.value)}
                   placeholder={selectedDef?.displayName || "Provider display name"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
@@ -1178,7 +1301,7 @@ export default function AddProviderModal({
                 </div>
               )}
 
-              {selectedDef?.usesApiKey !== false && (
+              {(wizardStep === "credentials" || wizardStep === "review") && selectedDef?.usesApiKey !== false && (
               <div>
                 <label htmlFor="provider-builtin-api-key" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   {selectedDef?.name === "cloudflare"
@@ -1205,7 +1328,7 @@ export default function AddProviderModal({
                             ? "Management API key"
                             : "Your API key"
                     }
-                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                   />
                   {!credentialManaged && (
                     <button
@@ -1236,6 +1359,7 @@ export default function AddProviderModal({
               </div>
               )}
 
+              {(wizardStep === "credentials" || wizardStep === "review") && (
               <div>
                 <label htmlFor="provider-builtin-label" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
                   Label (optional)
@@ -1247,17 +1371,31 @@ export default function AddProviderModal({
                   onChange={(e) => setLabel(e.target.value)}
                   disabled={Boolean(credentialManaged)}
                   placeholder="e.g. Socratic Trade, Congress.Trade"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                 />
                 <p className="text-xs text-gray-400 mt-0.5 dark:text-gray-500">Tag this key to distinguish it from others with the same provider name</p>
               </div>
+              )}
 
-              {renderSyncCadence()}
-
-              {renderExtraFields()}
-
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "credentials" || wizardStep === "review") && renderExtraFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
+              {wizardStep === "review" && (
+                <div className="rounded-lg border border-orange-100 bg-orange-50/60 px-3 py-3 text-sm text-gray-900 dark:border-orange-900/40 dark:bg-orange-950/20 dark:text-gray-100">
+                  <p className="font-medium">Review</p>
+                  <p className="mt-1 text-xs opacity-90">
+                    {builtinDisplayName || selectedBuiltin} · {tab}
+                    {label ? ` · ${label}` : ""} · budget{" "}
+                    {monthlyBudgetUsd.trim() ? `$${monthlyBudgetUsd}` : "unset"}
+                    {fixedMonthlyCostUsd.trim() ? ` · fixed $${fixedMonthlyCostUsd}/mo` : ""}
+                  </p>
+                </div>
+              )}
             </div>
           ) : tab === "custom" ? (
             <div className="space-y-4">
@@ -1274,7 +1412,7 @@ export default function AddProviderModal({
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={Boolean(editProvider)}
                     placeholder="my-api"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                   />
                 </div>
                 <div>
@@ -1288,7 +1426,7 @@ export default function AddProviderModal({
                     value={customDisplayName}
                     onChange={(e) => setCustomDisplayName(e.target.value)}
                     placeholder="My API"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
               </div>
@@ -1304,7 +1442,7 @@ export default function AddProviderModal({
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
-                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                   <button
                     type="button"
@@ -1337,7 +1475,7 @@ export default function AddProviderModal({
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="e.g. Production, Staging"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
                 <p className="text-xs text-gray-400 mt-0.5 dark:text-gray-500">Tag this key to distinguish it from others</p>
               </div>
@@ -1352,7 +1490,7 @@ export default function AddProviderModal({
                   value={customEndpoint}
                   onChange={(e) => setCustomEndpoint(e.target.value)}
                   placeholder="https://api.example.com/usage"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
@@ -1364,7 +1502,7 @@ export default function AddProviderModal({
                   id="provider-custom-auth-type"
                   value={customAuthType}
                   onChange={(e) => setCustomAuthType(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 >
                   <option value="bearer">Bearer Token</option>
                   <option value="api-key">API Key</option>
@@ -1382,7 +1520,7 @@ export default function AddProviderModal({
                   value={customAuthHeader}
                   onChange={(e) => setCustomAuthHeader(e.target.value)}
                   placeholder="Authorization"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
@@ -1408,7 +1546,7 @@ export default function AddProviderModal({
                     value={customBalancePath}
                     onChange={(e) => setCustomBalancePath(e.target.value)}
                     placeholder="$.balance"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 <div>
@@ -1419,7 +1557,7 @@ export default function AddProviderModal({
                     value={customCostPath}
                     onChange={(e) => setCustomCostPath(e.target.value)}
                     placeholder="$.cost"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 <div>
@@ -1430,7 +1568,7 @@ export default function AddProviderModal({
                     value={customRequestsPath}
                     onChange={(e) => setCustomRequestsPath(e.target.value)}
                     placeholder="$.requests"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 {trackCredits && (
@@ -1442,15 +1580,19 @@ export default function AddProviderModal({
                       value={customCreditsPath}
                       onChange={(e) => setCustomCreditsPath(e.target.value)}
                       placeholder="$.credits"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                     />
                   </div>
                 )}
               </fieldset>
 
-              {renderSyncCadence()}
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-4">
@@ -1467,7 +1609,7 @@ export default function AddProviderModal({
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={Boolean(editProvider)}
                     placeholder="my-service"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                   />
                 </div>
                 <div>
@@ -1481,7 +1623,7 @@ export default function AddProviderModal({
                     value={customDisplayName}
                     onChange={(e) => setCustomDisplayName(e.target.value)}
                     placeholder="My Service"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
               </div>
@@ -1496,13 +1638,17 @@ export default function AddProviderModal({
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="e.g. Production, Staging"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
-              {renderSyncCadence()}
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
             </div>
           )}
 
@@ -1512,23 +1658,46 @@ export default function AddProviderModal({
             </p>
           )}
 
-          <div className="mt-6 flex flex-wrap gap-3 justify-end">
+          <div className="mt-6 flex flex-wrap gap-3 justify-between">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors dark:text-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors dark:text-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600"
             >
               Cancel
             </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? "Saving..." : editProvider ? "Update" : "Add Provider"}
-            </button>
+            <div className="flex flex-wrap gap-3 justify-end">
+              {!isFirstWizardStep(wizardStep) && (
+                <button
+                  type="button"
+                  onClick={goPrevStep}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600"
+                >
+                  Back
+                </button>
+              )}
+              {!isLastWizardStep(wizardStep) ? (
+                <button
+                  type="button"
+                  onClick={goNextStep}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-accent rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {saving ? "Saving..." : editProvider ? "Update" : "Add Provider"}
+                </button>
+              )}
+            </div>
           </div>
     </ModalDialog>
   );

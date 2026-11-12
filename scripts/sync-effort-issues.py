@@ -66,11 +66,14 @@ Reconciliation
   - Title = first ~80 chars of the item's first line (bold markers and the
     bullet stripped), truncated on a word boundary with "...".
   - Body = the item's full text (all folded lines) + a fixed footer that
-    says this is a read-only mirror, plus a link to the board file at the
-    commit that produced it.
+    says this is a read-only mirror, plus a link to the board file on the
+    stable `main` branch (`BOARD_SOURCE_REF`). Do **not** embed `GITHUB_SHA`
+    in the Source URL — that rewrote every issue body on every board merge
+    and delayed orphan reconciliation by ~1s per update.
   - Idempotent: if title/body/labels/state already match, no API call is
     made beyond the initial list. Existing issues are only updated when
-    something actually changed.
+    something actually changed. Unchanged rows stay byte-identical across
+    sync runs that only differ by commit SHA.
   - Never deletes issues. After every current row reconciles successfully, a
     vanished non-historical marker issue is retired with `state:orphaned`; open
     issues are also closed, while closed historical Completed/Deployed issues
@@ -119,6 +122,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -143,6 +147,26 @@ RATE_LIMIT_RETRY_BUDGET_SECONDS = 300.0
 # Backoff for rate-limited requests when the server sends no Retry-After.
 RATE_LIMIT_BACKOFF_BASE_SECONDS = 15.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 120.0
+# Socket timeout for a single API call. Without one, urlopen blocks forever on a
+# half-open connection and the job only ends when Actions kills the whole run.
+HTTP_TIMEOUT_SECONDS = 30.0
+# Transport-level (not HTTP-level) retries. A truncated response body raises
+# http.client.IncompleteRead out of resp.read() *after* a 200, so it never
+# reaches the rate-limit retry in GitHubClient._request and used to abort the
+# whole sync. Listing every issue with state=all pulls several hundred KB across
+# pages, so a single mid-body disconnect was enough to fail the run
+# ("IncompleteRead(714456 bytes read, 6207 more expected)" in production); a
+# transient "SSL: CERTIFICATE_VERIFY_FAILED" did the same at connect time.
+#
+# Only *idempotent* methods are retried. A POST that created an issue but whose
+# response body was truncated has already mutated the repo -- replaying it would
+# file a duplicate issue, which is worse than the failure we are fixing. POSTs
+# therefore surface the transport error and let the next scheduled run reconcile
+# (creation is keyed off the board, so a re-run is self-healing).
+TRANSPORT_RETRY_METHODS = frozenset({"GET", "HEAD", "PUT", "PATCH", "DELETE"})
+TRANSPORT_RETRY_ATTEMPTS = 4
+TRANSPORT_BACKOFF_BASE_SECONDS = 2.0
+TRANSPORT_BACKOFF_MAX_SECONDS = 15.0
 # A board must retain at least this fraction of existing mirrored keys before
 # disappeared keys are retired. This treats large sudden key loss as probable
 # truncation/parser drift and requires a later healthy sync instead.
@@ -296,17 +320,49 @@ def http_request(
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
+
+    retryable = method.upper() in TRANSPORT_RETRY_METHODS
+    attempt = 0
+    while True:
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"message": raw.decode("utf-8", errors="replace")}
-        return e.code, parsed, dict(e.headers or {})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            # A real HTTP response, not a transport failure. Return it so
+            # GitHubClient._request can apply its rate-limit backoff. Note this
+            # must stay ahead of URLError below -- HTTPError subclasses it.
+            raw = e.read()
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"message": raw.decode("utf-8", errors="replace")}
+            return e.code, parsed, dict(e.headers or {})
+        except (
+            http.client.IncompleteRead,
+            http.client.HTTPException,
+            urllib.error.URLError,
+            ConnectionError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ) as e:
+            # json.JSONDecodeError lands here because a body that was cut short
+            # without tripping IncompleteRead still fails to parse -- same root
+            # cause, same remedy.
+            attempt += 1
+            if not retryable or attempt >= TRANSPORT_RETRY_ATTEMPTS:
+                raise
+            wait = min(
+                TRANSPORT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                TRANSPORT_BACKOFF_MAX_SECONDS,
+            )
+            print(
+                f"transport error on {method} {url} "
+                f"({type(e).__name__}: {e}) -- retrying in {wait:.0f}s "
+                f"(attempt {attempt}/{TRANSPORT_RETRY_ATTEMPTS - 1})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
 
 
 class RateLimitBudgetExhausted(Exception):
@@ -332,6 +388,25 @@ def _retry_after_seconds(headers: dict[str, str]) -> float | None:
                 return max(0.0, float(value))
             except ValueError:
                 return None
+    return None
+
+
+def _next_link_url(headers: dict[str, str]) -> str | None:
+    """Parse GitHub's `Link: <url>; rel="next"` header (case-insensitive)."""
+    link_value = None
+    for name, value in headers.items():
+        if name.lower() == "link":
+            link_value = value
+            break
+    if not link_value:
+        return None
+    # Multiple relations are comma-separated; each entry is `<url>; rel="…"`.
+    for part in link_value.split(","):
+        piece = part.strip()
+        if 'rel="next"' not in piece and "rel=next" not in piece:
+            continue
+        if piece.startswith("<") and ">" in piece:
+            return piece[1:piece.index(">")]
     return None
 
 
@@ -373,21 +448,59 @@ class GitHubClient:
             time.sleep(wait)
 
     def _get_all_pages(self, path: str, params: str = "") -> list[dict]:
+        """Fetch every page for a list endpoint.
+
+        Prefer the response `Link: rel="next"` URL when present so cursor-based
+        pagination (`after=…`) works. Falling back to `page=N` alone can stop
+        early or return only pull requests on `/issues`, which then makes every
+        board row look new and skips close/orphan reconciliation.
+        """
         results: list[dict] = []
-        page = 1
-        while True:
-            sep = "&" if params else ""
-            url = f"{API_BASE}/repos/{self.repo}/{path}?per_page=100&page={page}{sep}{params}"
-            status, payload = self._request("GET", url)
+        sep = "&" if params else ""
+        url: str | None = (
+            f"{API_BASE}/repos/{self.repo}/{path}?per_page=100{sep}{params}"
+        )
+        while url:
+            status, payload, headers = self._request_with_headers("GET", url)
             if status >= 300:
                 raise RuntimeError(f"GET {path} failed: {status} {payload}")
-            if not payload:
+            if not isinstance(payload, list) or not payload:
                 break
             results.extend(payload)
-            if len(payload) < 100:
-                break
-            page += 1
+            url = _next_link_url(headers)
         return results
+
+    def _request_with_headers(self, method: str, url: str, body: dict | None = None) -> tuple[int, dict | list, dict[str, str]]:
+        """Like `_request`, but preserves response headers for Link pagination."""
+        attempt = 0
+        while True:
+            attempt += 1
+            status, payload, headers = http_request(method, url, self.token, body)
+            if not _rate_limited(status, payload, headers):
+                if status >= 300 and status not in (422,):
+                    # Caller decides; return as-is for list helpers to raise.
+                    pass
+                return status, payload, headers
+            retry_after = _retry_after_seconds(headers)
+            if retry_after is not None:
+                wait = retry_after
+            else:
+                wait = min(
+                    RATE_LIMIT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                    RATE_LIMIT_BACKOFF_MAX_SECONDS,
+                )
+            if wait > self.retry_budget_remaining:
+                raise RateLimitBudgetExhausted(
+                    f"rate limited on {method} {url} and the next wait ({wait:.0f}s) exceeds the "
+                    f"remaining retry budget ({self.retry_budget_remaining:.0f}s of "
+                    f"{RATE_LIMIT_RETRY_BUDGET_SECONDS:.0f}s)"
+                )
+            self.retry_budget_remaining -= wait
+            print(
+                f"rate limited ({status}) on {method} {url} — sleeping {wait:.0f}s "
+                f"(retry budget left: {self.retry_budget_remaining:.0f}s)"
+            )
+            time.sleep(wait)
 
     def list_labels(self) -> set[str]:
         labels = self._get_all_pages("labels")
@@ -406,8 +519,14 @@ class GitHubClient:
             raise RuntimeError(f"create label {name} failed: {status} {payload}")
 
     def list_all_issues(self) -> list[dict]:
-        # state=all to see both open and closed mirrored issues.
-        return self._get_all_pages("issues", params="state=all")
+        # state=all to see both open and closed mirrored issues. The Issues API
+        # also returns pull requests — drop those so PR bodies can't collide
+        # with effort-key matching and so pagination actually reaches issues.
+        return [
+            issue
+            for issue in self._get_all_pages("issues", params="state=all")
+            if "pull_request" not in issue
+        ]
 
     def create_issue(self, title: str, body: str, labels: list[str], assignee: str | None) -> dict:
         if self.dry_run:
@@ -434,8 +553,19 @@ class GitHubClient:
         time.sleep(UPDATE_THROTTLE_SECONDS)
 
 
-def build_body(item: BoardItem, repo: str, ref: str) -> str:
-    link = f"https://github.com/{repo}/blob/{ref}/{BOARD_PATH}"
+# Stable branch used in issue Source links. Embedding GITHUB_SHA here used to
+# rewrite every mirrored issue body on every board merge (then sleep 1s each)
+# before orphan reconciliation could run. Traceability stays via the board
+# file on `main`; provenance of *this sync run* is workflow logs / GITHUB_SHA
+# in Actions, not the issue footer.
+BOARD_SOURCE_REF = "main"
+
+
+def build_body(item: BoardItem, repo: str, ref: str = BOARD_SOURCE_REF) -> str:
+    # `ref` is accepted for call-site compatibility but intentionally ignored for
+    # the Source URL so unchanged board rows stay byte-identical across commits.
+    del ref
+    link = f"https://github.com/{repo}/blob/{BOARD_SOURCE_REF}/{BOARD_PATH}"
     lines = [
         item.full_text,
         "",
@@ -626,7 +756,6 @@ def main() -> int:
         print("error: GITHUB_REPOSITORY is not set", file=sys.stderr)
         return 1
 
-    ref = os.environ.get("GITHUB_SHA", "main")
     assignee = os.environ.get("EFFORT_ISSUES_ASSIGNEE", "jaywedgeworth22")
 
     try:
@@ -653,7 +782,9 @@ def main() -> int:
               "stopped. Exiting 0 — an expected partial pass is not a failure.")
         return 0
 
-    stats = reconcile(items, client, repo, ref, assignee)
+    # Pass BOARD_SOURCE_REF (not GITHUB_SHA) so body provenance is stable across
+    # commits; see build_body / BOARD_SOURCE_REF.
+    stats = reconcile(items, client, repo, BOARD_SOURCE_REF, assignee)
     summary = (
         f"created={stats['created']} updated={stats['updated']} "
         f"unchanged={stats['unchanged']} reopened={stats['reopened']} "

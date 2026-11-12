@@ -116,6 +116,17 @@ describe("GET /api/subscriptions — auth", () => {
     expect(res.status).toBe(200);
   });
 
+  it("accepts the canonical x-usage-read-token header (X3 alias)", async () => {
+    const res = await GET(getRequest({ "x-usage-read-token": READ_TOKEN }));
+    expect(res.status).toBe(200);
+  });
+
+  it("marks the read surface version with an x-api-version response header (X4)", async () => {
+    const res = await GET(getRequest({ "x-usage-read-token": READ_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-api-version")).toBe("1");
+  });
+
   it("accepts a valid Authorization: Bearer header", async () => {
     const res = await GET(getRequest({ authorization: `Bearer ${READ_TOKEN}` }));
     expect(res.status).toBe(200);

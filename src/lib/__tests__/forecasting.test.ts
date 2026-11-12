@@ -3,6 +3,7 @@ import {
   calculateEomForecast,
   calculateEomForecastFromSeries,
   forecastMonthlyUsageFromSeries,
+  projectBudgetRunout,
 } from "../forecasting";
 
 describe("calculateEomForecast", () => {
@@ -93,5 +94,67 @@ describe("calculateEomForecastFromSeries (backward-compatible wrapper)", () => {
     const withFixed = calculateEomForecastFromSeries(dailyUsage, 50, now);
     const usageOnly = forecastMonthlyUsageFromSeries(dailyUsage, now);
     expect(withFixed).toBeCloseTo(50 + usageOnly, 6);
+  });
+});
+
+describe("projectBudgetRunout (S9)", () => {
+  it("returns nulls when no budget is configured", () => {
+    const now = new Date(Date.UTC(2026, 6, 16, 0, 0, 0));
+    expect(
+      projectBudgetRunout({ spentUsd: 50, projectedEomUsd: 200, monthlyBudgetUsd: null, now })
+    ).toEqual({ runoutDate: null, daysUntilBudgetExhausted: null });
+    expect(
+      projectBudgetRunout({ spentUsd: 50, projectedEomUsd: 200, monthlyBudgetUsd: 0, now })
+    ).toEqual({ runoutDate: null, daysUntilBudgetExhausted: null });
+  });
+
+  it("reports now/0 when the budget is already exhausted", () => {
+    const now = new Date(Date.UTC(2026, 6, 16, 0, 0, 0));
+    const result = projectBudgetRunout({
+      spentUsd: 100,
+      projectedEomUsd: 200,
+      monthlyBudgetUsd: 100,
+      now,
+    });
+    expect(result.runoutDate?.toISOString()).toBe(now.toISOString());
+    expect(result.daysUntilBudgetExhausted).toBe(0);
+  });
+
+  it("computes the crossing day from the average projected burn", () => {
+    // July 16 00:00 UTC (day 16.0 of 31). Spent $50 of $100; projection
+    // $96.875 → burn (96.875-50)/15 = 3.125/day → crossing in exactly 16 days.
+    const now = new Date(Date.UTC(2026, 6, 16, 0, 0, 0));
+    const result = projectBudgetRunout({
+      spentUsd: 50,
+      projectedEomUsd: 96.875,
+      monthlyBudgetUsd: 100,
+      now,
+    });
+    expect(result.daysUntilBudgetExhausted).toBe(16);
+    expect(result.runoutDate?.toISOString()).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  it("returns nulls when the projection never grows past current spend", () => {
+    const now = new Date(Date.UTC(2026, 6, 16, 0, 0, 0));
+    expect(
+      projectBudgetRunout({ spentUsd: 50, projectedEomUsd: 50, monthlyBudgetUsd: 100, now })
+    ).toEqual({ runoutDate: null, daysUntilBudgetExhausted: null });
+    expect(
+      projectBudgetRunout({ spentUsd: 50, projectedEomUsd: 40, monthlyBudgetUsd: 100, now })
+    ).toEqual({ runoutDate: null, daysUntilBudgetExhausted: null });
+  });
+
+  it("can cross beyond month end when the burn rate is slow", () => {
+    // July 30 00:00 UTC (1 day left). Budget nearly reached; $0.5/day
+    // projected growth → the $1 gap closes 2 days out, next month.
+    const now = new Date(Date.UTC(2026, 6, 30, 0, 0, 0));
+    const result = projectBudgetRunout({
+      spentUsd: 99,
+      projectedEomUsd: 99.5,
+      monthlyBudgetUsd: 100,
+      now,
+    });
+    expect(result.runoutDate?.toISOString()).toBe("2026-08-01T00:00:00.000Z");
+    expect(result.daysUntilBudgetExhausted).toBe(2);
   });
 });

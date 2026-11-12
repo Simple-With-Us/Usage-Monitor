@@ -4,9 +4,9 @@
 <dict>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.services.jays.usage.monitor</string>
+		<string>group.com.simplewithus.usage</string>
 	</array>
 	<key>aps-environment</key>
-	<string>production</string>
+	<string>development</string>
 </dict>
 </plist>

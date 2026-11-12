@@ -28,7 +28,7 @@
   HTTPS entrypoint keeps its default timeout. The proxy compose change is
   retained under `/data/coolify/proxy/docker-compose.yml` and a timestamped
   pre-change copy under `/data/coolify/proxy/backups/`.
-- Oracle (`100.97.154.2`) and Coolify (`100.86.49.101`) are peers on the
+- Oracle (`<TAILSCALE_IP_RETIRED>`) and Coolify (`100.86.49.101`) are peers on the
   existing Tailscale network. Oracle pins the Garage TLS hostname to the
   Coolify Tailscale address in `/etc/hosts`, so normal backup traffic stays on
   that private path while retaining hostname-based certificate validation.

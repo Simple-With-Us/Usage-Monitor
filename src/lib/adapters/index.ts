@@ -4,7 +4,7 @@ import {
   providerConfigForServer,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
-import { configurationError, unsupportedError } from "./helpers";
+import { configurationError, unsupportedError, blindProviderResult } from "./helpers";
 import type { AdapterInvocationContext } from "./helpers";
 import type { Provider } from "@prisma/client";
 import type { BuiltInProviderName } from "@/lib/provider-definitions";
@@ -44,9 +44,7 @@ async function loadAdapters() {
     import("./fintech_studios"),
     import("./massive"),
     import("./fred"),
-    import("./quiver"),
     import("./unusualwhales"),
-    import("./voyage"),
     import("./sentry"),
     import("./langfuse"),
     import("./twilio"),
@@ -54,31 +52,35 @@ async function loadAdapters() {
     import("./pushover"),
     import("./apify"),
     import("./stripe"),
-    import("./agent-sync-relay"),
+    import("./simple-tools-relay"),
     import("./hetzner"),
+    import("./backblaze"),
     import("./github"),
     import("./render"),
     import("./oracle"),
     import("./coolify"),
+    import("./deno"),
+    import("./namecheap"),
   ]);
 
   const [
     openai, anthropic, googleAi, pinecone, cloudflare, custom,
     deepseek, xai, mistral, openrouter, llamaindex,
     fmp, finnhub, alphavantage, marketstack, tiingo, twelvedata, fintech_studios, massive, fred,
-    quiver,
     unusualwhales,
-    voyage,
     sentry, langfuse,
     twilio, resend, pushover,
     apify,
     stripe,
-    agentSyncRelay,
+    simpleToolsRelay,
     hetzner,
+    backblaze,
     github,
     render,
     oracle,
     coolify,
+    deno,
+    namecheap,
   ] = modules;
 
   // Active built-ins are loaded into the poll registry. Retired and dormant
@@ -94,7 +96,16 @@ async function loadAdapters() {
     github: github.fetchUsage,
     render: render.fetchUsage,
     pinecone: pinecone.fetchUsage,
-    voyage: voyage.fetchUsage,
+    voyage: async () =>
+      blindProviderResult(
+        "voyage",
+        "No documented non-billable usage or billing API exists; no inference probe was sent."
+      ),
+    roic: async () =>
+      blindProviderResult(
+        "roic",
+        "No documented non-billable ROIC.ai usage/billing API is wired; track via Subscription or push telemetry."
+      ),
     fmp: fmp.fetchUsage,
     finnhub: finnhub.fetchUsage,
     alphavantage: alphavantage.fetchUsage,
@@ -104,7 +115,11 @@ async function loadAdapters() {
     "fintech-studios": fintech_studios.fetchUsage,
     massive: massive.fetchUsage,
     fred: fred.fetchUsage,
-    "quiver-quant": quiver.fetchUsage,
+    "quiver-quant": async () =>
+      blindProviderResult(
+        "quiver-quant",
+        "Quiver Quantitative does not expose a billing or usage quota API endpoint. Usage tracked via dashboard."
+      ),
     "unusual-whales": unusualwhales.fetchUsage,
     sentry: sentry.fetchUsage,
     langfuse: langfuse.fetchUsage,
@@ -113,11 +128,14 @@ async function loadAdapters() {
     pushover: pushover.fetchUsage,
     cloudflare: cloudflare.fetchUsage,
     hetzner: hetzner.fetchUsage,
+    backblaze: backblaze.fetchUsage,
     apify: apify.fetchUsage,
     llamaindex: llamaindex.fetchUsage,
     stripe: stripe.fetchUsage,
+    namecheap: namecheap.fetchUsage,
     oracle: oracle.fetchUsage,
     coolify: coolify.fetchUsage,
+    deno: deno.fetchUsage,
   };
   Object.assign(adapters, builtInAdapters);
 
@@ -129,9 +147,9 @@ async function loadAdapters() {
   // Custom
   adapters["custom"] = custom.fetchUsage;
 
-  // Agent Sync Relay (monitoring)
-  adapters["agent-sync-relay"] = agentSyncRelay.fetchUsage;
-  adapters["agent_sync_relay"] = agentSyncRelay.fetchUsage;
+  // Simple Tools Relay (monitoring)
+  adapters["simple-tools-relay"] = simpleToolsRelay.fetchUsage;
+  adapters["simple_tools_relay"] = simpleToolsRelay.fetchUsage;
 }
 
 export async function fetchProviderUsage(
@@ -169,7 +187,9 @@ export async function fetchProviderUsage(
     const adapterName =
       canonicalProviderKey(providerName) === "google-ai"
         ? "google-ai"
-        : providerName;
+        : providerName === "cloudflare" || providerName.startsWith("cloudflare-")
+          ? "cloudflare"
+          : providerName;
     isGeminiAdapter = adapterName === "google-ai";
     const builtinAdapter =
       providerName === "custom" ? undefined : adapters[adapterName];

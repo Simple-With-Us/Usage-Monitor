@@ -3,6 +3,7 @@ import { decryptJson, encryptJson } from "@/lib/crypto";
 import {
   mergeProviderConfig,
   providerConfigForClient,
+  providerConfigForServerOrNull,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 
@@ -151,5 +152,23 @@ describe("provider secret config", () => {
       nested: { region: "us", token: "secret" },
       host: "https://example.com",
     });
+  });
+
+  it("providerConfigForServerOrNull returns merged config and fails closed to null", () => {
+    expect(
+      providerConfigForServerOrNull(
+        { host: "https://example.com", apiKey: "legacy-secret" },
+        encryptJson({ apiSecret: "encrypted-secret" })
+      )
+    ).toEqual({
+      host: "https://example.com",
+      apiKey: "legacy-secret",
+      apiSecret: "encrypted-secret",
+    });
+
+    // Corrupt/un-decryptable secretConfig must not throw on read paths.
+    expect(
+      providerConfigForServerOrNull({ host: "https://example.com" }, "not-an-envelope")
+    ).toBeNull();
   });
 });

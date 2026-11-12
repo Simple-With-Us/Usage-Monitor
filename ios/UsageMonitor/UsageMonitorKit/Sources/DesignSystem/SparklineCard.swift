@@ -28,15 +28,20 @@ public struct SparklineCard: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.secondaryText)
-                Spacer()
-                if let caption {
-                    Text(caption)
-                        .font(Theme.Typography.captionEmphasis)
-                        .foregroundStyle(tint)
+            let showTitle = !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if showTitle || caption != nil {
+                HStack(alignment: .firstTextBaseline) {
+                    if showTitle {
+                        Text(title)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.secondaryText)
+                    }
+                    Spacer()
+                    if let caption {
+                        Text(caption)
+                            .font(Theme.Typography.captionEmphasis)
+                            .foregroundStyle(tint)
+                    }
                 }
             }
 

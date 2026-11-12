@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRateLimiter,
   getClientIp,
+  getIngestIdentityRateLimitKey,
   getLoginBackstopKey,
   getLoginRateLimitKey,
+  getNamedRateLimiter,
 } from "../rate-limit";
 
 describe("createRateLimiter", () => {
@@ -239,5 +241,41 @@ describe("getLoginBackstopKey", () => {
       headers: { "x-forwarded-for": "173.245.48.1" },
     });
     expect(getLoginBackstopKey(request)).toBe("173.245.48.1");
+  });
+});
+
+describe("getIngestIdentityRateLimitKey", () => {
+  it("gives distinct tokens distinct buckets and the same token a stable key", () => {
+    const keyA = getIngestIdentityRateLimitKey("token-a");
+    const keyB = getIngestIdentityRateLimitKey("token-b");
+    expect(keyA).not.toBe(keyB);
+    expect(getIngestIdentityRateLimitKey("token-a")).toBe(keyA);
+  });
+
+  it("never embeds the raw token in the key", () => {
+    const key = getIngestIdentityRateLimitKey("super-secret-ingest-token");
+    expect(key).not.toContain("super-secret-ingest-token");
+    expect(key).toMatch(/^ingest-token:[0-9a-f]{64}$/);
+  });
+});
+
+describe("getNamedRateLimiter", () => {
+  it("returns the same instance for the same name and a fresh one per name", () => {
+    const first = getNamedRateLimiter("test-named-a", 1_000, 1);
+    const again = getNamedRateLimiter("test-named-a", 60_000, 99);
+    const other = getNamedRateLimiter("test-named-b", 1_000, 1);
+    expect(again).toBe(first);
+    expect(other).not.toBe(first);
+    first.reset();
+    other.reset();
+  });
+
+  it("reset clears consumed budget (test isolation hook)", () => {
+    const limiter = getNamedRateLimiter("test-named-reset", 60_000, 1);
+    expect(limiter.check("key")).toBe(true);
+    expect(limiter.check("key")).toBe(false);
+    limiter.reset();
+    expect(limiter.check("key")).toBe(true);
+    limiter.reset();
   });
 });

@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import AppCore
 import Networking
+import DesignSystem
 
 /// The phase of the token-connection flow, driving the connect button and the
 /// inline status row.

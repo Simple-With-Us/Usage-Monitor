@@ -1,7 +1,7 @@
 # 2026-07-10 — subscription -> knob linkage phase 1
 
 PR: https://github.com/jaywedgeworth22/api-usage-monitor/pull/83 (`claude/subscription-knob-linkage`,
-OPEN, not merged — CLAUDE #agent-sync claim 2026-07-10, sonnet subagent in an isolated worktree).
+OPEN, not merged — CLAUDE #ag***-s**c claim 2026-07-10, sonnet subagent in an isolated worktree).
 
 ## Summary
 - Added `knobEnv Json?` to both `ProviderPlan` (free-tier baseline) and `Subscription` (per-plan

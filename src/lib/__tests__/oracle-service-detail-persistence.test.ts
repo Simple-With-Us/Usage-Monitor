@@ -42,7 +42,15 @@ beforeEach(async () => {
   providerId = (await prisma.provider.create({ data: { name: "oracle", displayName: "OCI", type: "builtin" } })).id;
 });
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 afterAll(async () => {
   await prisma?.$disconnect();
   if (dbPath && fs.existsSync(dbPath)) fs.rmSync(dbPath, { force: true });

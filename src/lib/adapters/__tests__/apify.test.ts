@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchUsage } from "../apify";
 
 function json(body: unknown): Response {
@@ -8,8 +8,29 @@ function json(body: unknown): Response {
   });
 }
 
+// The adapter only budgets a usage cycle whose start falls inside the current
+// real UTC month, so cycle fixtures must be derived from the current date
+// rather than pinned to a fixed month.
+function utcMonthCycle(monthOffset = 0): { startAt: string; endAt: string } {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + monthOffset, 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + monthOffset + 1, 1));
+  return {
+    startAt: start.toISOString().slice(0, 10),
+    endAt: end.toISOString().slice(0, 10),
+  };
+}
+
 describe("apify adapter", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it("combines usage cycle with plan price without retaining proxy credentials", async () => {
     vi.stubGlobal(
@@ -19,7 +40,7 @@ describe("apify adapter", () => {
         .mockResolvedValueOnce(
           json({
             data: {
-              monthlyUsageCycle: { startAt: "2026-07-01", endAt: "2026-08-01" },
+              monthlyUsageCycle: utcMonthCycle(),
               limits: { maxMonthlyUsageUsd: 300 },
               current: { monthlyUsageUsd: 20 },
             },
@@ -62,7 +83,7 @@ describe("apify adapter", () => {
         .mockResolvedValueOnce(
           json({
             data: {
-              monthlyUsageCycle: { startAt: "2026-07-01", endAt: "2026-08-01" },
+              monthlyUsageCycle: utcMonthCycle(),
               current: { monthlyUsageUsd: 15 },
             },
           })
@@ -96,7 +117,7 @@ describe("apify adapter", () => {
         .mockResolvedValueOnce(
           json({
             data: {
-              monthlyUsageCycle: { startAt: "2026-06-01", endAt: "2026-07-01" },
+              monthlyUsageCycle: utcMonthCycle(-1),
               current: { monthlyUsageUsd: 15 },
             },
           })

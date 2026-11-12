@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../../tailwind.config.ts";
 
 :root {
   --chart-grid: #e5e7eb;
@@ -103,7 +102,20 @@ body {
   }
 
   .responsive-table .table-actions {
+    flex-wrap: wrap;
     justify-content: flex-start;
+  }
+
+  .responsive-table {
+    min-width: 0 !important;
+  }
+}
+
+/* Desktop/tablet: keep action buttons on one row; allow horizontal scroll
+   instead of crushing columns into multi-line button stacks. */
+@media (min-width: 640px) {
+  .provider-table .table-actions {
+    flex-wrap: nowrap;
   }
 }
 
@@ -122,50 +134,179 @@ body {
    ==========================================================================
    Only pure spacing tweaks live here (padding/gap/font-size) - nothing in
    this file hides content. Collapsing a secondary line in compact mode is
-   done in the component itself (ProviderTable.tsx, ProviderCard.tsx, the
-   provider detail page) so secondary text can use an explicit disclosure or
-   accessible label. A blind CSS selector cannot preserve touch/keyboard
-   access, which is why this used to hide several field labels by accident.
+   done in the component itself (ProviderTable.tsx, the provider detail
+   page) so secondary text can use an explicit disclosure or accessible
+   label. A blind CSS selector cannot preserve touch/keyboard access, which
+   is why this used to hide several field labels by accident.
 
-   DashboardProviderWorkspace.tsx is intentionally NOT styled from here: it
-   already ships its own compact/comfortable "Row density" control (see the
-   `density` state and `usage-monitor:dashboard-density` storage key in that
-   file, from the #383/#384 density-redesign work), with its own row markup
-   and `title`-based detail fallbacks. Applying this global class on top of
-   that would fight its independent state instead of building on it. */
+   The preference is set from the Compact/Comfortable toggle in Nav.tsx
+   (setStoredDisplayDensity in src/lib/display-density.ts), persisted under
+   the `display-density` storage key, and mirrored onto <html> as
+   `density-<value>` by the pre-hydration script in layout.tsx.
 
-/* Global table row/cell height reduction (safe: padding only, no content
-   changes; SortHeader/th padding included, so the sticky header shrinks
-   along with the rows below it without affecting its `position: sticky`
-   offset). */
-.density-compact .responsive-table th,
+   Provider workspace family rows use `.provider-workspace-row` so compact
+   and comfortable density both affect the main operator surface. */
+
+/* ==========================================================================
+   Display Density (Compact vs Comfortable) Adjustments
+   ==========================================================================
+   Comfortable mode represents the spacious default layout.
+   Compact mode tightens padding, margins, row heights, and font scaling
+   across tables, cards, metric grids, and page containers so operators
+   can view significantly more data density on screen without scrolling. */
+
+/* 1. Global Tables (ProviderTable, ProjectsPanel, Money, Alerts, Settings, etc.) */
+.density-compact table th,
+.density-compact .responsive-table th {
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+  padding-left: 0.5rem !important;
+  padding-right: 0.5rem !important;
+  font-size: 0.75rem !important;
+}
+.density-compact table td,
 .density-compact .responsive-table td {
-  padding-top: 0.35rem !important;
-  padding-bottom: 0.35rem !important;
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+  padding-left: 0.5rem !important;
+  padding-right: 0.5rem !important;
+  font-size: 0.8125rem !important;
 }
 
-/* ProviderCard */
+/* 2. Global Cards, Panels & Sections across all pages */
+.density-compact .bg-white.rounded-lg,
+.density-compact .bg-white.rounded-xl,
+.density-compact .bg-white.rounded-2xl,
+.density-compact .dark\:bg-gray-800.rounded-lg,
+.density-compact .dark\:bg-gray-800.rounded-xl,
+.density-compact .dark\:bg-gray-800.rounded-2xl,
+.density-compact .card,
+.density-compact section.rounded-lg,
+.density-compact section.rounded-xl {
+  padding: 0.75rem 0.875rem !important;
+}
+
+/* 3. Global Vertical Spacing & Gaps
+   Tailwind v4 space-y-* applies margin-block-* on :not(:last-child), not
+   margin-top on ~ siblings. Match that shape so compact density tightens every
+   gap, including between the first and second child. */
+.density-compact .space-y-6 > :not([hidden]):not(:last-child) {
+  --tw-space-y-reverse: 0;
+  margin-block-start: calc(0.875rem * var(--tw-space-y-reverse)) !important;
+  margin-block-end: calc(0.875rem * calc(1 - var(--tw-space-y-reverse))) !important;
+}
+.density-compact .space-y-8 > :not([hidden]):not(:last-child) {
+  --tw-space-y-reverse: 0;
+  margin-block-start: calc(1.125rem * var(--tw-space-y-reverse)) !important;
+  margin-block-end: calc(1.125rem * calc(1 - var(--tw-space-y-reverse))) !important;
+}
+.density-compact .gap-6 {
+  gap: 0.75rem !important;
+}
+.density-compact .gap-8 {
+  gap: 1rem !important;
+}
+.density-compact .mb-6 {
+  margin-bottom: 0.75rem !important;
+}
+.density-compact .mb-8 {
+  margin-bottom: 1rem !important;
+}
+.density-compact .py-6 {
+  padding-top: 0.875rem !important;
+  padding-bottom: 0.875rem !important;
+}
+.density-compact .py-8 {
+  padding-top: 1rem !important;
+  padding-bottom: 1rem !important;
+}
+
+/* 4. Headings & Stat Metric Numbers */
+.density-compact h2 {
+  font-size: 1.15rem !important;
+  line-height: 1.4 !important;
+  margin-bottom: 0.35rem !important;
+}
+.density-compact h3 {
+  font-size: 0.925rem !important;
+  line-height: 1.35 !important;
+}
+.density-compact .text-2xl {
+  font-size: 1.25rem !important;
+  line-height: 1.5rem !important;
+}
+.density-compact .text-3xl {
+  font-size: 1.5rem !important;
+  line-height: 1.75rem !important;
+}
+
+/* 5. ProviderCard */
 .density-compact .provider-card {
-  padding: 0.875rem 1rem !important;
+  padding: 0.75rem 0.875rem !important;
 }
 .density-compact .provider-card .mb-4 {
-  margin-bottom: 0.5rem !important;
+  margin-bottom: 0.35rem !important;
 }
 .density-compact .provider-card .grid-cols-2 {
-  gap: 0.5rem !important;
+  gap: 0.375rem !important;
 }
 .density-compact .provider-card h3 {
-  font-size: 0.95rem !important;
+  font-size: 0.9rem !important;
 }
 .density-compact .provider-card .mt-3 {
-  margin-top: 0.5rem !important;
+  margin-top: 0.375rem !important;
 }
 
-/* Provider detail page (src/app/providers/[id]/page.tsx) */
+/* 6. Provider detail page (src/app/providers/[id]/page.tsx) */
 .density-compact .provider-details .grid-cols-1,
 .density-compact .provider-details .grid-cols-2 {
-  gap: 0.5rem !important;
+  gap: 0.375rem !important;
 }
 .density-compact .provider-details .p-4 {
-  padding: 0.75rem !important;
+  padding: 0.625rem !important;
+}
+
+/* 7. Provider workspace family rows */
+.density-comfortable .provider-workspace-row > td {
+  padding-top: 0.85rem !important;
+  padding-bottom: 0.85rem !important;
+}
+.density-compact .provider-workspace-row > td {
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+}
+
+/* Design tokens (web ↔ iOS accent parity).
+ * Brand mark / favicon: iOS client AppIcon (public/brand/, app/icon.png,
+ * app/apple-icon.png). Accent orange matches the icon field (#f97316). */
+:root {
+  --um-accent: #f97316;
+  --um-accent-soft: rgba(249, 115, 22, 0.14);
+  --um-radius-lg: 1rem;
+  --um-radius-xl: 1.25rem;
+  --um-success: #059669;
+  --um-warning: #d97706;
+  --um-danger: #dc2626;
+  --um-incomplete: #475569;
+  --um-surface: #ffffff;
+  --um-canvas: #f6f7f9;
+  /* RGB triplets for Tailwind surface tokens (card/muted/border). */
+  --um-card: 255 255 255;
+  --um-muted: 243 244 246;
+  --um-muted-foreground: 107 114 128;
+  --um-border: 229 231 235;
+}
+.dark {
+  --um-accent: #fb923c;
+  --um-accent-soft: rgba(251, 146, 60, 0.18);
+  --um-success: #34d399;
+  --um-warning: #fbbf24;
+  --um-danger: #f87171;
+  --um-incomplete: #94a3b8;
+  --um-surface: #1f2937;
+  --um-canvas: #111827;
+  --um-card: 17 24 39;
+  --um-muted: 31 41 55;
+  --um-muted-foreground: 156 163 175;
+  --um-border: 55 65 81;
 }

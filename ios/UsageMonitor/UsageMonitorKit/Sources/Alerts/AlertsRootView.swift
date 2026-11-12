@@ -35,6 +35,8 @@ public struct AlertsRootView: View {
         NavigationStack {
             content
                 .navigationTitle(AppTab.alerts.title)
+                // Inline (centered compact) title — avoid large left-aligned title at rest.
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbarContent }
                 .navigationDestination(for: ProviderAlertItem.self) { item in
                     ProviderAlertDetailView(providerId: item.provider.id, fallback: item.provider)
@@ -143,13 +145,12 @@ public struct AlertsRootView: View {
                     .padding(.vertical, Theme.Spacing.sm)
             } else {
                 ForEach(filtered) { item in
+                    // Avoid simultaneousGesture on NavigationLink — it greys
+                    // the row and often fails to push the detail.
                     NavigationLink(value: item) {
                         AlertCard(item: item)
                     }
                     .buttonStyle(.plain)
-                    .simultaneousGesture(TapGesture().onEnded {
-                        AlertsHaptics.selection()
-                    })
                 }
             }
         }
@@ -203,9 +204,9 @@ public struct AlertsRootView: View {
         await store.refresh()
         reconcile()
         if store.lastError == nil {
-            AlertsHaptics.notify(.success)
+            Haptics.notify(.success)
         } else {
-            AlertsHaptics.notify(.warning)
+            Haptics.notify(.warning)
         }
     }
 
@@ -223,7 +224,7 @@ public struct AlertsRootView: View {
         } else {
             withAnimation(.easeInOut(duration: 0.2)) { model.filter = filter }
         }
-        AlertsHaptics.impact(.light)
+        Haptics.impact(.light)
     }
 
     private var currentAccountScopeID: String? {

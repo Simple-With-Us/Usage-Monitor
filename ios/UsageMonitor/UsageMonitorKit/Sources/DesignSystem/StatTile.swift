@@ -27,8 +27,8 @@ public struct StatTile: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack(spacing: Theme.Spacing.xs) {
-                if let systemImage {
-                    Image(systemName: systemImage)
+                if SystemImage.resolved(systemImage) != nil {
+                    Image(safeSystemName: systemImage)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(status == .neutral ? Theme.Colors.secondaryText : status.tint)
                 }
@@ -36,13 +36,14 @@ public struct StatTile: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.secondaryText)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
 
             Text(value)
                 .font(Theme.Typography.statValue)
                 .monospacedDigit()
                 .foregroundStyle(Theme.Colors.primaryText)
-                .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.6)
                 .lineLimit(1)
 
             if let secondary {
@@ -50,10 +51,12 @@ public struct StatTile: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(status == .neutral ? Theme.Colors.tertiaryText : status.tint)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .dsCard(padding: Theme.Spacing.md)
+        .copyableValue(value, label: label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(value)")
         .accessibilityValue(secondary ?? "")

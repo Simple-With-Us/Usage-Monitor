@@ -40,7 +40,7 @@ public struct BudgetErrorState: View {
             actionTitle: connectTitle,
             actionSystemImage: "gearshape.fill",
             action: connectTitle == nil ? nil : onConnect,
-            retryTitle: error.isRetryable ? "Try again" : nil,
+            retryTitle: error.isRetryable ? "Try Again" : nil,
             retry: error.isRetryable ? onRetry : nil
         )
     }

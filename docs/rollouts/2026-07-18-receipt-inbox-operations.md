@@ -60,6 +60,15 @@ and use an exact high-entropy address such as
 addresses by design. This preserves personal iCloud email delivery while keeping
 receipt evidence isolated.
 
+## Live MX split restored (2026-08-14)
+
+Email Routing later took the apex MX, so `*@jays.services` stopped reaching
+iCloud.  Apex MX/SPF were put back on iCloud; `receipts.jays.services` stayed
+on Cloudflare MX with the catch-all pointed at
+`usage-monitor-receipt-inbox`.  Full receipt:
+`docs/rollouts/2026-08-14-apex-icloud-receipts-routing.md`.  Do not repair
+apex Email Routing DNS.
+
 ## Production prerequisites
 
 Before enabling real receipt intake:

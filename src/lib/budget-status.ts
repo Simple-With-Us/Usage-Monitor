@@ -15,12 +15,17 @@ import {
   resolveProviderIdentity,
 } from "@/lib/provider-identity";
 import { buildCanonicalProjectIdMap } from "@/lib/project-resolver";
-import { buildProviderAlertState, type ProviderAlert } from "@/lib/provider-alerts";
+import { buildProviderAlertState, type BudgetAlertTier, type ProviderAlert } from "@/lib/provider-alerts";
 import { getExternalEventRawCutoff } from "@/lib/data-retention";
-import { calculateEomForecast, calculateEomForecastFromSeries } from "@/lib/forecasting";
+import { calculateEomForecast, calculateEomForecastFromSeries, projectBudgetRunout } from "@/lib/forecasting";
 import { resolveAnomalyConfig, type AnomalyResult } from "@/lib/anomaly-detection";
 import { loadSpendAnomaliesByProviderId } from "@/lib/anomaly-loader";
-import { loadMtdDailyVariableUsageByProviderId } from "@/lib/daily-usage-series";
+import {
+  buildSnapshotVariableDayPeaks,
+  dailyIncrementsFromSnapshotPeaks,
+  loadMtdDailyVariableUsageByProviderId,
+  maxDailySeries,
+} from "@/lib/daily-usage-series";
 import { advancePeriod, isSubscriptionInterval } from "@/lib/subscriptions";
 import {
   canLinkSubscriptionToExternalBilling,
@@ -32,6 +37,12 @@ import { deriveGeminiBillingStatus } from "@/lib/gemini-key-status";
 import { providerConfigForServer } from "@/lib/provider-secret-config";
 import { subscriptionChargeIdempotencyKey } from "@/lib/subscription-charge-identity";
 import { isLegacyMistralSpendLimitCostSnapshot } from "@/lib/mistral-snapshot-quarantine";
+import { excludeInternalSystemProvidersWhere } from "@/lib/system-providers";
+import {
+  resolveOpenRouterVerifiedCash,
+  resolveOpenRouterVerifiedCashConfig,
+} from "@/lib/openrouter-verified-cash";
+import { loadGlobalBudgetSnapshot } from "@/lib/global-budget";
 // Type-only import — erased at compile time, so it introduces NO runtime import
 // cycle with budget-controls.ts (which imports computeBudgetStatus from here).
 import type { BudgetBreachState } from "@/lib/budget-controls";
@@ -97,8 +108,24 @@ export interface ProviderBudgetStatus {
   linkedFixedDedupeUsd: number;
   fixedCostConflict: boolean;
   forecastedSubscriptionRenewalsUsd: number;
+  /**
+   * Remaining known subscription charges this UTC month (auto-renew walks +
+   * single next bill when autoRenew is false but nextRenewalAt is still ahead).
+   */
+  forecastedRenewals: ForecastedRenewalLine[];
+  /** Variable usage extrapolated to EOM (excludes fixed + known renewals). */
+  projectedVariableUsageUsd: number;
   spentUsd: number;
   projectedEomUsd: number;
+  /**
+   * S9: the day the cumulative forecast crosses the monthly budget
+   * ("budget exhausts ~Aug 22 at current burn"). ISO string; `now` when the
+   * budget is already exhausted; null when unconfigured or never projected
+   * to cross within the current forecast.
+   */
+  projectedRunoutDate: string | null;
+  /** Fractional days (1-decimal) until the budget is exhausted; 0 when already exhausted; null when never projected. */
+  daysUntilBudgetExhausted: number | null;
   remainingUsd: number | null;
   percentUsed: number | null;
   /** MTD spend vs budget (lagging). */
@@ -109,6 +136,18 @@ export interface ProviderBudgetStatus {
    */
   projectedStatus: BudgetStatusLevel;
   alerts: ProviderAlert[];
+  // GROK3-E19: verified-preferred cash mode for OpenRouter (default-off).
+  // True when OPENROUTER_VERIFIED_PREFERRED_CASH is enabled AND coverage was
+  // high enough AND a period-level verified cost was available. Always false for
+  // non-OpenRouter providers and when the flag is unset.
+  verifiedPreferredCashApplied: boolean;
+  /** The verified period cost that replaced the self-reported estimate, or null. */
+  verifiedPreferredCashUsd: number | null;
+  /**
+   * Provider-reported external billing / bucket inventory records synced from
+   * the provider's API. Populated for multi-service/bucket providers like Backblaze B2.
+   */
+  externalBilling?: ProviderExternalBillingDTO[];
   // Budget-breach automated-control observability (default-off). These reflect
   // the durable state written by src/lib/budget-controls.ts. keyDisableRecommended
   // is advisory only and never reflects a credential mutation.
@@ -121,6 +160,23 @@ export interface ProviderBudgetStatus {
     pauseObservedSpendUsd: number | null;
     keyDisableRecommended: boolean;
   };
+}
+
+export interface ProviderExternalBillingDTO {
+  source: string;
+  externalId: string | null;
+  kind: string;
+  serviceName: string | null;
+  planName: string | null;
+  status: string | null;
+  amountUsd: number | null;
+  currency: string | null;
+  billingInterval: string | null;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  usageQuantity: number | null;
+  usageUnit: string | null;
+  syncedAt: string;
 }
 
 export interface BudgetStatusResponse {
@@ -138,7 +194,23 @@ export interface BudgetStatusResponse {
     percentUsed: number | null;
     overBudget: boolean;
     warning: boolean;
+    /** Explicit Global Budget override (null = use suggestion). */
+    globalMonthlyBudgetUsd: number | null;
+    suggestedGlobalBudgetUsd: number | null;
+    effectiveGlobalBudgetUsd: number | null;
+    globalBudgetSource: "override" | "suggested" | "none";
+    projectBudgetCount: number;
   };
+}
+
+/** One known future charge remaining in the current UTC month. */
+export interface ForecastedRenewalLine {
+  subscriptionId: string;
+  providerId: string;
+  name: string;
+  chargeUsd: number;
+  chargeAt: string;
+  autoRenew: boolean;
 }
 
 function monthStartUtc(now: Date): Date {
@@ -162,8 +234,75 @@ function monthLabel(now: Date): string {
   return `${y}-${m}`;
 }
 
+/**
+ * Known remaining bills this UTC month for Overview projection.
+ * - autoRenew: walk every renewal in (now, monthEnd]
+ * - !autoRenew: still include the single nextRenewalAt if it falls in that window
+ *   (so Grok $99/mo etc. show even when managed rows force autoRenew=false)
+ */
+export function planSubscriptionRenewals(
+  subscriptions: Array<{
+    id: string;
+    providerId: string;
+    name: string;
+    costUsd: number;
+    currency: string;
+    interval: string;
+    intervalCount: number;
+    nextRenewalAt: Date;
+    autoRenew: boolean;
+  }>,
+  now: Date
+): ForecastedRenewalLine[] {
+  const monthEnd = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  );
+  const lines: ForecastedRenewalLine[] = [];
+  for (const subscription of subscriptions) {
+    if (
+      subscription.currency.toUpperCase() !== "USD" ||
+      !isSubscriptionInterval(subscription.interval) ||
+      !(subscription.costUsd > 0)
+    ) {
+      continue;
+    }
+    const intervalCount = Math.max(1, Math.trunc(subscription.intervalCount));
+    let renewal = subscription.nextRenewalAt;
+    if (subscription.autoRenew) {
+      let guard = 0;
+      while (renewal < monthEnd && guard < 240) {
+        if (renewal > now) {
+          lines.push({
+            subscriptionId: subscription.id,
+            providerId: subscription.providerId,
+            name: subscription.name,
+            chargeUsd: subscription.costUsd,
+            chargeAt: renewal.toISOString(),
+            autoRenew: true,
+          });
+        }
+        renewal = advancePeriod(renewal, subscription.interval, intervalCount);
+        guard += 1;
+      }
+    } else if (renewal > now && renewal < monthEnd) {
+      lines.push({
+        subscriptionId: subscription.id,
+        providerId: subscription.providerId,
+        name: subscription.name,
+        chargeUsd: subscription.costUsd,
+        chargeAt: renewal.toISOString(),
+        autoRenew: false,
+      });
+    }
+  }
+  return lines;
+}
+
 function forecastSubscriptionRenewals(
   subscriptions: Array<{
+    id: string;
+    providerId: string;
+    name: string;
     costUsd: number;
     currency: string;
     interval: string;
@@ -173,31 +312,442 @@ function forecastSubscriptionRenewals(
   }>,
   now: Date
 ): number {
-  const monthEnd = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  return planSubscriptionRenewals(subscriptions, now).reduce(
+    (sum, line) => sum + line.chargeUsd,
+    0
   );
-  let total = 0;
-  for (const subscription of subscriptions) {
+}
+
+// ---------------------------------------------------------------------------
+// Extracted pure functions from computeBudgetStatusUncached
+// ---------------------------------------------------------------------------
+
+/** One linked period entry produced by resolveLinkedPeriods. */
+export interface LinkedPeriodEntry {
+  materializedUsd: number;
+  representedSnapshotUsd: number;
+  observedAt: Date;
+}
+
+/** Input shape for resolveLinkedPeriods. */
+export interface ResolveLinkedPeriodsInput {
+  localFixed: Array<{
+    id: string;
+    costUsd: number;
+    currency: string;
+    externalBillingSource: string | null;
+    externalBillingId: string | null;
+    externalBillingManaged: boolean;
+    currentPeriodStart: Date | null;
+    nextRenewalAt: Date;
+    lastChargedPeriodStart: Date | null;
+  }>;
+  liveExternalFixed: Array<{
+    source: string;
+    externalId: string;
+    amountUsd: number | null;
+    currentPeriodStart: Date | null;
+    syncedAt: Date;
+  }>;
+  externalBillingChargeCorrections: Array<{
+    managedSubscriptionId: string;
+    originalPeriodStart: Date;
+    originalPeriodEnd: Date;
+    originalAmountUsd: number;
+    correctedAmountUsd: number;
+    observedAt: Date;
+  }>;
+  materializedChargeByIdempotencyKey: Map<string, {
+    subscriptionId: string;
+    costUsd: number;
+    occurredAt: Date;
+    windowStart: Date;
+    windowEnd: Date;
+  }>;
+}
+
+/**
+ * Resolve subscription-linked billing periods that overlap between local
+ * subscription records and live external billing data. Returns a map keyed
+ * by (subscriptionId, periodStart, periodEnd) with the materialized and
+ * represented snapshot amounts for each linked period.
+ */
+export function resolveLinkedPeriods(
+  input: ResolveLinkedPeriodsInput
+): Map<string, LinkedPeriodEntry> {
+  const { localFixed, liveExternalFixed, externalBillingChargeCorrections, materializedChargeByIdempotencyKey } = input;
+  const linkedPeriods = new Map<string, LinkedPeriodEntry>();
+
+  const addLinkedPeriod = (
+    subscriptionId: string,
+    periodStart: Date,
+    periodEnd: Date,
+    representedSnapshotUsd: number,
+    observedAt: Date,
+    expectedMaterializedUsd?: number
+  ) => {
+    const periodKey = `${subscriptionId}\u0000${periodStart.toISOString()}\u0000${periodEnd.toISOString()}`;
+    const materialized = materializedChargeByIdempotencyKey.get(
+      subscriptionChargeIdempotencyKey(subscriptionId, periodStart)
+    );
     if (
-      !subscription.autoRenew ||
-      subscription.currency.toUpperCase() !== "USD" ||
-      !isSubscriptionInterval(subscription.interval)
+      !materialized ||
+      materialized.subscriptionId !== subscriptionId ||
+      materialized.occurredAt.getTime() !== periodStart.getTime() ||
+      materialized.windowStart.getTime() !== periodStart.getTime() ||
+      materialized.windowEnd.getTime() !== periodEnd.getTime() ||
+      (expectedMaterializedUsd != null &&
+        Math.abs(materialized.costUsd - expectedMaterializedUsd) > 1e-6)
     ) {
+      return;
+    }
+    const existing = linkedPeriods.get(periodKey);
+    if (!existing || observedAt > existing.observedAt) {
+      linkedPeriods.set(periodKey, {
+        materializedUsd: materialized.costUsd,
+        representedSnapshotUsd,
+        observedAt,
+      });
+    }
+  };
+
+  for (const subscription of localFixed) {
+    if (!subscription.externalBillingSource || !subscription.externalBillingId) {
       continue;
     }
-    let renewal = subscription.nextRenewalAt;
-    let guard = 0;
-    while (renewal < monthEnd && guard < 240) {
-      if (renewal > now) total += subscription.costUsd;
-      renewal = advancePeriod(
-        renewal,
-        subscription.interval,
-        Math.max(1, Math.trunc(subscription.intervalCount))
+    const externalRecord = liveExternalFixed.find(
+      (record) =>
+        record.source === subscription.externalBillingSource &&
+        record.externalId === subscription.externalBillingId
+    );
+    if (externalRecord) {
+      // Cast to satisfy the stricter external types — the original inline code
+      // in computeBudgetStatusUncached worked against Prisma-inferred shapes.
+      const exactCurrentTerms = canLinkSubscriptionToExternalBilling(
+        subscription as unknown as Parameters<typeof canLinkSubscriptionToExternalBilling>[0],
+        externalRecord as unknown as Parameters<typeof canLinkSubscriptionToExternalBilling>[1]
       );
-      guard += 1;
+      const chargedManagedCorrection =
+        subscription.externalBillingManaged &&
+        subscription.lastChargedPeriodStart?.getTime() ===
+          (subscription.currentPeriodStart as Date | null)?.getTime?.() &&
+        externalRecord.currentPeriodStart?.getTime() ===
+          (subscription.currentPeriodStart as Date | null)?.getTime?.();
+      if (exactCurrentTerms || chargedManagedCorrection) {
+        const materializedPeriod = exactCurrentTerms
+          ? resolveExternalBillingPeriod(externalRecord as unknown as Parameters<typeof resolveExternalBillingPeriod>[0])!
+          : {
+              start: subscription.currentPeriodStart!,
+              end: subscription.nextRenewalAt,
+            };
+        addLinkedPeriod(
+          subscription.id,
+          materializedPeriod.start,
+          materializedPeriod.end,
+          externalRecord.amountUsd ?? 0,
+          externalRecord.syncedAt
+        );
+      }
     }
   }
-  return total;
+
+  for (const correction of externalBillingChargeCorrections) {
+    addLinkedPeriod(
+      correction.managedSubscriptionId,
+      correction.originalPeriodStart,
+      correction.originalPeriodEnd,
+      correction.correctedAmountUsd,
+      correction.observedAt,
+      correction.originalAmountUsd
+    );
+  }
+
+  return linkedPeriods;
+}
+
+/** Output shape for reconcileFixedCosts. */
+export interface ReconciledFixedCosts {
+  representedSnapshotFixedUsd: number;
+  linkedMaterializedFixedUsd: number;
+  linkedSnapshotRepresentationUsd: number;
+  materializerLinkedSubscriptionPushedUsd: number;
+  linkedFixedDedupeUsd: number;
+  snapshotCostIncludesUnknownFixed: boolean;
+  fixedCostConflict: boolean;
+  planFixedInCashUsd: number;
+  fixedAccruedUsd: number;
+}
+
+export interface ReconcileFixedCostsInput {
+  linkedPeriods: Map<string, LinkedPeriodEntry>;
+  snapshotFixedCostIncludedUsd: number;
+  snapshotCostUsd: number | null;
+  latestCostSnapshotCostIncludesUnknownFixed: boolean;
+  subscriptionPushedUsd: number;
+  subscriptionPushedManualUsd: number;
+  fixedMonthlyCostUsd: number;
+}
+
+/**
+ * Reconcile fixed costs across linked subscription periods, pushed
+ * subscription events, and provider-plan fixed fees into a single
+ * deduplicated cash view.
+ */
+export function reconcileFixedCosts(
+  input: ReconcileFixedCostsInput
+): ReconciledFixedCosts {
+  const {
+    linkedPeriods,
+    snapshotFixedCostIncludedUsd,
+    snapshotCostUsd,
+    latestCostSnapshotCostIncludesUnknownFixed,
+    subscriptionPushedUsd,
+    subscriptionPushedManualUsd,
+    fixedMonthlyCostUsd,
+  } = input;
+
+  const representedSnapshotFixedUsd = [...linkedPeriods.values()].reduce(
+    (sum, period) => sum + period.representedSnapshotUsd,
+    0
+  );
+  // Do not spend proof from one fixed source against an unrelated/partial
+  // provider snapshot. The snapshot must cover every represented corrected
+  // amount before any exact linked historical events are replaced.
+  const linkedMaterializedFixedUsd =
+    snapshotFixedCostIncludedUsd + 0.005 >= representedSnapshotFixedUsd
+      ? [...linkedPeriods.values()].reduce(
+          (sum, period) => sum + period.materializedUsd,
+          0
+        )
+      : 0;
+  const linkedSnapshotRepresentationUsd =
+    linkedMaterializedFixedUsd > 0 ? representedSnapshotFixedUsd : 0;
+
+  const materializerLinkedSubscriptionPushedUsd = Math.max(
+    0,
+    subscriptionPushedUsd - subscriptionPushedManualUsd
+  );
+  const linkedFixedDedupeUsd =
+    snapshotFixedCostIncludedUsd > 0
+      ? Math.min(
+          materializerLinkedSubscriptionPushedUsd,
+          linkedMaterializedFixedUsd
+        )
+      : 0;
+  const snapshotCostIncludesUnknownFixed =
+    snapshotCostUsd != null
+      ? latestCostSnapshotCostIncludesUnknownFixed
+      : false;
+  const fixedCostConflict =
+    (fixedMonthlyCostUsd > 0 &&
+      (subscriptionPushedUsd > 0 || snapshotFixedCostIncludedUsd > 0)) ||
+    Math.min(
+      Math.max(
+        0,
+        snapshotFixedCostIncludedUsd - linkedSnapshotRepresentationUsd
+      ),
+      Math.max(0, subscriptionPushedUsd - linkedFixedDedupeUsd)
+    ) > 0.005 ||
+    (snapshotCostIncludesUnknownFixed && subscriptionPushedUsd > 0) ||
+    linkedMaterializedFixedUsd - linkedFixedDedupeUsd > 0.005;
+
+  // Prefer a single fixed source of truth for cash: when subscription events
+  // already materialize the recurring fee, do NOT also add ProviderPlan
+  // fixedMonthlyCostUsd (operator double-model).
+  const planFixedInCashUsd =
+    fixedMonthlyCostUsd > 0 && subscriptionPushedUsd > 0
+      ? 0
+      : fixedMonthlyCostUsd;
+
+  const fixedAccruedUsd =
+    planFixedInCashUsd +
+    subscriptionPushedUsd +
+    snapshotFixedCostIncludedUsd -
+    linkedFixedDedupeUsd;
+
+  return {
+    representedSnapshotFixedUsd,
+    linkedMaterializedFixedUsd,
+    linkedSnapshotRepresentationUsd,
+    materializerLinkedSubscriptionPushedUsd,
+    linkedFixedDedupeUsd,
+    snapshotCostIncludesUnknownFixed,
+    fixedCostConflict,
+    planFixedInCashUsd,
+    fixedAccruedUsd,
+  };
+}
+
+/**
+ * Compute the spend-coverage classification for a provider based on the
+ * presence/absence of various cost signals. This is a pure function of
+ * the input flags and provider metadata.
+ */
+export function computeSpendCoverage(input: {
+  hasUnknownCost: boolean;
+  hasPushedEvents: boolean;
+  pushedUnclassifiedCostEventCount: number;
+  hasKnownVariableCost: boolean;
+  fixedAccruedUsd: number;
+  receiptCashPaidUsd: number;
+  snapshotCostUsd: number | null;
+  snapshotCostCoverageIncomplete: boolean;
+  providerCanonicalKey: string;
+  geminiBillingIncomplete: boolean;
+}): CostCoverage {
+  const {
+    hasUnknownCost,
+    hasPushedEvents,
+    pushedUnclassifiedCostEventCount,
+    hasKnownVariableCost,
+    fixedAccruedUsd,
+    receiptCashPaidUsd,
+    snapshotCostUsd,
+    snapshotCostCoverageIncomplete,
+    providerCanonicalKey,
+    geminiBillingIncomplete,
+  } = input;
+
+  let spendCoverage: CostCoverage = hasUnknownCost
+    ? hasKnownVariableCost || fixedAccruedUsd > 0
+      ? "partial"
+      : pushedUnclassifiedCostEventCount > 0
+        ? "legacy_unknown"
+        : "unknown"
+    : hasPushedEvents || snapshotCostUsd != null
+      ? "complete"
+      : fixedAccruedUsd > 0 || receiptCashPaidUsd > 0
+        ? "partial"
+        : "unknown";
+
+  // Anthropic individual accounts and Mistral's currently published Admin
+  // Usage schema have no authoritative cash-total API.
+  if (
+    ["anthropic", "mistral"].includes(providerCanonicalKey) &&
+    snapshotCostUsd == null &&
+    hasPushedEvents &&
+    spendCoverage === "complete"
+  ) {
+    spendCoverage = "partial";
+  }
+
+  if (geminiBillingIncomplete && spendCoverage === "complete") {
+    spendCoverage =
+      hasKnownVariableCost || fixedAccruedUsd > 0 ? "partial" : "unknown";
+  }
+
+  if (snapshotCostCoverageIncomplete && spendCoverage === "complete") {
+    spendCoverage = hasKnownVariableCost || fixedAccruedUsd > 0
+      ? "partial"
+      : "unknown";
+  }
+
+  return spendCoverage;
+}
+
+// ---------------------------------------------------------------------------
+// GROK3-E19: OpenRouter verified-preferred-cash compliance fetch
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches per-event verification coverage and the period-level authoritative
+ * cost for each provider whose canonical key is "openrouter".
+ *
+ * Called only when OPENROUTER_VERIFIED_PREFERRED_CASH is enabled — zero DB
+ * overhead on the default-off path.
+ *
+ * Coverage formula mirrors provider-compliance.ts:
+ *   verifiedCoverage = settledCount / (settledCount + pendingCount + unverifiableCount)
+ * where "settled" = match | discrepancy.
+ */
+async function fetchOpenRouterComplianceForBudget(
+  providers: ReadonlyArray<{ id: string; name: string }>,
+  monthStart: Date,
+  now: Date
+): Promise<Map<string, { verifiedCoverage: number | null; periodVerifiedCostUsd: number | null }>> {
+  const result = new Map<
+    string,
+    { verifiedCoverage: number | null; periodVerifiedCostUsd: number | null }
+  >();
+
+  const openRouterProviders = providers.filter(
+    (p) => canonicalProviderKey(p.name) === "openrouter"
+  );
+  if (openRouterProviders.length === 0) return result;
+
+  const providerIds = openRouterProviders.map((p) => p.id);
+  const providerNames = openRouterProviders.map((p) => p.name);
+  // periodEnd matches the stable boundary used by the reconciliation upsert.
+  const periodEnd = new Date(
+    Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 1)
+  );
+
+  const [reconciliations, statusGroups] = await Promise.all([
+    prisma.providerUsageReconciliation.findMany({
+      where: {
+        providerId: { in: providerIds },
+        periodStart: monthStart,
+        periodEnd,
+        keyRef: "",
+      },
+      select: {
+        providerId: true,
+        verifiedCostUsd: true,
+      },
+    }),
+    prisma.externalUsageEvent.groupBy({
+      by: ["provider", "verificationStatus"],
+      where: {
+        provider: { in: providerNames },
+        providerRequestId: { not: null },
+        occurredAt: { gte: monthStart, lte: now },
+      },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const reconByProviderId = new Map(
+    reconciliations.map((r) => [r.providerId, r.verifiedCostUsd] as const)
+  );
+
+  // Aggregate event status counts keyed by stored provider name.
+  type StatusCounts = { settled: number; pending: number; unverifiable: number };
+  const countsByName = new Map<string, StatusCounts>();
+  for (const group of statusGroups) {
+    const counts = countsByName.get(group.provider) ?? {
+      settled: 0,
+      pending: 0,
+      unverifiable: 0,
+    };
+    const n = group._count._all;
+    if (group.verificationStatus === "match" || group.verificationStatus === "discrepancy") {
+      counts.settled += n;
+    } else if (group.verificationStatus === "unverifiable") {
+      counts.unverifiable += n;
+    } else {
+      // null / "pending" / "error" — all still-in-flight
+      counts.pending += n;
+    }
+    countsByName.set(group.provider, counts);
+  }
+
+  for (const provider of openRouterProviders) {
+    const rawVerifiedCost = reconByProviderId.get(provider.id) ?? null;
+    const periodVerifiedCostUsd =
+      rawVerifiedCost !== null && Number.isFinite(rawVerifiedCost) ? rawVerifiedCost : null;
+
+    const counts = countsByName.get(provider.name) ?? {
+      settled: 0,
+      pending: 0,
+      unverifiable: 0,
+    };
+    const denominator = counts.settled + counts.pending + counts.unverifiable;
+    const verifiedCoverage = denominator > 0 ? counts.settled / denominator : null;
+
+    result.set(provider.id, { verifiedCoverage, periodVerifiedCostUsd });
+  }
+
+  return result;
 }
 
 async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusResponse> {
@@ -210,8 +760,11 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     receiptCashByProviderId,
     latestCostTimes,
     materializedSubscriptionEvents,
+    snapshotCostSeriesRows,
+    latestScopeCostTimes,
   ] = await Promise.all([
     prisma.provider.findMany({
+      where: excludeInternalSystemProvidersWhere(),
       orderBy: { name: "asc" },
       select: {
         id: true,
@@ -281,6 +834,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
           },
           select: {
             id: true,
+            name: true,
             costUsd: true,
             currency: true,
             interval: true,
@@ -314,12 +868,16 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
             source: true,
             externalId: true,
             kind: true,
+            serviceName: true,
+            planName: true,
             status: true,
             amountUsd: true,
             currency: true,
             billingInterval: true,
             currentPeriodStart: true,
             currentPeriodEnd: true,
+            usageQuantity: true,
+            usageUnit: true,
             rollupRole: true,
             syncedAt: true,
           },
@@ -331,7 +889,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         },
       },
     }),
-    sumMonthToDateExternalCostByProvider(monthStart, rawCutoff),
+    sumMonthToDateExternalCostByProvider(monthStart, rawCutoff, now),
     sumMonthToDateReceiptCashByProviderId(monthStart, rawCutoff, now),
     prisma.usageSnapshot.groupBy({
       by: ["providerId"],
@@ -379,7 +937,137 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         windowEnd: true,
       },
     }),
+    // S4: scalar-only MTD cost snapshot history for trend-aware forecasting.
+    // Same cash-eligibility filter as latestCostTimes above (scope + window),
+    // so the forecast series never drinks from daily windows or mid-month
+    // straddle cycles the MTD math excludes. Bounded like the anomaly
+    // loader's scan; descending so truncation (if it ever hits) drops the
+    // OLDEST days, which the forward-fill in dailyIncrementsFromSnapshotPeaks
+    // tolerates far better than losing recent trend.
+    prisma.usageSnapshot.findMany({
+      where: {
+        fetchedAt: { gte: monthStart, lte: now },
+        totalCost: { not: null },
+        AND: [
+          {
+            OR: [
+              { costScope: null },
+              {
+                costScope: {
+                  in: ["calendar_month_to_date", "billing_cycle_to_date"],
+                },
+              },
+            ],
+          },
+          {
+            OR: [
+              { costWindowStart: null },
+              { costWindowStart: { gte: monthStart } },
+            ],
+          },
+        ],
+      },
+      orderBy: { fetchedAt: "desc" },
+      take: 20_000,
+      select: {
+        providerId: true,
+        fetchedAt: true,
+        totalCost: true,
+        fixedCostIncludedUsd: true,
+      },
+    }),
+    // S13: latest scope-eligible cost snapshot per provider WITHOUT the
+    // costWindowStart eligibility clause. Comparing this against
+    // latestCostTimes finds providers whose newest cost snapshot was
+    // silently dropped by the month-straddle filter (mid-month billing
+    // cycle), so the dashboard can surface an info alert instead of staying
+    // silent.
+    prisma.usageSnapshot.groupBy({
+      by: ["providerId"],
+      where: {
+        fetchedAt: { gte: monthStart, lte: now },
+        totalCost: { not: null },
+        OR: [
+          { costScope: null },
+          {
+            costScope: {
+              in: ["calendar_month_to_date", "billing_cycle_to_date"],
+            },
+          },
+        ],
+      },
+      _max: { fetchedAt: true },
+    }),
   ]);
+
+  // S4: per-provider MTD variable-cost day-peaks, diffed into daily
+  // increments inside the provider loop (quarantined providers skip theirs).
+  const snapshotVariableDayPeaksByProviderId =
+    buildSnapshotVariableDayPeaks(snapshotCostSeriesRows);
+
+  // S13: fetch the straddle-candidate rows (bounded to providers that HAVE a
+  // scope-eligible cost snapshot this month) so the loop can compare each
+  // provider's newest scope-eligible snapshot against the newest MTD-eligible
+  // one.
+  const latestScopeCostSnapshots = latestScopeCostTimes.length
+    ? await prisma.usageSnapshot.findMany({
+        where: {
+          OR: latestScopeCostTimes.flatMap((row) =>
+            row._max.fetchedAt
+              ? [{ providerId: row.providerId, fetchedAt: row._max.fetchedAt }]
+              : []
+          ),
+        },
+        select: {
+          providerId: true,
+          fetchedAt: true,
+          costWindowStart: true,
+        },
+      })
+    : [];
+  const latestScopeCostByProviderId = new Map<
+    string,
+    (typeof latestScopeCostSnapshots)[number]
+  >();
+  for (const snapshot of latestScopeCostSnapshots) {
+    const existing = latestScopeCostByProviderId.get(snapshot.providerId);
+    if (!existing || snapshot.fetchedAt > existing.fetchedAt) {
+      latestScopeCostByProviderId.set(snapshot.providerId, snapshot);
+    }
+  }
+
+  // S11: budget hysteresis for the dashboard/API path, mirroring
+  // alert-delivery.ts (C9). Open budget_warning/budget_exceeded notifications
+  // are the durable record of the prior tier; passing them into
+  // buildProviderAlertState lowers the CLEAR thresholds (75%/95%) so spend
+  // oscillating around 80%/100% does not flap the surfaced alerts. Fully
+  // defensive: a read failure degrades to no-hysteresis (legacy behavior)
+  // rather than breaking the money-path computation.
+  const previousBudgetTierByProviderId = new Map<string, BudgetAlertTier>();
+  try {
+    const openBudgetNotifications =
+      await prisma.providerAlertNotification.findMany({
+        where: {
+          resolvedAt: null,
+          alertCode: { in: ["budget_exceeded", "budget_warning"] },
+        },
+        select: { providerId: true, alertCode: true },
+      });
+    for (const notification of openBudgetNotifications) {
+      if (notification.alertCode === "budget_exceeded") {
+        previousBudgetTierByProviderId.set(notification.providerId, "exceeded");
+      } else if (
+        previousBudgetTierByProviderId.get(notification.providerId) !== "exceeded"
+      ) {
+        previousBudgetTierByProviderId.set(notification.providerId, "warning");
+      }
+    }
+  } catch (error) {
+    console.warn(
+      "[budget-status] open budget notification read failed; computing budget alerts without hysteresis",
+      error
+    );
+  }
 
   const geminiProviders = providers.filter(
     (provider) =>
@@ -492,7 +1180,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
   const latestCostSnapshotIds = [...latestCostByProviderId.values()].map(
     (snapshot) => snapshot.id
   );
-  const costCoverageCaveatSnapshotIds = new Set<string>();
+  const costCoverageCaveatCodeBySnapshotId = new Map<string, string>();
   if (latestCostSnapshotIds.length > 0) {
     const rows = await prisma.$queryRaw<Array<{ id: string; version: unknown; code: unknown }>>(
       Prisma.sql`
@@ -506,7 +1194,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     );
     for (const row of rows) {
       if (Number(row.version) === 1 && typeof row.code === "string") {
-        costCoverageCaveatSnapshotIds.add(row.id);
+        costCoverageCaveatCodeBySnapshotId.set(row.id, row.code);
       }
     }
   }
@@ -586,10 +1274,32 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       anomaliesByProviderId = await loadSpendAnomaliesByProviderId(
         now,
         anomalyConfig,
-        providers.map((p) => ({ id: p.id, name: p.name }))
+        providers.map((p) => ({ id: p.id, name: p.name, type: p.type }))
       );
     } catch (error) {
       console.warn("[anomaly-detection] spend anomaly load failed; skipping", error);
+    }
+  }
+
+  // GROK3-E19: fetch OpenRouter per-event coverage + period-level verified cost
+  // only when the feature flag is on — zero extra queries on the default-off path.
+  const verifiedCashConfig = resolveOpenRouterVerifiedCashConfig();
+  let openRouterComplianceByProviderId = new Map<
+    string,
+    { verifiedCoverage: number | null; periodVerifiedCostUsd: number | null }
+  >();
+  if (verifiedCashConfig.enabled) {
+    try {
+      openRouterComplianceByProviderId = await fetchOpenRouterComplianceForBudget(
+        providers,
+        monthStart,
+        now
+      );
+    } catch (error) {
+      console.warn(
+        "[openrouter-verified-cash] compliance fetch failed; falling back to observed usage",
+        error
+      );
     }
   }
 
@@ -606,7 +1316,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     const latestCostSnapshot = latestCostByProviderId.get(p.id) ?? null;
     const snapshotCostCoverageIncomplete =
       latestCostSnapshot != null &&
-      costCoverageCaveatSnapshotIds.has(latestCostSnapshot.id);
+      costCoverageCaveatCodeBySnapshotId.has(latestCostSnapshot.id);
     const geminiCostIdentityStatus = deriveGeminiBillingStatus({
       providerName: p.name,
       providerType: p.type,
@@ -671,13 +1381,30 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     );
     // Variable *consumption* only. max(snapshot, push) assumes one channel
     // supersets the other (org MTD vs app subset). Prepaid receipt cash is
-    // funding, not usage — it stays in receiptCashPaidUsd and may floor EOM
-    // projection, but must not inflate spentUsd / budget breach on top-ups.
+    // funding, not usage — it stays visible as receiptCashPaidUsd but takes
+    // no part in spentUsd or the EOM projection (S2).
     const observedVariableUsageUsd = Math.max(
       snapshotVariableCostUsd,
       pushed.usagePushed
     );
-    const usageCost = observedVariableUsageUsd;
+    // GROK3-E19: optionally substitute the authoritative verified period cost
+    // (from the reconciliation layer) for the self-reported variable usage
+    // estimate. Only applies for OpenRouter when the feature is enabled AND
+    // per-event coverage exceeds the configured threshold. Default-off — when
+    // the feature is disabled, verifiedCashResult.usageCost === observedVariableUsageUsd.
+    const vrCompliance = openRouterComplianceByProviderId.get(p.id) ?? {
+      verifiedCoverage: null,
+      periodVerifiedCostUsd: null,
+    };
+    const verifiedCashResult = resolveOpenRouterVerifiedCash({
+      providerCanonicalKey: canonicalProviderKey(p.name),
+      observedVariableUsageUsd,
+      verifiedCoverage: vrCompliance.verifiedCoverage,
+      periodVerifiedCostUsd: vrCompliance.periodVerifiedCostUsd,
+      config: verifiedCashConfig,
+    });
+    const usageCost = verifiedCashResult.usageCost;
+
     const liveExternalFixed = p.externalBilling.filter((record) => {
       return (
         isExternalBillingLinkCandidate(record, {
@@ -694,175 +1421,26 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     const localFixed = p.subscriptions.filter(
       (subscription) => subscription.currency.toUpperCase() === "USD"
     );
-    const linkedPeriods = new Map<
-      string,
-      { materializedUsd: number; representedSnapshotUsd: number; observedAt: Date }
-    >();
-    const addLinkedPeriod = (
-      subscriptionId: string,
-      periodStart: Date,
-      periodEnd: Date,
-      representedSnapshotUsd: number,
-      observedAt: Date,
-      expectedMaterializedUsd?: number
-    ) => {
-      const periodKey = `${subscriptionId}\u0000${periodStart.toISOString()}\u0000${periodEnd.toISOString()}`;
-      const materialized = materializedChargeByIdempotencyKey.get(
-        subscriptionChargeIdempotencyKey(subscriptionId, periodStart)
-      );
-      if (
-        !materialized ||
-        materialized.subscriptionId !== subscriptionId ||
-        materialized.occurredAt.getTime() !== periodStart.getTime() ||
-        materialized.windowStart.getTime() !== periodStart.getTime() ||
-        materialized.windowEnd.getTime() !== periodEnd.getTime() ||
-        (expectedMaterializedUsd != null &&
-          Math.abs(materialized.costUsd - expectedMaterializedUsd) > 1e-6)
-      ) {
-        return;
-      }
-      const existing = linkedPeriods.get(periodKey);
-      if (!existing || observedAt > existing.observedAt) {
-        linkedPeriods.set(periodKey, {
-          materializedUsd: materialized.costUsd,
-          representedSnapshotUsd,
-          observedAt,
-        });
-      }
-    };
-    for (const subscription of localFixed) {
-      if (!subscription.externalBillingSource || !subscription.externalBillingId) {
-        continue;
-      }
-      const externalRecord = liveExternalFixed.find(
-        (record) =>
-          record.source === subscription.externalBillingSource &&
-          record.externalId === subscription.externalBillingId
-      );
-      if (externalRecord) {
-        const exactCurrentTerms = canLinkSubscriptionToExternalBilling(
-          subscription,
-          externalRecord
-        );
-        const chargedManagedCorrection =
-          subscription.externalBillingManaged &&
-          subscription.lastChargedPeriodStart?.getTime() ===
-            subscription.currentPeriodStart.getTime() &&
-          externalRecord.currentPeriodStart?.getTime() ===
-            subscription.currentPeriodStart.getTime();
-        if (exactCurrentTerms || chargedManagedCorrection) {
-          const materializedPeriod = exactCurrentTerms
-            ? resolveExternalBillingPeriod(externalRecord)!
-            : {
-                start: subscription.currentPeriodStart,
-                end: subscription.nextRenewalAt,
-              };
-          addLinkedPeriod(
-            subscription.id,
-            materializedPeriod.start,
-            materializedPeriod.end,
-            externalRecord.amountUsd ?? 0,
-            externalRecord.syncedAt
-          );
-        }
-      }
 
-    }
-    // Correction proofs were written only while the provider record was
-    // fresh/authoritative and only after verifying one exact local event. They
-    // remain historical overlap evidence if the source rolls/stales or an
-    // owner later edits/deletes the Subscription row; neither action deletes
-    // the already-materialized charge event. Stale evidence cannot create a
-    // new proof or settle a new collision.
-    for (const correction of p.externalBillingChargeCorrections) {
-      addLinkedPeriod(
-        correction.managedSubscriptionId,
-        correction.originalPeriodStart,
-        correction.originalPeriodEnd,
-        correction.correctedAmountUsd,
-        correction.observedAt,
-        correction.originalAmountUsd
-      );
-    }
-    const representedSnapshotFixedUsd = [...linkedPeriods.values()].reduce(
-      (sum, period) => sum + period.representedSnapshotUsd,
-      0
-    );
-    // Do not spend proof from one fixed source against an unrelated/partial
-    // provider snapshot. The snapshot must cover every represented corrected
-    // amount before any exact linked historical events are replaced.
-    const linkedMaterializedFixedUsd =
-      snapshotFixedCostIncludedUsd + 0.005 >= representedSnapshotFixedUsd
-        ? [...linkedPeriods.values()].reduce(
-            (sum, period) => sum + period.materializedUsd,
-            0
-          )
-        : 0;
-    const linkedSnapshotRepresentationUsd =
-      linkedMaterializedFixedUsd > 0 ? representedSnapshotFixedUsd : 0;
-    // A provider can correct a fixed charge after the linked historical event
-    // materialized. Once an included fixed-cost snapshot exists, subtract the
-    // full overlap proven by linked materialized/subscription evidence, even
-    // when that old event is larger than a downward-corrected snapshot. This
-    // makes $5 historical + $4 corrected snapshot resolve to $4 (and $5 + $6
-    // to $6), while never deducting more than either the linked event total or
-    // the subscription event channel actually contains.
-    //
-    // pushed.subscriptionPushed is additive across BOTH the materializer's own
-    // sourceApp="subscription" charge (the thing linkedMaterializedFixedUsd
-    // proves overlaps the snapshot) AND any manual adjustments (owner-directed
-    // historical corrections/refunds, sourceApp != SUBSCRIPTION_SOURCE_APP)
-    // that are never represented in the snapshot at all. Dedupe against only
-    // the materializer-linked slice — isolated by subtracting the tracked
-    // manual contribution — so a manual refund is never cancelled out by this
-    // dedupe, and clamp it at 0 so a refund that drives the isolated slice
-    // negative can never make the dedupe itself negative and ADD spend back
-    // (see subscriptionPushedManualUsd's doc comment in external-usage-events.ts).
-    const materializerLinkedSubscriptionPushedUsd = Math.max(
-      0,
-      pushed.subscriptionPushed - pushed.subscriptionPushedManualUsd
-    );
-    const linkedFixedDedupeUsd =
-      snapshotFixedCostIncludedUsd > 0
-        ? Math.min(
-            materializerLinkedSubscriptionPushedUsd,
-            linkedMaterializedFixedUsd
-          )
-        : 0;
-    const snapshotCostIncludesUnknownFixed =
-      snapshotCostUsd != null
-        ? latestCostSnapshot?.costIncludesUnknownFixed ?? false
-        : false;
-    const fixedCostConflict =
-      (fixedMonthlyCostUsd > 0 &&
-        (pushed.subscriptionPushed > 0 || snapshotFixedCostIncludedUsd > 0)) ||
-      Math.min(
-        Math.max(
-          0,
-          snapshotFixedCostIncludedUsd - linkedSnapshotRepresentationUsd
-        ),
-        Math.max(0, pushed.subscriptionPushed - linkedFixedDedupeUsd)
-      ) > 0.005 ||
-      (snapshotCostIncludesUnknownFixed && pushed.subscriptionPushed > 0) ||
-      linkedMaterializedFixedUsd - linkedFixedDedupeUsd > 0.005;
-    // Prefer a single fixed source of truth for cash: when subscription events
-    // already materialize the recurring fee, do NOT also add ProviderPlan
-    // fixedMonthlyCostUsd (operator double-model). Still surface fixedCostConflict
-    // so Settings can resolve the misconfiguration. Linked snapshot dedupe is
-    // unchanged below.
-    const planFixedInCashUsd =
-      fixedMonthlyCostUsd > 0 && pushed.subscriptionPushed > 0
-        ? 0
-        : fixedMonthlyCostUsd;
-    // Preserve every distinct *remaining* fixed source. Collapse only the amount
-    // proven to represent the same provider billing identity through an explicit
-    // local Subscription link; equal prices alone are never treated as identity.
-    const fixedAccruedUsd =
-      planFixedInCashUsd +
-      pushed.subscriptionPushed +
-      snapshotFixedCostIncludedUsd -
-      linkedFixedDedupeUsd;
-    const spentUsd = fixedAccruedUsd + usageCost;
+    // Delegate to extracted pure functions
+    const linkedPeriods = resolveLinkedPeriods({
+      localFixed,
+      liveExternalFixed,
+      externalBillingChargeCorrections: p.externalBillingChargeCorrections,
+      materializedChargeByIdempotencyKey,
+    });
+
+    const reconciled = reconcileFixedCosts({
+      linkedPeriods,
+      snapshotFixedCostIncludedUsd,
+      snapshotCostUsd,
+      latestCostSnapshotCostIncludesUnknownFixed: latestCostSnapshot?.costIncludesUnknownFixed ?? false,
+      subscriptionPushedUsd: pushed.subscriptionPushed,
+      subscriptionPushedManualUsd: pushed.subscriptionPushedManualUsd,
+      fixedMonthlyCostUsd,
+    });
+
+    const spentUsd = reconciled.fixedAccruedUsd + usageCost;
     const hasPushedEvents =
       pushed.pricedEventCount +
         pushed.unpricedEventCount +
@@ -874,72 +1452,101 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       receiptCash.paidUsd > 0;
     const hasUnknownCost =
       pushed.unpricedEventCount > 0 || pushed.unclassifiedCostEventCount > 0;
-    let spendCoverage: CostCoverage = hasUnknownCost
-      ? hasKnownVariableCost || fixedAccruedUsd > 0
-        ? "partial"
-        : pushed.unclassifiedCostEventCount > 0
-          ? "legacy_unknown"
-          : "unknown"
-      : hasPushedEvents || snapshotCostUsd != null
-        ? "complete"
-        : fixedAccruedUsd > 0 || receiptCash.paidUsd > 0
-          ? "partial"
-          : "unknown";
-    // Anthropic individual accounts and Mistral's currently published Admin
-    // Usage schema have no authoritative cash-total API. A fully priced
-    // producer stream is complete for the events received, but cannot prove
-    // that every account request reached the monitor. Keep provider-level
-    // cash explicitly partial until an authoritative cost snapshot exists.
-    if (
-      ["anthropic", "mistral"].includes(canonicalProviderKey(p.name)) &&
-      snapshotCostUsd == null &&
-      hasPushedEvents &&
-      spendCoverage === "complete"
-    ) {
-      spendCoverage = "partial";
-    }
     const geminiBillingIncomplete =
       geminiBillingStatus != null && geminiBillingStatus.state !== "ready";
-    if (geminiBillingIncomplete && spendCoverage === "complete") {
-      spendCoverage =
-        hasKnownVariableCost || fixedAccruedUsd > 0 ? "partial" : "unknown";
-    }
-    if (snapshotCostCoverageIncomplete && spendCoverage === "complete") {
-      spendCoverage = hasKnownVariableCost || fixedAccruedUsd > 0
-        ? "partial"
-        : "unknown";
-    }
-    const forecastedSubscriptionRenewalsUsd = forecastSubscriptionRenewals(
-      p.subscriptions,
+    const spendCoverage = computeSpendCoverage({
+      hasUnknownCost,
+      hasPushedEvents,
+      pushedUnclassifiedCostEventCount: pushed.unclassifiedCostEventCount,
+      hasKnownVariableCost,
+      fixedAccruedUsd: reconciled.fixedAccruedUsd,
+      receiptCashPaidUsd: receiptCash.paidUsd,
+      snapshotCostUsd,
+      snapshotCostCoverageIncomplete,
+      providerCanonicalKey: canonicalProviderKey(p.name),
+      geminiBillingIncomplete,
+    });
+    // Only *active* rows forecast remaining charges. Managed/paused history
+    // stays in MTD accrual via materializer events; inventing future charges
+    // for non-active status overstates EOM (aligns with materializer filter).
+    const forecastedRenewals = planSubscriptionRenewals(
+      p.subscriptions
+        .filter((sub) => sub.status === "active")
+        .map((sub) => ({
+          id: sub.id,
+          providerId: p.id,
+          name: sub.name,
+          costUsd: sub.costUsd,
+          currency: sub.currency,
+          interval: sub.interval,
+          intervalCount: sub.intervalCount,
+          nextRenewalAt: sub.nextRenewalAt,
+          autoRenew: sub.autoRenew,
+        })),
       now
     );
-    // Receipt funding is a lumpy cash event, not a consumption sample. While
-    // it covers the observed variable usage, keep the receipt amount as the
-    // variable projection instead of annualizing/month-elapsed extrapolating
-    // that deposit. Once observed usage exceeds receipt cash, resume the
-    // ordinary usage-rate forecast with the receipt as a lower bound.
-    // Wave J / E11: prefer recency-weighted series when this provider owns
-    // push samples; always floor by observedVariableUsageUsd so a small push
-    // series cannot under-project against a larger poll snapshot (Codex P2).
+    const forecastedSubscriptionRenewalsUsd = forecastedRenewals.reduce(
+      (sum, line) => sum + line.chargeUsd,
+      0
+    );
+    // Receipt funding is a lumpy cash event, not a consumption sample (S2).
+    // Prepaid receipt cash is FUNDING COVERAGE for the observed usage — it
+    // must NEVER become the projected consumption itself: a $500 top-up over
+    // $12 of usage does not mean $500 will be consumed by EOM. The variable
+    // projection is floored only at max(observedUsage, linear-or-trend
+    // forecast); receiptCashPaidUsd stays visible on the DTO as funding
+    // evidence but no longer participates in the projection at all.
+    //
+    // S4 / Wave J / E11: build the daily series from BOTH channels — push
+    // telemetry (dailyUsageByProviderId) and poll snapshot day-peaks diffed
+    // into increments — merged element-wise via maxDailySeries, so
+    // poll-primary providers get the same recency-weighted trend forecast as
+    // push-primary ones. Always floor by observedVariableUsageUsd so a small
+    // series cannot under-project against a larger snapshot/push total
+    // (Codex P2). Quarantined snapshots (identity/config change, legacy
+    // Mistral spend-limit provenance) contribute no poll series.
     const pushDailySeries = dailyUsageByProviderId.get(p.id) ?? null;
+    const pollDayPeaks = billingSnapshotQuarantined
+      ? null
+      : snapshotVariableDayPeaksByProviderId.get(p.id) ?? null;
+    const pollDailySeries =
+      pollDayPeaks && pollDayPeaks.size > 0
+        ? dailyIncrementsFromSnapshotPeaks(pollDayPeaks, monthStart, now)
+        : null;
+    const mergedDailySeries = maxDailySeries(pushDailySeries, pollDailySeries);
+    // Trend fitting needs real history, not one lump. With fewer than 5
+    // NONZERO complete days the recency-weighted fit degrades to a
+    // single-spike extrapolation (clamped at 3x linear) — for a poll provider
+    // added mid-month, the unobserved days before its first snapshot read as
+    // zeros and one cumulative peak looks like a spike, fabricating a 3x
+    // projection (same fabrication class as S2). Fall back to the linear
+    // forecast until the provider has genuine day-to-day history.
+    const completeElapsedDays = Math.floor(
+      now.getUTCDate() + now.getUTCHours() / 24 + now.getUTCMinutes() / 1440
+    );
+    const nonzeroCompleteDays = mergedDailySeries
+      ? mergedDailySeries
+          .slice(0, Math.max(0, completeElapsedDays))
+          .filter((value) => value > 0).length
+      : 0;
     const linearProjectedVariable = calculateEomForecast(
       observedVariableUsageUsd,
       0,
       now
     );
     const seriesProjectedVariable =
-      pushDailySeries && pushDailySeries.some((v) => v > 0)
+      mergedDailySeries && nonzeroCompleteDays >= 5
         ? Math.max(
             observedVariableUsageUsd,
-            calculateEomForecastFromSeries(pushDailySeries, 0, now, {
+            calculateEomForecastFromSeries(mergedDailySeries, 0, now, {
               usageSoFarFallback: observedVariableUsageUsd,
             })
           )
         : linearProjectedVariable;
-    const projectedVariableUsageUsd =
-      receiptCash.paidUsd >= observedVariableUsageUsd
-        ? receiptCash.paidUsd
-        : Math.max(receiptCash.paidUsd, seriesProjectedVariable);
+    const projectedVariableUsageUsd = Math.max(
+      observedVariableUsageUsd,
+      seriesProjectedVariable
+    );
     const monthlyBudgetUsd = plan?.monthlyBudgetUsd ?? null;
 
     // Reuse the shared alert logic for budget alerts by feeding the combined usage cost as the
@@ -955,11 +1562,18 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
           totalRequests: latestSnapshot?.totalRequests ?? null,
           credits: latestSnapshot?.credits ?? null,
           fetchedAt: latestSnapshot?.fetchedAt ?? now,
+          costCoverageCaveatCode: latestCostSnapshot
+            ? (costCoverageCaveatCodeBySnapshotId.get(latestCostSnapshot.id) ?? null)
+            : null,
         },
         trackedSpendUsd: spentUsd,
-        fixedAccruedUsd,
+        fixedAccruedUsd: reconciled.fixedAccruedUsd,
         reconciliationDiscrepancyUsd: p.usageReconciliations?.[0]?.status === "discrepancy" ? p.usageReconciliations[0].deltaUsd : null,
         anomalies: anomaliesByProviderId.get(p.id),
+        // S11: same hysteresis the delivery path applies (alert-delivery.ts
+        // C9), so the dashboard/API view stops flapping at 80%/100%.
+        previousBudgetTier:
+          previousBudgetTierByProviderId.get(p.id) ?? "ok",
       },
       now
     );
@@ -969,9 +1583,10 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         a.code === "budget_warning" ||
         a.code === "usage_reconciliation_discrepancy" ||
         a.code === "spend_anomaly" ||
-        a.code === "request_anomaly"
+        a.code === "request_anomaly" ||
+        a.code === "catalog_estimate"
     );
-    if (fixedCostConflict) {
+    if (reconciled.fixedCostConflict) {
       budgetAlerts.push({
         code: "fixed_cost_conflict",
         severity: "warning",
@@ -997,6 +1612,56 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
             ? "warning"
             : "info",
         message,
+      });
+    }
+
+    // S13: a cost snapshot whose billing window started BEFORE this UTC month
+    // is excluded from month-to-date math (see the latestCostTimes filter),
+    // which silently hides mid-month-billing-cycle providers from budgets.
+    // Surface that exclusion as a visible info alert instead of staying
+    // silent. Fires only when the provider's NEWEST scope-eligible cost
+    // snapshot is the straddling one (a newer eligible snapshot supersedes).
+    const straddleCandidate = latestScopeCostByProviderId.get(p.id) ?? null;
+    if (
+      p.isActive &&
+      straddleCandidate != null &&
+      straddleCandidate.costWindowStart != null &&
+      straddleCandidate.costWindowStart < monthStart &&
+      (latestCostSnapshot == null ||
+        straddleCandidate.fetchedAt > latestCostSnapshot.fetchedAt)
+    ) {
+      budgetAlerts.push({
+        // Reuses the existing billing_sync_incomplete code (dedicated codes
+        // require extending the union in provider-alerts.ts, owned by another
+        // lane — cross-lane follow-up). The message carries the distinction.
+        code: "billing_sync_incomplete",
+        severity: "info",
+        message: `Latest cost snapshot covers a billing window starting ${straddleCandidate.costWindowStart.toISOString().slice(0, 10)} (before this UTC month) and is excluded from month-to-date budget math; spend for this mid-month billing cycle is understated until the cycle rolls over.`,
+      });
+    }
+
+    // S8: non-USD subscriptions are never charged as USD — creation rejects
+    // them (subscription-input.ts) and the materializer skips any legacy row
+    // loudly. Surface survivors here so a skipped charge is visible, not
+    // silent, until authoritative FX conversion exists.
+    const nonUsdActiveSubscriptions = p.subscriptions.filter(
+      (subscription) =>
+        subscription.status === "active" &&
+        subscription.currency.toUpperCase() !== "USD"
+    );
+    if (nonUsdActiveSubscriptions.length > 0) {
+      const currencies = [
+        ...new Set(
+          nonUsdActiveSubscriptions.map((subscription) =>
+            subscription.currency.toUpperCase()
+          )
+        ),
+      ].join(", ");
+      budgetAlerts.push({
+        // Same billing_sync_incomplete reuse rationale as the straddle alert.
+        code: "billing_sync_incomplete",
+        severity: "warning",
+        message: `${nonUsdActiveSubscriptions.length} active subscription(s) denominated in ${currencies} are NOT being charged: non-USD amounts are never materialized as USD until authoritative FX conversion exists.`,
       });
     }
 
@@ -1048,7 +1713,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     // elevates when EOM projection would breach even if current spend is still ok.
     let projectedStatus: BudgetStatusLevel = status;
     if (monthlyBudgetUsd != null && monthlyBudgetUsd > 0) {
-      const projected = projectedVariableUsageUsd + fixedAccruedUsd + forecastedSubscriptionRenewalsUsd;
+      const projected = projectedVariableUsageUsd + reconciled.fixedAccruedUsd + forecastedSubscriptionRenewalsUsd;
       // projectedEomUsd is assigned below — compute inline for projectedStatus.
       const projectedEomForStatus = projected;
       if (projectedEomForStatus >= monthlyBudgetUsd) {
@@ -1057,6 +1722,19 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         projectedStatus = status === "exceeded" ? "exceeded" : "warning";
       }
     }
+
+    const projectedEomUsd =
+      reconciled.fixedAccruedUsd +
+      projectedVariableUsageUsd +
+      forecastedSubscriptionRenewalsUsd;
+    // S9: budget runout ("exhausts ~Aug 22 at current burn") from the same
+    // trend-aware projection; null when unconfigured or never crossing.
+    const runout = projectBudgetRunout({
+      spentUsd,
+      projectedEomUsd,
+      monthlyBudgetUsd,
+      now,
+    });
 
     return {
       id: p.id,
@@ -1078,7 +1756,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         ? null
         : latestCostSnapshot?.costScope ?? null,
       snapshotFixedCostIncludedUsd,
-      snapshotCostIncludesUnknownFixed,
+      snapshotCostIncludesUnknownFixed: reconciled.snapshotCostIncludesUnknownFixed,
       pushedMonthToDateUsd,
       receiptCashPaidUsd: receiptCash.paidUsd,
       receiptCashEventCount: receiptCash.eventCount,
@@ -1090,20 +1768,39 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       pushedUnclassifiedCostEventCount: pushed.unclassifiedCostEventCount,
       spendCoverage,
       subscriptionMonthToDateUsd: pushed.subscriptionPushed,
-      fixedAccruedUsd,
-      linkedFixedDedupeUsd,
-      fixedCostConflict,
+      fixedAccruedUsd: reconciled.fixedAccruedUsd,
+      linkedFixedDedupeUsd: reconciled.linkedFixedDedupeUsd,
+      fixedCostConflict: reconciled.fixedCostConflict,
       forecastedSubscriptionRenewalsUsd,
+      forecastedRenewals,
+      projectedVariableUsageUsd,
       spentUsd,
-      projectedEomUsd:
-        fixedAccruedUsd +
-        projectedVariableUsageUsd +
-        forecastedSubscriptionRenewalsUsd,
+      projectedEomUsd,
+      projectedRunoutDate: runout.runoutDate?.toISOString() ?? null,
+      daysUntilBudgetExhausted: runout.daysUntilBudgetExhausted,
       remainingUsd,
       percentUsed,
       status,
       projectedStatus,
       alerts: budgetAlerts,
+      externalBilling: p.externalBilling.map((b) => ({
+        source: b.source,
+        externalId: b.externalId,
+        kind: b.kind,
+        serviceName: b.serviceName,
+        planName: b.planName,
+        status: b.status,
+        amountUsd: b.amountUsd,
+        currency: b.currency,
+        billingInterval: b.billingInterval,
+        currentPeriodStart: b.currentPeriodStart?.toISOString() ?? null,
+        currentPeriodEnd: b.currentPeriodEnd?.toISOString() ?? null,
+        usageQuantity: b.usageQuantity,
+        usageUnit: b.usageUnit,
+        syncedAt: b.syncedAt.toISOString(),
+      })),
+      verifiedPreferredCashApplied: verifiedCashResult.verifiedPreferredCashApplied,
+      verifiedPreferredCashUsd: verifiedCashResult.verifiedPreferredCashUsd,
       budgetControls: {
         enabled: p.budgetControlsEnabled,
         breachState: budgetBreachState,
@@ -1124,6 +1821,9 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     (sum, provider) => sum + provider.estimatedApiEquivalentUsd,
     0
   );
+  // Global / portfolio budget for Overview hero — freeform override preferred
+  // over sum of project budgets; independent of per-provider plan budgets.
+  const globalBudget = await loadGlobalBudgetSnapshot();
 
   return {
     ok: true,
@@ -1140,6 +1840,11 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       percentUsed: totalBudgetUsd > 0 ? budgetedSpentUsd / totalBudgetUsd : null,
       overBudget: providerStatuses.some((p) => p.status === "exceeded"),
       warning: providerStatuses.some((p) => p.status === "warning"),
+      globalMonthlyBudgetUsd: globalBudget.globalMonthlyBudgetUsd,
+      suggestedGlobalBudgetUsd: globalBudget.suggestedGlobalBudgetUsd,
+      effectiveGlobalBudgetUsd: globalBudget.effectiveGlobalBudgetUsd,
+      globalBudgetSource: globalBudget.globalBudgetSource,
+      projectBudgetCount: globalBudget.projectBudgetCount,
     },
   };
 }
@@ -1247,6 +1952,10 @@ interface StaleWhileRevalidateCacheEntry<T> {
   computedAt: number;
 }
 
+type StaleWhileRevalidateRefreshResult<T> =
+  | { ok: true; value: T; generation: number }
+  | { ok: false; generation: number };
+
 /**
  * A small stale-while-revalidate memoization helper keyed by an arbitrary
  * string derived from the call's `now`. See the file comment above for the
@@ -1262,7 +1971,7 @@ function createStaleWhileRevalidateCache<T>(options: {
   // The key AND generation of the refresh that currently "owns"
   // refreshPromise. A refresh only writes to `entry` / clears these slots
   // while it still owns them at completion - see the file comment above.
-  let refreshPromise: Promise<void> | null = null;
+  let refreshPromise: Promise<StaleWhileRevalidateRefreshResult<T>> | null = null;
   let refreshKey: string | null = null;
   let refreshGeneration = -1;
   // Bumped by invalidate(). The cache key alone (a month-start string) cannot
@@ -1283,7 +1992,11 @@ function createStaleWhileRevalidateCache<T>(options: {
     return refreshKey === key && refreshGeneration === gen;
   }
 
-  async function refresh(now: Date, key: string, gen: number): Promise<void> {
+  async function refresh(
+    now: Date,
+    key: string,
+    gen: number
+  ): Promise<StaleWhileRevalidateRefreshResult<T>> {
     try {
       const value = await options.compute(now);
       // Only adopt this result if a newer request hasn't already taken over
@@ -1301,6 +2014,11 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (ownsSlot(key, gen) && generation === gen) {
         entry = { key, value, computedAt: Date.now() };
       }
+      // A cold caller owns this promise even if a different cache key has
+      // since taken the shared publication slot.  Return its own computation
+      // directly so alternating keys cannot livelock while waiting for an
+      // entry that only the current slot owner is allowed to publish.
+      return { ok: true, value, generation: gen };
     } catch (error) {
       // A background refresh (there IS a last-good value for this key) must
       // never crash the process or surface to the caller that triggered it -
@@ -1308,7 +2026,6 @@ function createStaleWhileRevalidateCache<T>(options: {
       // cold start (no cached value yet for this key) has nothing to fall
       // back to, so it rethrows and the caller sees the failure, exactly
       // like an uncached call would today.
-      // eslint-disable-next-line no-console -- intentional: surfaces cache-refresh failures for on-call visibility
       console.warn(
         `[${options.label}] refresh failed; serving last good value if available`,
         error
@@ -1316,6 +2033,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (!entry || entry.key !== key) {
         throw error;
       }
+      return { ok: false, generation: gen };
     } finally {
       // Only clear the slot if we still own it. Checking the generation too
       // stops a superseded pre-invalidation refresh from releasing the slot
@@ -1348,7 +2066,7 @@ function createStaleWhileRevalidateCache<T>(options: {
         const gen = generation;
         refreshKey = key;
         refreshGeneration = gen;
-        refreshPromise = refresh(now, key, gen).catch(() => {});
+        refreshPromise = refresh(now, key, gen).catch(() => ({ ok: false, generation: gen }));
       }
       return cached.value;
     }
@@ -1364,7 +2082,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       // we are awaiting must send us round the loop for a genuinely fresh
       // compute rather than letting us adopt pre-invalidation work.
       const gen = generation;
-      let inFlight: Promise<void>;
+      let inFlight: Promise<StaleWhileRevalidateRefreshResult<T>>;
       if (refreshPromise && ownsSlot(key, gen)) {
         inFlight = refreshPromise;
       } else {
@@ -1373,13 +2091,18 @@ function createStaleWhileRevalidateCache<T>(options: {
         inFlight = refresh(now, key, gen);
         refreshPromise = inFlight;
       }
-      await inFlight;
+      const result = await inFlight;
+      if (generation !== gen) {
+        continue;
+      }
       if (entry && entry.key === key) {
         return entry.value;
       }
-      // Extremely rare: something else moved the cache on again before we
-      // could read our own result back (e.g. a rapid double rollover).
-      // Loop and try again for our own key.
+      if (result.ok && result.generation === gen) {
+        return result.value;
+      }
+      // A failed background result has no value to return.  If it was a cold
+      // refresh, refresh() already rethrew; otherwise retry this key.
     }
   }
 
@@ -1500,6 +2223,10 @@ export interface ProjectBudgetStatus {
   monthlyBudgetUsd: number | null;
   spentUsd: number;
   projectedEomUsd: number;
+  /** S9: day the project's cumulative forecast crosses its budget (ISO), or null. */
+  projectedRunoutDate: string | null;
+  /** Fractional days until the project budget is exhausted, or null. */
+  daysUntilBudgetExhausted: number | null;
   spendCoverage: CostCoverage;
   pricedEventCount: number;
   unpricedEventCount: number;
@@ -1534,6 +2261,16 @@ export interface ProjectBudgetStatusResponse {
     percentUsed: number | null;
     overBudget: boolean;
     warning: boolean;
+    // Global-budget snapshot, forwarded from computeBudgetStatus's summary.
+    // The dashboard (src/app/page.tsx) has parsed these from /api/budget-status
+    // since 146c9ca0, but this route never sent them — the hero fell back to
+    // the provider-plan sum on every first paint.  Bearer-token clients (iOS,
+    // widgets) also get their only global-budget read through this payload.
+    globalMonthlyBudgetUsd: number | null;
+    suggestedGlobalBudgetUsd: number | null;
+    effectiveGlobalBudgetUsd: number | null;
+    globalBudgetSource: "override" | "suggested" | "none";
+    projectBudgetCount: number;
   };
 }
 
@@ -1552,8 +2289,9 @@ async function computeProjectBudgetStatusUncached(now: Date): Promise<ProjectBud
       },
       orderBy: { name: "asc" }
     }),
-    sumMonthToDateExternalCostAttribution(monthStartUtc(now), getExternalEventRawCutoff(now)),
+    sumMonthToDateExternalCostAttribution(monthStartUtc(now), getExternalEventRawCutoff(now), now),
     prisma.provider.findMany({
+      where: excludeInternalSystemProvidersWhere(),
       select: {
         id: true,
         name: true,
@@ -1780,23 +2518,35 @@ async function computeProjectBudgetStatusUncached(now: Date): Promise<ProjectBud
             : "ok";
     }
 
+    const projectedEomUsd = calculateEomForecast(
+      spentUsd,
+      Math.min(
+        spentUsd,
+        directFixedUsd +
+          allocatedFixedUsd +
+          directReceiptBackedUsd +
+          allocatedReceiptBackedUsd
+      ),
+      now
+    );
+    // S9: per-project runout where the inputs exist (MTD spend + linear
+    // project forecast + budget); null when unconfigured/never crossing.
+    const projectRunout = projectBudgetRunout({
+      spentUsd,
+      projectedEomUsd,
+      monthlyBudgetUsd: proj.monthlyBudgetUsd,
+      now,
+    });
+
     return {
       id: proj.id,
       name: proj.name,
       description: proj.description,
       monthlyBudgetUsd: proj.monthlyBudgetUsd,
       spentUsd,
-      projectedEomUsd: calculateEomForecast(
-        spentUsd,
-        Math.min(
-          spentUsd,
-          directFixedUsd +
-            allocatedFixedUsd +
-            directReceiptBackedUsd +
-            allocatedReceiptBackedUsd
-        ),
-        now
-      ),
+      projectedEomUsd,
+      projectedRunoutDate: projectRunout.runoutDate?.toISOString() ?? null,
+      daysUntilBudgetExhausted: projectRunout.daysUntilBudgetExhausted,
       spendCoverage,
       ...directCoverage,
       incompleteAllocatedProviderCount,
@@ -1836,6 +2586,11 @@ async function computeProjectBudgetStatusUncached(now: Date): Promise<ProjectBud
       percentUsed: totalBudgetUsd > 0 ? budgetedSpentUsd / totalBudgetUsd : null,
       overBudget: projectStatuses.some((p) => p.status === "exceeded"),
       warning: projectStatuses.some((p) => p.status === "warning"),
+      globalMonthlyBudgetUsd: providerStatus.summary.globalMonthlyBudgetUsd,
+      suggestedGlobalBudgetUsd: providerStatus.summary.suggestedGlobalBudgetUsd,
+      effectiveGlobalBudgetUsd: providerStatus.summary.effectiveGlobalBudgetUsd,
+      globalBudgetSource: providerStatus.summary.globalBudgetSource,
+      projectBudgetCount: providerStatus.summary.projectBudgetCount,
     },
   };
 }

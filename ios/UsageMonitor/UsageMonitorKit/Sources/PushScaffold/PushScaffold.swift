@@ -1,29 +1,27 @@
 import Foundation
 import UserNotifications
+import Models
+import Networking
 #if canImport(UIKit)
 import UIKit
 #endif
-import Models
 
 /// Public entry point for the **PushScaffold** lane: the client-side plumbing
-/// for `UserNotifications` + APNs so budget/alert notifications can be
-/// delivered and their taps routed to the right screen. Depends only on
-/// `AppCore` + `Models`.
+/// for `UserNotifications` so budget/alert notifications can be delivered and
+/// their taps routed to the right screen. Depends only on `AppCore` + `Models`.
 ///
 /// Scope (see ARCHITECTURE-CONTRACT.md):
 ///   - `requestAuthorization()` — asks for alert/badge/sound permission.
-///   - `registerForRemoteNotifications()` — triggers APNs device-token
-///     registration (the app forwards the token via `setAPNsDeviceToken(_:)`).
 ///   - `configureNotificationCategories()` — registers the alert category so a
 ///     tapped notification carries a routable action.
-///   - `scheduleAlertNotifications(for:)` — client-side local notifications
-///     built from `[ProviderAlert]`, usable *before* any server push exists.
+///   - `scheduleAlertNotifications(for:)` — local notifications built from
+///     `[ProviderAlert]`, posted by the background refresh via `AlertNotifier`.
 ///   - Tap routing lives in `PushRouter` + `PushNotificationDelegate`.
 ///
-/// **Server-side APNs delivery is a documented backend follow-up.** This lane
-/// sets the client up correctly (authorization, token intake, category, tap
-/// routing, local fallback) but does not — and cannot — fake a push arriving
-/// from a server. See the integration notes returned to the Assemble agent.
+/// Remote APNs: Settings registers the device token at `POST /api/apns/device-tokens`.
+/// The server HTTP/2 sender delivers the same budget/alert pages as Pushover when
+/// `APNS_*` credentials are configured. Local notifications from background refresh
+/// remain the fallback when the sender is unconfigured or the device has no token.
 public enum PushScaffold {
 
     // MARK: Authorization
@@ -47,6 +45,45 @@ public enum PushScaffold {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 
+    // MARK: Remote APNs Notifications
+
+    /// Register for remote APNs push notifications with iOS.
+    public static func registerForRemoteNotifications() {
+        #if canImport(UIKit)
+        Task { @MainActor in
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        #endif
+    }
+
+    /// Handle newly registered APNs device token and sync it to the Usage Monitor server.
+    public static func handleAPNsDeviceToken(_ tokenString: String, client: APIClient? = nil) async {
+        UserDefaults.standard.set(tokenString, forKey: "apns.deviceToken")
+        guard let client else { return }
+        do {
+            #if canImport(UIKit)
+            let model = await MainActor.run { UIDevice.current.model }
+            let systemVersion = await MainActor.run { UIDevice.current.systemVersion }
+            #else
+            let model: String? = nil
+            let systemVersion: String? = nil
+            #endif
+            #if DEBUG
+            let environment = "sandbox"
+            #else
+            let environment = "production"
+            #endif
+            try await client.registerApnsDeviceToken(
+                deviceToken: tokenString,
+                deviceModel: model,
+                osVersion: systemVersion,
+                environment: environment
+            )
+        } catch {
+            print("[PushScaffold] Failed to upload APNs device token: \(error)")
+        }
+    }
+
     // MARK: Categories
 
     /// Register the notification categories/actions the app understands. Call
@@ -67,46 +104,12 @@ public enum PushScaffold {
         UNUserNotificationCenter.current().setNotificationCategories([alertCategory])
     }
 
-    // MARK: Remote (APNs) registration
-
-    /// Trigger APNs registration. On success the system calls the app
-    /// delegate's `didRegisterForRemoteNotificationsWithDeviceToken`, which
-    /// must forward the token to `setAPNsDeviceToken(_:)`.
-    ///
-    /// No-op where UIKit is unavailable (tests / previews).
-    @MainActor
-    public static func registerForRemoteNotifications() {
-        #if canImport(UIKit)
-        UIApplication.shared.registerForRemoteNotifications()
-        #endif
-    }
-
-    /// APNs device-token intake. The app forwards the raw token from
-    /// `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)`.
-    ///
-    /// This lane records the hex-encoded token on `PushRouter.shared` so the
-    /// (future) backend can be handed it during device enrollment. It does
-    /// **not** transmit the token anywhere — server enrollment is the
-    /// documented backend follow-up.
-    public static func setAPNsDeviceToken(_ token: Data) {
-        let hex = deviceTokenHexString(from: token)
-        Task { @MainActor in
-            PushRouter.shared.deviceTokenHex = hex
-        }
-    }
-
-    /// Pure, testable APNs-token → lowercase hex-string encoding (the format
-    /// APNs enrollment APIs expect).
-    public static func deviceTokenHexString(from token: Data) -> String {
-        token.map { String(format: "%02x", $0) }.joined()
-    }
-
-    // MARK: Local notifications (client-side fallback)
+    // MARK: Local notifications
 
     /// Schedule immediate local notifications for the given provider alerts —
-    /// a client-only path that works before any server push infrastructure
-    /// exists. De-duplicates by alert identity so re-scheduling the same alert
-    /// set does not spam the user. Returns the identifiers scheduled.
+    /// the only delivery path this app has. De-duplicates by alert identity so
+    /// re-scheduling the same alert set does not spam the user. Returns the
+    /// identifiers scheduled.
     ///
     /// Only alerts at or above `minimumSeverity` are surfaced; `.info` is
     /// treated as non-interruptive and skipped by default.

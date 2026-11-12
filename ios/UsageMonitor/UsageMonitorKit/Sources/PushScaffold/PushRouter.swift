@@ -12,7 +12,7 @@ import AppCore
 ///
 /// A single shared instance (`.shared`) exists so the `UNUserNotificationCenter`
 /// delegate — which the system may invoke before the SwiftUI graph is built —
-/// and `PushScaffold.setAPNsDeviceToken(_:)` have a stable target.
+/// has a stable target.
 @MainActor
 @Observable
 public final class PushRouter {
@@ -21,10 +21,6 @@ public final class PushRouter {
 
     /// The most recent unrouted deep link, or `nil` when nothing is pending.
     public private(set) var pendingLink: PushDeepLink?
-
-    /// Hex-encoded APNs device token, once registration succeeds. Handed to the
-    /// backend during device enrollment (a documented follow-up).
-    public var deviceTokenHex: String?
 
     /// Retained notification-center delegate (the center holds it weakly).
     private var delegate: PushNotificationDelegate?

@@ -1,0 +1,67 @@
+{
+  "teamId": "CC8UTF7ATG",
+  "apps": {
+    "socratic": {
+      "displayName": "Socratic.Trade",
+      "bundleId": "trade.socratic.app",
+      "appleId": 6799238379,
+      "scheme": "SocraticTrade",
+      "projectRel": "ios/Socratic Trade.xcodeproj",
+      "projectRelAlt": "ios/SocraticTrade.xcodeproj",
+      "xcodegenDir": "ios",
+      "worktreeHint": "~/apps/trading-grok-ios-tf",
+      "marketingVersionDefault": "1.0.1"
+    },
+    "congress": {
+      "displayName": "Congress.Trade",
+      "bundleId": "trade.congress.ios",
+      "appleId": 6798076688,
+      "scheme": "CongressTrade",
+      "projectRel": "clients/ios/CongressTrade.xcodeproj",
+      "xcodegenDir": null,
+      "worktreeHint": "~/apps/congress-grok-ios-tf",
+      "marketingVersionDefault": "1.0.0",
+      "projectRelAlt": "clients/ios/Congress.Trade.xcodeproj"
+    },
+    "usage": {
+      "fixedMarketingVersion": "0.1.0",
+      "displayName": "Usage Monitor",
+      "bundleId": "com.simplewithus.usage.client.ios",
+      "pairedBuildFeed": "https://github.com/Simple-With-Us/Usage-Monitor/releases/latest/download/appcast.xml",
+      "appleId": 6820881005,
+      "scheme": "UsageMonitor",
+      "projectRel": "ios/UsageMonitor/UsageMonitor.xcodeproj",
+      "xcodegenDir": "ios/UsageMonitor",
+      "worktreeHint": "~/apps/usage-grok-ios-tf",
+      "marketingVersionDefault": "1.0.0",
+      "extraBundleIds": [
+        "com.simplewithus.usage.client.ios.widget"
+      ],
+      "notes": "Server-backed client. ASC SKU usage-client-monitor. Self-host free server code. Bundle ID is com.simplewithus.usage.client.ios (owner ruling 2026-10-11: the live ASC record's bundle ID carries a trailing .ios and an ASC bundle ID is immutable, so the app aligns to the record rather than the record to the app). Earlier IDs were services.jays.usage.client.monitor, com.simplewithus.usagemonitor.ios, then com.simplewithus.usage.client. appleId 6820881005 is the new record created for it."
+    },
+    "usage-local": {
+      "fixedMarketingVersion": "0.1.0",
+      "displayName": "Local Monitor",
+      "bundleId": "com.simplewithus.usage.local.ios",
+      "pairedBuildFeed": "https://github.com/Simple-With-Us/Usage-Monitor/releases/latest/download/appcast.xml",
+      "appleId": 6820885210,
+      "scheme": "LocalUsageMonitor",
+      "projectRel": "ios/UsageMonitor/UsageMonitor.xcodeproj",
+      "xcodegenDir": "ios/UsageMonitor",
+      "worktreeHint": "~/apps/usage-grok-ios-tf",
+      "marketingVersionDefault": "1.0.0",
+      "notes": "On-device free App Store product; no server. ASC SKU usage-local-monitor. Separate from client. Bundle ID is com.simplewithus.usage.local.ios (owner ruling 2026-10-11, same reason as the client record). Earlier IDs were services.jays.usage.local.monitor, com.simplewithus.usagemonitor.local.ios, then com.simplewithus.usage.local. appleId 6820885210 is the new record created for it."
+    },
+    "dealdex": {
+      "displayName": "DealDex",
+      "bundleId": "net.dealdex",
+      "appleId": 6802474288,
+      "scheme": "DealDex",
+      "projectRel": "native/ios/DealDex.xcodeproj",
+      "xcodegenDir": "native/ios",
+      "worktreeHint": "~/apps/dealdex-grok",
+      "marketingVersionDefault": "1.0.2",
+      "notes": "Live bundle is net.dealdex (not stale online.dealdex). Apple ID 6802474288. Not shipped from this repo."
+    }
+  }
+}

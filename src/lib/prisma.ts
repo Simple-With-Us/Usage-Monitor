@@ -1,20 +1,45 @@
-// @prisma/client is CommonJS (`module.exports = { ...require('#main-entry-point') }`
-// in the generated client). Node's ESM named-export interop for a CommonJS
-// module depends on static analysis (cjs-module-lexer) of the module source,
-// and that spread-based re-export is exactly the shape that analysis cannot
-// always resolve - on Node 24 this intermittently leaves a named
-// `import { PrismaClient } from "@prisma/client"` binding undefined, throwing
-// "PrismaClient is not a constructor" only in some dynamic-import paths (a
-// fresh `await import("@/lib/prisma")` in a test file's beforeAll, in
-// particular). scripts/ensure-subscription-link-unique-index.mjs carries the
-// same fix for the equivalent startup-script hazard (PR #409); this default
-// import is the runtime-code sibling of that fix. Default-importing the
-// module object sidesteps synthetic named-export detection entirely: the
-// constructor is read back out via a plain property access instead.
-import type { PrismaClient as PrismaClientInstance } from "@prisma/client";
-import prismaClientModule from "@prisma/client";
+import "server-only";
 
-const { PrismaClient } = prismaClientModule;
+// The client itself is built by createPrismaClient(), which owns the Prisma 7
+// driver-adapter wiring and the DATABASE_URL check. Construction is deferred
+// to first use so that importing this module never needs a database URL:
+// `next build` collects page data for API routes, and a route that merely
+// imports the client must not fail a build that has no DATABASE_URL. Prisma 6
+// behaved the same way (an unconfigured `new PrismaClient()` only failed when
+// a query actually ran), so deferring construction restores that behavior
+// instead of changing the contract.
+import { Prisma, PrismaClient, type PrismaClient as PrismaClientInstance } from "@prisma/client";
+import { createPrismaClient } from "./create-prisma-client";
+
+// The real client (itself a Proxy) answers `in` for every model under both its
+// delegate name (`provider`) and its model name (`Provider`).
+const PRISMA_MODEL_DELEGATE_KEYS = new Set<string>(
+  Object.values(Prisma.ModelName).flatMap((name) => [
+    name,
+    name.charAt(0).toLowerCase() + name.slice(1),
+  ])
+);
+
+// Public members set per instance in the constructor, so they are not on
+// PrismaClient.prototype.  prisma-deferred-client.test.ts asserts every name
+// in this list and in PRISMA_MODEL_DELEGATE_KEYS exists on a real client, and
+// that every public own key of a real client is answered here, so a Prisma
+// upgrade that adds or drops one fails the test.
+const PRISMA_INSTANCE_MEMBERS = new Set<string>(["$extends", "$parent"]);
+
+/**
+ * Properties the real client has, answered without constructing it:  the
+ * PrismaClient class methods ($queryRawUnsafe, $transaction, $connect, ...),
+ * the per-instance public members, and the generated model delegates.
+ * Private `_` internals are not part of the public surface and are not listed.
+ */
+function isKnownPrismaClientProperty(prop: PropertyKey): boolean {
+  if (typeof prop === "string") {
+    if (PRISMA_MODEL_DELEGATE_KEYS.has(prop)) return true;
+    if (PRISMA_INSTANCE_MEMBERS.has(prop)) return true;
+  }
+  return prop in PrismaClient.prototype;
+}
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClientInstance | undefined;
@@ -29,42 +54,83 @@ function clampedIntEnv(name: string, fallback: number, min: number, max: number)
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
-// --- Single-connection SQLite pool -----------------------------------------
-// Prisma's SQLite "library" engine opens a POOL of connections (default
-// num_cpus*2+1), and the native page-cache / mmap bounds set below are
-// PER-CONNECTION - a PRAGMA issued on one pooled connection does not apply to
-// the others (verified empirically: with a pool >1, concurrent `PRAGMA
-// mmap_size` reads return a mix of the value we set and the default). Forcing
-// `connection_limit=1` makes the bound deterministic and pool-wide, and is
-// itself a native-memory reduction: one connection's cache/mmap instead of N.
-// It is safe here because this is a single Render instance against a local
-// SQLite file whose internal writes are already serialized (see
-// ingest-admission.ts), and no $transaction callback in this codebase issues
-// a query through the global client (only through its `tx` handle), so a
-// single connection cannot self-deadlock. Overridable via
-// SQLITE_CONNECTION_LIMIT for operators who deliberately want more.
-function withConnectionLimit(url: string): string {
-  if (/[?&]connection_limit=/.test(url)) return url; // respect an explicit value
-  const limit = clampedIntEnv("SQLITE_CONNECTION_LIMIT", 1, 1, 64);
-  return `${url}${url.includes("?") ? "&" : "?"}connection_limit=${limit}`;
+// Prisma 7 uses the better-sqlite3 driver adapter (single underlying
+// connection per PrismaClient). Native page-cache / mmap bounds below are
+// applied on that connection in applySqliteNativeMemoryPragmas().
+
+// The real client, constructed on first use and memoized for the lifetime of
+// this module instance.
+let realPrismaClient: PrismaClientInstance | undefined;
+
+function resolvePrismaClient(): PrismaClientInstance {
+  if (realPrismaClient) return realPrismaClient;
+  // A dev-mode reload re-imports this module; reuse the client cached on
+  // globalThis so the SQLite connection (and its pragmas) survive the reload.
+  const client = globalForPrisma.prisma ?? createPrismaClient();
+  realPrismaClient = client;
+  if (process.env.NODE_ENV !== "production") {
+    globalForPrisma.prisma = client;
+  }
+  return client;
 }
 
-function createPrismaClient(): PrismaClientInstance {
-  const url = process.env.DATABASE_URL;
-  // With no URL, defer to Prisma's own env-driven construction (and its own
-  // clear "Environment variable not found: DATABASE_URL" error path) rather
-  // than fabricating a datasource override.
-  if (!url) return new PrismaClient();
-  return new PrismaClient({
-    datasources: { db: { url: withConnectionLimit(url) } },
-  });
+type PrismaClientPropertyBag = Record<PropertyKey, unknown>;
+
+/**
+ * Binds a client method to the real client. Prisma's `$queryRawUnsafe`,
+ * `$transaction` and the model delegates are read off the client instance, so
+ * they must keep their receiver; the bound copy also carries the original's
+ * `mock` property over, so a test that reaches for `prisma.$queryRawUnsafe.mock`
+ * still sees the spy's call log.
+ */
+function bindClientMethod(value: unknown, thisArg: unknown): unknown {
+  if (typeof value !== "function") return value;
+  const bound = (value as (...args: unknown[]) => unknown).bind(thisArg);
+  const mock = (value as { mock?: unknown }).mock;
+  if (mock !== undefined) {
+    (bound as { mock?: unknown }).mock = mock;
+  }
+  return bound;
 }
 
-export const prisma = globalForPrisma.prisma ?? createPrismaClient();
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
+/**
+ * `prisma` stays a `PrismaClient` for every call site, but the underlying
+ * client is created on the first property access instead of at import time.
+ * The proxy forwards reads to the real client and binds methods to it, so
+ * `prisma.$queryRawUnsafe(...)`, `prisma.$transaction(...)` and model
+ * delegates such as `prisma.provider.findMany(...)` keep working unchanged.
+ */
+export const prisma: PrismaClientInstance = new Proxy({} as PrismaClientInstance, {
+  get(target, prop) {
+    // A property installed directly on the proxy target wins over the real
+    // client, so `vi.spyOn(prisma, "$queryRawUnsafe")` keeps patching the
+    // method the rest of this module calls.
+    if (Object.prototype.hasOwnProperty.call(target, prop)) {
+      const own = (target as unknown as PrismaClientPropertyBag)[prop];
+      if (typeof own !== "function") return own;
+      return bindClientMethod(own, resolvePrismaClient());
+    }
+    const client = resolvePrismaClient();
+    const value = (client as unknown as PrismaClientPropertyBag)[prop];
+    return bindClientMethod(value, client);
+  },
+  has(target, prop) {
+    if (Object.prototype.hasOwnProperty.call(target, prop)) return true;
+    // Once the client exists, answer exactly as the real client would.
+    const constructed = realPrismaClient ?? globalForPrisma.prisma;
+    if (constructed) return prop in constructed;
+    // Before that, answer from the client's known public surface.  An `in`
+    // check never constructs the client, opens the database, or needs a
+    // DATABASE_URL (e.g. during `next build`).
+    return isKnownPrismaClientProperty(prop);
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    // Only report properties installed on the proxy target (e.g. by vi.spyOn).
+    // Do not fabricate descriptors for delegates on the real client: a `value:
+    // undefined` descriptor shadows the real method after mockRestore().
+    return Reflect.getOwnPropertyDescriptor(target, prop);
+  },
+});
 
 // --- Native (non-heap) SQLite memory bounds --------------------------------
 // Prisma's default "library" engine for SQLite embeds its own SQLite driver
@@ -104,9 +170,67 @@ export interface SqliteMemoryPragmaValues {
   cacheSizeKib: number;
   mmapSizeBytes: number;
   tempStore: SqliteTempStore;
+  journalMode: string;
+  busyTimeoutMs: number;
+  walAutocheckpointPages: number;
 }
 
 export type SqliteTempStore = "default" | "file" | "memory";
+
+// E2a: journal_mode and busy_timeout were previously left to Prisma/SQLite
+// defaults (journal=delete, no explicit busy timeout). WAL gives readers and
+// the single writer separate locks so a long read (e.g. the MTD groupBy) no
+// longer blocks ingest writes behind the whole database file, and an
+// explicit busy_timeout makes a genuinely contended write wait briefly
+// instead of failing immediately with SQLITE_BUSY. journal_mode is
+// persistent on the database file (not per-connection), but it is applied
+// and read back through the same verified-pragma path as the memory bounds
+// so a rejected PRAGMA is logged loudly rather than silently no-op'ing.
+const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
+// When Litestream replicates this database it must own WAL checkpoints.
+// Litestream's verify() takes a fresh FULL-database snapshot whenever another
+// connection restarts, truncates, or overwrites the WAL behind it ("wal header
+// salt reset", "wal overwritten by another process", "full or restart
+// checkpoint detected").  SQLite's default wal_autocheckpoint=1000 lets this
+// app checkpoint on commit, which on 2026-10-28..30 produced ~2.38 GB
+// whole-DB L0 uploads to B2 several times an hour.  Litestream's docs say to
+// run the application with `PRAGMA wal_autocheckpoint = 0`
+// (https://litestream.io/tips/#disable-autocheckpoints-for-high-write-load-servers);
+// Litestream still checkpoints on its own (PASSIVE at 1000 pages / 1m, and an
+// emergency TRUNCATE at ~500 MB).  Without Litestream (LITESTREAM_ACTIVE unset)
+// nothing else would checkpoint, so keep SQLite's default there.
+const SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES = 1_000;
+
+function sqliteWalAutocheckpointPages(): number {
+  return process.env.LITESTREAM_ACTIVE === "true" ? 0 : SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES;
+}
+
+/**
+ * Persistent global hook keeps r2-usage.ts free of a Prisma import while
+ * allowing the R2 supervisor to transfer checkpoint ownership in both
+ * directions at runtime.  Callers may request only the two policy values.
+ */
+export const SET_WAL_AUTOCHECKPOINT_HOOK = "__apiUsageMonitorSetWalAutocheckpoint";
+
+function registerWalAutocheckpointHook(): void {
+  (globalThis as Record<string, unknown>)[SET_WAL_AUTOCHECKPOINT_HOOK] = async (
+    pages: number
+  ) => {
+    if (pages !== 0 && pages !== SQLITE_DEFAULT_WAL_AUTOCHECKPOINT_PAGES) {
+      throw new Error("Unsupported SQLite wal_autocheckpoint policy");
+    }
+    await prisma.$queryRawUnsafe(`PRAGMA wal_autocheckpoint = ${pages}`);
+    const applied = await readSqliteMemoryPragmas();
+    if (applied.walAutocheckpointPages !== pages) {
+      throw new Error("SQLite wal_autocheckpoint policy did not take effect");
+    }
+  };
+}
+
+function sqliteJournalModeFromPragma(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : String(value);
+}
 
 function sqliteTempStoreFromEnv(): Exclude<SqliteTempStore, "default"> {
   switch (process.env.SQLITE_TEMP_STORE?.trim().toLowerCase()) {
@@ -139,13 +263,24 @@ export function resolveSqliteMemoryPragmaValues(): SqliteMemoryPragmaValues {
     // 0 disables mmap I/O entirely; a positive value is a byte ceiling.
     mmapSizeBytes: clampedIntEnv("SQLITE_MMAP_SIZE_BYTES", 0, 0, 268_435_456),
     tempStore: sqliteTempStoreFromEnv(),
+    // WAL is not operator-tunable: it is the correctness fix for read/write
+    // blocking on the single-connection pool. busy_timeout stays tunable.
+    journalMode: "wal",
+    busyTimeoutMs: clampedIntEnv(
+      "SQLITE_BUSY_TIMEOUT_MS",
+      DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+      0,
+      60_000
+    ),
+    walAutocheckpointPages: sqliteWalAutocheckpointPages(),
   };
 }
 
 /**
- * Reads the currently-effective cache_size / mmap_size / temp_store off the live
- * connection. SQLite returns these as 64-bit INTEGERs, which Prisma surfaces
- * as JS BigInt, so each is coerced to Number before returning.
+ * Reads the currently-effective cache_size / mmap_size / temp_store /
+ * journal_mode / busy_timeout off the live connection. SQLite returns these
+ * as 64-bit INTEGERs, which Prisma surfaces as JS BigInt, so each is coerced
+ * to Number before returning.
  */
 export async function readSqliteMemoryPragmas(): Promise<SqliteMemoryPragmaValues> {
   const cacheRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
@@ -157,10 +292,23 @@ export async function readSqliteMemoryPragmas(): Promise<SqliteMemoryPragmaValue
   const tempStoreRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
     "PRAGMA temp_store"
   );
+  const journalModeRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    "PRAGMA journal_mode"
+  );
+  const busyTimeoutRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    "PRAGMA busy_timeout"
+  );
+  const walAutocheckpointRows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    "PRAGMA wal_autocheckpoint"
+  );
   return {
     cacheSizeKib: Number(cacheRows[0]?.cache_size),
     mmapSizeBytes: Number(mmapRows[0]?.mmap_size),
     tempStore: sqliteTempStoreFromPragma(tempStoreRows[0]?.temp_store),
+    journalMode: sqliteJournalModeFromPragma(journalModeRows[0]?.journal_mode),
+    // SQLite names the busy_timeout pragma's result column "timeout".
+    busyTimeoutMs: Number(busyTimeoutRows[0]?.timeout),
+    walAutocheckpointPages: Number(walAutocheckpointRows[0]?.wal_autocheckpoint),
   };
 }
 
@@ -179,6 +327,12 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
         await prisma.$queryRawUnsafe(`PRAGMA cache_size = ${target.cacheSizeKib}`);
         await prisma.$queryRawUnsafe(`PRAGMA mmap_size = ${target.mmapSizeBytes}`);
         await prisma.$queryRawUnsafe(`PRAGMA temp_store = ${target.tempStore.toUpperCase()}`);
+        await prisma.$queryRawUnsafe(`PRAGMA journal_mode = ${target.journalMode.toUpperCase()}`);
+        await prisma.$queryRawUnsafe(`PRAGMA busy_timeout = ${target.busyTimeoutMs}`);
+        await prisma.$queryRawUnsafe(
+          `PRAGMA wal_autocheckpoint = ${target.walAutocheckpointPages}`
+        );
+        registerWalAutocheckpointHook();
         // Read the values back on the same connection and confirm they took.
         // A mismatch is logged loudly (never swallowed): it would mean a future
         // engine change rejected a PRAGMA, or connection_limit was raised above
@@ -188,13 +342,20 @@ export function applySqliteNativeMemoryPragmas(): Promise<void> {
         if (
           applied.cacheSizeKib !== target.cacheSizeKib ||
           applied.mmapSizeBytes !== target.mmapSizeBytes ||
-          applied.tempStore !== target.tempStore
+          applied.tempStore !== target.tempStore ||
+          applied.journalMode !== target.journalMode ||
+          applied.busyTimeoutMs !== target.busyTimeoutMs ||
+          applied.walAutocheckpointPages !== target.walAutocheckpointPages
         ) {
           console.error(
             `[prisma] SQLite native memory bounds did not take effect ` +
               `(wanted cache_size=${target.cacheSizeKib}, mmap_size=${target.mmapSizeBytes}; ` +
-              `temp_store=${target.tempStore}; read back cache_size=${applied.cacheSizeKib}, ` +
-              `mmap_size=${applied.mmapSizeBytes}, temp_store=${applied.tempStore})`
+              `temp_store=${target.tempStore}; journal_mode=${target.journalMode}; ` +
+              `busy_timeout=${target.busyTimeoutMs}; read back cache_size=${applied.cacheSizeKib}, ` +
+              `mmap_size=${applied.mmapSizeBytes}, temp_store=${applied.tempStore}, ` +
+              `journal_mode=${applied.journalMode}, busy_timeout=${applied.busyTimeoutMs}, ` +
+              `wal_autocheckpoint=${applied.walAutocheckpointPages}; wanted ` +
+              `wal_autocheckpoint=${target.walAutocheckpointPages})`
           );
         }
       } catch (error) {
@@ -220,4 +381,5 @@ export function resetSqliteNativeMemoryPragmasForTests(): void {
     );
   }
   globalForPrisma.__apiUsageMonitorSqlitePragmasApplied = undefined;
+  delete (globalThis as Record<string, unknown>)[SET_WAL_AUTOCHECKPOINT_HOOK];
 }

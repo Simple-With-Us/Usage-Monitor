@@ -23,14 +23,18 @@ public struct RefreshableScrollView<Content: View>: View {
     }
 
     public var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: spacing) {
                 content
             }
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.vertical, Theme.Spacing.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .containerRelativeFrame(.horizontal, alignment: .leading)
         }
+        // Tab-bar clearance is applied ONCE at the tab shell (RootView).
+        // Applying it here too stacked ~2x(96pt padding + 96pt margins) of
+        // bottom inset and blanked most of the Platforms tab (owner 2026-08-31).
         .background(Theme.Colors.background)
         .refreshable { await onRefresh() }
     }

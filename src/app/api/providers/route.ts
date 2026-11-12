@@ -12,7 +12,7 @@ import { buildKeyPreview } from "@/lib/provider-key-preview";
 import {
   hasProviderSecrets,
   providerConfigForClient,
-  providerConfigForServer,
+  providerConfigForServerOrNull,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 import {
@@ -38,23 +38,16 @@ import {
   projectProviderBillingAccountMatches,
 } from "@/lib/provider-billing-account";
 import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
+import {
+  excludeInternalSystemProvidersWhere,
+  isInternalSystemProviderName,
+} from "@/lib/system-providers";
 import { getProviderComplianceSummariesBatch } from "@/lib/provider-compliance";
 
 function decryptKey(encryptedKey: string | null): string | null {
   if (!encryptedKey) return null;
   try {
     return decrypt(encryptedKey);
-  } catch {
-    return null;
-  }
-}
-
-function serverConfig(
-  config: unknown,
-  encryptedSecretConfig: string | null
-): Record<string, unknown> | null {
-  try {
-    return providerConfigForServer(config, encryptedSecretConfig);
   } catch {
     return null;
   }
@@ -120,6 +113,9 @@ const DASHBOARD_EXTERNAL_BILLING_WHERE = {
 export async function GET(request: NextRequest) {
   const dashboardView = request.nextUrl.searchParams.get("view") === "dashboard";
   const [providers, budget] = await Promise.all([prisma.provider.findMany({
+    // Hide internal system anchors (e.g. project-budgets alert carrier) from
+    // Connections / Providers / dashboard — they are not operator connections.
+    where: excludeInternalSystemProvidersWhere(),
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -272,7 +268,7 @@ export async function GET(request: NextRequest) {
   const serverConfigsByProviderId = new Map(
     providers.map((provider) => [
       provider.id,
-      serverConfig(provider.config, provider.secretConfig),
+      providerConfigForServerOrNull(provider.config, provider.secretConfig),
     ])
   );
   const billingAccountMatches = projectProviderBillingAccountMatches(
@@ -381,14 +377,14 @@ export async function GET(request: NextRequest) {
       latestSnapshot,
     });
     const canonicalBudget = budgetByProviderId.get(p.id);
-    const nonBudgetAlerts = alertState.alerts.filter(
+    const nonBudgetAlerts = (alertState.alerts || []).filter(
       (alert) =>
         alert.code !== "budget_exceeded" && alert.code !== "budget_warning"
     );
     const alerts =
       canonicalBudget && p.isActive
-        ? [...nonBudgetAlerts, ...canonicalBudget.alerts]
-        : alertState.alerts;
+        ? [...nonBudgetAlerts, ...(canonicalBudget.alerts || [])]
+        : alertState.alerts || [];
     const duplicateProviderIds = duplicateIdsByCanonicalName.get(
       canonicalProviderKey(p.name)
     ) ?? [];
@@ -473,6 +469,9 @@ export async function GET(request: NextRequest) {
       fixedCostConflict: canonicalBudget?.fixedCostConflict ?? false,
       forecastedSubscriptionRenewalsUsd:
         canonicalBudget?.forecastedSubscriptionRenewalsUsd ?? 0,
+      forecastedRenewals: canonicalBudget?.forecastedRenewals ?? [],
+      projectedVariableUsageUsd:
+        canonicalBudget?.projectedVariableUsageUsd ?? 0,
       projectedEomUsd:
         canonicalBudget?.projectedEomUsd ??
         (canonicalBudget != null ? alertState.projectedEomUsd : null),
@@ -522,6 +521,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Provider credential-management metadata is server-only" },
       { status: 400 }
+    );
+  }
+
+  if (isInternalSystemProviderName(input.name)) {
+    return NextResponse.json(
+      {
+        error:
+          "This name is reserved for an internal system provider and cannot be added as a connection",
+      },
+      { status: 409 }
     );
   }
 

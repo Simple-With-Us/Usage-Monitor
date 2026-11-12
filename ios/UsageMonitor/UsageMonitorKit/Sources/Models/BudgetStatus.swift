@@ -92,12 +92,22 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
     public var subscriptionMonthToDateUsd: Double
     public var fixedAccruedUsd: Double
     public var forecastedSubscriptionRenewalsUsd: Double
+    /// Variable usage extrapolated to EOM (excludes fixed + known renewals).
+    /// Optional so older cached snapshots still decode; callers use
+    /// ``resolvedProjectedVariableUsageUsd`` when absent.
+    public var projectedVariableUsageUsd: Double?
     public var spentUsd: Double
     public var projectedEomUsd: Double
     public var remainingUsd: Double?
     public var percentUsed: Double?
     public var status: BudgetLevel
+    /// Server-computed runway status from `projectedEomUsd` vs budget
+    /// (`src/lib/budget-status.ts` `projectedStatus`). Optional so older
+    /// payloads (and cached snapshots written before this shipped) still
+    /// decode; callers fall back to local projection math when it is absent.
+    public var projectedStatus: BudgetLevel?
     public var alerts: [ProviderAlert]
+    public var externalBilling: [ExternalBillingRecord]?
 
     public init(
         id: String,
@@ -115,12 +125,15 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
         subscriptionMonthToDateUsd: Double = 0,
         fixedAccruedUsd: Double = 0,
         forecastedSubscriptionRenewalsUsd: Double = 0,
+        projectedVariableUsageUsd: Double? = nil,
         spentUsd: Double = 0,
         projectedEomUsd: Double = 0,
         remainingUsd: Double? = nil,
         percentUsed: Double? = nil,
         status: BudgetLevel = .unconfigured,
-        alerts: [ProviderAlert] = []
+        projectedStatus: BudgetLevel? = nil,
+        alerts: [ProviderAlert] = [],
+        externalBilling: [ExternalBillingRecord]? = nil
     ) {
         self.id = id
         self.name = name
@@ -137,12 +150,15 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
         self.subscriptionMonthToDateUsd = subscriptionMonthToDateUsd
         self.fixedAccruedUsd = fixedAccruedUsd
         self.forecastedSubscriptionRenewalsUsd = forecastedSubscriptionRenewalsUsd
+        self.projectedVariableUsageUsd = projectedVariableUsageUsd
         self.spentUsd = spentUsd
         self.projectedEomUsd = projectedEomUsd
         self.remainingUsd = remainingUsd
         self.percentUsed = percentUsed
         self.status = status
+        self.projectedStatus = projectedStatus
         self.alerts = alerts
+        self.externalBilling = externalBilling
     }
 
     public var snapshotFetchedDate: Date? {
@@ -161,6 +177,27 @@ public struct ProviderBudgetStatus: Codable, Hashable, Sendable, Identifiable {
 
     public var mostSevereAlert: ProviderAlert? {
         alerts.min { $0.severity.order < $1.severity.order }
+    }
+
+    /// Variable usage portion of EOM projection.
+    /// Prefer the server field; otherwise derive from the two-part composition:
+    /// `projectedEom = variable + fixedAccrued + forecastedRenewals`.
+    public var resolvedProjectedVariableUsageUsd: Double {
+        if let projectedVariableUsageUsd, projectedVariableUsageUsd.isFinite {
+            return max(0, projectedVariableUsageUsd)
+        }
+        let derived = projectedEomUsd - fixedAccruedUsd - forecastedSubscriptionRenewalsUsd
+        return max(0, derived)
+    }
+
+    /// Known remaining subscription charges this UTC month (not yet spent).
+    public var resolvedForecastedSubscriptionRenewalsUsd: Double {
+        max(0, forecastedSubscriptionRenewalsUsd)
+    }
+
+    /// Fixed / subscription charges already accrued MTD.
+    public var resolvedFixedAccruedUsd: Double {
+        max(0, fixedAccruedUsd)
     }
 }
 

@@ -17,7 +17,9 @@ import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
  * Two rules this module exists to enforce:
  *   1. A provider whose billing simply cannot be verified is labelled
  *      "unverifiable" EXPLICITLY — never skipped, so a structurally-blind
- *      provider can never read as silently reconciled/ok.
+ *      provider can never read as silently reconciled/ok. That includes a
+ *      provider with an authoritative cost but ZERO pushed telemetry: there is
+ *      no self-reported figure to disagree with, so no delta is computed.
  *   2. Rows are UPSERTED on the (providerId, periodStart, periodEnd, keyRef)
  *      unique key, so repeated passes update one row per provider-period
  *      instead of destroying and recreating history.
@@ -142,14 +144,14 @@ export async function reconcileProviderUsage(
         },
       },
     }),
-    sumMonthToDateExternalCostByProvider(periodStart, rawCutoff),
+    sumMonthToDateExternalCostByProvider(periodStart, rawCutoff, now),
   ]);
 
   // Index the pushed-cost map by canonical provider key so alias spellings
   // (e.g. google_ai vs google-ai) reconcile against the same bucket.
   const pushedByCanonicalKey = new Map<
     string,
-    { usagePushed: number; eventCount: number }
+    { usagePushed: number; eventCount: number; pricedEventCount: number }
   >();
   for (const [name, cost] of pushedCosts.entries()) {
     const key = canonicalProviderKey(name);
@@ -161,10 +163,12 @@ export async function reconcileProviderUsage(
     if (existing) {
       existing.usagePushed += cost.usagePushed;
       existing.eventCount += eventCount;
+      existing.pricedEventCount += cost.pricedEventCount;
     } else {
       pushedByCanonicalKey.set(key, {
         usagePushed: cost.usagePushed,
         eventCount,
+        pricedEventCount: cost.pricedEventCount,
       });
     }
   }
@@ -209,13 +213,20 @@ export async function reconcileProviderUsage(
     const ambiguousAttribution = ownerId == null || ownerId !== provider.id;
     const pushed =
       ambiguousAttribution
-        ? { usagePushed: 0, eventCount: 0 }
+        ? { usagePushed: 0, eventCount: 0, pricedEventCount: 0 }
         : pushedByCanonicalKey.get(canonicalKey) ?? {
             usagePushed: 0,
             eventCount: 0,
+            pricedEventCount: 0,
           };
     const reportedCostUsd = pushed.usagePushed;
     const reportedEventCount = pushed.eventCount;
+    // Only PRICED events (a real, even $0.00, costUsd) are a self-reported
+    // dollar figure worth comparing against the provider's own bill. An
+    // unpriced/unclassified event (e.g. a producer pushing an activity ping
+    // with costUsd: null because it tracks call volume, not spend) is not a
+    // cost claim at all, so it must not count toward "telemetry exists" below.
+    const reportedPricedEventCount = pushed.pricedEventCount;
 
     const visibility = getProviderIntegrationProfile(
       provider.name,
@@ -251,6 +262,39 @@ export async function reconcileProviderUsage(
       // been polled yet this period.
       status = "pending";
       pending += 1;
+    } else if (reportedPricedEventCount === 0) {
+      // The provider's own bill is in hand, but nothing pushed a PRICED usage
+      // event for it this period, so there is no self-reported dollar figure
+      // to compare it against. Computing a delta here subtracts from ZERO and
+      // reports the ENTIRE bill as a "discrepancy" — which is how a $0.71
+      // Twilio month became a PagerDuty incident that no tolerance could ever
+      // absorb (only a 100% ratio tolerance would, and that disables the check
+      // for every provider). A provider with no telemetry source is not in
+      // disagreement with itself; it is simply unverified, and saying so is
+      // the honest answer. Ordered after the snapshot branch so "pending"
+      // keeps its narrower meaning: waiting on the poll, not missing the
+      // telemetry side.
+      //
+      // This is deliberately keyed on PRICED events, not raw event count
+      // (reportedEventCount, kept on the row for display/debugging only): PD
+      // #104/#105 was the same bug wearing a second costume. Congress.Trade
+      // pushes Stripe "usage" pings with costUsd: null (it tracks call volume,
+      // not spend), so reportedEventCount was 2 while reportedCostUsd stayed
+      // $0 — the old zero-EVENT-COUNT guard missed it, subtracted the real
+      // $0.45 bill from zero, and paged forever with no tolerance able to
+      // absorb it. A null-cost event is not a cost claim, so it must not count
+      // as "telemetry exists" any more than no event at all would. Gating on
+      // reportedPricedEventCount instead catches this shape without reopening
+      // the fixed Twilio case (its reportedPricedEventCount is also 0).
+      //
+      // Nothing here alerts — provider-alerts raises
+      // usage_reconciliation_discrepancy only on status === "discrepancy" — and
+      // because the counts are recomputed from live data every pass, a
+      // provider that LATER starts pushing priced telemetry falls straight
+      // through to normal reconciliation on the next run. The row is upserted
+      // in place, so no manual reset or backfill is involved.
+      status = "unverifiable";
+      unverifiable += 1;
     } else {
       verifiedCostUsd = snapshotCost;
       deltaUsd = snapshotCost - reportedCostUsd;

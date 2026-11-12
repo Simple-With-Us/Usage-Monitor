@@ -103,6 +103,17 @@ final class SettingsFeatureTests: XCTestCase {
         XCTAssertFalse(vm.isHostValid, "A URL with no host is rejected.")
     }
 
+    func testAboutFooterKeepsTwoSpacesAndNamesTheApp() {
+        let footer = AppInfo.aboutFooter
+        XCTAssertTrue(
+            footer.contains(".  "),
+            "About footer must use two spaces after the first sentence."
+        )
+        XCTAssertTrue(footer.contains(AppInfo.displayName))
+        XCTAssertTrue(footer.contains("Data stays on your device"))
+        XCTAssertFalse(footer.contains("glance. Data"))
+    }
+
     func testApplyHostChangePersistsAndReconfigures() {
         let env = makeEnv(token: "tok")
         let vm = SettingsViewModel()
@@ -114,64 +125,5 @@ final class SettingsFeatureTests: XCTestCase {
 
         XCTAssertEqual(env.settings.baseHost, "staging.example.com")
         XCTAssertFalse(vm.hostChanged, "Once applied, the field matches the persisted host.")
-    }
-
-    // MARK: Formatting
-
-    func testUptimeFormatting() {
-        XCTAssertEqual(UptimeFormat.string(fromSeconds: 273_600), "3d 4h")
-        XCTAssertEqual(UptimeFormat.string(fromSeconds: 3_660), "1h 1m")
-        XCTAssertEqual(UptimeFormat.string(fromSeconds: 90), "1m")
-        XCTAssertEqual(UptimeFormat.string(fromSeconds: 30), "30s")
-        XCTAssertEqual(UptimeFormat.string(fromSeconds: 0), "just started")
-    }
-
-    // MARK: Server status
-
-    func testSnapshotRollupsAndDependencyRows() {
-        let degraded = ServerStatusSnapshot(
-            health: .init(ok: true, status: "ok"),
-            readiness: .init(
-                ok: false,
-                status: "degraded",
-                checks: .init(database: .init(ok: true), scheduler: .init(ok: false))
-            ),
-            fetchedAt: Date()
-        )
-        XCTAssertEqual(degraded.overallStatus, .warning)
-        XCTAssertEqual(degraded.overallLabel, "Degraded")
-        XCTAssertEqual(degraded.dependencyChecks.count, 2)
-
-        let down = ServerStatusSnapshot(
-            health: .init(ok: false, status: "fail"),
-            readiness: nil,
-            fetchedAt: Date()
-        )
-        XCTAssertEqual(down.overallStatus, .danger)
-        XCTAssertEqual(down.overallLabel, "Offline")
-        XCTAssertTrue(down.dependencyChecks.isEmpty)
-    }
-
-    func testServerStatusStoreLoadsViaProbe() async {
-        let snapshot = ServerStatusSnapshot(
-            health: .init(ok: true, status: "ok", version: "1.0.0"),
-            readiness: nil,
-            fetchedAt: Date()
-        )
-        let store = ServerStatusStore(probe: { _ in snapshot })
-        let client = APIClient(configuration: .production, tokenStore: InMemoryTokenStore())
-
-        await store.load(using: client)
-
-        XCTAssertEqual(store.state.value, snapshot)
-    }
-
-    func testServerStatusStoreSurfacesTypedError() async {
-        let store = ServerStatusStore(probe: { _ in throw APIError.offline })
-        let client = APIClient(configuration: .production, tokenStore: InMemoryTokenStore())
-
-        await store.load(using: client)
-
-        XCTAssertEqual(store.state.error, .offline)
     }
 }

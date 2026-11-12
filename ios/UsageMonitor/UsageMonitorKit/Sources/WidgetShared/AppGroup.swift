@@ -9,7 +9,7 @@ import Foundation
 public enum AppGroup {
     /// Must match the `com.apple.security.application-groups` entitlement in
     /// both `UsageMonitor.entitlements` and `UsageMonitorWidget.entitlements`.
-    public static let identifier = "group.services.jays.usage.monitor"
+    public static let identifier = "group.com.simplewithus.usage"
 
     /// The shared container URL, or `nil` when the app group is not
     /// provisioned (e.g. an unsigned CI build or a SwiftUI preview). Callers
@@ -19,8 +19,11 @@ public enum AppGroup {
     }
 
     /// A `UserDefaults` scoped to the app group, or `.standard` as a fallback
-    /// so previews and unsigned builds don't crash.
+    /// so previews and unsigned builds don't crash or trigger cfprefsd detaches.
     public static var defaults: UserDefaults {
-        UserDefaults(suiteName: identifier) ?? .standard
+        guard containerURL != nil, let groupDefaults = UserDefaults(suiteName: identifier) else {
+            return .standard
+        }
+        return groupDefaults
     }
 }

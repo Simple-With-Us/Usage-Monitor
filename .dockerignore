@@ -10,3 +10,9 @@ process_prs.py
 protection*.json
 retry_merge*.py
 safari-extension
+# Broad `COPY . .` in the Dockerfile would otherwise drag these into every
+# image (large native app sources, review/rollout docs, and lane worktrees).
+ios
+chrome-extension
+docs
+.worktrees

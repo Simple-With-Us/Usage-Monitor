@@ -6,6 +6,7 @@ import {
   isDecommissionedProviderName,
   DEFAULT_USAGE_UNIT_LABEL,
   hasConfiguredProviderField,
+  isTotalRequestsGaugeProvider,
   usageUnitLabelForProvider,
 } from "@/lib/provider-definitions";
 
@@ -54,6 +55,7 @@ describe("usageUnitLabelForProvider", () => {
     expect(usageUnitLabelForProvider("sentry")).toBe("Events");
     expect(usageUnitLabelForProvider("pushover")).toBe("Messages");
     expect(usageUnitLabelForProvider("twelvedata")).toBe("API credits");
+    expect(usageUnitLabelForProvider("backblaze")).toBe("Storage (MB)");
   });
 
   it("resolves by canonical provider key, not raw casing", () => {
@@ -69,6 +71,16 @@ describe("usageUnitLabelForProvider", () => {
   it("does not apply built-in labels to custom providers reusing a built-in slug", () => {
     expect(usageUnitLabelForProvider("render", "custom")).toBe("Requests");
     expect(usageUnitLabelForProvider("render", "CUSTOM")).toBe("Requests");
+  });
+
+  it("marks only the Backblaze storage gauge as a gauge (UM-1622)", () => {
+    expect(isTotalRequestsGaugeProvider("backblaze")).toBe(true);
+    expect(isTotalRequestsGaugeProvider("Backblaze")).toBe(true);
+    // Cumulative flows (incl. Render bandwidth MTD) stay anomaly-eligible.
+    expect(isTotalRequestsGaugeProvider("render")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("openai")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("backblaze", "custom")).toBe(false);
+    expect(isTotalRequestsGaugeProvider("some-custom-provider")).toBe(false);
   });
 
   it("keeps every declared usageUnitLabel non-empty", () => {
@@ -101,7 +113,7 @@ describe("Anthropic provider definition", () => {
 
 describe("built-in provider retirement", () => {
   it("keeps historical definitions while hiding dormant and retired providers from new connections", () => {
-    for (const name of ["tradier", "intrinio", "alpaca", "robinhood", "vercel"]) {
+    for (const name of ["tradier", "intrinio", "alpaca", "robinhood", "vercel", "deno"]) {
       expect(BUILT_IN_PROVIDERS.some((provider) => provider.name === name)).toBe(true);
       expect(ADDABLE_BUILT_IN_PROVIDERS.some((provider) => provider.name === name)).toBe(false);
       expect(builtInProviderLifecycle(name)).toBe("retired");
@@ -111,5 +123,17 @@ describe("built-in provider retirement", () => {
     expect(builtInProviderLifecycle("openai")).toBe("active");
     expect(isDecommissionedProviderName("  VeRcEl  ")).toBe(true);
     expect(isDecommissionedProviderName("openai")).toBe(false);
+  });
+
+  it("says Deno Deploy is a retired dead host and Coolify is the Congress.Trade host", () => {
+    const deno = BUILT_IN_PROVIDERS.find((provider) => provider.name === "deno");
+
+    expect(deno?.lifecycle).toBe("retired");
+    expect(deno?.helpNote).toMatch(/retired/i);
+    expect(deno?.helpNote).toMatch(/dead/i);
+    expect(deno?.helpNote).toMatch(/Coolify/i);
+    expect(deno?.helpNote).toMatch(/Congress\.Trade/i);
+    expect(deno?.helpNote).not.toMatch(/are tracked via Deno Deploy API/i);
+    expect(deno?.needsConfig?.fields[0]?.placeholder).not.toBe("congress-trade");
   });
 });

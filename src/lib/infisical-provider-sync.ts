@@ -7,6 +7,9 @@ import {
   managedApiKeyFingerprint,
 } from "@/lib/crypto";
 import { geminiApiKeyFingerprint } from "@/lib/gemini-key-status";
+import { resolveProdInfisicalEnvironment } from "@/lib/infisical-environment";
+import { resolveInfisicalConnection, loadInfisicalConnection, infisicalConnectionFromEnv, isInfisicalConnectionDisabled, type InfisicalConnection } from "./infisical-connections";
+import { authorizeInfisical, infisicalSecretApi, infisicalSecretParams, InfisicalAuthError, requireConcreteInfisicalValue, requireInfisicalSecretIdentity } from "./infisical-auth";
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { prisma } from "@/lib/prisma";
 import {
@@ -29,7 +32,7 @@ import {
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
 
-export type InfisicalCredentialScope = "st" | "ct" | "shared" | "st-primary";
+export type InfisicalCredentialScope = "st" | "ct" | "shared" | "st-primary" | "um";
 
 export interface InfisicalCredentialSyncSourceResult {
   source: InfisicalCredentialScope;
@@ -52,6 +55,16 @@ export interface InfisicalCredentialSyncResult {
   failed: number;
   /** Mappings intentionally left untouched by a caller-supplied safety gate. */
   suppressed?: number;
+  /**
+   * Known provider-shaped Infisical secret names that are present in a root
+   * but not yet in CREDENTIAL_MAPPINGS. Names only — never values. Auto-create
+   * remains owner-gated; this is discovery for the sync/ops surface.
+   */
+  unmappedDiscoveries?: Array<{
+    source: InfisicalCredentialScope;
+    secretName: string;
+    providerName: string;
+  }>;
 }
 
 export interface InfisicalCredentialSyncOptions {
@@ -89,6 +102,8 @@ interface SourceDefinition {
 }
 
 interface SourceConfig extends SourceDefinition {
+  configurationError?: string;
+  connection?: InfisicalConnection;
   clientId?: string;
   clientSecret?: string;
   projectId: string;
@@ -233,7 +248,7 @@ const SOURCE_DEFINITIONS: readonly SourceDefinition[] = [
     clientSecretEnv: "INFISICAL_ST_CLIENT_SECRET",
     projectIdEnv: "INFISICAL_ST_PROJECT_ID",
     pathEnv: "INFISICAL_ST_SECRET_PATH",
-    defaultProjectId: "39d93bb7-76f9-498c-8b50-a7def52e072f",
+    defaultProjectId: process.env.INFISICAL_ST_PROJECT_ID || "",
   },
   {
     source: "ct",
@@ -241,7 +256,7 @@ const SOURCE_DEFINITIONS: readonly SourceDefinition[] = [
     clientSecretEnv: "INFISICAL_CT_CLIENT_SECRET",
     projectIdEnv: "INFISICAL_CT_PROJECT_ID",
     pathEnv: "INFISICAL_CT_SECRET_PATH",
-    defaultProjectId: "f61a79de-8d77-4f0b-9361-4b7208598290",
+    defaultProjectId: process.env.INFISICAL_CT_PROJECT_ID || "",
   },
   {
     source: "shared",
@@ -249,12 +264,20 @@ const SOURCE_DEFINITIONS: readonly SourceDefinition[] = [
     clientSecretEnv: "INFISICAL_SHARED_CLIENT_SECRET",
     projectIdEnv: "INFISICAL_SHARED_PROJECT_ID",
     pathEnv: "INFISICAL_SHARED_SECRET_PATH",
-    defaultProjectId: "18f563a3-9c88-454c-96eb-28fc9678f3ba",
+    defaultProjectId: process.env.INFISICAL_SHARED_PROJECT_ID || "",
+  },
+  {
+    source: "um",
+    clientIdEnv: "INFISICAL_UM_CLIENT_ID",
+    clientSecretEnv: "INFISICAL_UM_CLIENT_SECRET",
+    projectIdEnv: "INFISICAL_UM_PROJECT_ID",
+    pathEnv: "INFISICAL_UM_SECRET_PATH",
+    defaultProjectId: process.env.INFISICAL_UM_PROJECT_ID || "",
   },
 ] as const;
 
 function appAttempts(
-  source: "st" | "ct",
+  source: "st" | "ct" | "um",
   required: readonly string[],
   sharedFallback = false,
   optional?: readonly string[]
@@ -473,41 +496,9 @@ const CREDENTIAL_MAPPINGS: readonly CredentialMapping[] = [
       publicConfig: { accountId: values.get("TWILIO_ACCOUNT_SID") ?? "" },
     }),
   },
-  {
-    scope: "shared",
-    providerName: "oracle",
-    attempts: [{
-      source: "shared",
-      required: [
-        "OCI_TENANCY_OCID",
-        "OCI_USER_OCID",
-        "OCI_API_KEY_FINGERPRINT",
-        "OCI_API_SIGNING_PRIVATE_KEY",
-        "OCI_REGION",
-      ],
-      optional: ["OCI_COMPARTMENT_OCID", "OCI_LIMIT_SERVICES", "OCI_BUDGET_CURRENCY"],
-    }],
-    build: (values) => ({
-      publicConfig: {
-        tenancyOcid: values.get("OCI_TENANCY_OCID") ?? "",
-        userOcid: values.get("OCI_USER_OCID") ?? "",
-        fingerprint: values.get("OCI_API_KEY_FINGERPRINT") ?? "",
-        region: values.get("OCI_REGION") ?? "",
-        ...(values.get("OCI_COMPARTMENT_OCID")
-          ? { compartmentOcid: values.get("OCI_COMPARTMENT_OCID")! }
-          : {}),
-        ...(values.get("OCI_LIMIT_SERVICES")
-          ? { limitServices: values.get("OCI_LIMIT_SERVICES")! }
-          : {}),
-        ...(values.get("OCI_BUDGET_CURRENCY")
-          ? { budgetCurrency: values.get("OCI_BUDGET_CURRENCY")! }
-          : {}),
-      },
-      // privateKey is routed to encrypted Provider.secretConfig by the shared
-      // provider-config secret splitter and is never returned by provider APIs.
-      secretConfig: { privateKey: values.get("OCI_API_SIGNING_PRIVATE_KEY") ?? "" },
-    }),
-  },
+  // Oracle Cloud (OCI_*) is deliberately absent: the oracle built-in is
+  // retired (see provider-definitions.ts), so its shared OCI credentials must
+  // never re-provision a row that boot-time retirement would then deactivate.
   {
     scope: "shared",
     providerName: "coolify",
@@ -521,6 +512,63 @@ const CREDENTIAL_MAPPINGS: readonly CredentialMapping[] = [
       ...(values.get("COOLIFY_HOST")
         ? { publicConfig: { host: values.get("COOLIFY_HOST")! } }
         : {}),
+    }),
+  },
+  {
+    // Fleet read-only monitor key (listBuckets + listFiles). Prefer dedicated
+    // BACKBLAZE_* monitor credentials over per-app write backup keys.
+    scope: "shared",
+    providerName: "backblaze",
+    attempts: [{
+      source: "shared",
+      required: ["BACKBLAZE_APPLICATION_KEY", "BACKBLAZE_APPLICATION_KEY_ID"],
+      optional: ["BACKBLAZE_STORAGE_CAP_GB", "BACKBLAZE_STORAGE_PRICE_PER_GB"],
+    }, {
+      source: "shared",
+      required: ["B2_MONITOR_APPLICATION_KEY", "B2_MONITOR_KEY_ID"],
+      optional: ["BACKBLAZE_STORAGE_CAP_GB", "BACKBLAZE_STORAGE_PRICE_PER_GB"],
+    }],
+    build: (values) => {
+      const appKey =
+        values.get("BACKBLAZE_APPLICATION_KEY") ??
+        values.get("B2_MONITOR_APPLICATION_KEY");
+      const keyId =
+        values.get("BACKBLAZE_APPLICATION_KEY_ID") ??
+        values.get("B2_MONITOR_KEY_ID") ??
+        values.get("BACKBLAZE_KEY_ID");
+      const cap = values.get("BACKBLAZE_STORAGE_CAP_GB");
+      const price = values.get("BACKBLAZE_STORAGE_PRICE_PER_GB");
+      return {
+        apiKey: appKey,
+        publicConfig: {
+          applicationKeyId: keyId ?? "",
+          ...(cap ? { storageCapGb: cap } : {}),
+          ...(price ? { storagePricePerGbMonth: price } : {}),
+        },
+      };
+    },
+  },
+  {
+    // PD #79: this Provider row was created 2026-08-21 with no CREDENTIAL_MAPPINGS
+    // entry at all, so nothing could ever fill in its apiKey/config short of a
+    // manual Settings-page edit that never happened — every poll has failed
+    // "apiKey is required for Namecheap" since creation, for zero snapshots ever.
+    // clientIp is REQUIRED here (not optional — see the needsConfig fix in
+    // provider-definitions.ts) because fetchUsage() hard-rejects a missing/
+    // loopback ClientIP; Namecheap's API also requires that IP be whitelisted
+    // on the account regardless of what this app sends.
+    scope: "um",
+    providerName: "namecheap",
+    attempts: [{
+      source: "um",
+      required: ["NAMECHEAP_API_KEY", "NAMECHEAP_API_USER", "NAMECHEAP_CLIENT_IP"],
+    }],
+    build: (values) => ({
+      apiKey: values.get("NAMECHEAP_API_KEY"),
+      publicConfig: {
+        apiUser: values.get("NAMECHEAP_API_USER") ?? "",
+        clientIp: values.get("NAMECHEAP_CLIENT_IP") ?? "",
+      },
     }),
   },
 ] as const;
@@ -559,18 +607,23 @@ const SECRET_NAME_TO_PROVIDER: ReadonlyMap<string, string> = new Map<string, str
   ["RENDER_API_TOKEN", "render"],
   ["HETZNER_API_TOKEN", "hetzner"],
   ["HETZNER_API_KEY", "hetzner"],
+  ["BACKBLAZE_APPLICATION_KEY", "backblaze"],
+  ["BACKBLAZE_APPLICATION_KEY_ID", "backblaze"],
+  ["BACKBLAZE_KEY_ID", "backblaze"],
+  ["B2_MONITOR_APPLICATION_KEY", "backblaze"],
+  ["B2_MONITOR_KEY_ID", "backblaze"],
+  ["B2_APPLICATION_KEY", "backblaze"],
+  ["B2_KEY_ID", "backblaze"],
   ["CLOUDFLARE_API_TOKEN", "cloudflare"],
   ["CLOUDFLARE_API_KEY", "cloudflare"],
   ["CLOUDFLARE_GLOBAL_API_KEY", "cloudflare"],
-  // Oracle Cloud (multi-key)
-  ["OCI_TENANCY_OCID", "oracle"],
-  ["OCI_USER_OCID", "oracle"],
-  ["OCI_API_KEY_FINGERPRINT", "oracle"],
-  ["OCI_API_SIGNING_PRIVATE_KEY", "oracle"],
-  ["OCI_REGION", "oracle"],
-  ["OCI_COMPARTMENT_OCID", "oracle"],
+  // Oracle Cloud (OCI_*) is intentionally unmapped: the provider is retired,
+  // so lingering OCI secrets must not be flagged for (re)wiring.
   ["COOLIFY_API_TOKEN", "coolify"],
   ["COOLIFY_HOST", "coolify"],
+  ["NAMECHEAP_API_KEY", "namecheap"],
+  ["NAMECHEAP_API_USER", "namecheap"],
+  ["NAMECHEAP_CLIENT_IP", "namecheap"],
   // Vector DB
   ["PINECONE_API_KEY", "pinecone"],
   ["VOYAGE_API_KEY", "voyage"],
@@ -622,6 +675,7 @@ const SCOPE_LABELS: Readonly<Record<InfisicalCredentialScope, string>> = {
   ct: "Congress.Trade",
   shared: "Shared",
   "st-primary": ST_PRIMARY_MANAGED_LABEL,
+  um: "Usage-Monitor",
 };
 
 let syncInFlight: Promise<InfisicalCredentialSyncResult> | null = null;
@@ -631,15 +685,26 @@ function cleanEnv(name: string): string | undefined {
   return value || undefined;
 }
 
-function configuredSources(): SourceConfig[] {
-  const environment = cleanEnv("INFISICAL_ENV") ?? DEFAULT_ENVIRONMENT;
-  return SOURCE_DEFINITIONS.map((definition) => ({
+async function configuredSources(): Promise<SourceConfig[]> {
+  const environment = resolveProdInfisicalEnvironment(
+    cleanEnv("INFISICAL_ENV"),
+    "INFISICAL_ENV"
+  );
+  return Promise.all(SOURCE_DEFINITIONS.map(async (definition) => {
+    try {
+    const connection = await resolveInfisicalConnection(definition.source);
+    return {
     ...definition,
-    clientId: cleanEnv(definition.clientIdEnv),
-    clientSecret: cleanEnv(definition.clientSecretEnv),
-    projectId: cleanEnv(definition.projectIdEnv) ?? definition.defaultProjectId,
+    connection: connection ?? undefined,
+    clientId: connection?.clientId ?? (isInfisicalConnectionDisabled(definition.source) ? undefined : cleanEnv(definition.clientIdEnv)),
+    clientSecret: connection?.clientSecret ?? (isInfisicalConnectionDisabled(definition.source) ? undefined : cleanEnv(definition.clientSecretEnv)),
+    projectId: connection?.projectId ?? cleanEnv(definition.projectIdEnv) ?? definition.defaultProjectId,
     environment,
-    secretPath: cleanEnv(definition.pathEnv) ?? DEFAULT_SECRET_PATH,
+    secretPath: connection?.secretPath ?? cleanEnv(definition.pathEnv) ?? DEFAULT_SECRET_PATH,
+  };
+    } catch {
+      return { ...definition, projectId: definition.defaultProjectId, environment, secretPath: DEFAULT_SECRET_PATH, configurationError: "source_configuration_unreadable" };
+    }
   }));
 }
 
@@ -781,6 +846,7 @@ async function readJsonObject(response: Response): Promise<Record<string, unknow
 }
 
 async function login(baseUrl: string, source: SourceConfig): Promise<string> {
+  if (source.connection?.mode === "service-tokens") return authorizeInfisical(source.connection, source.secretPath, "read", { baseUrl });
   const response = await fetchBounded(
     `${baseUrl}/api/v1/auth/universal-auth/login`,
     {
@@ -809,7 +875,7 @@ async function preflightSourceScope(
   source: SourceConfig,
   token: string
 ): Promise<Set<string>> {
-  const params = new URLSearchParams({
+  const params = source.connection ? infisicalSecretParams(source.connection, source.secretPath) : new URLSearchParams({
     projectId: source.projectId,
     environment: source.environment,
     secretPath: source.secretPath,
@@ -819,7 +885,8 @@ async function preflightSourceScope(
     includePersonalOverrides: "false",
     includeImports: "false",
   });
-  const response = await fetchBounded(`${baseUrl}/api/v4/secrets?${params}`, {
+  const api = source.connection ? infisicalSecretApi(source.connection) : "/api/v4/secrets";
+  const response = await fetchBounded(`${baseUrl}${api}?${params}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (!response.ok) {
@@ -892,7 +959,7 @@ async function fetchSecretRecord(
   secretName: string,
   options: { expandSecretReferences?: boolean } = {}
 ): Promise<SecretRecordRead> {
-  const params = new URLSearchParams({
+  const params = source.connection?.mode === "service-tokens" ? infisicalSecretParams(source.connection, source.secretPath, true) : new URLSearchParams({
     projectId: source.projectId,
     environment: source.environment,
     secretPath: source.secretPath,
@@ -902,7 +969,7 @@ async function fetchSecretRecord(
     includeImports: "false",
   });
   const response = await fetchBounded(
-    `${baseUrl}/api/v4/secrets/${encodeURIComponent(secretName)}?${params}`,
+    `${baseUrl}${source.connection ? infisicalSecretApi(source.connection) : "/api/v4/secrets"}/${encodeURIComponent(secretName)}?${params}`,
     { headers: { authorization: `Bearer ${token}` } }
   );
   if (response.status === 404) {
@@ -918,10 +985,15 @@ async function fetchSecretRecord(
   if (!isRecord(secret)) {
     throw new InfisicalSyncError("secret_invalid_response");
   }
+  if (source.connection?.mode === "service-tokens") {
+    requireInfisicalSecretIdentity(source.connection, source.secretPath, secret);
+    if (secret.secretKey !== secretName) throw new InfisicalSyncError("secret_scope_mismatch");
+  }
   const value = secret.secretValue;
   if (typeof value !== "string") {
     throw new InfisicalSyncError("secret_invalid_response");
   }
+  if (source.connection?.mode === "service-tokens") requireConcreteInfisicalValue(value);
   if (Buffer.byteLength(value, "utf8") > MAX_SECRET_VALUE_BYTES) {
     throw new InfisicalSyncError("secret_too_large");
   }
@@ -968,8 +1040,9 @@ async function createSecret(
   secretName: string,
   secretValue: string
 ): Promise<void> {
+  if (source.connection) token = await authorizeInfisical(source.connection, source.secretPath, "write", { baseUrl });
   const response = await fetchBounded(
-    `${baseUrl}/api/v4/secrets/${encodeURIComponent(secretName)}`,
+    `${baseUrl}${source.connection ? infisicalSecretApi(source.connection) : "/api/v4/secrets"}/${encodeURIComponent(secretName)}`,
     {
       method: "POST",
       headers: {
@@ -977,7 +1050,7 @@ async function createSecret(
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        projectId: source.projectId,
+        [source.connection?.mode === "service-tokens" ? "workspaceId" : "projectId"]: source.projectId,
         environment: source.environment,
         secretPath: source.secretPath,
         type: "shared",
@@ -1062,9 +1135,15 @@ async function readSource(
   source: SourceConfig,
   names: readonly string[]
 ): Promise<SourceRead> {
+  if (source.configurationError) return {
+    source: source.source, authenticated: false, values: new Map(), missing: new Set(),
+    errors: new Map(names.map((name) => [name, source.configurationError!])), allSecretNames: new Set(),
+    result: { source: source.source, configured: true, status: "error", available: 0, missing: 0, failed: names.length, errorCode: source.configurationError },
+  };
   const hasId = Boolean(source.clientId);
   const hasSecret = Boolean(source.clientSecret);
-  if (!hasId && !hasSecret) {
+  const serviceTokens = source.connection?.mode === "service-tokens";
+  if (!hasId && !hasSecret && !serviceTokens) {
     return {
       source: source.source,
       authenticated: false,
@@ -1082,7 +1161,7 @@ async function readSource(
       },
     };
   }
-  if (!hasId || !hasSecret) {
+  if ((!hasId || !hasSecret) && !serviceTokens) {
     return {
       source: source.source,
       authenticated: false,
@@ -1102,13 +1181,23 @@ async function readSource(
     };
   }
 
-  let token: string;
-  let scopeNames: Set<string>;
+  const scopeNames = new Set<string>();
+  const scopes: Array<{ source: SourceConfig; token: string; names: Set<string> }> = [];
   try {
-    token = await login(baseUrl, source);
-    scopeNames = await preflightSourceScope(baseUrl, source, token);
+    let identityToken: string | undefined;
+    for (const path of source.connection?.readPaths ?? [source.secretPath]) {
+      const scoped = { ...source, secretPath: path };
+      const token = identityToken ?? await login(baseUrl, scoped);
+      if (!serviceTokens) identityToken = token;
+      const listed = await preflightSourceScope(baseUrl, scoped, token);
+      for (const name of listed) {
+        if (scopeNames.has(name) && names.includes(name)) throw new InfisicalSyncError("ambiguous_secret_folder");
+        scopeNames.add(name);
+      }
+      scopes.push({ source: scoped, token, names: listed });
+    }
   } catch (error) {
-    const code = error instanceof InfisicalSyncError ? error.code : "auth_failed";
+    const code = error instanceof InfisicalSyncError || error instanceof InfisicalAuthError ? error.code : "auth_failed";
     return {
       source: source.source,
       authenticated: false,
@@ -1131,13 +1220,14 @@ async function readSource(
   const entries = await Promise.all(
     names.map(async (name) => {
       try {
-        const value = await fetchSecret(baseUrl, source, token, name);
+        const selected = scopes.find((scope) => scope.names.has(name)) ?? (scopes.length === 1 ? scopes[0] : undefined);
+        const value = selected ? await fetchSecret(baseUrl, selected.source, selected.token, name) : undefined;
         return { name, value };
       } catch (error) {
         return {
           name,
           errorCode:
-            error instanceof InfisicalSyncError ? error.code : "secret_read_failed",
+            error instanceof InfisicalSyncError || error instanceof InfisicalAuthError ? error.code : "secret_read_failed",
         };
       }
     })
@@ -1264,8 +1354,8 @@ function readStoredBinding(provider: ProviderRecord): StoredBindingRead {
       if (!primary.readable || !primary.binding) return { readable: false };
       return { readable: true, binding: primary.binding };
     } else if (
-      (value.scope !== "st" && value.scope !== "ct" && value.scope !== "shared") ||
-      (value.source !== "st" && value.source !== "ct" && value.source !== "shared")
+      (value.scope !== "st" && value.scope !== "ct" && value.scope !== "shared" && value.scope !== "um") ||
+      (value.source !== "st" && value.source !== "ct" && value.source !== "shared" && value.source !== "um")
     ) {
       return { readable: false };
     }
@@ -1403,13 +1493,18 @@ function validateStGeminiBootstrapProvider(
   };
 }
 
-function fixedStBootstrapSource(): SourceConfig {
+async function fixedStBootstrapSource(): Promise<SourceConfig> {
   const definition = SOURCE_DEFINITIONS.find(({ source }) => source === "st")!;
+  const stored = await loadInfisicalConnection("st");
+  const disabled = isInfisicalConnectionDisabled("st");
+  const connection = stored ?? (disabled ? null : infisicalConnectionFromEnv("st"));
+  if ((stored || connection?.mode === "service-tokens") && (connection!.projectId !== (cleanEnv(definition.projectIdEnv) ?? definition.defaultProjectId) || !connection!.readPaths.includes(DEFAULT_SECRET_PATH))) throw new InfisicalSyncError("bootstrap_scope_mismatch");
   return {
     ...definition,
-    clientId: cleanEnv(definition.clientIdEnv),
-    clientSecret: cleanEnv(definition.clientSecretEnv),
-    projectId: definition.defaultProjectId,
+    connection: stored ?? (connection?.mode === "service-tokens" ? connection : undefined),
+    clientId: connection?.clientId ?? (disabled ? undefined : cleanEnv(definition.clientIdEnv)),
+    clientSecret: connection?.clientSecret ?? (disabled ? undefined : cleanEnv(definition.clientSecretEnv)),
+    projectId: cleanEnv(definition.projectIdEnv) ?? definition.defaultProjectId,
     environment: DEFAULT_ENVIRONMENT,
     secretPath: DEFAULT_SECRET_PATH,
   };
@@ -1444,8 +1539,10 @@ export async function bootstrapStGeminiCredentialToInfisical(): Promise<StGemini
   };
   if (cleanEnv(ST_GEMINI_BOOTSTRAP_FLAG) !== "true") return disabled;
 
-  const source = fixedStBootstrapSource();
-  if (!source.clientId || !source.clientSecret) {
+  let createAttempted = false;
+  try {
+  const source = await fixedStBootstrapSource();
+  if ((!source.clientId || !source.clientSecret) && source.connection?.mode !== "service-tokens") {
     return auditStGeminiBootstrap({
       ...disabled,
       enabled: true,
@@ -1454,8 +1551,6 @@ export async function bootstrapStGeminiCredentialToInfisical(): Promise<StGemini
     });
   }
 
-  let createAttempted = false;
-  try {
     const initialProvider = await loadStGeminiBootstrapProvider();
     const initial = validateStGeminiBootstrapProvider(initialProvider);
     if (!initial.material) {
@@ -2003,17 +2098,20 @@ async function applyCandidates(candidates: readonly CredentialCandidate[]): Prom
   return { created, updated, unchanged, failed };
 }
 
-function fixedStPrimarySource(): SourceConfig {
+async function fixedStPrimarySource(): Promise<SourceConfig> {
   const st = SOURCE_DEFINITIONS.find(({ source }) => source === "st")!;
+  const connection = await resolveInfisicalConnection("st-primary");
+  if (connection && (connection.projectId !== (cleanEnv(st.projectIdEnv) ?? st.defaultProjectId) || connection.secretPath !== ST_PRIMARY_SECRET_PATH)) throw new InfisicalSyncError("bridge_scope_mismatch");
   return {
     ...st,
     source: "st-primary",
     clientIdEnv: ST_PRIMARY_CLIENT_ID_ENV,
     clientSecretEnv: ST_PRIMARY_CLIENT_SECRET_ENV,
     pathEnv: "",
-    clientId: cleanEnv(ST_PRIMARY_CLIENT_ID_ENV),
-    clientSecret: cleanEnv(ST_PRIMARY_CLIENT_SECRET_ENV),
-    projectId: st.defaultProjectId,
+    connection: connection ?? undefined,
+    clientId: connection?.clientId ?? (isInfisicalConnectionDisabled("st-primary") ? undefined : cleanEnv(ST_PRIMARY_CLIENT_ID_ENV)),
+    clientSecret: connection?.clientSecret ?? (isInfisicalConnectionDisabled("st-primary") ? undefined : cleanEnv(ST_PRIMARY_CLIENT_SECRET_ENV)),
+    projectId: cleanEnv(st.projectIdEnv) ?? st.defaultProjectId,
     environment: DEFAULT_ENVIRONMENT,
     secretPath: ST_PRIMARY_SECRET_PATH,
   };
@@ -2468,7 +2566,11 @@ function mappedSecretNames(): Set<string> {
  */
 function discoverUnmappedSecrets(
   reads: ReadonlyMap<InfisicalCredentialScope, SourceRead>
-): void {
+): Array<{
+  source: InfisicalCredentialScope;
+  secretName: string;
+  providerName: string;
+}> {
   try {
     const alreadyMapped = mappedSecretNames();
     const discovered: Array<{
@@ -2488,7 +2590,7 @@ function discoverUnmappedSecrets(
       }
     }
 
-    if (discovered.length === 0) return;
+    if (discovered.length === 0) return [];
 
     console.info(
       `[infisical-discovery] ${JSON.stringify({
@@ -2500,8 +2602,10 @@ function discoverUnmappedSecrets(
         })),
       })}`
     );
+    return discovered;
   } catch {
     // Discovery is best-effort. A failure here must never affect the sync.
+    return [];
   }
 }
 
@@ -2512,11 +2616,11 @@ async function syncRootOnce(
   const result = emptyResult(enabled);
   if (!enabled) return result;
 
-  const sources = configuredSources();
+  const sources = await configuredSources();
   result.configured = sources.some(
-    (source) => Boolean(source.clientId && source.clientSecret)
+    (source) => Boolean(source.configurationError || source.clientId && source.clientSecret || source.connection?.mode === "service-tokens")
   );
-  if (!sources.some((source) => source.clientId || source.clientSecret)) {
+  if (!sources.some((source) => source.configurationError || source.clientId || source.clientSecret || source.connection?.mode === "service-tokens")) {
     return result;
   }
 
@@ -2574,7 +2678,10 @@ async function syncRootOnce(
     result.failed += applied.failed;
   }
 
-  discoverUnmappedSecrets(reads);
+  const discoveries = discoverUnmappedSecrets(reads);
+  if (discoveries.length > 0) {
+    result.unmappedDiscoveries = discoveries;
+  }
   return result;
 }
 
@@ -2585,8 +2692,16 @@ async function syncOnce(
   const root = await syncRootOnce(options);
   if (!stPrimaryEnabled) return root;
 
-  const source = fixedStPrimarySource();
-  const configured = Boolean(source.clientId && source.clientSecret);
+  let source: SourceConfig;
+  try { source = await fixedStPrimarySource(); }
+  catch {
+    root.enabled = true; root.configured = true; root.failed += 2;
+    const failure: InfisicalCredentialSyncSourceResult = { source: "st-primary", configured: true, status: "error", available: 0, missing: 0, failed: 2, errorCode: "source_configuration_unreadable" };
+    const index = root.sources.findIndex((item) => item.source === "st-primary");
+    if (index >= 0) root.sources[index] = failure; else root.sources.push(failure);
+    return root;
+  }
+  const configured = Boolean(source.clientId && source.clientSecret || source.connection?.mode === "service-tokens");
   const sourceIndex = root.sources.findIndex((item) => item.source === "st-primary");
   const setSource = (value: InfisicalCredentialSyncSourceResult) => {
     if (sourceIndex >= 0) root.sources[sourceIndex] = value;
@@ -2594,7 +2709,7 @@ async function syncOnce(
   };
   root.enabled = true;
   root.configured ||= configured;
-  if (!source.clientId && !source.clientSecret) {
+  if (!source.clientId && !source.clientSecret && source.connection?.mode !== "service-tokens") {
     setSource({
       source: "st-primary",
       configured: false,

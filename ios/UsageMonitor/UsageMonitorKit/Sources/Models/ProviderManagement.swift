@@ -150,9 +150,54 @@ public struct ProviderManagementItem: Codable, Hashable, Sendable, Identifiable 
         !(credentialManagement?.readOnlyFields.contains("isActive") ?? false)
     }
 
+    /// Matches web Settings: Infisical-managed rows cannot be deleted (server 409).
+    public var canDelete: Bool {
+        credentialManagement == nil
+    }
+
+    /// Whether the server can poll this provider. Mirrors web `supportsManualFetch`
+    /// — never surface a Fetch button that can only fail.
+    public var canFetch: Bool {
+        if credentialManagement?.alias == true { return false }
+        let t = type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if t == "manual_provider" || t == "generic" || t == "push" { return false }
+        let key = Self.canonicalKey(name)
+        if Self.manualSyncProviderKeys.contains(key) { return false }
+        return true
+    }
+
+    public var inventoryStatusLabel: String {
+        if !isActive { return "Inactive" }
+        return canFetch ? "Active" : "Manually only"
+    }
+
     public var latestSnapshotDate: Date? {
         latestSnapshot.flatMap { ISO8601DateParser.date(from: $0.fetchedAt) }
     }
+
+    private static let manualSyncProviderKeys: Set<String> = [
+        "voyage", "roic", "fmp", "finnhub", "alphavantage", "marketstack",
+        "tiingo", "massive", "fred", "quiver-quant", "robinhood",
+    ]
+
+    private static func canonicalKey(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+    }
+}
+
+/// Response from `DELETE /api/providers/:id` (`{ "success": true }`).
+public struct ProviderDeleteReceipt: Codable, Hashable, Sendable {
+    public var success: Bool
+    public init(success: Bool) { self.success = success }
+}
+
+/// Response from `DELETE /api/subscriptions/:id` (`{ "ok": true }`).
+public struct SubscriptionDeleteReceipt: Codable, Hashable, Sendable {
+    public var ok: Bool
+    public init(ok: Bool) { self.ok = ok }
 }
 
 /// Minimal response from `PUT /api/providers/:id`.
@@ -178,17 +223,115 @@ public struct ProviderMutationReceipt: Codable, Hashable, Sendable, Identifiable
     }
 }
 
-/// Minimal response from `PUT /api/subscriptions/:id`.
+/// How a non-active subscription transitions back to `active`
+/// (`activationMode` in `src/lib/subscription-input.ts`).
+///
+/// - `resume`: keep the existing schedule and roll forward to the current
+///   period; the resumed term counts as already paid (only valid for a
+///   previously charged paused/canceled row).
+/// - `repurchase`: start a fresh billing cycle anchored at activation; the
+///   next maintenance run charges the new current period.
+public enum SubscriptionActivationMode: String, Codable, Hashable, Sendable {
+    case resume
+    case repurchase
+}
+
+/// Editable subset of a provider's plan, submitted by the native plan editor.
+/// Every field uses clear-on-nil semantics: the form always submits its full
+/// state, so `nil` encodes an explicit JSON null (the server clears the stored
+/// value) rather than an omitted key (which would preserve it).
+public struct ProviderPlanPatch: Hashable, Sendable {
+    /// Server-supported `billingInterval` values (`SUBSCRIPTION_INTERVALS`).
+    public static let billingIntervals = ["weekly", "monthly", "quarterly", "annual"]
+
+    public var monthlyBudgetUsd: Double?
+    public var fixedMonthlyCostUsd: Double?
+    public var notes: String?
+    /// ISO date string (`yyyy-MM-dd`), or `nil` to clear.
+    public var renewalDate: String?
+    /// One of `billingIntervals`, or `nil` to clear.
+    public var billingInterval: String?
+
+    public init(
+        monthlyBudgetUsd: Double? = nil,
+        fixedMonthlyCostUsd: Double? = nil,
+        notes: String? = nil,
+        renewalDate: String? = nil,
+        billingInterval: String? = nil
+    ) {
+        self.monthlyBudgetUsd = monthlyBudgetUsd
+        self.fixedMonthlyCostUsd = fixedMonthlyCostUsd
+        self.notes = notes
+        self.renewalDate = renewalDate
+        self.billingInterval = billingInterval
+    }
+}
+
+/// Minimal response from `PUT /api/subscriptions/:id`. The route returns the
+/// full subscription row, so management-relevant fields beyond the original
+/// four are decoded when present.
 public struct SubscriptionMutationReceipt: Codable, Hashable, Sendable, Identifiable {
     public var id: String
     public var name: String
     public var status: String
     public var nextRenewalAt: String
+    /// `true` while the row remains auto-managed by external-billing
+    /// maintenance; the server clears it on any owner edit.
+    public var externalBillingManaged: Bool?
+    /// Watermark proving a previously charged term exists (resume-eligible).
+    public var lastChargedPeriodStart: String?
 
-    public init(id: String, name: String, status: String, nextRenewalAt: String) {
+    public init(
+        id: String,
+        name: String,
+        status: String,
+        nextRenewalAt: String,
+        externalBillingManaged: Bool? = nil,
+        lastChargedPeriodStart: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.status = status
         self.nextRenewalAt = nextRenewalAt
+        self.externalBillingManaged = externalBillingManaged
+        self.lastChargedPeriodStart = lastChargedPeriodStart
+    }
+
+    public var nextRenewalDate: Date? {
+        ISO8601DateParser.date(from: nextRenewalAt)
+    }
+}
+
+/// Response from `POST /api/providers/:id/fetch` (201): the fresh usage
+/// snapshot recorded by the manual fetch.
+public struct ProviderFetchReceipt: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var providerId: String
+    public var fetchedAt: String
+    public var balance: Double?
+    public var totalCost: Double?
+    public var totalRequests: Double?
+    public var credits: Double?
+
+    public init(
+        id: String,
+        providerId: String,
+        fetchedAt: String,
+        balance: Double? = nil,
+        totalCost: Double? = nil,
+        totalRequests: Double? = nil,
+        credits: Double? = nil
+    ) {
+        self.id = id
+        self.providerId = providerId
+        self.fetchedAt = fetchedAt
+        self.balance = balance
+        self.totalCost = totalCost
+        self.totalRequests = totalRequests
+        self.credits = credits
+    }
+
+    public var fetchedDate: Date? {
+        ISO8601DateParser.date(from: fetchedAt)
     }
 }

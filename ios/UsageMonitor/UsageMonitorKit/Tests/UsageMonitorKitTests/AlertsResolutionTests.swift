@@ -170,3 +170,26 @@ final class AlertsResolutionTests: XCTestCase {
         XCTAssertEqual(model.filtered(items).count, 4)
     }
 }
+
+/// I7: server alert codes added after the app shipped must have deliberate
+/// titles/symbols, not the raw fallback string.
+final class ProviderAlertPresentationTests: XCTestCase {
+    private func alert(_ code: String) -> ProviderAlert {
+        ProviderAlert(code: code, severity: .warning, message: "m")
+    }
+
+    func testNewServerCodesHaveTitlesAndSymbols() {
+        XCTAssertEqual(alert("budget_control_paused").title, "Auto-paused on budget breach")
+        XCTAssertEqual(alert("key_disable_recommended").title, "Key disable recommended")
+        XCTAssertEqual(alert("spend_anomaly").title, "Spend anomaly")
+        XCTAssertEqual(alert("request_anomaly").title, "Request anomaly")
+        for code in ["budget_control_paused", "key_disable_recommended", "spend_anomaly", "request_anomaly"] {
+            XCTAssertNotEqual(alert(code).symbolName, "bell.badge", "\(code) must not use the generic fallback symbol")
+        }
+    }
+
+    func testUnknownCodeStillFallsBack() {
+        XCTAssertEqual(alert("future_code").title, "Future Code")
+        XCTAssertEqual(alert("future_code").symbolName, "bell.badge")
+    }
+}

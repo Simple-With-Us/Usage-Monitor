@@ -69,6 +69,27 @@ describe("GET /api/budget-status authentication", () => {
     expect(mocks.computeProjectBudgetStatus).toHaveBeenCalledOnce();
   });
 
+  it("accepts the x-usage-read-token header and its x-usage-ingest-token alias (X3)", async () => {
+    process.env.USAGE_READ_TOKEN = READ_TOKEN;
+
+    const canonical = await GET(request({ "x-usage-read-token": READ_TOKEN }));
+    expect(canonical.status).toBe(200);
+
+    const alias = await GET(request({ "x-usage-ingest-token": READ_TOKEN }));
+    expect(alias.status).toBe(200);
+  });
+
+  it("marks the read surface version with an x-api-version response header (X4)", async () => {
+    process.env.USAGE_READ_TOKEN = READ_TOKEN;
+
+    const response = await GET(
+      request({ authorization: `Bearer ${READ_TOKEN}` })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-api-version")).toBe("1");
+  });
+
   it("accepts a verified dashboard session without requiring a read token", async () => {
     const response = await GET(
       request({

@@ -42,3 +42,18 @@ legacy replay adapter. There is no dual-write path.
 Revert the receiver commit while keeping the v1 replay parser. Producers must not be
 promoted until this receiver revision is confirmed live, so rollback cannot strand a
 v2-only producer behind an older production receiver.
+
+## Updates
+
+- 2026-07-29 (X9): the shared pin in `package.json` is now
+  `@jaywedgeworth22/congress-trading-shared#v2.3.0`; the `#v2.0.0` pin recorded above
+  is historical. The v2 wire schema, canonical idempotency, and ACK contract are
+  unchanged by this bump.
+- 2026-07-29 (X2, documentation half): **producer requirement** — producers must
+  persist an outbox of unsent events and honor the receiver's backoff signals. A
+  `503` with error code `receiver_busy` (or any `retryAfterSeconds` /
+  `Retry-After` value in a typed v2 error body) means "retry this exact batch
+  later"; the events are deduped by their canonical idempotency keys, so retrying
+  is always safe. Fire-and-forget sends without an outbox can silently lose
+  events under receiver backpressure. The conforming client lives in the
+  `congress-trading-shared` package (producer repos), not here.

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { hasValidDashboardSession } from "@/lib/auth";
+import { isUsageReadAuthorized } from "@/lib/ingest-auth";
 import {
+  buildDailySpendSeries,
   classifyCostCoverage,
   summarizeExternalUsageEvents,
 } from "@/lib/external-usage-events";
@@ -18,16 +21,53 @@ const DEFAULT_RAW_LIMIT = 50;
  * Summary mode (default): grouped MTD-style rollup for the dashboard.
  * Raw mode (`?raw=1`): cursor-paginated individual events with deterministic
  * orderBy (Wave K / E15) — never unbounded.
+ *
+ * Auth: dashboard session cookie OR the usage read token
+ * (`isUsageReadAuthorized` — USAGE_READ_TOKEN with the documented ingest
+ * fallback), matching GET /api/export/daily-rollups. NOTE: like
+ * `/api/export/daily-rollups`, this route self-authenticates; bearer-token
+ * access additionally requires the path to be excluded from the
+ * dashboard-session middleware (src/middleware.ts's isPublicPath). Dashboard
+ * session access works without that exclusion.
  */
 export async function GET(request: NextRequest) {
+  if (!hasValidDashboardSession(request) && !isUsageReadAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
-  const requestedDays = Number(searchParams.get("days") ?? 30);
-  const days = Number.isFinite(requestedDays)
-    ? Math.min(Math.max(Math.trunc(requestedDays), 1), 365)
-    : 30;
+  const rawDaysParam = searchParams.get("days");
+  const rawFrom = searchParams.get("from");
+  const rawTo = searchParams.get("to");
+
+  // Calendar-range mode: `from` and/or `to` take priority over `days`.
+  // `from` / `to` are interpreted as UTC calendar days (inclusive).
+  const hasRangeParams = rawFrom != null || rawTo != null;
+
+  let since: Date;
+  let until: Date | undefined;
+  let days: number;
+
+  if (hasRangeParams) {
+    since = rawFrom ? new Date(rawFrom + "T00:00:00.000Z") : new Date(0);
+    until = rawTo ? new Date(rawTo + "T23:59:59.999Z") : undefined;
+    // Approximate `days` for the response metadata (rolling equiv in whole days).
+    const sinceMs = since.getTime();
+    const untilMs = (until ?? new Date()).getTime();
+    days = Math.max(1, Math.ceil((untilMs - sinceMs) / 86_400_000));
+  } else {
+    const isAllTime = rawDaysParam === "all" || rawDaysParam === "all_time";
+    const requestedDays = Number(rawDaysParam ?? 30);
+    days = isAllTime
+      ? 3650
+      : Number.isFinite(requestedDays)
+      ? Math.min(Math.max(Math.trunc(requestedDays), 1), 3650)
+      : 30;
+    since = isAllTime || days >= 3650 ? new Date(0) : new Date(Date.now() - days * 86_400_000);
+    until = undefined;
+  }
+
   const projectFilter = searchParams.get("projectId");
-  const since = new Date();
-  since.setDate(since.getDate() - days);
 
   const rawMode =
     searchParams.get("raw") === "1" ||
@@ -43,14 +83,21 @@ export async function GET(request: NextRequest) {
     // order=asc|desc — default newest first for operator debugging.
     const order =
       searchParams.get("order") === "asc" ? ("asc" as const) : ("desc" as const);
+    const metricTypeFilter = searchParams.get("metricType");
+    const sourceAppFilter = searchParams.get("sourceApp")?.trim();
 
     const where = {
-      occurredAt: { gte: since },
+      occurredAt: {
+        gte: since,
+        ...(until != null ? { lte: until } : {}),
+      },
       ...(projectFilter
         ? projectFilter === "none"
           ? { projectId: null }
           : { projectId: projectFilter }
         : {}),
+      ...(metricTypeFilter ? { metricType: metricTypeFilter } : {}),
+      ...(sourceAppFilter ? { sourceApp: sourceAppFilter } : {}),
     };
 
     const rows = await prisma.externalUsageEvent.findMany({
@@ -72,6 +119,10 @@ export async function GET(request: NextRequest) {
         service: true,
         projectId: true,
         metricType: true,
+        quantity: true,
+        unit: true,
+        limit: true,
+        credits: true,
         costUsd: true,
         requests: true,
         billingMode: true,
@@ -79,6 +130,7 @@ export async function GET(request: NextRequest) {
         verificationStatus: true,
         occurredAt: true,
         idempotencyKey: true,
+        metadata: true,
       },
     });
 
@@ -97,12 +149,16 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const [summary, projects, providers] = await Promise.all([
-    summarizeExternalUsageEvents(since, getExternalEventRawCutoff()),
+  const [summary, projects, providers, dailySeries] = await Promise.all([
+    summarizeExternalUsageEvents(since, getExternalEventRawCutoff(), new Date(), until),
     prisma.project.findMany({ select: { id: true, name: true } }),
     prisma.provider.findMany({
       select: { id: true, name: true, displayName: true },
     }),
+    // Additive: per-day cost series over the same [since, until] window, so
+    // the dashboard's chart-range burn chart can render actual history for
+    // the selected range instead of a fixed month-to-date projection.
+    buildDailySpendSeries(since, getExternalEventRawCutoff(), until ?? new Date()),
   ]);
 
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
@@ -153,10 +209,13 @@ export async function GET(request: NextRequest) {
       (sum, group) => sum + group.estimatedApiEquivalentUsd,
       0
     ),
+    derivedCostEstimateUsd: summary.derivedCostEstimateUsd,
+    derivedCostEstimateEventCount: summary.derivedCostEstimateEventCount,
     ...costCounts,
     costCoverage: classifyCostCoverage(costCounts),
     totalRequests: groups.reduce((sum, group) => sum + group.totalRequests, 0),
     eventCount: groups.reduce((sum, group) => sum + group.eventCount, 0),
     groups,
+    dailySeries,
   });
 }

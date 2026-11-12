@@ -52,39 +52,74 @@ function LoginForm() {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-[60vh]">
-      <div className="w-full max-w-sm bg-white rounded-xl border border-gray-200 p-6 space-y-4 dark:bg-gray-800 dark:border-gray-700">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Log in</h1>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="password" className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoFocus
-              autoComplete="current-password"
-              aria-describedby={error ? "login-error" : undefined}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Dashboard password"
-              className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-            />
-          </div>
-          {error && (
-            <p id="login-error" role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 dark:text-red-300 dark:bg-red-950/60">
-              {error}
-            </p>
-          )}
-          <button
-            type="submit"
-            disabled={submitting || !password}
-            className="w-full min-h-11 px-4 py-2 text-base font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
-          >
-            {submitting ? "Logging in..." : "Log in"}
-          </button>
-        </form>
+    <div className="flex items-center justify-center min-h-[70vh] px-4">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="text-center">
+          {/* Same brand mark as nav / favicon / iOS client app icon */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/icon-64.png"
+            alt=""
+            width={48}
+            height={48}
+            className="mx-auto mb-3 h-12 w-12 rounded-xl shadow-sm"
+            aria-hidden="true"
+            decoding="async"
+          />
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Usage Monitor</h1>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            API &amp; infra spend in one place
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Log In</h2>
+          <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+            <div>
+              <label htmlFor="password" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
+                Dashboard password
+              </label>
+              <input
+                id="password"
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                aria-describedby={error ? "login-error" : undefined}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-accent focus:border-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+              />
+            </div>
+            {error && (
+              <p id="login-error" role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 dark:text-red-300 dark:bg-red-950/60">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={submitting || !password}
+              className="w-full min-h-11 px-4 py-2 text-base font-medium text-white bg-accent rounded-lg hover:opacity-90 transition-colors disabled:opacity-50"
+            >
+              {submitting ? "Logging in…" : "Log In"}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoginSkeleton() {
+  return (
+    <div className="flex items-center justify-center min-h-[70vh]" aria-busy="true" aria-label="Loading login form">
+      <div className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-6 space-y-4 dark:bg-gray-800 dark:border-gray-700">
+        <div className="h-7 w-24 rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+        <div className="space-y-2">
+          <div className="h-3 w-16 rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+          <div className="h-11 w-full rounded-lg bg-gray-200 dark:bg-gray-700 animate-pulse" />
+        </div>
+        <div className="h-11 w-full rounded-lg bg-gray-200 dark:bg-gray-700 animate-pulse" />
       </div>
     </div>
   );
@@ -92,7 +127,7 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<LoginSkeleton />}>
       <LoginForm />
     </Suspense>
   );

@@ -616,11 +616,34 @@ export async function fetchUsage(
     Object.values(runRateByResource).reduce((sum, amount) => sum + amount, 0)
   );
 
+  // Pro-rate catalog monthly run-rate across the UTC calendar month so budgets
+  // see money without pretending this is an invoice. Hetzner Cloud API still
+  // has no invoice/billing-history endpoint (accounts.hetzner.com UI only).
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const monthMs = Math.max(1, nextMonth.getTime() - monthStart.getTime());
+  const elapsedMs = Math.min(monthMs, Math.max(0, now.getTime() - monthStart.getTime()));
+  const monthFraction = elapsedMs / monthMs;
+  const estimatedMtd =
+    pricingComplete && runRateAmount != null && Number.isFinite(runRateAmount)
+      ? roundCatalogAmount(runRateAmount * monthFraction)
+      : null;
+
   return {
     balance: null,
-    // The catalog is a current full-month run-rate, not an invoice or accrued
-    // month-to-date bill. Never write it into the USD spend path.
-    totalCost: null,
+    totalCost: estimatedMtd,
+    costWindowStart: pricingComplete ? monthStart : null,
+    costWindowEnd: pricingComplete ? now : null,
+    costScope: pricingComplete ? ("calendar_month_to_date" as const) : ("unknown" as const),
+    costCoverageCaveat:
+      estimatedMtd != null
+        ? {
+            code: "hetzner_catalog_runrate_prorated",
+            message:
+              "Estimated MTD from Hetzner public pricing catalog × current resources, pro-rated by UTC month elapsed. Not an invoice (Hetzner has no billing API).",
+          }
+        : null,
     totalRequests: null,
     credits: null,
     rawData: {
@@ -646,12 +669,15 @@ export async function fetchUsage(
             currency,
             basis: "current_resource_catalog_net_monthly_maximum",
             byResource: runRateByResource,
+            estimatedMtdUsd: estimatedMtd,
+            monthFraction,
           }
         : null,
       pricingVatRate: pricing.vat_rate ?? null,
       capabilities: {
         completeResourceInventory: true,
         catalogMonthlyRunRate: pricingComplete,
+        catalogMtdEstimate: estimatedMtd != null,
         actualInvoiceCost: false,
         accountCurrencyKnown: currency != null,
         currencyConversionApplied,

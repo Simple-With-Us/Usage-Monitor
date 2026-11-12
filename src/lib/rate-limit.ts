@@ -10,6 +10,7 @@
  * switch to a shared store (Redis, etc.) if you scale horizontally.
  */
 
+import { createHash } from "crypto";
 import { isCloudflareIp } from "./cloudflare-ip-ranges";
 
 interface RateLimitEntry {
@@ -23,6 +24,13 @@ export interface RateLimiter {
    * Calling this also increments the counter for `key`.
    */
   check(key: string): boolean;
+
+  /**
+   * Clears every tracked key. Intended for test isolation (module-level
+   * limiter singletons otherwise leak window state across tests); production
+   * code never calls this.
+   */
+  reset(): void;
 
   /**
    * Returns true if `key` currently has budget remaining, WITHOUT consuming
@@ -113,7 +121,46 @@ export function createRateLimiter(
       }
       existing.count += 1;
     },
+
+    reset(): void {
+      store.clear();
+    },
   };
+}
+
+/**
+ * Process-wide named limiter registry. Route modules create their limiters
+ * through this so tests can retrieve the same instance and `reset()` it
+ * between cases — Next.js route files cannot export extra bindings (only
+ * HTTP methods + config), so a route-local module const is unreachable from
+ * test files. First call wins: later calls with the same name ignore the
+ * supplied window/budget and return the existing limiter.
+ */
+const namedLimiters = new Map<string, RateLimiter>();
+
+export function getNamedRateLimiter(
+  name: string,
+  windowMs: number,
+  maxRequests: number
+): RateLimiter {
+  let limiter = namedLimiters.get(name);
+  if (!limiter) {
+    limiter = createRateLimiter(windowMs, maxRequests);
+    namedLimiters.set(name, limiter);
+  }
+  return limiter;
+}
+
+/**
+ * Builds the rate-limit key used for authenticated ingest traffic: a SHA-256
+ * hash of the presented bearer/header token. Each distinct credential gets
+ * its own bucket, so producers sharing Cloudflare's egress IP no longer
+ * share one rate bucket (the old pre-auth per-IP behavior), and one producer
+ * bursting can never 429 the others. The raw token is never used as (or
+ * logged through) the key itself.
+ */
+export function getIngestIdentityRateLimitKey(token: string): string {
+  return `ingest-token:${createHash("sha256").update(token).digest("hex")}`;
 }
 
 /**
@@ -121,17 +168,18 @@ export function createRateLimiter(
  * common proxy headers.
  *
  * Only the rightmost X-Forwarded-For hop is trusted. That entry is the peer
- * address our own reverse proxy (Render) observed and appended when it
- * forwarded the request; every entry to its left is copied verbatim from
- * whatever the client sent and can be freely spoofed - e.g. to rotate
- * through fake IPs and evade per-IP rate limiting. Trusting the leftmost
- * entry (the historical behavior here) makes limiting trivially bypassable.
+ * address our own reverse proxy (Caddy, on the Oracle Cloud production VPS)
+ * observed and appended when it forwarded the request; every entry to its
+ * left is copied verbatim from whatever the client sent and can be freely
+ * spoofed - e.g. to rotate through fake IPs and evade per-IP rate limiting.
+ * Trusting the leftmost entry (the historical behavior here) makes limiting
+ * trivially bypassable.
  *
  * IMPORTANT - this is NOT necessarily "the client": usage.jays.services is
- * fronted by Cloudflare in front of Render, so in production the rightmost
- * hop Render observes is Cloudflare's own egress IP, which is SHARED by
+ * fronted by Cloudflare in front of Caddy, so in production the rightmost
+ * hop Caddy observes is Cloudflare's own egress IP, which is SHARED by
  * every Cloudflare-proxied client, not a per-visitor address. Only when a
- * request reaches Render directly (bypassing Cloudflare) does this hop
+ * request reaches Caddy directly (bypassing Cloudflare) does this hop
  * identify one true peer. Callers that need to distinguish individual
  * Cloudflare-proxied clients (e.g. login rate limiting) should pair this
  * with `cf-connecting-ip` rather than treating this value alone as a client
@@ -155,19 +203,20 @@ export function getClientIp(request: Request): string {
  * X-Forwarded-For hop, CF-Connecting-IP header value or "" when absent).
  *
  * Why a tuple instead of `getClientIp` alone: usage.jays.services sits
- * behind Cloudflare, which proxies to Render. For that path, the rightmost
- * XFF hop Render observes is Cloudflare's own egress IP - shared by every
- * Cloudflare-proxied client - so keying only on it would bucket unrelated
- * visitors together. Cloudflare itself sets `CF-Connecting-IP` from the
- * TLS-terminated connection before forwarding the request, so a client
- * arriving through Cloudflare cannot forge it; pairing it with the shared
- * egress hop separates distinct CF-proxied clients back out again.
+ * behind Cloudflare, which proxies to Caddy on the Oracle VPS. For that
+ * path, the rightmost XFF hop Caddy observes is Cloudflare's own egress
+ * IP - shared by every Cloudflare-proxied client - so keying only on it
+ * would bucket unrelated visitors together. Cloudflare itself sets
+ * `CF-Connecting-IP` from the TLS-terminated connection before forwarding
+ * the request, so a client arriving through Cloudflare cannot forge it;
+ * pairing it with the shared egress hop separates distinct CF-proxied
+ * clients back out again.
  *
- * Why it's still safe for traffic that reaches Render directly (bypassing
+ * Why it's still safe for traffic that reaches Caddy directly (bypassing
  * Cloudflare): there, `CF-Connecting-IP` is just another ordinary header a
  * client can set to anything, including rotating it per request. But the
  * rightmost XFF hop in that path is that direct peer's own address as
- * observed by Render's proxy - unspoofable by the client. Rotating the
+ * observed by Caddy - unspoofable by the client. Rotating the
  * forged `CF-Connecting-IP` in that scenario only fragments the tuple key
  * *under that one unspoofable hop*; it cannot collide with, or exhaust the
  * budget of, any other source. The login route pairs this tuple limiter with
@@ -195,7 +244,7 @@ export function getLoginRateLimitKey(request: Request): string {
  *   through Cloudflare, so `CF-Connecting-IP` is Cloudflare-set and
  *   trustworthy as a per-client identity - keying on it alone gives every
  *   distinct real visitor sharing Cloudflare's shared egress hop its own
- *   backstop bucket. This is what fixes the production (Cloudflare -> Render)
+ *   backstop bucket. This is what fixes the production (Cloudflare -> Caddy)
  *   case: a burst of distinct CF-proxied attacker clients draining their own
  *   tuple budgets can no longer also drain a bucket shared with the
  *   legitimate owner, because they no longer share a bucket at all.

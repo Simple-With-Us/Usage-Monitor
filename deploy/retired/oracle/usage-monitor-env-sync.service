@@ -1,0 +1,20 @@
+[Unit]
+Description=Sync the Usage Monitor runtime env from Infisical into tmpfs
+# The synced /run/usage-monitor/usage-monitor.env must exist before Docker
+# Compose ever evaluates env_file. usage-monitor.service hard-requires this
+# unit; the auto-deploy service only orders after it (the deploy transaction
+# re-runs the sync itself with a bounded stale-tmpfs fallback).
+After=network-online.target
+Wants=network-online.target
+# On hosts that have not migrated to Infisical this unit is cleanly skipped
+# (condition skip does not fail dependent units), preserving the legacy
+# /etc/usage-monitor/usage-monitor.env flow.
+ConditionPathExists=/etc/usage-monitor/infisical-bootstrap.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usage-monitor-env-sync
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

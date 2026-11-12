@@ -48,12 +48,15 @@ describe("resolveSqliteMemoryPragmaValues", () => {
     vi.unstubAllEnvs();
   });
 
-  it("defaults to a 2MB cache, mmap disabled, and disk-backed temp B-trees", async () => {
+  it("defaults to a 2MB cache, mmap disabled, disk-backed temp B-trees, WAL, and a 5s busy timeout", async () => {
     const { resolveSqliteMemoryPragmaValues } = await import("@/lib/prisma");
     expect(resolveSqliteMemoryPragmaValues()).toEqual({
       cacheSizeKib: -2000,
       mmapSizeBytes: 0,
       tempStore: "file",
+      journalMode: "wal",
+      busyTimeoutMs: 5_000,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -61,11 +64,15 @@ describe("resolveSqliteMemoryPragmaValues", () => {
     vi.stubEnv("SQLITE_CACHE_SIZE_KIB", "4000");
     vi.stubEnv("SQLITE_MMAP_SIZE_BYTES", "8388608");
     vi.stubEnv("SQLITE_TEMP_STORE", "memory");
+    vi.stubEnv("SQLITE_BUSY_TIMEOUT_MS", "7500");
     const { resolveSqliteMemoryPragmaValues } = await import("@/lib/prisma");
     expect(resolveSqliteMemoryPragmaValues()).toEqual({
       cacheSizeKib: -4000,
       mmapSizeBytes: 8_388_608,
       tempStore: "memory",
+      journalMode: "wal",
+      busyTimeoutMs: 7_500,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -73,11 +80,13 @@ describe("resolveSqliteMemoryPragmaValues", () => {
     vi.stubEnv("SQLITE_CACHE_SIZE_KIB", "not-a-number");
     vi.stubEnv("SQLITE_MMAP_SIZE_BYTES", "999999999999");
     vi.stubEnv("SQLITE_TEMP_STORE", "not-a-mode");
+    vi.stubEnv("SQLITE_BUSY_TIMEOUT_MS", "999999999999");
     const { resolveSqliteMemoryPragmaValues } = await import("@/lib/prisma");
     const values = resolveSqliteMemoryPragmaValues();
     expect(values.cacheSizeKib).toBe(-2000); // invalid input falls back to default
     expect(values.mmapSizeBytes).toBe(268_435_456); // clamped to the 256MB ceiling
     expect(values.tempStore).toBe("file"); // invalid input fails closed to the RSS-safe mode
+    expect(values.busyTimeoutMs).toBe(60_000); // clamped to the 60s ceiling
   });
 });
 
@@ -93,6 +102,7 @@ describe("applySqliteNativeMemoryPragmas", () => {
     vi.stubEnv("SQLITE_CACHE_SIZE_KIB", "1234");
     vi.stubEnv("SQLITE_MMAP_SIZE_BYTES", "1048576");
     vi.stubEnv("SQLITE_TEMP_STORE", "memory");
+    vi.stubEnv("SQLITE_BUSY_TIMEOUT_MS", "4321");
     const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
       "@/lib/prisma"
     );
@@ -104,11 +114,14 @@ describe("applySqliteNativeMemoryPragmas", () => {
       cacheSizeKib: -1234,
       mmapSizeBytes: 1_048_576,
       tempStore: "memory",
+      journalMode: "wal",
+      busyTimeoutMs: 4_321,
+      walAutocheckpointPages: 1_000,
     });
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it("pins the ~2MB cache, disables mmap, and uses disk-backed temp storage by default", async () => {
+  it("pins the ~2MB cache, disables mmap, uses disk-backed temp storage, WAL, and a 5s busy timeout by default", async () => {
     const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
       "@/lib/prisma"
     );
@@ -119,6 +132,9 @@ describe("applySqliteNativeMemoryPragmas", () => {
       cacheSizeKib: -2000,
       mmapSizeBytes: 0,
       tempStore: "file",
+      journalMode: "wal",
+      busyTimeoutMs: 5_000,
+      walAutocheckpointPages: 1_000,
     });
   });
 
@@ -155,9 +171,73 @@ describe("applySqliteNativeMemoryPragmas", () => {
 
     const setCalls = querySpy.mock.calls
       .map((call) => String(call[0]))
-      .filter((sql) => /PRAGMA (cache_size|mmap_size|temp_store)\s*=/.test(sql));
-    expect(setCalls).toHaveLength(3);
+      .filter((sql) =>
+        /PRAGMA (cache_size|mmap_size|temp_store|journal_mode|busy_timeout|wal_autocheckpoint)\s*=/.test(sql)
+      );
+    expect(setCalls).toHaveLength(6);
     expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("disables app-side WAL autocheckpoints only when Litestream owns checkpoints", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubEnv("LITESTREAM_ACTIVE", "true");
+    vi.stubEnv("LITESTREAM_R2_SUPERVISOR_ACTIVE", "true");
+    vi.stubEnv("LITESTREAM_R2_SUPERVISOR_PID", String(process.pid));
+    vi.stubEnv("APP_STARTUP_WRAPPER", "start-with-litestream-v2");
+    vi.stubEnv("LITESTREAM_S3_BUCKET", "test-r2-bucket");
+    vi.stubEnv("LITESTREAM_S3_ENDPOINT", "account.r2.cloudflarestorage.com");
+    vi.stubEnv("LITESTREAM_S3_ACCESS_KEY_ID", "test-access-key");
+    vi.stubEnv("LITESTREAM_S3_SECRET_ACCESS_KEY", "test-secret-key");
+    const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
+      "@/lib/prisma"
+    );
+
+    await applySqliteNativeMemoryPragmas();
+
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    // The R2 kill switch hands checkpoints back to SQLite at runtime.
+    const { enforceR2AutoDisable, clearR2AutoDisable, __resetR2UsageStateForTests } = await import(
+      "@/lib/r2-usage"
+    );
+    // enforceR2AutoDisable writes these directly; stub first so
+    // vi.unstubAllEnvs restores them for later tests.
+    vi.stubEnv("LITESTREAM_EMERGENCY_DISABLE", "");
+    vi.stubEnv("R2_WRITES_DISABLED", "");
+    await enforceR2AutoDisable("test: wal hook");
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+    expect(process.env.LITESTREAM_ACTIVE).toBe("false");
+
+    await clearR2AutoDisable("test: resume hook");
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    expect(process.env.LITESTREAM_ACTIVE).toBe("true");
+    __resetR2UsageStateForTests();
+
+    // Without Litestream nothing else checkpoints, so SQLite's default returns.
+    vi.unstubAllEnvs();
+    const { resetSqliteNativeMemoryPragmasForTests } = await import("@/lib/prisma");
+    resetSqliteNativeMemoryPragmasForTests();
+    await applySqliteNativeMemoryPragmas();
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+  });
+
+  it("registers the persistent checkpoint hook when Litestream is inactive at boot", async () => {
+    vi.stubEnv("LITESTREAM_ACTIVE", "false");
+    const { applySqliteNativeMemoryPragmas, readSqliteMemoryPragmas } = await import(
+      "@/lib/prisma"
+    );
+    await applySqliteNativeMemoryPragmas();
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
+
+    const setCheckpoint = (globalThis as Record<string, unknown>)[
+      "__apiUsageMonitorSetWalAutocheckpoint"
+    ];
+    expect(typeof setCheckpoint).toBe("function");
+    await (setCheckpoint as (pages: 0 | 1_000) => Promise<void>)(0);
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(0);
+    await (setCheckpoint as (pages: 0 | 1_000) => Promise<void>)(1_000);
+    expect((await readSqliteMemoryPragmas()).walAutocheckpointPages).toBe(1_000);
   });
 
   it("is idempotent - a second call does not re-issue the PRAGMAs", async () => {

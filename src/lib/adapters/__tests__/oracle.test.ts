@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchUsage } from "../oracle";
 
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
@@ -18,6 +18,11 @@ const config = {
 function json(data: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json", ...headers } });
 }
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
