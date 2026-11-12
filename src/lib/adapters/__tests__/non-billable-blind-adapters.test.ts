@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchUsage as fetchAlphaVantage } from "../alphavantage";
 import { fetchUsage as fetchFinnhub } from "../finnhub";
-import { fetchUsage as fetchFintechStudios } from "../fintech_studios";
 import { fetchUsage as fetchFmp } from "../fmp";
 import { fetchUsage as fetchFred } from "../fred";
 import { fetchUsage as fetchMarketstack } from "../marketstack";
@@ -17,7 +16,6 @@ describe("blind provider adapters", () => {
     const adapters = [
       fetchAlphaVantage,
       fetchFinnhub,
-      fetchFintechStudios,
       fetchFmp,
       fetchFred,
       fetchMarketstack,

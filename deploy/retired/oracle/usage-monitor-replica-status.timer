@@ -1,0 +1,17 @@
+[Unit]
+Description=Periodically refresh the Litestream replica heartbeat for /api/ready
+
+[Timer]
+# Ten-minute cadence keeps well inside the three-hour
+# LITESTREAM_REPLICA_MAX_AGE_SECONDS staleness budget (aligned with the 1h
+# Litestream sync-interval), so several consecutive missed probes are needed
+# before the side-channel ages out - a single slow listing never pages anyone.
+OnBootSec=2min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
+AccuracySec=10s
+Persistent=true
+Unit=usage-monitor-replica-status.service
+
+[Install]
+WantedBy=timers.target

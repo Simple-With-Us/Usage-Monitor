@@ -70,3 +70,20 @@ export function decryptJson(envelope: string): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
+
+/**
+ * Stable, server-only identity for a managed API key.
+ *
+ * This is not password hashing. It lets the Infisical reconciler match the
+ * same key after list reordering without storing or exposing the plaintext.
+ * Key the digest with the same durable secret that protects the encrypted
+ * credential rows so an offline dictionary cannot recover low-entropy keys
+ * from a leaked fingerprint.
+ */
+export function managedApiKeyFingerprint(apiKey: string): string {
+  return crypto
+    .createHmac("sha256", getEncryptionKey())
+    .update("usage-monitor:managed-api-key:v1\0", "utf8")
+    .update(apiKey, "utf8")
+    .digest("hex");
+}

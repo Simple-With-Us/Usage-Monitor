@@ -33,18 +33,19 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
 
   let balance: number | null = null;
   let credits: number | null = null;
+  const balances = (data.balance_infos ?? []).map((info) => ({
+    currency: info.currency?.trim().toUpperCase() || null,
+    total: parseNumber(info.total_balance),
+    granted: parseNumber(info.granted_balance),
+    toppedUp: parseNumber(info.topped_up_balance),
+  }));
 
-  for (const info of data.balance_infos || []) {
+  for (const info of balances) {
     if (info.currency === "USD") {
-      balance = parseNumber(info.total_balance);
-      credits = parseNumber(info.granted_balance);
+      balance = info.total;
+      credits = info.granted;
       break;
     }
-  }
-
-  if (balance == null && data.balance_infos?.[0]) {
-    balance = parseNumber(data.balance_infos[0].total_balance);
-    credits = parseNumber(data.balance_infos[0].granted_balance);
   }
 
   return {
@@ -52,18 +53,37 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     totalCost: null,
     totalRequests: null,
     credits,
-    rawData: data,
+    rawData: {
+      available: data.is_available ?? null,
+      balances,
+      capabilities: {
+        multiCurrencyBalance: true,
+        canonicalUsdBalance: balances.some((entry) => entry.currency === "USD"),
+        billingHistory: false,
+      },
+    },
     externalBilling: {
       source: "deepseek-account-balance",
       authoritative: true,
-      records: [
-        {
-          externalId: "api-account",
+      records: balances.length > 0
+        ? balances.map((entry, index) => ({
+          externalId: entry.currency ?? `unknown-${index}`,
           kind: "account",
-          planName: "DeepSeek API account",
+          serviceName: "DeepSeek API balance",
+          planName: entry.currency ? `${entry.currency} balance` : "Account balance",
           status: data.is_available === false ? "unavailable" : "active",
-        },
-      ],
+          remainingQuantity: entry.total,
+          usageUnit: entry.currency,
+          rollupRole: "metadata" as const,
+        }))
+        : [{
+          externalId: "api-account",
+          kind: "account" as const,
+          serviceName: "DeepSeek API account",
+          planName: null,
+          status: data.is_available === false ? "unavailable" : "active",
+          rollupRole: "metadata" as const,
+        }],
     },
   };
 }

@@ -12,8 +12,19 @@ let persistExternalUsageEvents: typeof import("../external-usage-events").persis
 let computeBudgetStatus: typeof import("../budget-status").computeBudgetStatus;
 let getSnapshots: typeof import("@/app/api/snapshots/route").GET;
 let getUsageEvents: typeof import("@/app/api/usage-events/route").GET;
+let OWNER_EXPENSE_SOURCE_APP: typeof import("../owner-expense").OWNER_EXPENSE_SOURCE_APP;
 
 const NOW = new Date("2026-07-04T12:00:00.000Z");
+
+// /api/usage-events self-authenticates (dashboard session OR USAGE_READ_TOKEN);
+// these integration calls present the read token like the poster snapshot does.
+const READ_TOKEN = "retention-integration-read-token";
+
+function usageEventsRequest(url: string): NextRequest {
+  return new NextRequest(url, {
+    headers: { authorization: `Bearer ${READ_TOKEN}` },
+  });
+}
 
 beforeAll(async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "retention-integration-test-"));
@@ -23,11 +34,13 @@ beforeAll(async () => {
   process.env.EXTERNAL_USAGE_EVENT_RAW_RETENTION_DAYS = "7";
   process.env.EXTERNAL_USAGE_EVENT_TOMBSTONE_RETENTION_DAYS = "30";
   process.env.DATA_RETENTION_DISABLE_VACUUM = "1";
+  process.env.USAGE_READ_TOKEN = READ_TOKEN;
 
   setupPrismaSqliteTestDb(dbPath);
 
   ({ prisma } = await import("@/lib/prisma"));
   ({ runDataRetentionMaintenance } = await import("../data-retention"));
+  ({ OWNER_EXPENSE_SOURCE_APP } = await import("../owner-expense"));
   ({ persistExternalUsageEvents } = await import("../external-usage-events"));
   ({ computeBudgetStatus } = await import("../budget-status"));
   ({ GET: getSnapshots } = await import("@/app/api/snapshots/route"));
@@ -57,8 +70,27 @@ afterEach(() => {
 });
 
 describe("retention integration", () => {
+  it("filters raw receipt inspection by exact source before pagination", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    await prisma.externalUsageEvent.createMany({ data: ["botfleet", "codex", "botfleet"].map((sourceApp, index) => ({
+      idempotencyKey: `source-filter-${index}`, sourceApp, provider: "openai",
+      billingMode: "estimated", metricType: "usage", quantity: 1, unit: "token",
+      occurredAt: new Date(NOW.getTime() - index * 1000),
+    })) });
+    const first = await (await getUsageEvents(usageEventsRequest("https://example.test/api/usage-events?raw=1&sourceApp=botfleet&limit=1"))).json();
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0].sourceApp).toBe("botfleet");
+    expect(first.hasMore).toBe(true);
+    const second = await (await getUsageEvents(usageEventsRequest(`https://example.test/api/usage-events?raw=1&sourceApp=botfleet&limit=1&cursor=${first.nextCursor}`))).json();
+    expect(second.events).toHaveLength(1);
+    expect(second.events[0].sourceApp).toBe("botfleet");
+    expect(second.events[0].id).not.toBe(first.events[0].id);
+    expect(second.hasMore).toBe(false);
+  });
+
   it("summarizes every filtered raw event beyond the former 5,000-row cap", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
     const rows = Array.from({ length: 5_050 }, (_, index) => ({
       idempotencyKey: `summary-page-${index}`,
@@ -85,7 +117,7 @@ describe("retention integration", () => {
     });
 
     const response = await getUsageEvents(
-      new NextRequest("https://usage.jays.services/api/usage-events?days=30")
+      usageEventsRequest("https://usage.jays.services/api/usage-events?days=30")
     );
     const summary = await response.json();
     expect(summary.eventCount).toBe(5_050);
@@ -93,7 +125,7 @@ describe("retention integration", () => {
   });
 
   it("returns only the newest requested raw snapshot points in chronological order", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
     const provider = await prisma.provider.create({
       data: {
@@ -125,17 +157,20 @@ describe("retention integration", () => {
   });
 
   it("keeps old rollup tombstones so late producer retries remain idempotent", async () => {
-    await prisma.externalUsageEventTombstone.create({
-      data: {
-        idempotencyKey: "old-but-still-protected",
-        occurredAt: new Date("2025-01-01T00:00:00.000Z"),
-        prunedAt: new Date("2025-01-02T00:00:00.000Z"),
-      },
+    await prisma.externalUsageEventTombstone.createMany({
+      data: ["old-but-still-protected", "old-protected-two", "old-protected-three"].map(
+        (idempotencyKey) => ({
+          idempotencyKey,
+          occurredAt: new Date("2025-01-01T00:00:00.000Z"),
+          prunedAt: new Date("2025-01-02T00:00:00.000Z"),
+        })
+      ),
     });
 
     const result = await runDataRetentionMaintenance(NOW);
 
     expect(result.tombstonesPruned).toBe(0);
+    expect(result.tombstoneCount).toBe(3);
     expect(
       await prisma.externalUsageEventTombstone.findUnique({
         where: { idempotencyKey: "old-but-still-protected" },
@@ -159,8 +194,75 @@ describe("retention integration", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(1);
   });
 
+  it("keeps receipt replay, collision, and tombstone behavior lossless", async () => {
+    const provider = await prisma.provider.create({
+      data: {
+        name: "anthropic",
+        displayName: "Anthropic",
+        type: "push",
+        refreshIntervalMin: 60,
+      },
+    });
+    const digest = "c".repeat(64);
+    const receipt = {
+      idempotencyKey: `billing-receipt:v1:${digest}`,
+      sourceApp: "billing-receipt-import",
+      provider: "anthropic",
+      service: "api-prepaid-funding",
+      label: "receipt_cash_paid",
+      keyRef: `provider:${provider.id}:billing-receipt:${digest}`,
+      billingMode: "actual",
+      metricType: "cost",
+      unit: "usd",
+      confidence: "actual",
+      costUsd: 20,
+      occurredAt: new Date("2026-06-20T12:00:00.000Z"),
+    };
+
+    expect(await persistExternalUsageEvents([receipt])).toMatchObject({ persisted: 1 });
+    expect(await persistExternalUsageEvents([receipt])).toMatchObject({ persisted: 0 });
+    await expect(
+      persistExternalUsageEvents([{ ...receipt, costUsd: 25 }])
+    ).rejects.toThrow(/Idempotency key collision/);
+
+    await runDataRetentionMaintenance(NOW);
+    const replay = await persistExternalUsageEvents([receipt]);
+    expect(replay).toMatchObject({ persisted: 0, skippedPrunedDuplicates: 1 });
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: receipt.idempotencyKey },
+      })
+    ).not.toBeNull();
+  });
+
+  it("reports only newly inserted rows as persisted across idempotent replays", async () => {
+    const existing = {
+      idempotencyKey: "accepted-count-existing",
+      sourceApp: "socratic-trade",
+      provider: "openai",
+      billingMode: "actual",
+      metricType: "cost",
+      costUsd: 0,
+      occurredAt: new Date("2026-07-03T12:00:00.000Z"),
+    };
+    const first = await persistExternalUsageEvents([existing]);
+    const replay = await persistExternalUsageEvents([existing]);
+    const mixed = await persistExternalUsageEvents([
+      existing,
+      { ...existing, idempotencyKey: "accepted-count-new" },
+    ]);
+
+    expect(first).toMatchObject({ attempted: 1, persisted: 1, skippedPrunedDuplicates: 0 });
+    expect(replay).toMatchObject({ attempted: 1, persisted: 0, skippedPrunedDuplicates: 0 });
+    expect(replay.newEvents).toEqual([]);
+    expect(mixed).toMatchObject({ attempted: 2, persisted: 1, skippedPrunedDuplicates: 0 });
+    expect(mixed.newEvents.map((event) => event.idempotencyKey)).toEqual(["accepted-count-new"]);
+    expect(await prisma.externalUsageEvent.count()).toBe(2);
+  });
+
   it("serves rolled-up historical data without double counting recent raw rows", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
 
     const provider = await prisma.provider.create({
@@ -246,7 +348,7 @@ describe("retention integration", () => {
     expect(snapshots[1].totalCost).toBe(11);
 
     const usageEventsResponse = await getUsageEvents(
-      new NextRequest("https://usage.jays.services/api/usage-events?days=30")
+      usageEventsRequest("https://usage.jays.services/api/usage-events?days=30")
     );
     const usageEvents = await usageEventsResponse.json();
     expect(usageEvents.eventCount).toBe(2);
@@ -266,7 +368,65 @@ describe("retention integration", () => {
         occurredAt: new Date("2026-06-25T12:00:00.000Z"),
       },
     ]);
+    expect(replay.persisted).toBe(0);
     expect(replay.skippedPrunedDuplicates).toBe(1);
     expect(await prisma.externalUsageEvent.findMany()).toHaveLength(1);
+  });
+
+  it("never prunes owner-recorded expenses, however old they are", async () => {
+    // Regression for the Oct 24–26, 2026 wipe: pruneExternalUsageEvents
+    // selected purely on occurredAt, so every owner expense older than the
+    // retention window was rolled up, tombstoned, and deleted. Owner
+    // expenses are a permanent ledger and must survive the prune untouched.
+    // The owner row uses the canonical OWNER_EXPENSE_SOURCE_APP constant, so
+    // this also pins data-retention's exclusion value to it.
+    const old = new Date("2026-06-20T12:00:00.000Z");
+    await prisma.externalUsageEvent.createMany({
+      data: [
+        {
+          idempotencyKey: "owner-expense-survives-prune",
+          sourceApp: OWNER_EXPENSE_SOURCE_APP,
+          provider: "heb",
+          billingMode: "actual",
+          metricType: "cost",
+          costUsd: 42.5,
+          occurredAt: old,
+        },
+        {
+          idempotencyKey: "external-event-pruned",
+          sourceApp: "codex-smoke",
+          provider: "openai",
+          billingMode: "actual",
+          metricType: "cost",
+          costUsd: 12,
+          occurredAt: old,
+        },
+      ],
+    });
+
+    const result = await runDataRetentionMaintenance(NOW);
+
+    expect(result.externalUsageEvents.pruned).toBe(1);
+    expect(result.externalUsageEvents.tombstonesWritten).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.findUnique({
+        where: { idempotencyKey: "owner-expense-survives-prune" },
+      })
+    ).not.toBeNull();
+    expect(
+      await prisma.externalUsageEvent.findUnique({
+        where: { idempotencyKey: "external-event-pruned" },
+      })
+    ).toBeNull();
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: "external-event-pruned" },
+      })
+    ).not.toBeNull();
+    expect(
+      await prisma.externalUsageEventTombstone.findUnique({
+        where: { idempotencyKey: "owner-expense-survives-prune" },
+      })
+    ).toBeNull();
   });
 });

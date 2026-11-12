@@ -1,0 +1,57 @@
+{
+  "usage-monitor-receipt-lifecycle-auditor": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/receipt-lifecycle-auditor/wrangler.jsonc"
+    ],
+    "probe": "telemetry",
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 50,
+      "max_subrequests": 20,
+      "limits_pending": true
+    }
+  },
+  "expenses-jays-services": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/expenses-site/wrangler.jsonc"
+    ],
+    "probe": "telemetry",
+    "tolerated_exceptions": 12,
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 100,
+      "max_subrequests": 200,
+      "limits_pending": true
+    }
+  },
+  "usage-monitor-receipt-inbox": {
+    "command": [
+      "npx",
+      "--no-install",
+      "wrangler",
+      "deploy",
+      "--config",
+      "workers/receipt-inbox/wrangler.jsonc"
+    ],
+    "health": "https://receipt-inbox.jays.services/health",
+    "bearer": "RECEIPT_INBOX_READ_TOKEN",
+    "ok": true,
+    "deploy_after": "usage-monitor-receipt-lifecycle-auditor",
+    "guard": {
+      "status": "gated",
+      "max_cpu_ms": 500,
+      "max_subrequests": 30,
+      "limits_pending": true
+    }
+  }
+}

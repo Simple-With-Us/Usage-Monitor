@@ -5,6 +5,24 @@ import path from "path";
 import { NextRequest } from "next/server";
 import protobuf from "protobufjs";
 import { setupPrismaSqliteTestDb } from "@/lib/__tests__/setup-test-db";
+import { tryAcquireIngestAdmission } from "@/lib/ingest-admission";
+import { getNamedRateLimiter } from "@/lib/rate-limit";
+
+// Wrap the persistence module so one test can simulate an unexpected
+// (non-collision) persistence failure without touching the real database.
+const persistenceControl = vi.hoisted(() => ({ failNext: { value: false } }));
+vi.mock("@/lib/otlp/cumulative-state", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/otlp/cumulative-state")>();
+  return {
+    ...actual,
+    persistOtlpUsageEvents: (
+      ...args: Parameters<typeof actual.persistOtlpUsageEvents>
+    ) =>
+      persistenceControl.failNext.value
+        ? Promise.reject(new Error("simulated persistence failure"))
+        : actual.persistOtlpUsageEvents(...args),
+  };
+});
 
 // This test exercises the real POST /api/otlp/v1/metrics route handler
 // against a throwaway SQLite file (never the dev `data`/`dev.db`), following
@@ -36,6 +54,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.unstubAllEnvs();
+  persistenceControl.failNext.value = false;
+  // Process-wide named rate limiters (keyed on the token hash / backstop
+  // identity since X1, not the per-test rotating IP) — reset between tests.
+  getNamedRateLimiter("otlp-metrics-identity", 1_000, 10).reset();
+  getNamedRateLimiter("otlp-metrics-unauthenticated", 1_000, 10).reset();
   await prisma.otlpMetricState.deleteMany();
   await prisma.externalUsageEvent.deleteMany({ where: { sourceApp: "claude-code" } });
   await prisma.provider.deleteMany({ where: { name: { in: ["anthropic", "Anthropic"] } } });
@@ -104,6 +127,50 @@ describe("POST /api/otlp/v1/metrics", () => {
     expect(res.status).toBe(401);
   });
 
+  it("fails closed before decoding or writing when OTLP metrics ingest is disabled", async () => {
+    vi.stubEnv("OTLP_METRICS_INGEST_ENABLED", "false");
+    const res = await POST(
+      jsonRequest("not-an-otlp-object", { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("300");
+    expect(await prisma.externalUsageEvent.count({ where: { sourceApp: "claude-code" } })).toBe(0);
+    expect(await prisma.otlpMetricState.count()).toBe(0);
+  });
+
+  it("rejects overlapping database ingest before writing", async () => {
+    const release = tryAcquireIngestAdmission();
+    expect(release).not.toBeNull();
+    try {
+      const res = await POST(
+        jsonRequest(samplePayload, { authorization: "Bearer test-token-123" })
+      );
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(await prisma.externalUsageEvent.count({ where: { sourceApp: "claude-code" } })).toBe(0);
+      expect(await prisma.otlpMetricState.count()).toBe(0);
+    } finally {
+      release?.();
+    }
+  });
+
+  it("rejects a busy receiver before decoding an otherwise invalid OTLP payload", async () => {
+    const release = tryAcquireIngestAdmission();
+    expect(release).not.toBeNull();
+    try {
+      const res = await POST(
+        jsonRequest("not-an-otlp-object", { authorization: "Bearer test-token-123" })
+      );
+      // Before the admission gate moved above decoding this was a 400.
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(await prisma.externalUsageEvent.count({ where: { sourceApp: "claude-code" } })).toBe(0);
+      expect(await prisma.otlpMetricState.count()).toBe(0);
+    } finally {
+      release?.();
+    }
+  });
+
   it("accepts a valid bearer token and writes a usage row", async () => {
     const res = await POST(jsonRequest(samplePayload, { authorization: "Bearer test-token-123" }));
     expect(res.status).toBe(202);
@@ -116,6 +183,24 @@ describe("POST /api/otlp/v1/metrics", () => {
     expect(rows[0].provider).toBe("anthropic");
     expect(rows[0].service).toBe("claude-code");
     expect(rows[0].costUsd).toBeCloseTo(0.0231);
+  });
+
+  it("accepts a claude-code scoped token when scoped tokens are required", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "claude-code:scoped-claude-token,codecaps:scoped-caps-token");
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+
+    const unscoped = await POST(jsonRequest(samplePayload, { authorization: "Bearer test-token-123" }));
+    expect(unscoped.status).toBe(401);
+
+    const otherProducer = await POST(
+      jsonRequest(samplePayload, { authorization: "Bearer scoped-caps-token" })
+    );
+    expect(otherProducer.status).toBe(403);
+
+    const res = await POST(jsonRequest(samplePayload, { authorization: "Bearer scoped-claude-token" }));
+    expect(res.status).toBe(202);
+    const rows = await prisma.externalUsageEvent.findMany({ where: { sourceApp: "claude-code" } });
+    expect(rows).toHaveLength(1);
   });
 
   it("lazily seeds an anthropic Provider row with no budget on first ingest", async () => {
@@ -180,9 +265,155 @@ describe("POST /api/otlp/v1/metrics", () => {
       where: { sourceApp: "claude-code" },
       orderBy: { occurredAt: "asc" },
     });
-    expect(rows.map((row) => row.costUsd)).toEqual([0.0231, 0.0269]);
+    expect(rows.map((row) => row.costUsd)).toEqual([
+      expect.closeTo(0.0231, 5),
+      expect.closeTo(0.0269, 5),
+    ]);
     expect(rows.reduce((sum, row) => sum + (row.costUsd ?? 0), 0)).toBeCloseTo(0.05);
     expect(await prisma.otlpMetricState.count()).toBe(1);
+  });
+
+  it("drops system.* metrics by default without writing rows (Wave G / E9)", async () => {
+    const systemPayload = {
+      resourceMetrics: [
+        {
+          resource: {
+            attributes: [
+              { key: "host.name", value: { stringValue: "web-01" } },
+              { key: "service.name", value: { stringValue: "host" } },
+            ],
+          },
+          scopeMetrics: [
+            {
+              metrics: [
+                {
+                  name: "system.cpu.utilization",
+                  gauge: {
+                    dataPoints: [
+                      {
+                        asDouble: 0.5,
+                        attributes: [{ key: "state", value: { stringValue: "user" } }],
+                        timeUnixNano: "1751500060000000000",
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const res = await POST(
+      jsonRequest(systemPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.ignoredSystemMetrics).toBe(1);
+    expect(body.accepted ?? 0).toBe(0);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "system-metrics" } })
+    ).toBe(0);
+  });
+
+  it("persists system.* metrics when OTLP_SYSTEM_METRICS_INGEST_ENABLED=true", async () => {
+    vi.stubEnv("OTLP_SYSTEM_METRICS_INGEST_ENABLED", "true");
+    const systemPayload = {
+      resourceMetrics: [
+        {
+          resource: {
+            attributes: [{ key: "host.name", value: { stringValue: "web-01" } }],
+          },
+          scopeMetrics: [
+            {
+              metrics: [
+                {
+                  name: "system.memory.usage",
+                  sum: {
+                    aggregationTemporality: 1,
+                    isMonotonic: false,
+                    dataPoints: [
+                      {
+                        asDouble: 1024,
+                        attributes: [{ key: "state", value: { stringValue: "used" } }],
+                        timeUnixNano: "1751500060000000000",
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const res = await POST(
+      jsonRequest(systemPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBeGreaterThanOrEqual(1);
+    expect(body.ignoredSystemMetrics).toBeUndefined();
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "system-metrics" } })
+    ).toBe(1);
+  });
+
+  it("advances checkpoint on zero cumulative delta without persisting a zero event (Wave F / E9)", async () => {
+    const first = await POST(
+      jsonRequest(samplePayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(first.status).toBe(202);
+    expect((await first.json()).accepted).toBe(1);
+
+    // Same cumulative value, later timestamp — pure heartbeat / no-change
+    // export. Checkpoint must advance; no new ExternalUsageEvent.
+    const zeroDelta = structuredClone(samplePayload);
+    const zeroPoint =
+      zeroDelta.resourceMetrics[0].scopeMetrics[0].metrics[0].sum.dataPoints[0];
+    zeroPoint.timeUnixNano = "1751500120000000000";
+    // Keep asDouble equal to the first export (0.0231 in samplePayload).
+    const zeroResponse = await POST(
+      jsonRequest(zeroDelta, { authorization: "Bearer test-token-123" })
+    );
+    expect(zeroResponse.status).toBe(202);
+    const zeroBody = await zeroResponse.json();
+    expect(zeroBody.ignoredOutOfOrder).toBe(1);
+    // No new persist; accepted stays at 0 for this call (only retries count
+    // when an existing key is resubmitted — this is a new point key).
+    expect(zeroBody.accepted ?? 0).toBe(0);
+
+    const rows = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "claude-code" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].costUsd).toBeCloseTo(0.0231);
+
+    const state = await prisma.otlpMetricState.findFirst();
+    expect(state).toBeTruthy();
+    expect(state!.lastTimeUnixNano).toBe("1751500120000000000");
+    expect(state!.lastValue).toBeCloseTo(0.0231);
+
+    // A later positive delta from the advanced checkpoint still works.
+    const later = structuredClone(samplePayload);
+    const laterPoint =
+      later.resourceMetrics[0].scopeMetrics[0].metrics[0].sum.dataPoints[0];
+    laterPoint.timeUnixNano = "1751500180000000000";
+    laterPoint.asDouble = 0.05;
+    const laterResponse = await POST(
+      jsonRequest(later, { authorization: "Bearer test-token-123" })
+    );
+    expect(laterResponse.status).toBe(202);
+    const laterRows = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "claude-code" },
+      orderBy: { occurredAt: "asc" },
+    });
+    expect(laterRows).toHaveLength(2);
+    expect(laterRows.map((row) => row.costUsd)).toEqual([
+      expect.closeTo(0.0231),
+      expect.closeTo(0.0269),
+    ]);
   });
 
   it("bounds cumulative checkpoint cardinality without deleting replay protection", async () => {
@@ -261,7 +492,11 @@ describe("POST /api/otlp/v1/metrics", () => {
     expect(await prisma.otlpMetricState.count()).toBe(0);
   });
 
-  it("uses an explicit metadata allowlist", async () => {
+  it("uses an explicit metadata allowlist, with session.id as the one deliberate exception", async () => {
+    // session.id is retained (2026-09-24) for GET /api/cost-by-session -- see
+    // mapping-utils.ts's METADATA_ALLOWLIST comment and
+    // src/lib/cost-by-session.ts. It is an opaque per-process UUID, not PII,
+    // unlike user.email which stays excluded below.
     const payload = structuredClone(samplePayload);
     payload.resourceMetrics[0].resource.attributes.push(
       { key: "user.email", value: { stringValue: "private@example.com" } },
@@ -269,15 +504,31 @@ describe("POST /api/otlp/v1/metrics", () => {
     );
     payload.resourceMetrics[0].scopeMetrics[0].metrics[0].sum.dataPoints[0].attributes.push({
       key: "session.id",
-      value: { stringValue: "secret-session" },
+      value: { stringValue: "kept-session" },
     });
     await POST(jsonRequest(payload, { authorization: "Bearer test-token-123" }));
     const row = await prisma.externalUsageEvent.findFirstOrThrow({
       where: { sourceApp: "claude-code" },
     });
-    expect(row.metadata).toMatchObject({ model: "claude-sonnet-5", project: "socratic-trade" });
+    expect(row.metadata).toMatchObject({
+      model: "claude-sonnet-5",
+      project: "socratic-trade",
+      "session.id": "kept-session",
+    });
     expect(row.metadata).not.toMatchObject({ "user.email": expect.anything() });
-    expect(row.metadata).not.toMatchObject({ "session.id": expect.anything() });
+  });
+
+  it("mirrors dotted project.name resource attribute into metadata.project", async () => {
+    const payload = structuredClone(samplePayload);
+    payload.resourceMetrics[0].resource.attributes.push({
+      key: "project.name",
+      value: { stringValue: "congress-trade" },
+    });
+    await POST(jsonRequest(payload, { authorization: "Bearer test-token-123" }));
+    const row = await prisma.externalUsageEvent.findFirstOrThrow({
+      where: { sourceApp: "claude-code" },
+    });
+    expect(row.metadata).toMatchObject({ project: "congress-trade" });
   });
 
   it("rejects oversized attribute values during bounded validation", async () => {
@@ -413,3 +664,232 @@ describe("POST /api/otlp/v1/metrics", () => {
     expect(body.accepted).toBe(1);
   });
 });
+
+describe("POST /api/otlp/v1/metrics rate limiting (X1) and typed 500 (X6)", () => {
+  it("limits authenticated traffic per token, not per source IP", async () => {
+    // One credential from many distinct source IPs: the 11th request within
+    // the window 429s — the bucket follows the authenticated identity.
+    for (let index = 1; index <= 10; index += 1) {
+      const res = await POST(
+        jsonRequest(samplePayload, {
+          authorization: "Bearer test-token-123",
+          "x-forwarded-for": `10.8.0.${index}`,
+        })
+      );
+      expect(res.status).toBe(202);
+    }
+    const limited = await POST(
+      jsonRequest(samplePayload, {
+        authorization: "Bearer test-token-123",
+        "x-forwarded-for": "10.8.0.11",
+      })
+    );
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("30");
+  });
+
+  it("does not let unauthenticated hammering through the shared Cloudflare egress IP drain the producer bucket", async () => {
+    for (let index = 1; index <= 15; index += 1) {
+      const res = await POST(
+        jsonRequest(samplePayload, {
+          authorization: "Bearer wrong-token",
+          "x-forwarded-for": "173.245.48.1",
+          "cf-connecting-ip": `198.51.100.${index}`,
+        })
+      );
+      expect(res.status).toBe(401);
+    }
+    const producer = await POST(
+      jsonRequest(samplePayload, {
+        authorization: "Bearer test-token-123",
+        "x-forwarded-for": "173.245.48.1",
+        "cf-connecting-ip": "198.51.100.1",
+      })
+    );
+    expect(producer.status).toBe(202);
+  });
+
+  it("returns a typed retryable internal_error body when persistence fails unexpectedly (X6)", async () => {
+    persistenceControl.failNext.value = true;
+    const res = await POST(
+      jsonRequest(samplePayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(500);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({
+      ok: false,
+      schemaVersion: 2,
+      error: {
+        code: "internal_error",
+        message: "Internal error",
+        retryable: true,
+        retryAfterSeconds: 30,
+      },
+    });
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "claude-code" } })
+    ).toBe(0);
+  });
+
+  it("rejects an OTLP metrics request with 403 when token is scoped to a foreign producer", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "socratic-trade:tok-socratic");
+    const res = await POST(
+      jsonRequest(samplePayload, { authorization: "Bearer tok-socratic" })
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'Credential is not authorized for sourceApp "claude-code"',
+    });
+  });
+
+  it("accepts an OTLP metrics request when token is scoped to claude-code", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "claude-code:tok-claude");
+    const res = await POST(
+      jsonRequest(samplePayload, { authorization: "Bearer tok-claude" })
+    );
+    expect(res.status).toBe(202);
+  });
+});
+
+const genAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [
+          { key: "agent.platform", value: { stringValue: "botfleet" } },
+          { key: "gen_ai.system", value: { stringValue: "openai" } },
+        ],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              unit: "token",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [
+                      { key: "gen_ai.token.type", value: { stringValue: "input" } },
+                      { key: "gen_ai.request.model", value: { stringValue: "gpt-5" } },
+                    ],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "88",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const cursorAgentGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "cursor-agent" } }],
+      },
+      scopeMetrics: genAiPayload.resourceMetrics[0].scopeMetrics,
+    },
+  ],
+};
+
+const overlapGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "openai-codex" } }],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [{ key: "gen_ai.token.type", value: { stringValue: "input" } }],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "10",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
+  it("persists a non-overlap gen_ai token point", async () => {
+    const res = await POST(
+      jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(1);
+    expect(body.ignoredOverlap).toBeUndefined();
+    const rows = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "botfleet" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provider).toBe("openai");
+    expect(rows[0].quantity).toBe(88);
+    expect(rows[0].label).toBe("token:input");
+  });
+
+  it("skips overlap platforms by default and reports ignoredOverlap", async () => {
+    const res = await POST(
+      jsonRequest(overlapGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "openai-codex" } })
+    ).toBe(0);
+  });
+
+  it("skips cursor-agent gen_ai rows so the admin poller is the billed ledger", async () => {
+    const res = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
+  });
+
+  it("authenticates a cursor-agent scoped token and still skips the overlap rows", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "cursor-agent:tok-cursor");
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    const denied = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(denied.status).toBe(401);
+    const res = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer tok-cursor" })
+    );
+    expect(res.status).toBe(202);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
+  });
+});
+

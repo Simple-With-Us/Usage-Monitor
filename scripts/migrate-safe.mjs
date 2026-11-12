@@ -2,13 +2,17 @@
 /**
  * Safe migration script for Prisma + SQLite deployments.
  *
- * Runs plain `prisma db push` (no `--accept-data-loss`) and trusts Prisma's
- * own built-in guard: it refuses to apply a change that would actually drop
- * or truncate non-empty rows (checked against real row counts, not just
+ * Runs `prisma db push` (never `--accept-data-loss`) and trusts
+ * Prisma's own built-in guard: it refuses to apply a change that would actually
+ * drop or truncate non-empty rows (checked against real row counts, not just
  * schema-shape heuristics like "a table was recreated") and applies cleanly
- * otherwise, exiting non-zero only when data would genuinely be lost. On
- * refusal this script exits with instructions for manual review instead of
- * silently forcing the change via --accept-data-loss.
+ * otherwise, exiting non-zero only when data would genuinely be lost.
+ * Prisma 7 no longer runs `prisma generate` from `db push` (the old
+ * `--skip-generate` flag is gone), so deploy-time pushes cannot race client
+ * generation. On refusal this
+ * script exits with instructions for manual review instead of silently forcing
+ * the change via --accept-data-loss. Litestream's internal tables are excluded
+ * from Prisma schema management in prisma.config.ts.
  *
  * Previously this ran `prisma db push --dry-run` first and parsed the diff
  * text for destructive-looking patterns — `--dry-run` is not a supported
@@ -23,7 +27,7 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync } from "fs";
+import { sqliteDatabaseFileExists } from "./lib/sqlite-database-url.mjs";
 
 const DB_PATH = process.env.DATABASE_URL;
 
@@ -42,14 +46,7 @@ function run(cmd) {
 async function main() {
   // If the database file doesn't exist yet (first deploy), `prisma db push`
   // is always safe — it will create all tables from scratch.
-  let dbExists = false;
-  if (DB_PATH) {
-    // Parse the SQLite file path from DATABASE_URL (format: "file:/path/to/db")
-    const match = DB_PATH.match(/^file:(.+)$/);
-    if (match) {
-      dbExists = existsSync(match[1]);
-    }
-  }
+  const dbExists = DB_PATH ? sqliteDatabaseFileExists(DB_PATH) : false;
 
   if (!dbExists) {
     log("No existing database found — creating schema from scratch (safe).");

@@ -2,6 +2,27 @@ import { describe, it, expect } from "vitest";
 import { mapClaudeCodeMetrics, PROVIDER, SERVICE, SOURCE_APP } from "../claude-code-mapper";
 import type { OtlpExportMetricsServiceRequest } from "../types";
 
+describe("native launcher correlation", () => {
+  it("retains launcher attribution while excluding arbitrary resource content", () => {
+    const request = sampleRequest();
+    request.resourceMetrics![0].resource!.attributes!.push(
+      { key: "agent.launcher", value: { stringValue: "botfleet" } },
+      { key: "agent.launcher.session", value: { stringValue: "thread-123" } },
+      { key: "user.email", value: { stringValue: "private@example.test" } },
+      { key: "prompt", value: { stringValue: "private prompt" } },
+    );
+    const { events } = mapClaudeCodeMetrics(request);
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.metadata["agent.launcher"]).toBe("botfleet");
+      expect(event.metadata["agent.launcher.session"]).toBe("thread-123");
+      expect(event.metadata["session.id"]).toBe("abc-123");
+      expect(event.metadata).not.toHaveProperty("user.email");
+      expect(event.metadata).not.toHaveProperty("prompt");
+    }
+  });
+});
+
 function sampleRequest(overrides: Partial<OtlpExportMetricsServiceRequest> = {}): OtlpExportMetricsServiceRequest {
   return {
     resourceMetrics: [
@@ -80,11 +101,16 @@ describe("mapClaudeCodeMetrics", () => {
     expect(tokenEvent!.metadata.tokenType).toBe("input");
   });
 
-  it("maps claude_code.cost.usage to a cost event with costUsd set", () => {
+  it("marks claude_code.cost.usage as a non-authoritative API-equivalent estimate", () => {
     const { events } = mapClaudeCodeMetrics(sampleRequest());
     const costEvent = events.find((e) => e.metricType === "cost");
     expect(costEvent).toBeDefined();
     expect(costEvent!.costUsd).toBeCloseTo(0.0231);
+    expect(costEvent!.billingMode).toBe("estimated");
+    expect(costEvent!.label).toBe("estimated_api_equivalent");
+    expect(costEvent!.metadata.costSemantics).toBe(
+      "estimated_api_equivalent_not_authoritative"
+    );
     expect(costEvent!.keyRef).toBe("claude-sonnet-5");
   });
 
@@ -300,5 +326,46 @@ describe("mapClaudeCodeMetrics", () => {
   it("leaves projectName undefined when no project attribute is present", () => {
     const { events } = mapClaudeCodeMetrics(sampleRequest());
     expect(events.every((e) => e.projectName === undefined)).toBe(true);
+  });
+  describe("repository attributes (OTEL_METRICS_INCLUDE_REPOSITORY=1, UM-1599)", () => {
+    const vcs = [
+      { key: "vcs.repository.url.full", value: { stringValue: "https://github.com/simple-with-us/usage-monitor" } },
+      { key: "vcs.owner.name", value: { stringValue: "simple-with-us" } },
+      { key: "vcs.repository.name", value: { stringValue: "usage-monitor" } },
+      { key: "vcs.provider.name", value: { stringValue: "github" } },
+    ];
+
+    function withPointAttrs(extra: unknown[]) {
+      const request = sampleRequest();
+      for (const metric of (request.resourceMetrics as any)[0].scopeMetrics[0].metrics) {
+        for (const point of metric.sum.dataPoints) point.attributes.push(...extra);
+      }
+      return request;
+    }
+
+    it("uses vcs.repository.name as the project and keeps vcs.* in metadata", () => {
+      const { events } = mapClaudeCodeMetrics(withPointAttrs(vcs));
+      expect(events.length).toBeGreaterThan(0);
+      for (const event of events) {
+        expect(event.projectName).toBe("usage-monitor");
+        expect(event.metadata).toMatchObject({
+          "vcs.repository.name": "usage-monitor",
+          "vcs.owner.name": "simple-with-us",
+          "vcs.provider.name": "github",
+          "vcs.repository.url.full": "https://github.com/simple-with-us/usage-monitor",
+        });
+      }
+    });
+
+    it("lets an explicit project attribute win over the repository name", () => {
+      const request = withPointAttrs(vcs);
+      (request.resourceMetrics as any)[0].resource.attributes.push({
+        key: "project",
+        value: { stringValue: "socratic-trade" },
+      });
+      const { events } = mapClaudeCodeMetrics(request);
+      expect(events.every((e) => e.projectName === "socratic-trade")).toBe(true);
+      expect(events[0].metadata["vcs.repository.name"]).toBe("usage-monitor");
+    });
   });
 });

@@ -26,6 +26,13 @@ describe("intrinio adapter", () => {
     expect(result.totalRequests).toBe(15);
     expect(result.credits).toBe(135);
     expect(result.externalBilling?.records).toHaveLength(2);
+    expect(result.externalBilling?.records[0]).toMatchObject({
+      usageQuantity: 10,
+      remainingQuantity: 90,
+      usageUnit: "calls",
+      rollupRole: "metadata",
+      dateKind: "quota_reset",
+    });
     expect(JSON.stringify(result.rawData)).not.toContain("private@example.com");
   });
 });

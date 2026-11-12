@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "minimumReleaseAge": "5 days",
+  "packageRules": [
+    {
+      "description": "Keep Node updates within the supported package engine and runtime major.",
+      "matchPackageNames": ["node"],
+      "allowedVersions": ">=24 <25"
+    },
+    {
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major dependencies",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "typescript devDep is the TS 6 API alias for eslint; compiler is @typescript/native (TS 7).",
+      "matchManagers": ["npm"],
+      "matchDepNames": ["typescript"],
+      "enabled": false
+    },
+    {
+      "description": "Prisma CLI and client must move together; Prisma 7 also needs prisma.config.ts and a driver adapter, so the major stays a manual migration.",
+      "matchUpdateTypes": ["major"],
+      "matchPackageNames": ["prisma", "@prisma/client"],
+      "groupName": "prisma"
+    }
+  ],
+  "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }
+}

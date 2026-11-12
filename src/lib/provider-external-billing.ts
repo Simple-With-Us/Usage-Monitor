@@ -66,7 +66,10 @@ export async function reconcileProviderExternalBilling(
     seenIds.add(externalId);
 
     const data = {
+      paidRecurringAuthoritative:
+        record.paidRecurringAuthoritative === true,
       kind: cleanRequired(record.kind, "kind"),
+      serviceName: cleanOptional(record.serviceName),
       planName: cleanOptional(record.planName),
       status: cleanOptional(record.status),
       amountUsd: cleanNumber(record.amountUsd, "amountUsd"),
@@ -79,6 +82,11 @@ export async function reconcileProviderExternalBilling(
       requestLimitWindow: cleanOptional(record.requestLimitWindow),
       spendLimitUsd: cleanNumber(record.spendLimitUsd, "spendLimitUsd"),
       spendLimitWindow: cleanOptional(record.spendLimitWindow),
+      usageQuantity: cleanNumber(record.usageQuantity, "usageQuantity"),
+      remainingQuantity: cleanNumber(record.remainingQuantity, "remainingQuantity"),
+      usageUnit: cleanOptional(record.usageUnit),
+      rollupRole: cleanOptional(record.rollupRole),
+      dateKind: cleanOptional(record.dateKind),
       syncedAt,
     };
 

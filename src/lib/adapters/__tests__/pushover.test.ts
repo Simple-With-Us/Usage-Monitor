@@ -18,5 +18,12 @@ describe("pushover adapter", () => {
     expect(result.totalRequests).toBe(2_504);
     expect(result.credits).toBe(7_496);
     expect(String(fetchMock.mock.calls[0][0])).toContain("/1/apps/limits.json");
+    expect(result.externalBilling?.records[0]).toMatchObject({
+      planName: "Pooled account/team quota",
+      usageQuantity: 2_504,
+      remainingQuantity: 7_496,
+      dateKind: "quota_reset",
+      rollupRole: "metadata",
+    });
   });
 });

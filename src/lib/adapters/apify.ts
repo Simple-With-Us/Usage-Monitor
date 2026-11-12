@@ -31,10 +31,15 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       plan?: {
         id?: string;
         description?: string;
+        tier?: string;
         isEnabled?: boolean;
         monthlyBasePriceUsd?: number;
         monthlyUsageCreditsUsd?: number;
         usageDiscountPercent?: number;
+        teamAccountSeatCount?: number;
+        supportLevel?: string;
+        availableAddOns?: unknown[];
+        enabledPlatformFeatures?: string[];
       };
     };
   };
@@ -95,10 +100,19 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
               ? {
                   id: plan.id,
                   description: plan.description,
+                  tier: plan.tier,
                   isEnabled: plan.isEnabled,
                   monthlyBasePriceUsd: plan.monthlyBasePriceUsd,
                   monthlyUsageCreditsUsd: plan.monthlyUsageCreditsUsd,
                   usageDiscountPercent: plan.usageDiscountPercent,
+                  teamAccountSeatCount: plan.teamAccountSeatCount,
+                  supportLevel: plan.supportLevel,
+                  availableAddOnCount: Array.isArray(plan.availableAddOns)
+                    ? plan.availableAddOns.length
+                    : null,
+                  enabledPlatformFeatures: Array.isArray(plan.enabledPlatformFeatures)
+                    ? plan.enabledPlatformFeatures.filter((feature) => typeof feature === "string").slice(0, 100)
+                    : [],
                 }
               : null,
           }
@@ -124,17 +138,27 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
           records: [
             {
               externalId: plan.id ?? "account-plan",
+              paidRecurringAuthoritative:
+                userData.data?.isPaying === true &&
+                plan.isEnabled !== false &&
+                monthlyBasePrice != null &&
+                monthlyBasePrice > 0,
               kind: "plan",
-              planName: plan.description ?? plan.id ?? null,
+              serviceName: "Apify platform",
+              planName: plan.description ?? plan.tier ?? plan.id ?? null,
               status: plan.isEnabled === false ? "inactive" : "active",
               amountUsd: monthlyBasePrice,
               currency: "USD",
               billingInterval: "monthly",
               currentPeriodStart: cycleStart,
               currentPeriodEnd: cycleEnd,
-              nextRenewalAt: cycleEnd,
               spendLimitUsd: maxMonthly,
               spendLimitWindow: "month",
+              usageQuantity: usedMonthly,
+              remainingQuantity: balance,
+              usageUnit: "USD credits",
+              rollupRole: "canonical",
+              dateKind: "period_end",
             },
           ],
         }

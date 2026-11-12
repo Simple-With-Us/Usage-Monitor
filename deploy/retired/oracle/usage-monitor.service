@@ -1,0 +1,26 @@
+[Unit]
+Description=Usage Monitor Docker Compose stack
+Requires=docker.service usage-monitor-env-sync.service
+After=docker.service network-online.target data.mount usage-monitor-env-sync.service
+Wants=network-online.target
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/etc/usage-monitor
+# host.env carries only USAGE_MONITOR_REVISION (deploy-written state); every
+# other value, including Caddy's USAGE_MONITOR_HOSTNAME interpolation, comes
+# from the Infisical-synced tmpfs env file.
+EnvironmentFile=/etc/usage-monitor/host.env
+ExecStartPre=/usr/bin/chown 1000:1000 /data
+ExecStartPre=/usr/bin/chmod 0750 /data
+ExecStart=/usr/bin/docker compose --project-name usage-monitor --env-file /run/usage-monitor/usage-monitor.env --file /etc/usage-monitor/compose.yaml up --detach --no-build --remove-orphans
+ExecStartPost=/usr/bin/docker update --restart=no usage-monitor-app-1
+ExecStop=/usr/bin/docker compose --project-name usage-monitor --env-file /run/usage-monitor/usage-monitor.env --file /etc/usage-monitor/compose.yaml stop --timeout 60
+TimeoutStartSec=1800
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

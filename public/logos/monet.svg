@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Monet">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7f6f3"/>
+      <stop offset="100%" stop-color="#efeeea"/>
+    </linearGradient>
+  </defs>
+  <!-- App-tile chrome (Claude Design style) -->
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- Multicolor radial petals around a hollow center -->
+  <g transform="translate(32 32)">
+    <!-- 12 petals at 30° steps; alternating warm / cool hues -->
+    <g>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#E07A5F" transform="rotate(0)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6BA3D6" transform="rotate(30)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6FBF73" transform="rotate(60)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#D97BB5" transform="rotate(90)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#E07A5F" transform="rotate(120)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6BA3D6" transform="rotate(150)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6FBF73" transform="rotate(180)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#D97BB5" transform="rotate(210)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#E07A5F" transform="rotate(240)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6BA3D6" transform="rotate(270)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#6FBF73" transform="rotate(300)"/>
+      <rect x="-3.2" y="-22" width="6.4" height="14" rx="3.2" fill="#D97BB5" transform="rotate(330)"/>
+    </g>
+    <!-- Soft ring so the center reads open like the reference -->
+    <circle r="5.5" fill="none" stroke="#e8e6e1" stroke-width="1.2"/>
+  </g>
+</svg>

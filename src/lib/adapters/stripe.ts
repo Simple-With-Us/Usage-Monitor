@@ -60,7 +60,14 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
 
   let startingAfter: string | null = null;
   let pageCount = 0;
-  let feeCents = 0;
+  const feeCentsByCurrency = new Map<string, number>();
+  const feeTransactionsByCurrency = new Map<string, number>();
+  const feeBreakdown = new Map<string, {
+    currency: string;
+    category: string;
+    feeCents: number;
+    transactions: number;
+  }>();
   let feeTransactionCount = 0;
   let transactionCount = 0;
   const seenCursors = new Set<string>();
@@ -106,10 +113,30 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       ) {
         invalidResponse("transaction id, currency, or fee was missing or invalid");
       }
-      if (transaction.currency === "usd" && typeof transaction.fee === "number") {
-        feeCents += transaction.fee;
-        if (transaction.fee !== 0) feeTransactionCount++;
-      }
+      const currency = transaction.currency.trim().toLowerCase();
+      feeCentsByCurrency.set(
+        currency,
+        (feeCentsByCurrency.get(currency) ?? 0) + transaction.fee
+      );
+      feeTransactionsByCurrency.set(
+        currency,
+        (feeTransactionsByCurrency.get(currency) ?? 0) + 1
+      );
+      const category =
+        transaction.reporting_category?.trim() ||
+        transaction.type?.trim() ||
+        "uncategorized";
+      const breakdownKey = `${currency}\u0000${category}`;
+      const currentBreakdown = feeBreakdown.get(breakdownKey) ?? {
+        currency,
+        category,
+        feeCents: 0,
+        transactions: 0,
+      };
+      currentBreakdown.feeCents += transaction.fee;
+      currentBreakdown.transactions += 1;
+      feeBreakdown.set(breakdownKey, currentBreakdown);
+      if (transaction.fee !== 0) feeTransactionCount++;
     }
     pageCount++;
 
@@ -127,13 +154,66 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
   }
 
   const balanceData = (balanceResponse.data ?? {}) as StripeBalance;
+  const canonicalUsdAvailable =
+    feeCentsByCurrency.has("usd") || transactionCount === 0;
+  const canonicalUsdCents = canonicalUsdAvailable
+    ? feeCentsByCurrency.get("usd") ?? 0
+    : null;
+  const month = new Date(monthStartSeconds * 1000).toISOString().slice(0, 7);
+  const externalRecords = [];
+  const canonicalCurrencyTotals =
+    transactionCount === 0
+      ? [["usd", 0] as const]
+      : [...feeCentsByCurrency.entries()].sort(([left], [right]) => left.localeCompare(right));
+  for (const [currency, cents] of canonicalCurrencyTotals) {
+    externalRecords.push({
+      externalId: `${month}:${currency}`,
+      kind: "billing_period" as const,
+      serviceName: "Stripe processing fees",
+      planName: `${currency.toUpperCase()} canonical total`,
+      status: "open",
+      amountUsd: cents / 100,
+      currency: currency.toUpperCase(),
+      currentPeriodStart: new Date(monthStartSeconds * 1000).toISOString(),
+      currentPeriodEnd: now.toISOString(),
+      usageQuantity: feeTransactionsByCurrency.get(currency) ?? 0,
+      usageUnit: "transactions",
+      rollupRole: "canonical" as const,
+      dateKind: "report_through" as const,
+    });
+  }
+  if (feeBreakdown.size > 0) {
+    for (const breakdown of [...feeBreakdown.values()].sort((left, right) =>
+      left.currency.localeCompare(right.currency) ||
+      left.category.localeCompare(right.category)
+    )) {
+      externalRecords.push({
+        externalId: `${month}:${breakdown.currency}:${breakdown.category}`,
+        kind: "billing_period" as const,
+        serviceName: breakdown.category.replace(/[_-]+/g, " "),
+        planName: "Stripe processing fee category",
+        status: "open",
+        amountUsd: breakdown.feeCents / 100,
+        currency: breakdown.currency.toUpperCase(),
+        currentPeriodStart: new Date(monthStartSeconds * 1000).toISOString(),
+        currentPeriodEnd: now.toISOString(),
+        usageQuantity: breakdown.transactions,
+        usageUnit: "transactions",
+        rollupRole: "component" as const,
+        dateKind: "report_through" as const,
+      });
+    }
+  }
 
   return {
     balance: balanceResponse.ok ? usdTotal(balanceData.available) : null,
-    totalCost: centsToDollars(feeCents),
-    costWindowStart: new Date(monthStartSeconds * 1000),
-    costWindowEnd: now,
-    costScope: "calendar_month_to_date",
+    totalCost:
+      canonicalUsdCents == null ? null : centsToDollars(canonicalUsdCents),
+    costWindowStart:
+      canonicalUsdCents == null ? null : new Date(monthStartSeconds * 1000),
+    costWindowEnd: canonicalUsdCents == null ? null : now,
+    costScope:
+      canonicalUsdCents == null ? "unknown" : "calendar_month_to_date",
     totalRequests: null,
     credits: null,
     rawData: {
@@ -146,13 +226,25 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
         : null,
       fees: {
         monthStart: new Date(monthStartSeconds * 1000).toISOString(),
-        totalUsd: feeCents / 100,
+        totalUsd:
+          canonicalUsdCents == null ? null : canonicalUsdCents / 100,
+        byCurrency: Object.fromEntries(
+          [...feeCentsByCurrency.entries()].sort().map(([currency, cents]) => [
+            currency.toUpperCase(),
+            {
+              amount: cents / 100,
+              transactions: feeTransactionsByCurrency.get(currency) ?? 0,
+            },
+          ])
+        ),
         transactionCount,
         transactionsWithFees: feeTransactionCount,
         pages: pageCount,
       },
       capabilities: {
         actualProcessingFees: true,
+        canonicalUsdCost: canonicalUsdAvailable,
+        nonUsdFeesPreserved: feeCentsByCurrency.size > Number(feeCentsByCurrency.has("usd")),
         merchantBalance: balanceResponse.ok,
         stripeAccountSubscription: false,
         note: "Customer subscriptions are merchant revenue, not the Stripe account's own plan.",
@@ -161,20 +253,7 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     externalBilling: {
       source: "stripe-processing-fees",
       authoritative: true,
-      records: [
-        {
-          externalId: new Date(monthStartSeconds * 1000)
-            .toISOString()
-            .slice(0, 7),
-          kind: "billing_period",
-          planName: "Stripe processing fees",
-          status: "open",
-          amountUsd: feeCents / 100,
-          currency: "USD",
-          currentPeriodStart: new Date(monthStartSeconds * 1000).toISOString(),
-          currentPeriodEnd: now.toISOString(),
-        },
-      ],
+      records: externalRecords,
     },
   };
 }

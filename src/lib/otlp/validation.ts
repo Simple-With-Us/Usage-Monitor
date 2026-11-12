@@ -6,6 +6,7 @@ import type {
   OtlpResourceMetrics,
 } from "./types";
 import { dataPointValue } from "./types";
+import { readBoundedRequestBody } from "@/lib/bounded-request-body";
 
 export const MAX_OTLP_BODY_BYTES = 1_048_576;
 const MAX_RESOURCE_METRICS = 64;
@@ -217,38 +218,13 @@ export function validateMetricsRequest(request: OtlpExportMetricsServiceRequest)
 }
 
 export async function readBoundedBody(request: Request): Promise<Uint8Array> {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength) {
-    const declared = Number(contentLength);
-    if (!Number.isFinite(declared) || declared < 0 || declared > MAX_OTLP_BODY_BYTES) {
-      throw new Error(`OTLP payload exceeds ${MAX_OTLP_BODY_BYTES} bytes`);
-    }
-  }
-  if (!request.body) return new Uint8Array();
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_OTLP_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`OTLP payload exceeds ${MAX_OTLP_BODY_BYTES} bytes`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
+  // Delegates to the same streaming bounded reader used by
+  // /api/ingest/usage, keeping one canonical implementation across ingest
+  // routes. RequestBodyTooLargeError's message ("<label> exceeds <n>
+  // bytes") preserves the "exceeds" substring both OTLP route handlers key
+  // their 413 response off of, so callers are unaffected by this change.
+  return readBoundedRequestBody(request, {
+    maxBytes: MAX_OTLP_BODY_BYTES,
+    label: "OTLP payload",
+  });
 }
