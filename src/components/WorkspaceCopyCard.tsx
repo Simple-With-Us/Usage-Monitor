@@ -28,7 +28,7 @@ export default function WorkspaceCopyCard() {
       a.click();
       URL.revokeObjectURL(url);
       setMessage(
-        `Saved a package with no secrets (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers).  In Usage Monitor Local, open Settings, then Import Package.`
+        `Saved a package with no secrets (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers).${SENTENCE_GAP}In Usage Monitor Local, open Settings, then Import Package.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Export failed");
@@ -76,7 +76,7 @@ export default function WorkspaceCopyCard() {
         throw new Error(body.error || "Import failed");
       }
       setMessage(
-        `Imported ${body.projects ?? 0} projects and ${body.providers ?? 0} providers (${body.skipped ?? 0} already present). Keys were not copied. Add them again on this copy.`
+        `Imported ${body.projects ?? 0} projects and ${body.providers ?? 0} providers (${body.skipped ?? 0} already present).${SENTENCE_GAP}Keys were not copied.${SENTENCE_GAP}Add them again on this copy.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed");

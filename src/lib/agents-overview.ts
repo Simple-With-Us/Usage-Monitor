@@ -70,13 +70,13 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     dataCapability: "Live status only. Token counts are not available.",
     fidelityTier: "process_only",
     tokenTelemetryKind: "none",
-    notes: "Cursor does not share a local token count.  Process status is live.  Usage is not reported.",
+    notes: "Cursor does not share a local token count.\u00A0 Process status is live.\u00A0 Usage is not reported.",
     defaultMonthlySeatCostUsd: 0,
     listMonthlySeatCostUsd: AGENT_SEAT_CATALOG["cursor-agent"].listMonthlyUsd,
     bundledOffsetUsd: AGENT_SEAT_CATALOG["cursor-agent"].listMonthlyUsd,
     bundledOffsetLabel: "SuperGrok Heavy",
     unavailableReason:
-      "Cursor does not share a local token count.  Process status is live.  Usage is not reported.",
+      "Cursor does not share a local token count.\u00A0 Process status is live.\u00A0 Usage is not reported.",
   },
   {
     id: "grok-build",
@@ -98,7 +98,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
     notes:
-      "The command-line tool reports exact input and output totals.  A model and cache split appear only when they match those totals.  Mixed or missed history stays unpriced.",
+      "The command-line tool reports exact input and output totals.\u00A0 A model and cache split appear only when they match those totals.\u00A0 Mixed or missed history stays unpriced.",
     defaultMonthlySeatCostUsd: AGENT_SEAT_CATALOG["antigravity-cli"].billedMonthlyUsd ?? 70,
     listMonthlySeatCostUsd: AGENT_SEAT_CATALOG["antigravity-cli"].listMonthlyUsd,
     bundledOffsetUsd: 30,
@@ -116,7 +116,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
       "The desktop app does not share turn-by-turn token counts.",
     defaultMonthlySeatCostUsd: 0,
     unavailableReason:
-      "Antigravity Desktop does not share turn-by-turn token counts.  This is not zero usage.",
+      "Antigravity Desktop does not share turn-by-turn token counts.\u00A0 This is not zero usage.",
   },
   {
     id: "github-copilot",
@@ -138,7 +138,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
     notes:
-      "The official app reports remaining quota.  Per-turn token counts come from the local session record.  The Mac build leaves the model blank, so those rows have no reported cost.  Usage Monitor estimates a list price from the tokens.",
+      "The official app reports remaining quota.\u00A0 Per-turn token counts come from the local session record.\u00A0 The Mac build leaves the model blank, so those rows have no reported cost.\u00A0 Usage Monitor estimates a list price from the tokens.",
     defaultMonthlySeatCostUsd: 0,
   },
   {
@@ -162,7 +162,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
     notes:
-      "Reads exact per-turn input, output, and cache counts from the local session ledger.  Model estimates and other records are left out.",
+      "Reads exact per-turn input, output, and cache counts from the local session ledger.\u00A0 Model estimates and other records are left out.",
     defaultMonthlySeatCostUsd: 0,
   },
   {
@@ -174,7 +174,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "local_database",
     tokenTelemetryKind: "local_database",
     notes:
-      "Reads each call from ZCode's local database.  Input leaves out cached tokens.  Output includes reasoning.",
+      "Reads each call from ZCode's local database.\u00A0 Input leaves out cached tokens.\u00A0 Output includes reasoning.",
     defaultMonthlySeatCostUsd: 0,
   },
   {
@@ -186,7 +186,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
     notes:
-      "Reads completed OpenCode replies.  Reasoning is included in output.  The price is a list-price estimate.",
+      "Reads completed OpenCode replies.\u00A0 Reasoning is included in output.\u00A0 The price is a list-price estimate.",
     defaultMonthlySeatCostUsd: 0,
   },
   {
@@ -198,7 +198,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
     notes:
-      "Reads Fx replies.  Input includes cached tokens.  Reasoning is included in output.",
+      "Reads Fx replies.\u00A0 Input includes cached tokens.\u00A0 Reasoning is included in output.",
     defaultMonthlySeatCostUsd: 0,
   },
 ];
