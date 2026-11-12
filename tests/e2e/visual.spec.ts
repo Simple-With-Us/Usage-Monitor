@@ -244,7 +244,7 @@ test.describe('visual: dashboard', () => {
     await login(page);
     await page.goto('/');
     await pinFonts(page);
-    const details = page.locator('#portfolio details');
+    const details = page.locator('#portfolio > details');
     await expect(details).toBeVisible();
     if (await details.getAttribute('open') === null) {
       await details.locator('summary').click();

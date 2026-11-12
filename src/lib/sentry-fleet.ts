@@ -234,14 +234,21 @@ const GAUGE_NAME = /(?:^|[._])(?:duration_ms|ttft_ms|duration|ratio|latency|cost
 const MILLISECOND_NAME = /(?:^|[._])(?:duration_ms|ttft_ms)\b/;
 
 // Failure-class signals: a `failed|rejected|error|zero_success` segment
-// after a `.` or `_` boundary, so "ingest.admission_rejected",
+// after a `.` or `_` boundary, so "ingest.events_rejected",
 // "scheduler.tick.failed", "circuit_error" and
 // "scheduler.provider_fetch_zero_success" match while healthy names like
 // "scheduler.duration_ms" or "usage.persisted" do not.
 const FAILURE_NAME = /(?:^|[._])(?:failed|rejected|error|zero_success)\b/;
 
+// Designed SQLite back-pressure. A busy writer answers 503 + Retry-After
+// and the producer retries. That is not an outage, so it must not open a
+// fleet-infra issue on every overlap (FLEET-INFRA-E7). The same name still
+// counts in the usage-monitor project.
+const BACKPRESSURE_METRICS = new Set(["ingest.admission_rejected"]);
+
 /** True when `name` is a failure-class signal that should open an issue. */
 export function isFleetInfraFailureMetric(name: string): boolean {
+  if (BACKPRESSURE_METRICS.has(name)) return false;
   return FAILURE_NAME.test(name);
 }
 
@@ -339,11 +346,14 @@ export async function recordFleetInfraTraceMetric(
  * (FLEET-INFRA-E3 `usage.persisted` alone passed 300k events) and buried
  * real errors.
  *
- * Failure-class metrics (`ingest.failed`, `ingest.admission_rejected`,
+ * Failure-class metrics (`ingest.failed`, `ingest.events_rejected`,
  * `scheduler.provider_fetch_zero_success`, ...) still post a warning-level
  * event so they keep opening and alerting as fleet-infra issues.  Their
  * `value` rides in `extra.metric.value` and `attributes` are stamped into
  * tags with a `[um-fleet, metric, name]` fingerprint.
+ * `ingest.admission_rejected` is excluded: it is the designed 503 when the
+ * single SQLite writer is busy, and one issue event per overlap is what
+ * kept FLEET-INFRA-E7 firing.
  */
 export async function recordFleetInfraMetric(
   name: string,
