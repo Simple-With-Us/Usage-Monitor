@@ -37,7 +37,14 @@ function event(index, overrides = {}) {
   return {
     eventId: `event-${index}`,
     ts: new Date(1700000000000 + index * 1000).toISOString(),
+<<<<<<< HEAD
     platform: "opencode",
+=======
+    //  A platform that no other collector reports, so the ledger feed
+    //  really posts it.  A platform with its own collector is skipped by
+    //  the overlap gate on purpose.
+    platform: "a-agent",
+>>>>>>> origin/main
     model: "a-model",
     operation: "chat",
     tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0, reasoning: 0 },
@@ -205,6 +212,7 @@ describe("the um sender", () => {
     //  The good events were delivered, so the offset moved past the poison.
     assert.ok(journal.getOffset("um-turns") > 0);
   });
+<<<<<<< HEAD
 
   it("never advances an offset in dry-run mode, even for an empty batch", async () => {
     const { journal } = await openJournal();
@@ -296,4 +304,6 @@ describe("the um sender", () => {
     assert.equal(written, Buffer.byteLength(raw, "utf8"));
     assert.equal(await journal.appendBatch([]), 0);
   });
+=======
+>>>>>>> origin/main
 });

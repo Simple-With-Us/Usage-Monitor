@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,7 @@ import {
   splitInclusiveCache,
 } from "./lib/session-token-collectors.mjs";
 import { collectDeepSeekEvents } from "./deepseek-usage-collector.mjs";
+import { collectCodexEvents } from "./codex-usage-collector.mjs";
 import { collectFxEvents } from "./fx-usage-collector.mjs";
 import { collectOpencodeEvents } from "./opencode-usage-collector.mjs";
 import {
@@ -40,6 +42,8 @@ import {
   COLLECTOR_STATE_OVERLAP_MINUTES,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
+  codexSessionCwd,
+  codexSessionId,
   codexSessionKeyFor,
   isBotFleetManagedCodexSession,
   isBotFleetSessionPath,
@@ -279,6 +283,29 @@ assert(
     !isBotFleetSessionPath("/Users/test/.dsh/sessions/local/session.jsonl.zstd"),
   "BotFleet child-path detection covers both managed workspace layouts",
 );
+assert(
+  // Claude Code's projects-folder name for cwd /Users/jay/.botfleet/workspaces/<id>.
+  isBotFleetSessionPath(
+    "/Users/jay/.claude/projects/-Users-jay--botfleet-workspaces-0b6c/4f1e.jsonl",
+    {}
+  ) &&
+    !isBotFleetSessionPath("/Users/jay/.claude/projects/-Users-jay-Code-Usage-Monitor/4f1e.jsonl", {}),
+  "BotFleet child-path detection matches Claude's projects-folder encoding",
+);
+assert(
+  !isBotFleetSessionPath("/Users/jay/.claude/projects/-Users-jay-Code-my-botfleet-workspaces-notes/s.jsonl", {}) &&
+    !isBotFleetSessionPath("/Users/jay/Code/botfleet-workspaces-tool/x.jsonl", {}),
+  "BotFleet child-path detection ignores ordinary folders that merely mention the name",
+);
+assert(
+  isBotFleetSessionPath("/srv/bf/data/workspaces/abc/", {
+    BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces/",
+  }) &&
+    !isBotFleetSessionPath("/srv/bf/data/workspaces-old/abc/", {
+      BOTFLEET_WORKSPACES_DIRS: "/srv/bf/data/workspaces",
+    }),
+  "BotFleet child-path detection honours BOTFLEET_WORKSPACES_DIRS on real paths",
+);
 
 const traversalRoot = await mkdtemp(join(tmpdir(), "collector-traversal-"));
 try {
@@ -299,6 +326,20 @@ try {
     onTraversalError: () => { traversalErrors += 1; },
   });
   assert(traversalErrors === 0, "a missing provider root remains a valid empty scan");
+  const child = join(traversalRoot, "disappearing-child");
+  mkdirSync(child);
+  await writeFile(join(child, "usage.jsonl"), "fixture");
+  const missingChild = await walkFiles(traversalRoot, {
+    suffix: ".jsonl",
+    reportMissing: true,
+    readDirectory: async (directory, options) => {
+      const entries = await readdir(directory, options);
+      if (directory === traversalRoot) await rm(child, { recursive: true });
+      return entries;
+    },
+    onTraversalError: (error) => { if (error.code === "ENOENT") traversalErrors += 1; },
+  });
+  assert(missingChild.length === 0 && traversalErrors === 1, "opted-in scans report a nested directory disappearing after discovery");
 } finally {
   await rm(traversalRoot, { recursive: true, force: true });
 }
@@ -545,6 +586,16 @@ assert(
   "BotFleet Codex child sessions are identified before standalone ingest",
 );
 assert(
+  codexSessionId(botFleetSessionMeta) === undefined &&
+    codexSessionId(
+      [
+        botFleetSessionMeta,
+        JSON.stringify({ type: "session_meta", payload: { id: " 019a-thread " } }),
+      ].join("\n"),
+    ) === "019a-thread",
+  "Codex session id skips a session_meta row that has no id",
+);
+assert(
   !botFleetChildExclusionEnabled({}),
   "BotFleet child exclusion stays gated until durable BotFleet delivery is active",
 );
@@ -558,6 +609,47 @@ assert(
   ),
   "standalone Codex sessions remain eligible",
 );
+
+{
+  const root = await mkdtemp(join(tmpdir(), "codex-workspace-attribution-"));
+  try {
+    mkdirSync(join(root, "sessions"));
+    const metadata = (id, cwd, originator = "codex_cli_rs") => ({ type: "session_meta", payload: { id, cwd, originator } });
+    const usage = { type: "event_msg", timestamp: "2026-11-01T12:00:00Z", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } };
+    for (const [id, cwd] of [
+      ["managed", "/srv/botfleet/data/workspaces/child"],
+      ["sibling", "/srv/botfleet/data/workspaces-other/child"],
+      ["traversal", "/srv/botfleet/data/workspaces/../ordinary"],
+      ["ordinary", "/ordinary"],
+    ]) {
+      await writeFile(join(root, "sessions", `${id}.jsonl`), [metadata(id, cwd), usage,
+        metadata("later-hint", "/srv/botfleet/data/workspaces/decoy")].map(JSON.stringify).join("\n"));
+    }
+    const baseline = await collectCodexEvents({ codexHome: root, env: {} });
+    const configuredEnv = { BOTFLEET_WORKSPACES_DIRS: "/srv/botfleet/data/workspaces/" };
+    const linked = await collectCodexEvents({ codexHome: root, env: configuredEnv });
+    assert(baseline.length === 8 && linked.length === baseline.length, "configured Codex attribution keeps every native token slice");
+    const withoutWorkspaceHint = (events) => events.map((event) => {
+      const copy = structuredClone(event);
+      delete copy.metadata["workspace.botfleetHint"];
+      return copy;
+    });
+    assert(JSON.stringify(withoutWorkspaceHint(linked)) === JSON.stringify(baseline), "Codex workspace hint changes no event id, measurement, session identity or other field");
+    assert(linked.filter((event) => event.metadata["session.id"] === "managed").every((event) => event.metadata["workspace.botfleetHint"] === "configured-root"), "configured workspace adds a non-authoritative hint to the exact Codex session");
+    assert(linked.every((event) => !event.metadata["agent.launcher"]), "workspace membership never asserts BotFleet launch provenance");
+    assert(linked.filter((event) => event.metadata["session.id"] !== "managed").every((event) => !event.metadata["workspace.botfleetHint"]), "siblings, traversal and later metadata hints do not acquire a workspace hint");
+    assert(!JSON.stringify(linked).includes("/srv/"), "workspace paths are never emitted");
+    const exclusionEnabled = await collectCodexEvents({ codexHome: root, env: { ...configuredEnv, USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN: "1" } });
+    assert(JSON.stringify(exclusionEnabled) === JSON.stringify(linked), "new configured-root attribution never expands legacy child exclusion");
+    assert(codexSessionCwd([metadata("first", undefined), metadata("later", "/srv/botfleet/data/workspaces/decoy")].map(JSON.stringify).join("\n")) === undefined, "missing authoritative cwd stays unknown");
+    assert(codexSessionCwd([metadata(undefined, "/srv/botfleet/data/workspaces/decoy"), metadata("later", "/ordinary")].map(JSON.stringify).join("\n")) === undefined, "a cwd without its own session identity is never joined to a later session");
+    await writeFile(join(root, "sessions", "legacy-managed.jsonl"), [metadata("legacy-managed", "/ordinary", "botfleet"), usage].map(JSON.stringify).join("\n"));
+    const legacyExcluded = await collectCodexEvents({ codexHome: root, env: { ...configuredEnv, USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN: "1" } });
+    assert(JSON.stringify(legacyExcluded) === JSON.stringify(linked), "previously recognized BotFleet children still obey the existing exclusion switch");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 const codexHome = "/Users/jay/.codex";
 const rolloutName =
@@ -819,9 +911,15 @@ const claudeFixture = [
 ].join("\n");
 
 const claudeEvents = parseClaudeSessionJsonl(claudeFixture, { sessionKey: "test/claude-session.jsonl" });
-assert(claudeEvents.length === 4, `claude event count ${claudeEvents.length}`);
+// Four token types; the input is split into the row the old parser stored
+// (1500 - 300) and the remainder it never counted (300).
+assert(claudeEvents.length === 5, `claude event count ${claudeEvents.length}`);
 assert(claudeEvents[0].producerKeyRef === "claude-opus-5", "claude model parsed");
-assert(claudeEvents.find((e) => e.label === "token:input")?.quantity === 1200, "claude uncached input quantity");
+// Anthropic's input_tokens already excludes cache reads and writes.
+assert(
+  claudeEvents.filter((e) => e.label === "token:input").reduce((sum, e) => sum + e.quantity, 0) === 1500,
+  "claude uncached input quantity",
+);
 assert(claudeEvents.find((e) => e.label === "token:cacheRead")?.quantity === 300, "claude cache read quantity");
 assert(claudeEvents.find((e) => e.label === "token:cacheCreation")?.quantity === 200, "claude cache write quantity");
 assert(claudeEvents.find((e) => e.label === "token:output")?.quantity === 450, "claude output quantity");
@@ -1142,10 +1240,92 @@ try {
   insert.run("msg_u", "ses_1", "user", 3, 1792198500000, 1792198510000, JSON.stringify({ time: { created: 1 } }));
   db.close();
   const ocCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
-  assert(ocCollected.length === 6, `opencode collector reads assistant rows (${ocCollected.length})`);
+  // Six token rows (msg_1 has four token types, msg_2 has two) plus the cost
+  // row for msg_1, which reported a real cost, plus one context row per
+  // assistant message.  The fixture database has no session_v2 / project / kv
+  // tables, so there is no models.dev catalog: the context rows report the
+  // used tokens and leave the limit null, and no session or lifecycle rows
+  // are produced.
+  assert(
+    ocCollected.length === 9,
+    `opencode collector reads assistant rows (${ocCollected.length})`,
+  );
+  assert(
+    ocCollected.filter((e) => e.label.startsWith("token:")).length === 6 &&
+      ocCollected.filter((e) => e.metricType === "cost").length === 1 &&
+      ocCollected.filter((e) => e.metricType === "cost")[0]?.costUsd === 0.000513474,
+    "opencode collector adds one cost row for the reported cost",
+  );
+  // The token rows are the rows Usage Monitor ALREADY stored, so their event
+  // ids and their content are PINNED here.  The id is the hash of the row's
+  // content, so a pinned id pins the content too: a change to either would
+  // make the next replay a different row, and Usage Monitor answers HTTP 409
+  // for the WHOLE batch when a replayed row differs from the stored one.
+  const ocTokenRows = ocCollected.filter((e) => e.label.startsWith("token:"));
+  assert(
+    JSON.stringify(ocTokenRows.map((e) => [e.eventId, e.label, e.quantity])) ===
+      JSON.stringify([
+        ["7a6445c704997442634ed0dc547649441c240f7682a67f749359543209e17fbc", "token:input", 10],
+        ["3dd2f4bd8550d8f4e113943830c1145fc25ab66157bed8a9bcabc1ae3aa6095e", "token:output", 50],
+        ["a1a60b68b999a56a51c9072146262726df9553b717bd2c3a21627710aa8f1163", "token:input", 436],
+        ["107e58b954d64fec328e17c77651902b7235815c40d0d9f4bcd33d20bcbb1ff3", "token:output", 221],
+        ["798b30fd142c5e6180d167d8b350a09e6cf2a2431397e88da80b19aa1522b0c3", "token:cacheRead", 218737],
+        ["d4998bcbd3be45c127fe5a79ba3e843d5617b09a3113760c0607729bfe5e17b5", "token:cacheCreation", 7],
+      ]),
+    "opencode token rows keep their exact event ids",
+  );
+  // The pin covers everything except the correlation keys (`session.id`,
+  // `agent.launcher`), which Usage Monitor ignores when only one side of a
+  // replay carries them (src/lib/telemetry-correlation.ts), so adding them to a
+  // stored row cannot answer 409.  Every other byte is still pinned.
+  const withoutCorrelation = (event) => {
+    const { "session.id": _session, "agent.launcher": _launcher, ...metadata } = event.metadata;
+    return { ...event, metadata };
+  };
+  assert(
+    createHash("sha256").update(JSON.stringify(ocTokenRows.map(withoutCorrelation))).digest("hex") ===
+      "e3c1af265367a5ca714b717422e7d5207d258c27a85be58c9045a89149ece2cf",
+    "opencode token rows keep their exact content",
+  );
+  assert(
+    ocTokenRows.every((e) => e.metadata["session.id"] === "ses_1" && !("agent.launcher" in e.metadata)),
+    "opencode token rows name their session as a correlation key",
+  );
+  assert(
+    ocCollected.every((e) => e.metadata["session.id"] === "ses_1" && !("agent.launcher" in e.metadata)),
+    "opencode cost and context rows also carry session correlation",
+  );
+  const fleetDb = new DatabaseSync(dbPath);
+  fleetDb.exec(
+    "CREATE TABLE session_v2 (id text PRIMARY KEY, project_id text, parent_id text, directory text, title text, " +
+      "cost real, tokens_input integer, tokens_output integer, tokens_reasoning integer, tokens_cache_read integer, " +
+      "tokens_cache_write integer, summary_additions integer, summary_deletions integer, summary_files integer, " +
+      "time_created integer, time_updated integer, time_compacting integer, time_archived integer)",
+  );
+  fleetDb.prepare("INSERT INTO session_v2 (id, directory) VALUES (?, ?)").run("ses_1", "/home/test/.botfleet/workspaces/child");
+  fleetDb.close();
+  const fleetCollected = await collectOpencodeEvents({ dbPath, since: new Date(0) });
+  assert(
+    fleetCollected.every((e) => e.metadata["session.id"] === "ses_1" && e.metadata["agent.launcher"] === "botfleet"),
+    "opencode BotFleet correlation covers tokens, cost and context without dropping rows",
+  );
+  assert(
+    ocCollected.every((event) => fleetCollected.some((fleetEvent) => fleetEvent.eventId === event.eventId)),
+    "opencode launcher correlation preserves every existing event id",
+  );
+  const restoreDb = new DatabaseSync(dbPath);
+  restoreDb.exec("DROP TABLE session_v2");
+  restoreDb.close();
+  assert(
+    ocCollected.filter((e) => e.label.startsWith("context:")).length === 2 &&
+      ocCollected
+        .filter((e) => e.label.startsWith("context:"))
+        .every((e) => e.metricType === "limit" && e.metadata.contextLimit === null),
+    "opencode collector reports the used tokens with a null limit when no catalog exists",
+  );
   const ocRecent = await collectOpencodeEvents({ dbPath, since: new Date(1792198590000) });
   assert(
-    ocRecent.length === 4 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
+    ocRecent.length === 6 && ocRecent.every((e) => e.metadata.model === "muse-spark-1.3-contributor"),
     "opencode collector honours the since watermark",
   );
   assert(

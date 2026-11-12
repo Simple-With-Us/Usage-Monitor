@@ -28,7 +28,10 @@ import {
   scrubSpan,
   stripProducerContent,
 } from "../allowlist.mjs";
+<<<<<<< HEAD
 import { normalizeLogRecord, normalizeSpan } from "../internal-event.mjs";
+=======
+>>>>>>> origin/main
 
 const CANARY = "CANARY_SECRET_123";
 
@@ -151,11 +154,254 @@ describe("the sentry allowlist", () => {
     assert.ok(scrubbed);
     const keys = new Set(scrubbed.attributes.map((attribute) => attribute.key));
     for (const key of SENTRY_ATTRIBUTE_ALLOWLIST) {
+<<<<<<< HEAD
       assert.equal(keys.has(key), true, `${key} should have survived`);
+=======
+      const wireKey = key === "context.tokens"
+        ? "context.used"
+        : key === "gen_ai.usage.reasoning_tokens"
+          ? "gen_ai.usage.reasoning_count"
+          : key;
+      assert.equal(keys.has(wireKey), true, `${key} should have survived as ${wireKey}`);
+>>>>>>> origin/main
     }
     assert.equal(scrubbed.attributes.length, SENTRY_ATTRIBUTE_ALLOWLIST.length);
   });
 
+<<<<<<< HEAD
+=======
+  it("stringifies only the four custom numeric attributes for raw OTLP (UM-1614)", () => {
+    const span = makeSpan([
+      intAttr("ttft_ms", 0),
+      intAttr("context.tokens", 64),
+      intAttr("context.limit", 128),
+      { key: "context.utilization_pct", value: { doubleValue: 50.25 } },
+      intAttr("gen_ai.usage.input_tokens", 7),
+      { key: "context.utilization_pct", value: { doubleValue: Number.NaN } },
+      intAttr("ttft_ms", Number.POSITIVE_INFINITY),
+      stringAttr("gen_ai.input.messages", CANARY),
+    ]);
+    const original = structuredClone(span);
+
+    const scrubbed = scrubSpan(span);
+
+    assert.ok(scrubbed);
+    assert.deepEqual(span, original);
+    const byKey = new Map(scrubbed.attributes.map((attribute) => [attribute.key, attribute.value]));
+    assert.equal(byKey.get("ttft_ms").stringValue, "0");
+    assert.equal(byKey.get("context.used").stringValue, "64");
+    assert.equal(byKey.get("context.limit").stringValue, "128");
+    assert.equal(byKey.get("context.utilization_pct").stringValue, "50.25");
+    for (const key of ["ttft_ms", "context.used", "context.limit", "context.utilization_pct"]) {
+      assert.equal("intValue" in byKey.get(key), false, `${key} should not be emitted as intValue`);
+      assert.equal("doubleValue" in byKey.get(key), false, `${key} should not be emitted as doubleValue`);
+    }
+    assert.equal(byKey.has("gen_ai.usage.input_tokens"), true);
+    assert.equal(byKey.get("gen_ai.usage.input_tokens").intValue, "7");
+    assert.equal(serialized(scrubbed).includes(CANARY), false);
+
+    const scrubbedLog = scrubLogRecord({
+      body: { stringValue: CANARY },
+      attributes: span.attributes,
+    });
+    assert.ok(scrubbedLog);
+    const logByKey = new Map(scrubbedLog.attributes.map((attribute) => [attribute.key, attribute.value]));
+    assert.equal(logByKey.get("context.utilization_pct").stringValue, "50.25");
+    assert.equal(logByKey.get("gen_ai.usage.input_tokens").intValue, "7");
+    assert.equal(serialized(scrubbedLog).includes(CANARY), false);
+  });
+
+  it("stringifies typed custom numerics in rebuilt internal events without mutation (UM-1614)", () => {
+    const event = {
+      eventId: "a".repeat(64),
+      ts: "2026-10-21T12:00:00.000Z",
+      kind: "span",
+      platform: "codex-cli",
+      model: "a-model",
+      operation: "chat",
+      tokens: { input: 7, output: 0 },
+      ttftMs: 0,
+      context: { tokens: 64, limit: 128, utilizationPct: 50.25 },
+      attrs: {
+        "ttft_ms": 99,
+        "context.tokens": 99,
+        "context.limit": 99,
+        "context.utilization_pct": 99,
+        "gen_ai.usage.input_tokens": 99,
+      },
+      promptText: CANARY,
+      responseText: CANARY,
+    };
+    const original = structuredClone(event);
+
+    const scrubbed = scrubInternalEvent(event);
+
+    assert.ok(scrubbed);
+    assert.deepEqual(event, original);
+    const byKey = new Map(scrubbed.attributes.map((attribute) => [attribute.key, attribute.value]));
+    assert.equal(byKey.get("ttft_ms").stringValue, "0");
+    assert.equal(byKey.get("context.used").stringValue, "64");
+    assert.equal(byKey.get("context.limit").stringValue, "128");
+    assert.equal(byKey.get("context.utilization_pct").stringValue, "50.25");
+    assert.equal(byKey.get("gen_ai.usage.input_tokens").intValue, "7");
+    assert.equal(serialized(scrubbed).includes(CANARY), false);
+
+    const scrubbedLog = scrubInternalEvent({ ...event, kind: "log" });
+    assert.ok(scrubbedLog);
+    assert.match(scrubbedLog.body.stringValue, /context\.utilization_pct=50\.25/);
+    assert.match(scrubbedLog.body.stringValue, /gen_ai\.usage\.input_tokens=7/);
+    assert.equal(serialized(scrubbedLog).includes(CANARY), false);
+  });
+
+  it("drops non-finite typed custom numerics instead of stringifying them (UM-1614)", () => {
+    const event = {
+      eventId: "b".repeat(64),
+      ts: "2026-10-21T12:00:00.000Z",
+      kind: "span",
+      ttftMs: Number.NaN,
+      context: { tokens: Number.POSITIVE_INFINITY, limit: 10, utilizationPct: Number.NEGATIVE_INFINITY },
+    };
+
+    const scrubbed = scrubInternalEvent(event);
+
+    assert.ok(scrubbed);
+    assert.deepEqual(scrubbed.attributes.map((attribute) => attribute.key), ["context.limit"]);
+    assert.equal(scrubbed.attributes[0].value.stringValue, "10");
+  });
+
+  it("keeps Sentry's typed numeric columns numeric and sends every other value as a string (UM-1614)", () => {
+    //  Sentry stores a number only on its own typed columns, and a number
+    //  on any other key is dropped whole.  The wire therefore carries the
+    //  token counters and the HTTP status as numbers, and every other
+    //  allowlisted value as text.
+    const typed = [
+      "gen_ai.usage.input_tokens",
+      "gen_ai.usage.output_tokens",
+      "gen_ai.usage.cache_read_input_tokens",
+      "gen_ai.usage.cache_creation_input_tokens",
+      "http.response.status_code",
+    ];
+    const renamed = {
+      "context.tokens": "context.used",
+      "gen_ai.usage.reasoning_tokens": "gen_ai.usage.reasoning_count",
+    };
+    const attributes = SENTRY_ATTRIBUTE_ALLOWLIST.map((key) => intAttr(key, typed.includes(key) ? 7 : 4321));
+    const scrubbed = scrubSpan(makeSpan(attributes));
+    assert.ok(scrubbed);
+    const byKey = new Map(scrubbed.attributes.map((attribute) => [attribute.key, attribute.value]));
+    for (const key of SENTRY_ATTRIBUTE_ALLOWLIST) {
+      const wireKey = renamed[key] ?? key;
+      const value = byKey.get(wireKey);
+      assert.ok(value, `${wireKey} should have survived`);
+      if (typed.includes(key)) {
+        assert.equal(value.intValue, "7", `${wireKey} should stay a number`);
+        assert.equal("stringValue" in value, false, `${wireKey} should not be a string`);
+      } else {
+        assert.equal(value.stringValue, "4321", `${wireKey} should be a string`);
+        assert.equal("intValue" in value, false, `${wireKey} should not be a number`);
+      }
+    }
+  });
+
+  it("renames the two attributes Sentry filters by name (UM-1614)", () => {
+    //  Sentry replaces the value of a string attribute whose key carries
+    //  "token" with the marker `[Filtered]`, so these two travel under a
+    //  different name on the wire.
+    const scrubbed = scrubSpan(
+      makeSpan([intAttr("context.tokens", 4321), intAttr("gen_ai.usage.reasoning_tokens", 77)]),
+    );
+    assert.ok(scrubbed);
+    const byKey = new Map(scrubbed.attributes.map((attribute) => [attribute.key, attribute.value]));
+    assert.equal(byKey.has("context.tokens"), false);
+    assert.equal(byKey.has("gen_ai.usage.reasoning_tokens"), false);
+    assert.equal(byKey.get("context.used").stringValue, "4321");
+    assert.equal(byKey.get("gen_ai.usage.reasoning_count").stringValue, "77");
+  });
+
+  it("never ships a wire key that Sentry would filter by name (UM-1614)", () => {
+    const typed = new Set([
+      "gen_ai.usage.input_tokens",
+      "gen_ai.usage.output_tokens",
+      "gen_ai.usage.cache_read_input_tokens",
+      "gen_ai.usage.cache_creation_input_tokens",
+      "gen_ai.usage.total_tokens",
+      "http.response.status_code",
+    ]);
+    const attributes = SENTRY_ATTRIBUTE_ALLOWLIST.map((key) => intAttr(key, 7));
+    const scrubbed = scrubSpan(makeSpan(attributes));
+    assert.ok(scrubbed);
+    for (const attribute of scrubbed.attributes) {
+      if (!attribute.key.toLowerCase().includes("token")) continue;
+      assert.equal(typed.has(attribute.key), true, `${attribute.key} must be a typed column`);
+    }
+  });
+
+  it("collapses a renamed producer attribute and the typed field into one (UM-1614)", () => {
+    const scrubbed = scrubInternalEvent({
+      eventId: "c".repeat(64),
+      ts: "2026-10-21T12:00:00.000Z",
+      kind: "span",
+      platform: "codex-cli",
+      model: "a-model",
+      operation: "chat",
+      attrs: { "context.tokens": 99, "gen_ai.usage.reasoning_tokens": 99 },
+      context: { tokens: 64, limit: 128, utilizationPct: 50.25 },
+      tokens: { reasoning: 77 },
+    });
+    assert.ok(scrubbed);
+    const byKey = new Map(scrubbed.attributes.map((attribute) => [attribute.key, attribute.value]));
+    assert.equal(byKey.get("context.used").stringValue, "64");
+    assert.equal(byKey.get("gen_ai.usage.reasoning_count").stringValue, "77");
+    assert.equal(scrubbed.attributes.filter((attribute) => attribute.key === "context.used").length, 1);
+    assert.equal(
+      scrubbed.attributes.filter((attribute) => attribute.key === "gen_ai.usage.reasoning_count").length,
+      1,
+    );
+  });
+
+  it("parses a numeric string on a typed column and drops a non numeric one (UM-1614)", () => {
+    const scrubbed = scrubSpan(
+      makeSpan([
+        stringAttr("gen_ai.usage.input_tokens", "1234"),
+        stringAttr("gen_ai.usage.output_tokens", "many"),
+      ]),
+    );
+    assert.ok(scrubbed);
+    assert.equal(scrubbed.attributes.length, 1);
+    assert.equal(scrubbed.attributes[0].key, "gen_ai.usage.input_tokens");
+    assert.equal(scrubbed.attributes[0].value.intValue, "1234");
+  });
+
+  it("sends a boolean as a string (UM-1614)", () => {
+    //  Sentry drops a boolean on a string column, so it travels as text.
+    const scrubbed = scrubSpan(makeSpan([{ key: "gen_ai.tool.status", value: { boolValue: true } }]));
+    assert.ok(scrubbed);
+    assert.equal(scrubbed.attributes.length, 1);
+    assert.equal(scrubbed.attributes[0].value.stringValue, "true");
+    assert.equal("boolValue" in scrubbed.attributes[0].value, false);
+  });
+
+  it("leaves the internal event keys alone (UM-1614)", () => {
+    //  The producer contract does not move: the internal event keeps
+    //  `context.tokens`, so the Usage Monitor path is untouched.
+    const event = {
+      eventId: "d".repeat(64),
+      ts: "2026-10-21T12:00:00.000Z",
+      kind: "span",
+      attrs: { "context.tokens": 4321, "gen_ai.usage.reasoning_tokens": 77 },
+      context: { tokens: 4321 },
+      tokens: { reasoning: 77 },
+    };
+    assert.equal(event.attrs["context.tokens"], 4321);
+    assert.equal(event.attrs["gen_ai.usage.reasoning_tokens"], 77);
+    const scrubbed = scrubInternalEvent(event);
+    assert.ok(scrubbed);
+    const keys = scrubbed.attributes.map((attribute) => attribute.key);
+    assert.equal(keys.includes("context.used"), true);
+    assert.equal(keys.includes("gen_ai.usage.reasoning_count"), true);
+  });
+
+>>>>>>> origin/main
   it("drops a key that is not on the allowlist (case 6)", () => {
     const scrubbed = scrubSpan(makeSpan([stringAttr("some.unknown.key", "value")]));
     assert.ok(scrubbed);
@@ -269,6 +515,7 @@ describe("the sentry allowlist", () => {
     assert.equal(serialized(scrubbed).includes(CANARY), false);
     assert.deepEqual(scrubbed.status, { code: 2 });
   });
+<<<<<<< HEAD
 
   it("never lets a producer span name become the operation", () => {
     //  `operation` reaches Sentry as the span name AND as the allowlisted
@@ -314,4 +561,6 @@ describe("the sentry allowlist", () => {
     });
     assert.equal(retry.eventId, first.eventId);
   });
+=======
+>>>>>>> origin/main
 });

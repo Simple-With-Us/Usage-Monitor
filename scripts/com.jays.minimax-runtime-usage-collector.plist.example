@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/minimax-runtime-usage-collector.mjs.
+
+  Must run on the Mac that has ~/.minimax/v2/sqlite/runtime-state.sqlite.
+  Install like the Claude Code collector: copy to ~/Library/LaunchAgents,
+  then replace every placeholder below, then bootstrap.
+
+  Placeholders to replace before install:
+    /ABSOLUTE/PATH/TO/node                      the node binary
+    /ABSOLUTE/PATH/TO/Usage-Monitor/scripts/... the collector script
+    /ABSOLUTE/PATH/TO/HOME/Library/Logs/...     the log file
+    USAGE-MONITOR-HOST                          the Usage Monitor host, so
+                                                 USAGE_MONITOR_INGEST_URL
+                                                 never keeps the fake host
+
+  StartInterval 900 = 15 minutes.  The first run defaults to a three-day
+  bootstrap; later runs resume from a durable successful-through watermark
+  with a one-hour idempotent overlap.  On-demand: run the node script with
+  --dry-run first, or --days 30 to backfill.
+
+  Reads the MiniMax desktop runtime's exact per-turn token ledger
+  (local_runtime_token_usage) read-only and sends it as producer
+  `minimax-code`, alongside the quota collector's remaining-percent windows.
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.minimax-runtime-usage-collector
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.minimax-runtime-usage-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/minimax-runtime-usage-collector.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- The deployment's ingest endpoint; the collector refuses to guess one. -->
+    <key>USAGE_MONITOR_INGEST_URL</key>
+    <string>https://USAGE-MONITOR-HOST/api/ingest/usage</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/minimax-runtime-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/minimax-runtime-usage-collector.log</string>
+</dict>
+</plist>

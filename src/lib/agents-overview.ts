@@ -11,7 +11,10 @@ import { prisma } from "@/lib/prisma";
 import { isDeepSeekPaygModel, sumDeepSeekPaygEvents, type DeepSeekPaygEvent } from "@/lib/pricing/deepseek-payg";
 import { CURSOR_ADMIN_SOURCE_APP } from "@/lib/cursor-admin-poller";
 import { deriveTokenCostUsd, getModelPricing } from "@/lib/pricing/model-pricing";
-import { SUBSCRIPTION_ANALYTICS_SOURCE_APPS } from "@/lib/subscription-analytics";
+import {
+  SUBSCRIPTION_ANALYTICS_SOURCE_APPS,
+  isSubscriptionAnalyticsTelemetry,
+} from "@/lib/subscription-analytics";
 import {
   isReliableTokenTelemetryKind,
   resolveTelemetryAccuracy,
@@ -26,7 +29,7 @@ export interface AgentPlatformMeta {
   provider: string;
   description: string;
   dataCapability: string;
-  fidelityTier: "realtime_otlp" | "session_jsonl" | "process_only" | "unavailable";
+  fidelityTier: "realtime_otlp" | "session_jsonl" | "local_database" | "process_only" | "unavailable";
   tokenTelemetryKind: TokenTelemetryKind;
   notes: string;
   defaultMonthlySeatCostUsd: number;
@@ -39,9 +42,9 @@ export interface AgentPlatformMeta {
 export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
   {
     id: "claude-code",
-    name: "Claude Code / Desktop",
+    name: "Claude Code",
     provider: "Anthropic",
-    description: "Claude Code CLI, Claude Desktop, and Monet multi-agent sync.",
+    description: "Claude Code telemetry from the native OTLP feed.",
     dataCapability: "Full real-time OTLP telemetry (/api/otlp/v1/metrics)",
     fidelityTier: "realtime_otlp",
     tokenTelemetryKind: "otlp",
@@ -52,7 +55,7 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     id: "openai-codex",
     name: "OpenAI Codex",
     provider: "OpenAI",
-    description: "Codex CLI & autonomous coding cloud agent.",
+    description: "Local Codex CLI session telemetry.",
     dataCapability: "Incremental session JSONL delta parsing",
     fidelityTier: "session_jsonl",
     tokenTelemetryKind: "session_jsonl",
@@ -131,13 +134,12 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     name: "MiniMax Code",
     provider: "MiniMax",
     description: "MiniMax Code CLI / agent seat.",
-    dataCapability: "Exact Token Plan quota windows; process detection; no per-turn token feed",
-    fidelityTier: "unavailable",
-    tokenTelemetryKind: "none",
-    notes: "The official mmx CLI exposes exact rolling and weekly remaining-percent quota.  Token usage is not reported because MiniMax has no exact local per-turn feed.",
+    dataCapability: "Exact Token Plan quota windows plus exact per-turn tokens from the desktop runtime ledger",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "The official mmx CLI exposes exact rolling and weekly remaining-percent quota.  Per-turn tokens come from the desktop runtime's local_runtime_token_usage ledger (scripts/minimax-runtime-usage-collector.mjs): exact input, output, cache-read and cache-write counts per agent turn.  The Mac build leaves the model column empty, so those rows carry no model and no reported cost; Usage Monitor derives an API-equivalent estimate from the tokens.",
     defaultMonthlySeatCostUsd: 0,
-    unavailableReason:
-      "MiniMax Code has no exact local per-turn token feed.  This is not zero usage.",
   },
   {
     id: "deepseek-dsh",
@@ -156,14 +158,48 @@ export const AGENT_PLATFORMS: readonly AgentPlatformMeta[] = [
     name: "Kimi Code",
     provider: "Moonshot AI",
     description: "Kimi Code CLI and ACP seat.",
-    dataCapability: "Live process detection. Exact token telemetry is not available.",
-    fidelityTier: "unavailable",
-    tokenTelemetryKind: "none",
+    dataCapability: "Exact per-turn tokens from durable usage.record rows in wire.jsonl",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
     notes:
-      "Kimi Code's local wire log exposes request models and a turn-counting estimate, but no provider input/output usage ledger.  Usage is not reported.",
+      "The local collector reads durable usage.record rows with usageScope=turn.  Input, output, cache-read, and cache-creation counts come from the record's native fields; model estimates and non-turn records are excluded.",
     defaultMonthlySeatCostUsd: 0,
-    unavailableReason:
-      "Kimi Code does not expose exact local token usage.  This is not zero usage.",
+  },
+  {
+    id: "zcode",
+    name: "ZCode",
+    provider: "Z.ai",
+    description: "ZCode CLI and ACP seat.",
+    dataCapability: "Exact per-call tokens from the local model_usage SQLite ledger",
+    fidelityTier: "local_database",
+    tokenTelemetryKind: "local_database",
+    notes:
+      "The local collector reads model_usage rows from ZCode's SQLite database.  Input excludes cached reads and cache creation; output includes reasoning, which remains metadata-only.",
+    defaultMonthlySeatCostUsd: 0,
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    provider: "OpenCode",
+    description: "OpenCode local session telemetry.",
+    dataCapability: "Completed assistant-message token parsing",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "Reads completed OpenCode assistant messages.  Reasoning is included in output and retained as metadata; catalog pricing is an API-equivalent estimate.",
+    defaultMonthlySeatCostUsd: 0,
+  },
+  {
+    id: "fx",
+    name: "Fx",
+    provider: "xAI",
+    description: "Fx local generation telemetry.",
+    dataCapability: "Generation token and cache parsing",
+    fidelityTier: "session_jsonl",
+    tokenTelemetryKind: "session_jsonl",
+    notes:
+      "Reads Fx generation facts.  Input includes cached tokens; reasoning is included in output and retained as metadata.",
+    defaultMonthlySeatCostUsd: 0,
   },
 ];
 
@@ -174,7 +210,24 @@ const TOKEN_TELEMETRY_KIND_BY_APP = new Map(
 export function platformIdForSourceApp(sourceApp: string): string {
   const normalized = sourceApp.trim().toLowerCase();
   if (normalized === CURSOR_ADMIN_SOURCE_APP) return "cursor-agent";
-  return normalized === "antigravity-statusline" ? "antigravity-cli" : normalized;
+  const aliases: Record<string, string> = {
+    "antigravity-statusline": "antigravity-cli",
+    kimi: "kimi-code",
+    "kimi-code-cli": "kimi-code",
+    "moonshot-kimi": "kimi-code",
+    "z-code": "zcode",
+    "z-ai": "zcode",
+    "z.ai": "zcode",
+    zai: "zcode",
+    zhipu: "zcode",
+    zhipuai: "zcode",
+    "zhipu-ai": "zcode",
+    bigmodel: "zcode",
+    "bigmodel.cn": "zcode",
+    glm: "zcode",
+    "glm-code": "zcode",
+  };
+  return aliases[normalized] ?? normalized;
 }
 
 /** Claude Code OTLP cost wins over token-catalog PAYG when both exist. */
@@ -208,7 +261,7 @@ export interface AgentPlatformStatus {
   isRunningOnMac: boolean;
   macStatus: "running" | "idle" | "stopped" | "unknown";
   dataCapability: string;
-  fidelityTier: "realtime_otlp" | "session_jsonl" | "process_only" | "unavailable";
+  fidelityTier: "realtime_otlp" | "session_jsonl" | "local_database" | "process_only" | "unavailable";
   notes: string;
   monthlySeatCostUsd: number;
   billedMonthlySeatCostUsd: number;
@@ -320,8 +373,10 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     [] as Array<{
       sourceApp: string;
       provider: string;
+      service?: string | null;
       keyRef: string | null;
       label?: string | null;
+      confidence?: string;
       _sum: { totalQuantity?: number | null; totalCostUsd?: number | null };
     }>
   );
@@ -342,7 +397,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   ] = await Promise.all([
     getLatestMacHealth().catch(() => null),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef", "label"],
+      by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
       where: {
         OR: eventWhereOr,
         metricType: "usage",
@@ -352,7 +407,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { quantity: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef"],
+      by: ["sourceApp", "provider", "service", "keyRef", "label"],
       where: {
         OR: eventWhereOr,
         metricType: "cost",
@@ -361,7 +416,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { costUsd: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef", "label"],
+      by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
       where: {
         OR: eventWhereOr,
         metricType: "usage",
@@ -371,7 +426,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       _sum: { quantity: true },
     }),
     prisma.externalUsageEvent.groupBy({
-      by: ["sourceApp", "provider", "keyRef"],
+      by: ["sourceApp", "provider", "service", "keyRef", "label"],
       where: {
         OR: eventWhereOr,
         metricType: "cost",
@@ -381,7 +436,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     }),
     queryRollups
       ? prisma.externalUsageEventDailyRollup.groupBy({
-          by: ["sourceApp", "provider", "keyRef", "label"],
+          by: ["sourceApp", "provider", "keyRef", "label", "confidence"],
           where: {
             OR: eventWhereOr,
             metricType: "usage",
@@ -393,7 +448,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       : emptyRollup,
     queryRollups
       ? prisma.externalUsageEventDailyRollup.groupBy({
-          by: ["sourceApp", "provider", "keyRef"],
+          by: ["sourceApp", "provider", "service", "keyRef", "label"],
           where: {
             OR: eventWhereOr,
             metricType: "cost",
@@ -478,6 +533,22 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   const skipOverlappingSeatEvent = (sourceApp: string): boolean =>
     hasCursorAdminBilling && sourceApp.trim().toLowerCase() === "cursor-agent";
 
+  const isReportedSeatCost = (row: {
+    sourceApp: string;
+    provider: string;
+    service?: string | null;
+    label?: string | null;
+  }): boolean =>
+    row.sourceApp === CURSOR_ADMIN_SOURCE_APP ||
+    row.sourceApp === "cursor-agent" ||
+    isSubscriptionAnalyticsTelemetry({
+      sourceApp: row.sourceApp,
+      service: row.service,
+      provider: row.provider,
+      metricType: "cost",
+      label: row.label,
+    });
+
   const observedByPlatform: Partial<Record<string, { planType: string }>> = {};
   if (observedCodexPlan?.keyRef?.trim()) {
     observedByPlatform["openai-codex"] = { planType: observedCodexPlan.keyRef.trim() };
@@ -499,9 +570,11 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   const tokensByPlatformAndModel = new Map<string, Map<string, AgentTokenBreakdown>>();
   const reportedCostByPlatform = new Map<string, number>();
+  const partialTokenPlatforms = new Set<string>();
 
   for (const row of costGroups) {
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (!isReportedSeatCost(row)) continue;
     if (skipOverlappingSeatEvent(row.sourceApp)) continue;
     const app = platformIdForSourceApp(row.sourceApp);
     const current = reportedCostByPlatform.get(app) || 0;
@@ -509,6 +582,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   }
   for (const row of rollupCostGroups) {
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (!isReportedSeatCost(row)) continue;
     if (skipOverlappingSeatEvent(row.sourceApp)) continue;
     const app = platformIdForSourceApp(row.sourceApp);
     const current = reportedCostByPlatform.get(app) || 0;
@@ -523,6 +597,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       provider: g.provider,
       keyRef: g.keyRef,
       label: g.label,
+      confidence: g.confidence,
       quantity: g._sum.quantity,
     })),
     ...rollupTokenGroups.map((g) => ({
@@ -530,6 +605,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       provider: g.provider,
       keyRef: g.keyRef,
       label: g.label,
+      confidence: g.confidence,
       quantity: g._sum.totalQuantity,
     })),
   ];
@@ -538,6 +614,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     if (!isReliableTokenSourceApp(group.sourceApp)) continue;
     if (skipOverlappingSeatEvent(group.sourceApp)) continue;
     const app = platformIdForSourceApp(group.sourceApp);
+    if (app === "kimi-code" && group.confidence === "estimated") {
+      partialTokenPlatforms.add(app);
+    }
     const model = group.keyRef || "unknown-model";
     const qty = Math.max(0, group.quantity || 0);
     grandTotalTokens += qty;
@@ -616,6 +695,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       agentProcesses[appKey] === "running" ||
       (appKey === "deepseek-dsh" && agentProcesses.deepseek === "running") ||
       (appKey === "kimi-code" && agentProcesses.kimi === "running") ||
+      (appKey === "zcode" && agentProcesses.zcode === "running") ||
       (appKey === "grok-build" && (macProcesses["grok-leader"] === "running" || agentProcesses["grok-build"] === "running")) ||
       (appKey === "claude-code" && (macProcesses["claude-remote-control"] === "running" || agentProcesses["claude-code"] === "running"));
 
@@ -738,6 +818,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       tokenTelemetryKind,
       totalTokens: platformTotalTokens,
       isRunningOnMac: Boolean(isRunning),
+      isPartial: partialTokenPlatforms.has(appKey),
       unavailableReason: meta.unavailableReason,
     });
 
@@ -779,7 +860,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       cacheCreationTokens: accuracy.usageIsReliable ? platformCacheCreation : 0,
       apiEquivalentCostUsd: Number(displayApiCost.toFixed(2)),
       apiEquivalentCostComplete:
-        accuracy.usageIsReliable && platformApiCostComplete,
+        accuracy.usageIsReliable &&
+        accuracy.accuracy !== "partial" &&
+        platformApiCostComplete,
       tokenDerivedCostUsd: Number(
         (accuracy.usageIsReliable ? platformApiCost : 0).toFixed(2),
       ),
@@ -805,11 +888,13 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   const totalNetSavings = Math.max(0, totalApiEquivalentCost - totalSubscriptionCost);
   const savingsMultiplier = totalSubscriptionCost > 0 ? totalApiEquivalentCost / totalSubscriptionCost : 1;
   const unreliablePlatforms = platforms.filter((p) => !p.usageIsReliable);
+  const partialPlatforms = platforms.filter((p) => p.telemetryAccuracy === "partial");
   const unpricedModelCount = modelDistribution.filter(
     (model) => !model.apiEquivalentCostKnown,
   ).length;
   const telemetryIncompleteNote = telemetryIncompleteNoteFor(
     unreliablePlatforms.map((p) => p.name),
+    partialPlatforms.map((p) => p.name),
   );
 
   // 5-hour rolling burn numbers
@@ -824,6 +909,12 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     if (skipOverlappingSeatEvent(g.sourceApp)) continue;
     const qty = Math.max(0, g._sum.quantity || 0);
     tokens5h += qty;
+    if (
+      platformIdForSourceApp(g.sourceApp) === "kimi-code" &&
+      g.confidence === "estimated"
+    ) {
+      derivedCost5hComplete = false;
+    }
     const model = g.keyRef || "";
     const label = g.label?.toLowerCase() || "";
     if (label.includes("inputunsplit") && qty > 0) derivedCost5hComplete = false;
@@ -866,6 +957,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   for (const g of cost5hGroups) {
     if (!isReliableTokenSourceApp(g.sourceApp)) continue;
+    if (!isReportedSeatCost(g)) continue;
     if (skipOverlappingSeatEvent(g.sourceApp)) continue;
     const cost = Math.max(0, g._sum.costUsd || 0);
     const app = platformIdForSourceApp(g.sourceApp);
@@ -914,13 +1006,15 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       totalTokens: grandTotalTokens,
       totalApiEquivalentCostUsd: Number(totalApiEquivalentCost.toFixed(2)),
       apiEquivalentCostComplete:
-        unpricedModelCount === 0 && unreliablePlatforms.length === 0,
+        unpricedModelCount === 0 &&
+        unreliablePlatforms.length === 0 &&
+        partialPlatforms.length === 0,
       unpricedModelCount,
       totalSubscriptionCostUsd: Number(totalSubscriptionCost.toFixed(2)),
       totalNetSavingsUsd: Number(totalNetSavings.toFixed(2)),
       savingsMultiplier: Number(savingsMultiplier.toFixed(1)),
       topModel,
-      telemetryIncomplete: unreliablePlatforms.length > 0,
+      telemetryIncomplete: unreliablePlatforms.length > 0 || partialPlatforms.length > 0,
       telemetryIncompleteNote,
       unreliablePlatformIds: unreliablePlatforms.map((p) => p.id),
     },
@@ -928,7 +1022,9 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       tokens5h,
       costEstimate5hUsd: Number(costEstimate5hUsd.toFixed(2)),
       costEstimateComplete:
-        derivedCost5hComplete && unreliablePlatforms.length === 0,
+        derivedCost5hComplete &&
+        unreliablePlatforms.length === 0 &&
+        partialPlatforms.length === 0,
       burnRateTokensPerHour: Math.round(burnRateTokensPerHour),
       burnRateUsdPerHour: Number(burnRateUsdPerHour.toFixed(2)),
     },

@@ -16,6 +16,7 @@
 // "delivered" and "offset advanced" would resend, so every sender also
 // checks the sent set before it sends.  Sentry does not dedupe OTLP logs,
 // which is why that check is not optional.
+<<<<<<< HEAD
 
 import { constants as fsConstants } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -23,6 +24,35 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { NULL_LOGGER } from "./internal-event.mjs";
+=======
+//
+// The offset is an ABSOLUTE byte position in the logical journal stream.
+// The file on disk only holds the part of the stream that is not consumed
+// yet: once the file grows past MAX_JOURNAL_BYTES, the prefix that every
+// destination has already read is dropped and the base of the file moves
+// forward.  The offsets themselves never change, so a compaction can
+// neither lose nor replay an event.  The prefix that is dropped is a whole
+// number of lines, because every offset sits on a line boundary.
+//
+// Every persisted state file and every journal row is validated with Zod
+// before it is used.  A malformed state file is rejected instead of being
+// half believed, and a malformed row is dropped instead of reaching a
+// sender with an invalid identity.
+//
+// Zod is a runtime dependency of this repository.  The hub therefore has one
+// third-party import, and it is on the parsing boundary, where an explicit
+// runtime shape guard belongs.
+
+import { constants as fsConstants } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, link, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import { z } from "zod";
+
+import { NULL_LOGGER } from "./internal-event.mjs";
+import { rebuildLogBody, scalarFromAnyValue, scrubOtlpAttributes } from "./allowlist.mjs";
+>>>>>>> origin/main
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -30,16 +60,132 @@ const FILE_MODE = 0o600;
 /** How many already-sent event ids one destination remembers. */
 export const MAX_SENT_IDS = 10_000;
 
+<<<<<<< HEAD
 /** Read chunk size when scanning the journal. */
 const READ_CHUNK_BYTES = 256 * 1024;
 
 /** Makes every state-file temp name unique within the process. */
 let writeCounter = 0;
+=======
+/** The journal file is compacted once it grows past this size. */
+export const MAX_JOURNAL_BYTES = 32 * 1024 * 1024;
+
+/** Read chunk size when scanning the journal. */
+const READ_CHUNK_BYTES = 256 * 1024;
+
+/** The file that records where the journal file starts in the stream. */
+const BASE_FILE = "journal.base.json";
+const SENTRY_REQUEST_FILE = "sentry-request.json";
+export const MAX_SENTRY_REQUEST_BYTES = 2 * 1024 * 1024;
+const SentryResponseClass = z.enum(["partial_success", "malformed_ack", "oversized_ack", "unreadable_ack", "unexpected_content_type"]);
+const SentryWireEventSchema = z.strictObject({
+  eventId: z.string().min(1).max(256), ts: z.string().max(64), kind: z.enum(["span", "log"]),
+  name: z.string().max(160), attributes: z.array(z.unknown()).max(64),
+  durationMs: z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  body: z.strictObject({ stringValue: z.string() }).optional(),
+  severityNumber: z.union([z.literal(9), z.literal(17)]).optional(),
+  status: z.strictObject({ code: z.union([z.literal(1), z.literal(2)]) }).optional(),
+});
+const SentryRequestSchema = z.strictObject({
+  version: z.literal(1), destination: z.literal("sentry"), signal: z.enum(["logs", "traces"]),
+  batchDigest: z.string().regex(/^[a-f0-9]{64}$/), phase: z.enum(["prepared", "held"]),
+  eventIds: z.array(z.string().min(1).max(256)).min(1).max(1000),
+  events: z.array(SentryWireEventSchema).min(1).max(1000),
+  responseClass: SentryResponseClass.optional(), rejectedCount: z.number().int().nonnegative().max(1000).optional(),
+  httpStatus: z.number().int().min(200).max(299).optional(),
+});
+
+function sentryRequestEvents(events, signal) {
+  if (!Array.isArray(events) || !events.length || events.length > (signal === "logs" ? 100 : 1000)) throw new Error("Invalid Sentry request size");
+  return events.map((event) => {
+    const eventId = eventIdOf(event);
+    if (!eventId || !Number.isFinite(Date.parse(event.ts))) throw new Error("Invalid Sentry request identity");
+    const attributes = scrubOtlpAttributes(event.attributes);
+    const operation = attributes.find((a) => a.key === "gen_ai.operation.name");
+    const name = operation ? scalarFromAnyValue(operation.value) : signal === "logs" ? "log" : "chat";
+    const safe = { eventId, ts: event.ts, kind: signal === "logs" ? "log" : "span", name: typeof name === "string" ? name.slice(0, 160) : "chat", attributes };
+    if (Number.isFinite(event.durationMs) && event.durationMs >= 0 && event.durationMs <= Number.MAX_SAFE_INTEGER) safe.durationMs = event.durationMs;
+    if (signal === "logs") {
+      safe.body = { stringValue: rebuildLogBody(attributes) };
+      safe.severityNumber = event.severityNumber === 17 ? 17 : 9;
+    } else safe.status = { code: event.status?.code === 2 ? 2 : 1 };
+    return SentryWireEventSchema.parse(safe);
+  });
+}
+
+function sentryBatchDigest(signal, events) {
+  return createHash("sha256").update(JSON.stringify({ signal, events })).digest("hex");
+}
+
+/** The persisted read offset of one destination. */
+const OffsetStateSchema = z.object({
+  offset: z.number().int().nonnegative(),
+});
+
+/** The persisted set of delivered event ids of one destination. */
+const SentStateSchema = z.object({
+  eventIds: z.array(z.string().min(1).max(256)).max(MAX_SENT_IDS),
+});
+
+/**
+ * One journal row.
+ *
+ * The identity fields are required: a row without an event id cannot be
+ * deduplicated and a row without a timestamp cannot be ordered.  The rest
+ * of the row is the internal event, which is passed through as it is.
+ */
+const JournalEventSchema = z.looseObject({
+  eventId: z.string().min(1).max(256),
+  ts: z.string().min(1).max(64),
+  kind: z.enum(["span", "log"]).optional(),
+  platform: z.string().max(200).optional(),
+});
+
+/** The compaction bookkeeping of the journal file. */
+const BaseStateSchema = z.object({
+  base: z.number().int().nonnegative(),
+  nextBase: z.number().int().nonnegative(),
+  pendingSize: z.number().int().nonnegative(),
+});
+>>>>>>> origin/main
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+<<<<<<< HEAD
+=======
+/**
+ * A tiny promise mutex.
+ *
+ * Two places must not interleave: the appends and the compaction of the
+ * journal file, and the writes of the per-destination state files.  Each
+ * one gets its own mutex.
+ */
+function createMutex() {
+  let tail = Promise.resolve();
+  return function run(task) {
+    const result = tail.then(task, task);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}
+
+/**
+ * The id of an event, when the event carries a valid one.
+ *
+ * The journal validates every row before a sender can see it, so this is
+ * the second guard for a caller that maps ids out of an event.
+ */
+export function eventIdOf(event) {
+  const checked = JournalEventSchema.safeParse(event);
+  return checked.success ? checked.data.eventId : undefined;
+}
+
+>>>>>>> origin/main
 /** A destination name becomes a file name, so it is restricted. */
 export function normalizeDestination(name) {
   const value = String(name ?? "").trim().toLowerCase();
@@ -54,17 +200,38 @@ export class Journal {
    * @param {object} options
    * @param {string} options.dir       State directory.  Created with mode 700.
    * @param {object} [options.logger]
+<<<<<<< HEAD
    */
   constructor({ dir, logger = NULL_LOGGER }) {
     if (typeof dir !== "string" || !dir.trim()) throw new Error("Journal dir is required");
     this.dir = dir;
     this.logger = logger;
+=======
+   * @param {number} [options.maxJournalBytes]  The size the journal file
+   *        passes before the consumed prefix is dropped.
+   */
+  constructor({ dir, logger = NULL_LOGGER, maxJournalBytes = MAX_JOURNAL_BYTES } = {}) {
+    if (typeof dir !== "string" || !dir.trim()) throw new Error("Journal dir is required");
+    this.dir = dir;
+    this.logger = logger;
+    this.maxJournalBytes = Number.isSafeInteger(maxJournalBytes) && maxJournalBytes > 0
+      ? maxJournalBytes
+      : MAX_JOURNAL_BYTES;
+>>>>>>> origin/main
     this.journalPath = join(dir, "journal.jsonl");
     this.stateDir = join(dir, "state");
     this.deadLetterPath = join(dir, "dead-letter.jsonl");
     this.handle = undefined;
     this.offsets = new Map();
     this.sentSets = new Map();
+<<<<<<< HEAD
+=======
+    //  The absolute byte position of the first retained byte of the file.
+    this.base = 0;
+    this.fileMutex = createMutex();
+    this.stateMutex = createMutex();
+    this.writeCounter = 0;
+>>>>>>> origin/main
   }
 
   /** Create the directory tree with tight modes and open the journal. */
@@ -72,11 +239,62 @@ export class Journal {
     await mkdir(this.stateDir, { recursive: true, mode: DIR_MODE });
     await chmod(this.dir, DIR_MODE);
     await chmod(this.stateDir, DIR_MODE);
+<<<<<<< HEAD
+=======
+    await this.recoverBase();
+>>>>>>> origin/main
     this.handle = await open(this.journalPath, "a", FILE_MODE);
     await this.handle.chmod(FILE_MODE);
     return this;
   }
 
+<<<<<<< HEAD
+=======
+  /**
+   * Read the compaction bookkeeping and settle an interrupted compaction.
+   *
+   * The base file records the base of the file, the base the file WILL have
+   * after a compaction, and the size the file had before that compaction.
+   * A compaction interrupted after the swap left a file that is smaller
+   * than the recorded size, so the new base is the right one.  A compaction
+   * interrupted before the swap left the file untouched, so the old base is
+   * the right one.
+   */
+  async recoverBase() {
+    const state = await this.readBaseFile();
+    let base = 0;
+    if (state) {
+      if (state.pendingSize > 0) {
+        const size = await this.fileSize();
+        base = size < state.pendingSize ? state.nextBase : state.base;
+      } else {
+        base = state.base;
+      }
+    }
+    this.base = base;
+    await this.writeBaseFile({ base, nextBase: base, pendingSize: 0 });
+    return base;
+  }
+
+  async readBaseFile() {
+    try {
+      const raw = await readFile(join(this.stateDir, BASE_FILE), "utf8");
+      const parsed = BaseStateSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success) {
+        this.logger.warn("the journal base state is not usable", { file: BASE_FILE });
+        return null;
+      }
+      return parsed.data;
+    } catch {
+      return null;
+    }
+  }
+
+  async writeBaseFile(state) {
+    await this.writeStateFile(BASE_FILE, state);
+  }
+
+>>>>>>> origin/main
   /** Load the persisted offsets and sent sets for the known destinations. */
   async loadDestinations(destinations) {
     for (const raw of destinations) {
@@ -90,9 +308,18 @@ export class Journal {
   async readOffsetFile(destination) {
     try {
       const raw = await readFile(join(this.stateDir, `${destination}.offset.json`), "utf8");
+<<<<<<< HEAD
       const parsed = JSON.parse(raw);
       const offset = Number(parsed?.offset);
       return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+=======
+      const parsed = OffsetStateSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success) {
+        this.logger.warn("the offset state is not usable", { destination });
+        return 0;
+      }
+      return parsed.data.offset;
+>>>>>>> origin/main
     } catch {
       return 0;
     }
@@ -101,9 +328,18 @@ export class Journal {
   async readSentFile(destination) {
     try {
       const raw = await readFile(join(this.stateDir, `${destination}.sent.json`), "utf8");
+<<<<<<< HEAD
       const parsed = JSON.parse(raw);
       const ids = Array.isArray(parsed?.eventIds) ? parsed.eventIds : [];
       return new Set(ids.filter((id) => typeof id === "string" && id));
+=======
+      const parsed = SentStateSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success) {
+        this.logger.warn("the sent state is not usable", { destination });
+        return new Set();
+      }
+      return new Set(parsed.data.eventIds);
+>>>>>>> origin/main
     } catch {
       return new Set();
     }
@@ -116,6 +352,7 @@ export class Journal {
    * can never split the record across two lines.
    */
   async append(event) {
+<<<<<<< HEAD
     if (!isPlainObject(event)) throw new Error("Journal append needs an object");
     if (!this.handle) throw new Error("Journal is not open");
     const line = `${JSON.stringify(event)}\n`;
@@ -144,6 +381,33 @@ export class Journal {
     await this.handle.write(body, null, "utf8");
     await this.handle.sync();
     return Buffer.byteLength(body, "utf8");
+=======
+    return this.appendBatch([event]);
+  }
+
+  /**
+   * Append a batch of internal events with ONE write and ONE fsync.
+   *
+   * A receiver request can carry a hundred events.  Flushing once per event
+   * turns one request into a hundred disk flushes and delays the response,
+   * which invites the producer to retry and duplicate the spans.
+   */
+  async appendBatch(events) {
+    const list = Array.isArray(events) ? events : [];
+    if (list.length === 0) return 0;
+    for (const event of list) {
+      if (!isPlainObject(event)) throw new Error("Journal append needs an object");
+    }
+    const body = `${list.map((event) => JSON.stringify(event)).join("\n")}\n`;
+    const bytes = Buffer.byteLength(body, "utf8");
+    await this.fileMutex(async () => {
+      if (!this.handle) throw new Error("Journal is not open");
+      await this.handle.write(body, null, "utf8");
+      await this.handle.sync();
+    });
+    await this.maybeCompact();
+    return bytes;
+>>>>>>> origin/main
   }
 
   /** The current read offset of one destination. */
@@ -156,8 +420,16 @@ export class Journal {
   async setOffset(destination, offset) {
     const key = normalizeDestination(destination);
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Offset must be a non-negative integer");
+<<<<<<< HEAD
     this.offsets.set(key, offset);
     await this.writeStateFile(key, `${key}.offset.json`, { offset });
+=======
+    await this.stateMutex(async () => {
+      await this.writeStateFile(`${key}.offset.json`, { offset });
+      this.offsets.set(key, offset);
+    });
+    await this.maybeCompact();
+>>>>>>> origin/main
   }
 
   /** True when this destination already delivered the event. */
@@ -171,6 +443,7 @@ export class Journal {
   async markSent(destination, eventId) {
     const key = normalizeDestination(destination);
     if (typeof eventId !== "string" || !eventId) return;
+<<<<<<< HEAD
     let set = this.sentSets.get(key);
     if (!set) {
       set = new Set();
@@ -183,26 +456,64 @@ export class Journal {
       set.delete(oldest);
     }
     await this.writeStateFile(key, `${key}.sent.json`, { eventIds: [...set] });
+=======
+    await this.stateMutex(async () => {
+      const set = new Set(this.sentSet(key));
+      if (set.has(eventId)) return;
+      set.add(eventId);
+      this.trimSentSet(set);
+      await this.writeStateFile(`${key}.sent.json`, { eventIds: [...set] });
+      this.sentSets.set(key, set);
+    });
+>>>>>>> origin/main
   }
 
   /** Record a batch of delivered event ids. */
   async markSentBatch(destination, eventIds) {
     const key = normalizeDestination(destination);
+<<<<<<< HEAD
+=======
+    await this.stateMutex(async () => {
+      const set = new Set(this.sentSet(key));
+      let changed = false;
+      for (const eventId of eventIds) {
+        if (typeof eventId !== "string" || !eventId || set.has(eventId)) continue;
+        set.add(eventId);
+        changed = true;
+      }
+      this.trimSentSet(set);
+      if (changed) {
+        await this.writeStateFile(`${key}.sent.json`, { eventIds: [...set] });
+        this.sentSets.set(key, set);
+      }
+    });
+  }
+
+  sentSet(key) {
+>>>>>>> origin/main
     let set = this.sentSets.get(key);
     if (!set) {
       set = new Set();
       this.sentSets.set(key, set);
     }
+<<<<<<< HEAD
     let changed = false;
     for (const eventId of eventIds) {
       if (typeof eventId !== "string" || !eventId || set.has(eventId)) continue;
       set.add(eventId);
       changed = true;
     }
+=======
+    return set;
+  }
+
+  trimSentSet(set) {
+>>>>>>> origin/main
     while (set.size > MAX_SENT_IDS) {
       const oldest = set.values().next().value;
       set.delete(oldest);
     }
+<<<<<<< HEAD
     if (changed) {
       await this.writeStateFile(key, `${key}.sent.json`, { eventIds: [...set] });
     }
@@ -225,6 +536,96 @@ export class Journal {
       throw error;
     }
     await chmod(target, FILE_MODE);
+=======
+  }
+
+  /**
+   * Write one state file.
+   *
+   * The temporary path is unique per write, so two concurrent writes can
+   * never truncate the same temporary file, and the rename that publishes
+   * the file is atomic.
+   * Sent receipts must survive a crash before intent removal is durable;
+   * offset/base durability also protects compaction's absolute positions.
+   */
+  async writeStateFile(fileName, payload, { exclusive = false } = {}) {
+    const target = join(this.stateDir, fileName);
+    const temporary = this.tempPath(target);
+    const body = `${JSON.stringify(payload)}\n`;
+    try {
+      const file = await open(temporary, "wx", FILE_MODE);
+      try {
+        await file.writeFile(body);
+        await this.syncStateFile(file);
+      } finally { await file.close(); }
+      if (exclusive) await link(temporary, target);
+      else await rename(temporary, target);
+      await chmod(target, FILE_MODE);
+      await this.syncStateDirectory();
+    } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+  }
+
+  async syncStateFile(file) { await file.sync(); }
+
+  async syncStateDirectory() {
+    const directory = await open(this.stateDir, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
+
+  /** An unresolved pre-POST intent is a channel hold, including after a restart. */
+  async readSentryRequest() {
+    let file;
+    try { file = await open(join(this.stateDir, SENTRY_REQUEST_FILE), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
+    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    let bytes;
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry request state");
+      bytes = await file.readFile("utf8");
+    } finally { await file.close(); }
+    const request = SentryRequestSchema.parse(JSON.parse(bytes));
+    const events = sentryRequestEvents(request.events, request.signal);
+    if (JSON.stringify(events) !== JSON.stringify(request.events) || sentryBatchDigest(request.signal, events) !== request.batchDigest || JSON.stringify(events.map((e) => e.eventId)) !== JSON.stringify(request.eventIds) || new Set(request.eventIds).size !== events.length || (request.rejectedCount ?? 0) > events.length) throw new Error("Invalid Sentry request state");
+    return request;
+  }
+
+  async prepareSentryRequest(signal, events) {
+    if (!["logs", "traces"].includes(signal)) throw new Error("Invalid Sentry signal");
+    return this.stateMutex(async () => {
+      if (await this.readSentryRequest()) throw new Error("Unresolved Sentry request retained");
+      const safe = sentryRequestEvents(events, signal);
+      const request = SentryRequestSchema.parse({ version: 1, destination: "sentry", signal, phase: "prepared", batchDigest: sentryBatchDigest(signal, safe), events: safe, eventIds: safe.map((e) => e.eventId) });
+      if (new Set(request.eventIds).size !== safe.length || Buffer.byteLength(JSON.stringify(request)) > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry request bounds");
+      await this.writeStateFile(SENTRY_REQUEST_FILE, request, { exclusive: true });
+      return request;
+    });
+  }
+
+  async holdSentryRequest(batchDigest, { responseClass, rejectedCount, httpStatus }) {
+    return this.stateMutex(async () => {
+      const request = await this.readSentryRequest();
+      if (!request || request.batchDigest !== batchDigest) throw new Error("Sentry request identity changed");
+      const held = SentryRequestSchema.parse({ ...request, phase: "held", responseClass, httpStatus, ...(rejectedCount === undefined ? {} : { rejectedCount }) });
+      if ((rejectedCount ?? 0) > request.events.length || Buffer.byteLength(JSON.stringify(held)) > MAX_SENTRY_REQUEST_BYTES) throw new Error("Invalid Sentry hold bounds");
+      await this.writeStateFile(SENTRY_REQUEST_FILE, held);
+      return held;
+    });
+  }
+
+  async clearSentryRequest(batchDigest) {
+    return this.stateMutex(async () => {
+      const request = await this.readSentryRequest();
+      if (!request || request.phase !== "prepared" || request.batchDigest !== batchDigest) throw new Error("Unresolved Sentry request preserved");
+      await unlink(join(this.stateDir, SENTRY_REQUEST_FILE));
+      await this.syncStateDirectory();
+    });
+  }
+
+  /** A temporary path that no other write can collide with. */
+  tempPath(target) {
+    this.writeCounter += 1;
+    return `${target}.${process.pid}.${this.writeCounter}.${randomUUID()}.tmp`;
+>>>>>>> origin/main
   }
 
   /**
@@ -232,20 +633,35 @@ export class Journal {
    *
    * Events this destination already sent are skipped, and the returned
    * `endOffset` points past every line that was consumed, so a skipped
+<<<<<<< HEAD
    * event never blocks the ones behind it.
    *
    * A partial trailing line (a crash mid-write) is never parsed and never
    * counted, so the offset stays on a line boundary.
+=======
+   * event never blocks the ones behind it.  A repeated event id inside one
+   * batch is skipped as well, so one turn is never delivered twice.
+   *
+   * A partial trailing line (a crash mid-write) is never parsed and never
+   * counted, so the offset stays on a line boundary.
+   *
+   * A row that does not match the journal schema is dropped: it cannot be
+   * deduplicated and it must not reach a sender.
+>>>>>>> origin/main
    */
   async readBatch(destination, limit) {
     const key = normalizeDestination(destination);
     const start = this.getOffset(key);
     const sent = this.sentSets.get(key) ?? new Set();
+<<<<<<< HEAD
     const seenInBatch = new Set();
+=======
+>>>>>>> origin/main
     const events = [];
     if (!this.handle && !(await this.exists())) {
       return { events, endOffset: start };
     }
+<<<<<<< HEAD
     const file = await open(this.journalPath, fsConstants.O_RDONLY);
     try {
       const info = await file.stat();
@@ -256,6 +672,39 @@ export class Journal {
       let pending = "";
       let pendingStart = start;
       let filePos = start;
+=======
+    //  The base and the file are taken together, under the file mutex, so
+    //  a compaction cannot slip between them.  A compaction that runs
+    //  after this point replaces the file, but the handle below still
+    //  points at the file this read belongs to, so the positions of this
+    //  read and the base of this read always belong together.
+    const opened = await this.fileMutex(async () => {
+      const base = this.base;
+      const file = await open(this.journalPath, fsConstants.O_RDONLY);
+      let size;
+      try {
+        size = (await file.stat()).size;
+      } catch (error) {
+        //  The handle is only closed by the `finally` below once it has
+        //  been handed out, so a failure here has to close it itself.
+        //  Otherwise every read that fails after the open leaks a
+        //  descriptor until the process runs out of them.
+        await file.close();
+        throw error;
+      }
+      return { base, file, size };
+    });
+    const { base, file, size } = opened;
+    try {
+      const fileStart = Math.max(0, start - base);
+      if (fileStart >= size) return { events, endOffset: start };
+      const decoder = new StringDecoder("utf8");
+      const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+      const seen = new Set();
+      let pending = "";
+      let pendingStart = fileStart;
+      let filePos = fileStart;
+>>>>>>> origin/main
       let endOffset = start;
       let done = false;
       while (!done && events.length < limit) {
@@ -273,7 +722,11 @@ export class Journal {
           const consumed = Buffer.byteLength(line, "utf8") + 1;
           pending = pending.slice(newline + 1);
           pendingStart += consumed;
+<<<<<<< HEAD
           endOffset = pendingStart;
+=======
+          endOffset = base + pendingStart;
+>>>>>>> origin/main
           const trimmed = line.trim();
           if (!trimmed) continue;
           let parsed = null;
@@ -282,6 +735,7 @@ export class Journal {
           } catch {
             parsed = null;
           }
+<<<<<<< HEAD
           if (!isPlainObject(parsed)) continue;
           if (typeof parsed.eventId === "string") {
             //  Skip an id this destination already delivered, and skip a
@@ -291,6 +745,15 @@ export class Journal {
             seenInBatch.add(parsed.eventId);
           }
           events.push(parsed);
+=======
+          const checked = JournalEventSchema.safeParse(parsed);
+          if (!checked.success) continue;
+          const event = checked.data;
+          if (sent.has(event.eventId)) continue;
+          if (seen.has(event.eventId)) continue;
+          seen.add(event.eventId);
+          events.push(event);
+>>>>>>> origin/main
           if (events.length >= limit) break;
         }
       }
@@ -309,6 +772,110 @@ export class Journal {
     }
   }
 
+<<<<<<< HEAD
+=======
+  /** The size of the journal file on disk. */
+  async fileSize() {
+    try {
+      const info = await stat(this.journalPath);
+      return info.size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The smallest offset of every known destination. */
+  minimumOffset() {
+    if (this.offsets.size === 0) return undefined;
+    let min = Infinity;
+    for (const offset of this.offsets.values()) {
+      if (offset < min) min = offset;
+    }
+    return Number.isFinite(min) ? min : undefined;
+  }
+
+  /**
+   * Drop the part of the journal every destination has already read.
+   *
+   * The offsets are absolute, so removing a prefix does not change them:
+   * only the base of the file moves.  The region that is removed is the
+   * part below the smallest offset, so no destination can lose an event it
+   * has not read yet.  A destination that is down keeps the journal from
+   * shrinking, which is the price of not dropping its events.
+   */
+  async maybeCompact() {
+    const target = this.minimumOffset();
+    if (target === undefined) return false;
+    if (target <= this.base) return false;
+    const size = await this.fileSize();
+    if (size <= this.maxJournalBytes) return false;
+    //  The compaction rewrites the whole remaining file, so it is only
+    //  worth its copy when the consumed prefix is a real part of the file.
+    //  While the unconsumed backlog is still over the cap the rewrite
+    //  cannot bring the file under it, so skipping keeps the write
+    //  amplification at 2x instead of copying the whole file for every
+    //  byte a slow destination consumes.
+    //  The skip is NOT unbounded, though: once the consumed prefix is at
+    //  least half the file the copy pays for itself, so the file still
+    //  shrinks.  That bounds the file at 2x the unconsumed backlog, which
+    //  is the smallest it can ever be while that backlog is retained.
+    const prefix = Math.min(target - this.base, size);
+    const remaining = size - prefix;
+    if (remaining >= this.maxJournalBytes && prefix * 2 < size) return false;
+    await this.compactTo(target);
+    return true;
+  }
+
+  /** Rewrite the journal file without the consumed prefix. */
+  async compactTo(target) {
+    await this.fileMutex(async () => {
+      const size = await this.fileSize();
+      const cut = Math.min(target - this.base, size);
+      if (cut <= 0) return;
+      const temporary = `${this.journalPath}.compact`;
+      if (cut >= size) {
+        await writeFile(temporary, "", { mode: FILE_MODE });
+      } else {
+        await this.copyRange(this.journalPath, temporary, cut, size);
+      }
+      //  The pending record is written BEFORE the swap, so a crash in
+      //  between leaves enough information to settle the outcome.
+      await this.writeBaseFile({ base: this.base, nextBase: target, pendingSize: size });
+      await rename(temporary, this.journalPath);
+      await chmod(this.journalPath, FILE_MODE);
+      await this.writeBaseFile({ base: target, nextBase: target, pendingSize: 0 });
+      this.base = target;
+      if (this.handle) {
+        await this.handle.close();
+        this.handle = undefined;
+      }
+      this.handle = await open(this.journalPath, "a", FILE_MODE);
+      await this.handle.chmod(FILE_MODE);
+    });
+  }
+
+  /** Copy a byte range of one file into another file. */
+  async copyRange(source, target, from, to) {
+    const input = await open(source, fsConstants.O_RDONLY);
+    const output = await open(target, "w", FILE_MODE);
+    try {
+      const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+      let position = from;
+      while (position < to) {
+        const want = Math.min(READ_CHUNK_BYTES, to - position);
+        const { bytesRead } = await input.read(buffer, 0, want, position);
+        if (bytesRead <= 0) break;
+        await output.write(buffer.subarray(0, bytesRead), 0, bytesRead, position - from);
+        position += bytesRead;
+      }
+      await output.sync();
+    } finally {
+      await output.close();
+      await input.close();
+    }
+  }
+
+>>>>>>> origin/main
   /**
    * Quarantine one event into the dead-letter file.
    *

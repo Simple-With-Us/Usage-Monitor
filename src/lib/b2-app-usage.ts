@@ -19,6 +19,7 @@ import type {
   B2AppUsageDailyPoint,
   B2AppUsageSlice,
 } from "@/lib/b2-app-usage-types";
+import { B2_APP_LABELS } from "@/lib/b2-app-usage-types";
 
 export type {
   B2AppId,
@@ -42,13 +43,7 @@ export interface B2UsageCheckResult {
   pushoverSent: boolean;
 }
 
-const APP_LABELS: Record<B2AppId, string> = {
-  "usage-monitor": "Usage Monitor",
-  "socratic-trade": "Socratic.Trade",
-  "congress-trade": "Congress.Trade",
-  "fleet-infra": "Fleet Infra",
-  other: "Other",
-};
+const APP_LABELS = B2_APP_LABELS;
 
 interface CacheEntry {
   payload: B2AppUsageBreakdownPayload;

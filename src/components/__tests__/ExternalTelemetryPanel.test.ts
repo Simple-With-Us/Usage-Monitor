@@ -234,12 +234,58 @@ describe("ExternalTelemetryPanel", () => {
     );
 
     expect(html).toContain("Tracked cash spend");
-    expect(html).toContain("Claude API-equivalent estimate: $9,000.00");
+    expect(html).toContain("API-equivalent estimate: $9,000.00");
     expect(html).toContain(
-      "Excluded from cash spend · verify Anthropic Console billing"
+      "Excluded from cash spend · verify provider billing"
     );
     expect(html).toContain(
       "API-equivalent estimate · excluded from cash spend"
     );
+  });
+
+  it("shows token quantity and derived dollars separately for token-only seats", () => {
+    const html = renderToStaticMarkup(
+      createElement(ExternalTelemetryPanel, {
+        usageSummary: {
+          days: 30,
+          totalCostUsd: 0,
+          estimatedApiEquivalentUsd: 3,
+          pricedEventCount: 0,
+          unpricedEventCount: 0,
+          unclassifiedCostEventCount: 0,
+          costCoverage: "unknown",
+          totalRequests: 0,
+          eventCount: 1,
+          groups: [{
+            sourceApp: "opencode",
+            environment: null,
+            provider: "anthropic",
+            canonicalProvider: "anthropic",
+            service: "opencode",
+            projectId: null,
+            metricType: "usage",
+            unit: "token",
+            eventCount: 1,
+            pricedEventCount: 0,
+            unpricedEventCount: 0,
+            unclassifiedCostEventCount: 0,
+            costCoverage: "unknown",
+            totalCostUsd: 0,
+            estimatedApiEquivalentUsd: 3,
+            totalRequests: 0,
+            totalQuantity: 1_000_000,
+            limit: null,
+            limitWindow: null,
+            latestAt: "2026-07-14T00:00:00.000Z",
+          }],
+        },
+      })
+    );
+
+    const usageCell = html.split('data-label="Usage"')[1]?.split('data-label="Quota"')[0];
+    expect(usageCell).toContain(">1,000,000</p>");
+    expect(usageCell).toContain("API-equivalent estimate: $3.00 · excluded from cash spend");
+    expect(usageCell!.indexOf("1,000,000")).toBeLessThan(usageCell!.indexOf("$3.00"));
+    expect(html).toContain("opencode · token");
   });
 });

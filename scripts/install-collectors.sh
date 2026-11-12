@@ -38,30 +38,38 @@ case "$DEST" in
   "$HOME"/Code/*) echo "refusing to install into the ~/Code integration tree: $DEST" >&2; exit 2 ;;
 esac
 
+# Validate the entire existing graph before rsync can overwrite or delete it.
+INSTALL_PREFLIGHT="$(node "$SRC/scripts/check-collector-install.mjs" "$SRC" "$DEST")"
+read -r SHA ZOD_VERSION INSTALL_ZOD <<< "$INSTALL_PREFLIGHT"
+if [[ ! "$SHA" =~ ^[a-f0-9]{40}$ || ! "$ZOD_VERSION" =~ ^[~^]?4\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ! "$INSTALL_ZOD" =~ ^[01]$ || "$INSTALL_PREFLIGHT" != "$SHA $ZOD_VERSION $INSTALL_ZOD" ]]; then
+  echo "refusing to install: invalid collector preflight output" >&2
+  exit 2
+fi
 mkdir -p "$DEST/scripts"
 # Entry points and shared libs only; no tests, iOS tooling, or deploy scripts.
 rsync -a --delete --delete-excluded \
   --include='/lib/' --include='/lib/*.mjs' \
+  --include='/telemetry-hub/' --include='/telemetry-hub/*.mjs' \
   --include='/*-collector.mjs' \
+  --include='/collector-injector.mjs' \
   --include='/run-subscription-quota-collector.sh' \
   --include='/antigravity-statusline-telemetry.mjs' \
   --exclude='*' \
   "$SRC/scripts/" "$DEST/scripts/"
 
-ZOD_VERSION="$(node -p "require('$SRC/package.json').dependencies.zod" 2>/dev/null || true)"
-ZOD_VERSION="${ZOD_VERSION:-^4.6.5}"
-if [[ ! -f "$DEST/node_modules/zod/package.json" ]]; then
+if [[ "$INSTALL_ZOD" == 1 ]]; then
   printf '{"name":"usage-monitor-collectors","private":true,"type":"module"}\n' > "$DEST/package.json"
   (cd "$DEST" && npm install --omit=dev --no-audit --no-fund --silent "zod@${ZOD_VERSION}")
 fi
 
-SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf 'sha=%s\ninstalled=%s\nsource=%s\n' "$SHA" "$(date -u +%FT%TZ)" "$SRC" > "$DEST/VERSION"
 
-# Smoke test: every entry point must at least parse and resolve its imports.
+# Syntax-check entry points, then resolve the common bridge dependency graph.
 for f in "$DEST"/scripts/*-collector.mjs; do
   node --check "$f"
 done
+node --check "$DEST/scripts/collector-injector.mjs"
+node --input-type=module -e 'await import(process.argv[1]);' "$DEST/scripts/lib/collector-sentry-bridge.mjs"
 bash -n "$DEST/scripts/run-subscription-quota-collector.sh"
 echo "installed $SHA -> $DEST"
 
@@ -81,6 +89,36 @@ for plist in "$AGENTS_DIR"/com.jays.*collector.plist; do
   launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$UID_N" "$plist"
   echo "repointed + reloaded $label"
+done
+
+# The collectors that refuse to guess an ingest endpoint (UM-1636/UM-1637)
+# need the deployment's endpoint in their environment; they never hardcode a
+# hostname.  The operator supplies the value; when it is missing, say so
+# instead of leaving a job that fails every run.
+for ENDPOINT_LABEL in "com.jays.claude-usage-collector" "com.jays.minimax-runtime-usage-collector"; do
+  ENDPOINT_PLIST="$AGENTS_DIR/$ENDPOINT_LABEL.plist"
+  [[ -f "$ENDPOINT_PLIST" ]] || continue
+  if [[ -n "${USAGE_MONITOR_INGEST_URL:-}" ]]; then
+    # PlistBuddy's "Set" fails when the key is absent and "Add" fails when it
+    # is present, so try both: an absent key must not abort the installer.
+    if ! /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$ENDPOINT_PLIST" >/dev/null 2>&1 || true
+    fi
+    wrote=1
+    if ! /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:USAGE_MONITOR_INGEST_URL $USAGE_MONITOR_INGEST_URL" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
+      if ! /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:USAGE_MONITOR_INGEST_URL string $USAGE_MONITOR_INGEST_URL" "$ENDPOINT_PLIST" >/dev/null 2>&1; then
+        wrote=0
+      fi
+    fi
+    stored="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$ENDPOINT_PLIST" 2>/dev/null || true)"
+    if [[ "$wrote" == 1 && "$stored" == "$USAGE_MONITOR_INGEST_URL" ]]; then
+      echo "set USAGE_MONITOR_INGEST_URL for $ENDPOINT_LABEL"
+    else
+      echo "error: could not set USAGE_MONITOR_INGEST_URL for $ENDPOINT_LABEL" >&2
+    fi
+  elif [[ -z "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:USAGE_MONITOR_INGEST_URL' "$ENDPOINT_PLIST" 2>/dev/null)" ]]; then
+    echo "warning: $ENDPOINT_LABEL has no USAGE_MONITOR_INGEST_URL; export it and re-run with --plists"
+  fi
 done
 
 # subscription-quota LaunchAgent: run it through the Keychain wrapper.  The

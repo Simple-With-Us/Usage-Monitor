@@ -360,6 +360,71 @@ export async function recordIngestEventsRejected(
   } catch {
     // Best-effort diagnostic counter; Usage Monitor remains the ledger.
   }
+  try {
+    const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");
+    const attrs: Record<string, string> = {};
+    if (attributes.route) attrs.route = attributes.route;
+    if (attributes.outcome) attrs.outcome = attributes.outcome;
+    await recordFleetInfraMetric("ingest.events_rejected", safeCount, attrs);
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * A producer-scoped ingest credential was refused because the event it
+ * carried named a source app / harness / platform the credential does not own.
+ *
+ * This is a SILENT producer failure from the producer's side: the route
+ * answers 403 and the producer retries, but nothing in Usage Monitor's own
+ * numbers says "this feed is dead".  It is exactly how Claude Code's OTLP
+ * trace batches were lost for days (UM-1636): the turn dimension resolved to
+ * the model vendor ("anthropic") instead of the harness that owns the
+ * credential ("claude-code"), so every trace batch was refused while the
+ * metrics and logs batches of the same session still landed.  Count it so the
+ * gap shows up in Sentry instead of only in a diff.
+ */
+export async function recordIngestScopeRejected(
+  attributes: {
+    route?: string;
+    dimension?: "sourceApp" | "harness" | "platform";
+    value?: string;
+  } = {}
+): Promise<void> {
+  try {
+    const mod = await loadSentry();
+    if (!mod) return;
+    const metrics = api<{
+      count: (
+        name: string,
+        value?: number,
+        options?: { attributes?: Record<string, string | number | boolean> }
+      ) => void;
+    }>(mod, "metrics");
+    const logger = api<{
+      warn: (message: string, attrs?: Record<string, unknown>) => void;
+    }>(mod, "logger");
+    const attrs: Record<string, string> = {};
+    if (attributes.route) attrs.route = attributes.route;
+    if (attributes.dimension) attrs.dimension = attributes.dimension;
+    if (attributes.value) attrs.value = attributes.value;
+    logger?.warn?.("ingest.scope_rejected", attrs);
+    metrics?.count?.("ingest.scope_rejected", 1, { attributes: attrs });
+  } catch {
+    // Best-effort diagnostic counter; never let observability break ingest.
+  }
+  // fleet-infra mirror, like ingest.failed: a refused producer is a fleet
+  // health signal, not just this app's.
+  try {
+    const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");
+    const attrs: Record<string, string> = {};
+    if (attributes.route) attrs.route = attributes.route;
+    if (attributes.dimension) attrs.dimension = attributes.dimension;
+    if (attributes.value) attrs.value = attributes.value;
+    await recordFleetInfraMetric("ingest.scope_rejected", 1, attrs);
+  } catch {
+    // best-effort
+  }
 }
 
 /**

@@ -204,6 +204,19 @@ jobs:
           node-version-file: .node-version
           cache: npm
 
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line.
+      #
+      # It runs BEFORE `npm ci`.  The script is plain Node with no
+      # dependencies, so a runner on the wrong runtime fails here, before it
+      # builds node_modules under the wrong ABI and leaves a poisoned install
+      # and npm cache behind for later steps to reuse.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
+
       - name: Install dependencies
         run: npm ci
 
@@ -241,11 +254,20 @@ jobs:
       - name: Test receipt-inbox worker
         run: npm run test:receipt-inbox-worker
 
+      # Excluded from the root run for the same reason.  It pins what the expenses
+      # sync's daily write budget trusts: D1's own meta.rows_written.  Offline, with
+      # inline bindings in workers/expenses-site/vitest.config.mjs and no secrets.
+      - name: Test expenses worker
+        run: npm run test:expenses-worker
+
       - name: Test safe migration path
         run: npm run test:migrate-safe
 
       - name: Test pre-migration SQLite backup
         run: npm run test:sqlite-backup
+
+      - name: Test concurrent startup partial cleanup
+        run: npm run test:backup-concurrent-startup
 
       # Fourth instance of the drift class the two comments below/above describe
       # -- in `npm run verify`, no CI step -- and the one flagged as out of scope
@@ -272,6 +294,11 @@ jobs:
       # re-breaks the exit code, so this step is also that fix's own guard.
       - name: Test sentry-ci-report
         run: npm run test:sentry-ci-report
+
+      # Fully offline: every subprocess is stubbed in the unittest, so no
+      # Mac, process table or credential is involved.
+      - name: Test security ancestry audit
+        run: npm run test:security-ancestry
 
       - name: Test R2 weekly archive
         run: npm run test:r2-archive
@@ -308,6 +335,43 @@ jobs:
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
 
+      # The server's storage watch (deploy/server/vps-storage-watch):  a
+      # database past its growth threshold posts one alert tagging both
+      # Housekeepers and Jay, the cooldown holds, and a missing database path
+      # posts nothing.  Fully offline:  curl is replaced by a recorder.
+      - name: Test the server storage watch
+        run: |
+          bash -n deploy/server/vps-storage-watch/vps-storage-watch.sh
+          bash -n deploy/server/vps-storage-watch/install.sh
+          bash deploy/server/vps-storage-watch/test.sh
+
+      # The App Store Connect credential contract (AFC-459):  the private key
+      # comes from the environment or from Infisical, and a path on disk is
+      # not a credential source at all.  Fully offline:  the keys are
+      # generated at test time and the fleet reader is replaced by a fake.
+      - name: Test the App Store Connect credential contract
+        run: |
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          bash scripts/ios-fleet/test-asc-credentials.sh
+
+      # The fleet's version-numbering rules (AFC-517):  the marketing version
+      # is the next patch on the app's train and the build number is
+      # INDEPENDENT of it, so App Store Connect can no longer show "1.0.N (N)".
+      # The rules live in scripts/ios-fleet/version-plan.mjs (pure, no I/O);
+      # this is their unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet version-numbering rules
+        run: node --test scripts/ios-fleet/version-plan.node-test.mjs
+
+      # The shared merge-timestamp release build (owner, Oct 29 2026):  ONE
+      # build per app across iOS and macOS for a fixed marketing version,
+      # max(S, M + 1) as a plain integer, computed once per release.  The
+      # planner lives in scripts/ios-fleet/shared-build.mjs (pure, no I/O);
+      # this is its unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet shared release build
+        run: node --test scripts/ios-fleet/shared-build.test.mjs
+
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
       # a payload-shape regression in the collector can be caught before the
@@ -340,8 +404,15 @@ jobs:
       #    without jq, so a runner image change degrades rather than breaks).
       - name: Test session token collectors
         run: npm run test:session-token-collectors
+      - name: Test collector telemetry and durable delivery
+        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs scripts/telemetry-native-followup.node-test.mjs
       - name: Test detached collector runtime updates
         run: npm run test:collector-runtime
+
+      - name: Test Claude Duplicate Cleanup
+        env:
+          VITEST: "true"
+        run: node --test scripts/__tests__/claude-duplicate-cleanup.test.mjs scripts/__tests__/claude-duplicate-stored-plan.test.mjs scripts/__tests__/claude-duplicate-sqlite.test.mjs
 
       - name: Test CF token map
         run: npm run test:cf-token-map

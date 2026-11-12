@@ -10,6 +10,14 @@
 //
 // The scrubber that enforces the Sentry policy lives in ./allowlist.mjs.
 //
+<<<<<<< HEAD
+=======
+// ONE tick at a time.  A delivery pass can take far longer than the tick
+// interval, so the pass carries an in-flight guard: a second pass never
+// starts on top of the first one, so no event is delivered twice and no
+// two passes write the same offset file at the same time.
+//
+>>>>>>> origin/main
 // Usage:
 //   node scripts/telemetry-hub/hub.mjs [--dry-run] [--state-dir <path>]
 //        [--port <n>] [--um-base-url <url>] [--sentry-endpoint <url>]
@@ -19,6 +27,7 @@
 // telemetry and journals it, it never advances a delivery offset, and it
 // prints counts and key names only.  It never prints a producer value.
 
+<<<<<<< HEAD
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +37,20 @@ import { Journal } from "./journal.mjs";
 import { createReceiver } from "./otlp-receiver.mjs";
 import { createSentrySender } from "./sentry-sender.mjs";
 import { createUmSender } from "./um-sender.mjs";
+=======
+import { realpathSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { createLogger } from "./internal-event.mjs";
+import { Journal } from "./journal.mjs";
+import { createReceiver, parseReceiverSources } from "./otlp-receiver.mjs";
+import { createSentrySender } from "./sentry-sender.mjs";
+import { createUmSender } from "./um-sender.mjs";
+import { projectHubTelemetry } from "./metadata-projection.mjs";
+>>>>>>> origin/main
 
 const DEFAULT_STATE_DIR = join(homedir(), ".local", "state", "telemetry-hub");
 const DRY_RUN_STATE_SUFFIX = "-dry-run";
@@ -100,6 +123,14 @@ export async function runDeliveryPass({ umSender, sentrySender, logger }) {
   return { um, sentry };
 }
 
+<<<<<<< HEAD
+=======
+export function receiverJournal(journal, { metadataOnly = false } = {}) {
+  if (!metadataOnly) return journal;
+  return { appendBatch: (events) => journal.appendBatch(events.map(projectHubTelemetry)) };
+}
+
+>>>>>>> origin/main
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
@@ -117,20 +148,31 @@ export async function main(argv = process.argv.slice(2)) {
   const journal = new Journal({ dir: stateDir, logger });
   await journal.open();
 
+<<<<<<< HEAD
   const umSender = createUmSender({
     journal,
     //  `||` and not `??`: an empty env var must fall through so the sender's
     //  own default applies.  With `??` an empty string reached `createUmSender`
     //  as an explicit value, its default parameter never applied, and every
     //  UM request used a relative URL that fetch cannot resolve.
+=======
+  const sentryOnly = process.env.TELEMETRY_HUB_SENTRY_ONLY === "1";
+  const umSender = sentryOnly ? { destinations: [], runOnce: async () => ({ ok: true, disabled: true }) } : createUmSender({
+    journal,
+>>>>>>> origin/main
     baseUrl: options.umBaseUrl?.trim() || process.env.UM_BASE_URL?.trim() || undefined,
     dryRun: options.dryRun,
     logger,
   });
   const sentrySender = createSentrySender({
     journal,
+<<<<<<< HEAD
     endpoint: options.sentryEndpoint?.trim() || process.env.SENTRY_OTLP_ENDPOINT?.trim() || undefined,
     publicKey: process.env.SENTRY_PUBLIC_KEY?.trim() || undefined,
+=======
+    endpoint: options.sentryEndpoint ?? process.env.SENTRY_OTLP_ENDPOINT?.trim() ?? undefined,
+    publicKey: process.env.SENTRY_PUBLIC_KEY?.trim() ?? undefined,
+>>>>>>> origin/main
     dryRun: options.dryRun,
     logger,
   });
@@ -139,8 +181,15 @@ export async function main(argv = process.argv.slice(2)) {
 
   let receiver;
   if (options.receiver) {
+<<<<<<< HEAD
     receiver = createReceiver({ journal, logger, port: options.port });
     await receiver.listen();
+=======
+    receiver = createReceiver({ journal: receiverJournal(journal, { metadataOnly: process.env.TELEMETRY_HUB_METADATA_ONLY === "1" }), logger, port: options.port,
+      host: process.env.TELEMETRY_HUB_BIND_HOST || "127.0.0.1", sources: parseReceiverSources(process.env.TELEMETRY_HUB_SOURCES_JSON) });
+    await receiver.listen();
+    if (process.env.TELEMETRY_HUB_READINESS_FILE) await writeFile(process.env.TELEMETRY_HUB_READINESS_FILE, JSON.stringify({ host: receiver.host, port: options.port }), { mode: 0o600 });
+>>>>>>> origin/main
     logger.info("the otlp receiver is listening", { host: receiver.host, port: options.port });
   }
 
@@ -155,6 +204,10 @@ export async function main(argv = process.argv.slice(2)) {
     if (stopping) return;
     stopping = true;
     if (receiver) await receiver.close();
+<<<<<<< HEAD
+=======
+    if (process.env.TELEMETRY_HUB_READINESS_FILE) await unlink(process.env.TELEMETRY_HUB_READINESS_FILE).catch(() => {});
+>>>>>>> origin/main
     await journal.close();
   };
   process.on("SIGINT", () => {
@@ -170,6 +223,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
+<<<<<<< HEAD
   //  A pass can take far longer than the tick (three attempts against a 20s
   //  timeout, plus backoff, per chunk per destination), so a naive interval
   //  would overlap passes: both would read the same journal offset and
@@ -182,6 +236,19 @@ export async function main(argv = process.argv.slice(2)) {
     deliveryInFlight = true;
     void runDeliveryPass({ umSender, sentrySender, logger }).finally(() => {
       deliveryInFlight = false;
+=======
+  //  A pass can take far longer than the tick: three attempts with a
+  //  twenty second timeout and a backoff, per chunk, per destination.  The
+  //  in-flight flag keeps a second pass from starting on top of the first
+  //  one, so no event is delivered twice and no two passes write the same
+  //  offset file at the same time.
+  let inFlight = false;
+  const timer = setInterval(() => {
+    if (inFlight) return;
+    inFlight = true;
+    void runDeliveryPass({ umSender, sentrySender, logger }).finally(() => {
+      inFlight = false;
+>>>>>>> origin/main
     });
   }, DEFAULT_TICK_MS);
   timer.unref?.();
@@ -195,9 +262,44 @@ export async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
+<<<<<<< HEAD
 const invokedDirectly = process.argv[1]
   ? import.meta.url === pathToFileURL(process.argv[1]).href
   : false;
+=======
+/**
+ * Is this module the program that node was started with?
+ *
+ * Node resolves the URL of the entry module to its REAL path, so
+ * `import.meta.url` points at the file on disk, while `process.argv[1]`
+ * keeps the path as it was typed.  When the two paths differ by a symlink
+ * — a lane under /Users/jay/apps/lanes, a checkout under /tmp, any
+ * symlinked install — a plain comparison says "not the entry module", the
+ * hub then starts, does nothing, and exits 0 in silence.  A LaunchAgent
+ * pointed at such a path looks healthy and collects nothing.
+ *
+ * Both sides are therefore resolved to their real paths before they are
+ * compared.
+ *
+ * @param {string|undefined} argv1  `process.argv[1]`
+ * @param {string|undefined} metaUrl  `import.meta.url`
+ * @returns {boolean}
+ */
+export function isInvokedDirectly(argv1, metaUrl) {
+  if (!argv1 || !metaUrl) return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    try {
+      return metaUrl === pathToFileURL(argv1).href;
+    } catch {
+      return false;
+    }
+  }
+}
+
+const invokedDirectly = isInvokedDirectly(process.argv[1], import.meta.url);
+>>>>>>> origin/main
 if (invokedDirectly) {
   main().then(
     (code) => {

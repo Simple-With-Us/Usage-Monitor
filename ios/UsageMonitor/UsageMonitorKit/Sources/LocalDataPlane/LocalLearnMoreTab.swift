@@ -1,7 +1,7 @@
 import SwiftUI
 import DesignSystem
 
-/// Learn More tab for Usage Local Monitor — the on-device app.
+/// Learn More tab for Usage Monitor Local — the on-device app.
 /// Owner 2026-09-09: one tab for what the hosted dashboard and the iPhone app
 /// are, what this app can do, and where to read more.  Not an Agents tab.
 ///
@@ -28,7 +28,7 @@ public struct LocalLearnMoreTab: View {
     private var sectionOverview: some View {
         Section {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                Text("This is Usage Local Monitor.  It keeps spend, budgets, and API keys on this device — no hosted server required.")
+                Text("This is Usage Monitor Local.  It keeps spend, budgets, and API keys on this device — no hosted server required.")
                     .font(Theme.Typography.body)
                 Text("It is one of three Usage Monitor pieces.  The other two are the hosted dashboard and the App Store iPhone app.")
                     .font(Theme.Typography.body)
@@ -78,7 +78,7 @@ public struct LocalLearnMoreTab: View {
                 fleetRow(
                     icon: "iphone",
                     color: Color(red: 0.05, green: 0.72, blue: 0.68),
-                    title: "Usage Local Monitor (This App)",
+                    title: "Usage Monitor Local (This App)",
                     detail: "On this device.  Spend and keys stay here."
                 )
                 fleetRow(

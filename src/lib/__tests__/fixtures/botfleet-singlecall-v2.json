@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 2,
+  "producerId": "botfleet",
+  "producerInstanceId": "fixture-host",
+  "events": [
+    {
+      "eventId": "bf-call-v1:a6043a3009483bc18cdc077b3394215302fefd01642ed189d214eab525022c0d",
+      "environment": "operator",
+      "provider": "anthropic",
+      "service": "unknown",
+      "project": "general",
+      "label": "Fixture",
+      "billingMode": "estimated",
+      "metricType": "usage",
+      "quantity": 100,
+      "unit": "token",
+      "requests": 1,
+      "confidence": "estimated",
+      "occurredAt": "2026-10-30T20:00:00.000Z",
+      "metadata": {
+        "botName": "Fixture",
+        "botId": "fixture-bot",
+        "threadId": "fixture-thread",
+        "inputTokens": 80,
+        "outputTokens": 20,
+        "cachedInputTokens": 30,
+        "cwd": null,
+        "success": true,
+        "model": null,
+        "instanceId": "fixture-claude",
+        "usageReported": true,
+        "cacheWriteTokens": 40,
+        "servedModel": "claude-test",
+        "childHarness": "claudeAgent",
+        "childSessionId": "fixture-session",
+        "billedCallProofVersion": 1,
+        "billedCallId": "fixture-call",
+        "billedCallModel": "claude-test",
+        "billedCallOutput": 20,
+        "billedCallCacheRead": 30,
+        "billedCallCacheWrite": 40
+      },
+      "ai": {
+        "model": {
+          "served": "claude-test"
+        },
+        "harness": "botfleet",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "cacheRead": 30,
+          "cacheWrite5m": 40,
+          "cacheWrite1h": 0
+        }
+      }
+    }
+  ]
+}

@@ -75,6 +75,103 @@ describe("mapOtlpTracesRequest", () => {
     expect(result.turns).toHaveLength(0);
     expect(result.ignored).toBe(1);
   });
+
+  it("labels OpenRouter Broadcast spans with the gateway and accepts legacy token aliases", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat openai/gpt-5",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500001250000000",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-1" } },
+                    { key: "gen_ai.system", value: { stringValue: "openai" } },
+                    { key: "gen_ai.request.model", value: { stringValue: "openai/gpt-5" } },
+                    { key: "gen_ai.response.id", value: { stringValue: "gen-1" } },
+                    { key: "gen_ai.usage.prompt_tokens", value: { intValue: "120" } },
+                    { key: "gen_ai.usage.completion_tokens", value: { intValue: "35" } },
+                    { key: "gen_ai.usage.cost", value: { doubleValue: 0.14 } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({ ignored: 0 });
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0]).toMatchObject({
+      platform: "openrouter",
+      seat: "openrouter",
+      model: "openai/gpt-5",
+      generationId: "gen-1",
+      inputTokens: 120,
+      outputTokens: 35,
+      costUsd: 0.14,
+      durationMs: 1250,
+    });
+  });
+
+  it("applies an OpenRouter gateway marker to unmarked sibling spans", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat openai/gpt-5",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-3" } },
+                    { key: "gen_ai.system", value: { stringValue: "openai" } },
+                  ],
+                },
+                {
+                  name: "chat anthropic/claude-sonnet",
+                  attributes: [
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.turns.map((turn) => turn.platform)).toEqual(["openrouter", "openrouter"]);
+  });
+
+  it("keeps an explicit coding platform over the OpenRouter gateway marker", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "chat",
+                  attributes: [
+                    { key: "openrouter.trace.id", value: { stringValue: "or-trace-2" } },
+                    { key: "agent.platform", value: { stringValue: "opencode" } },
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.turns[0].platform).toBe("opencode");
+  });
 });
 
 describe("mapDirectTurnsRequest", () => {
@@ -107,6 +204,74 @@ describe("mapDirectTurnsRequest", () => {
     expect(turn.toolCount).toBe(2);
     expect(turn.occurredAt.toISOString()).toBe("2026-10-11T12:00:00.000Z");
     expect(turn.contentExpiresAt).toBeInstanceOf(Date);
+  });
+
+  it("labels Claude Code trace turns with the harness, not the model vendor", () => {
+    // Claude Code's spans carry gen_ai.system="anthropic" and name the harness
+    // in the span prefix / service.name.  AgentTurn.platform must stay a
+    // coding-platform value so a producer-scoped OTLP credential (producer
+    // "claude-code") can write its own turns; labelling the turn "anthropic"
+    // made the whole trace batch 403 at /api/otlp/v1/traces.
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [
+              { key: "service.name", value: { stringValue: "claude-code" } },
+              { key: "seat", value: { stringValue: "CLAUDE" } },
+            ],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "claude_code.interaction",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500002000000000",
+                  attributes: [
+                    { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                    { key: "session.id", value: { stringValue: "sess-1" } },
+                    { key: "model", value: { stringValue: "claude-opus-5-5" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0].platform).toBe("claude-code");
+    expect(result.turns[0].seat).toBe("CLAUDE");
+    expect(result.turns[0].conversationId).toBe("sess-1");
+  });
+
+  it("keeps an explicit agent.platform over the Claude Code harness default", () => {
+    const result = mapOtlpTracesRequest({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: "service.name", value: { stringValue: "claude-code" } }],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                {
+                  name: "claude_code.interaction",
+                  startTimeUnixNano: "1751500000000000000",
+                  endTimeUnixNano: "1751500001000000000",
+                  attributes: [
+                    { key: "agent.platform", value: { stringValue: "claude-code-desktop" } },
+                    { key: "session.id", value: { stringValue: "sess-2" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(result.turns[0].platform).toBe("claude-code-desktop");
   });
 
   it("ignores malformed entries and caps the batch", () => {

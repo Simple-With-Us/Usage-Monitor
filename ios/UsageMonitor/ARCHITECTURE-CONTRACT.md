@@ -20,8 +20,8 @@ total spend).
 
 | App target | Bundle ID | Role |
 |---|---|---|
-| **UsageMonitor** (Usage Client Monitor) | `com.simplewithus.usage.client.ios` | Remote live-sync client (owner + server self-hosters). §§1–9. |
-| **LocalUsageMonitor** (Usage Local Monitor) | `com.simplewithus.usage.local.ios` | On-device self-host product. §10 + design doc. |
+| **UsageMonitor** (Usage Monitor Client) | `com.simplewithus.usage.client.ios` | Remote live-sync client (owner + server self-hosters). §§1–9. |
+| **LocalUsageMonitor** (Usage Monitor Local) | `com.simplewithus.usage.local.ios` | On-device self-host product. §10 + design doc. |
 
 See `ios/README.md` and
 `docs/designs/2026-08-04-mobile-parity-and-phone-self-host.md`.
@@ -345,7 +345,7 @@ depend on both AppCore and the integration modules.
 
 ---
 
-## 10. Usage Local Monitor (separate app) — addendum
+## 10. Usage Monitor Local (separate app) — addendum
 
 **Authority:** `docs/designs/2026-08-04-mobile-parity-and-phone-self-host.md`.
 This section binds the **LocalUsageMonitor** app target only. §§1–9 bind
@@ -355,8 +355,8 @@ This section binds the **LocalUsageMonitor** app target only. §§1–9 bind
 
 | App | Xcode scheme | Money-truth | App group |
 |---|---|---|---|
-| **UsageMonitor** (Usage Client Monitor) | `UsageMonitor` | Remote server SQLite via HTTPS | `group.com.simplewithus.usage` |
-| **LocalUsageMonitor** (Usage Local Monitor) | `LocalUsageMonitor` | On-device GRDB (PR-2+) | `group.com.simplewithus.usage` |
+| **UsageMonitor** (Usage Monitor Client) | `UsageMonitor` | Remote server SQLite via HTTPS | `group.com.simplewithus.usage` |
+| **LocalUsageMonitor** (Usage Monitor Local) | `LocalUsageMonitor` | On-device GRDB (PR-2+) | `group.com.simplewithus.usage` |
 
 - **Do not** merge these into one binary with a runtime switch.
 - Local app must **not** link remote money write paths (`APIClient` mutations,
@@ -416,5 +416,5 @@ Materializer     → LocalStore             subscription_charge rows (planned)
    **UsageMonitor** client talking to a server).
 5. Any PR that ports server money math must cite design §2.3 and add golden
    vector tests before merge.
-6. Deep links: Usage Local Monitor uses `usagelocalmonitor://`; Usage Client
+6. Deep links: Usage Monitor Local uses `usagelocalmonitor://`; Usage Client
    Monitor uses `usageclientmonitor://`.

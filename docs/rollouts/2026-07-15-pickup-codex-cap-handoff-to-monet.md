@@ -22,13 +22,13 @@ Almost everything is already done. Do not re-do it.
 
 ## 1. What I picked up and why
 
-CODEX hit its weekly usage cap (last #agent-sync post 2026-07-14T23:00Z). Owner asked CLAUDE to pick up its lanes. CODEX reported these as active before the cap:
+CODEX hit its weekly usage cap (last #ag***-s**c post 2026-07-14T23:00Z). Owner asked CLAUDE to pick up its lanes. CODEX reported these as active before the cap:
 - UI provider-grouping redesign subagent
 - Infisical / API-key automatic-sync subagent
 - Scheduler serialization fix (committed and pushed)
 - Anthropic receipt reconciliation (committed locally)
 
-I posted the pickup claim to #agent-sync as `[CLAUDE->FLEET]` and reserved a row on the live board (`/Users/jay/apps/API-USAGE-MONITOR-EFFORT-LOG.md`, In Progress). This entire pickup was **read-only** — no `codex/*` pushes, no production writes. Any gap fixes are to land as new `claude/*` (or your `monet/*`) PRs.
+I posted the pickup claim to #ag***-s**c as `[CLAUDE->FLEET]` and reserved a row on the live board (`/Users/jay/apps/API-USAGE-MONITOR-EFFORT-LOG.md`, In Progress). This entire pickup was **read-only** — no `codex/*` pushes, no production writes. Any gap fixes are to land as new `claude/*` (or your `monet/*`) PRs.
 
 ---
 
@@ -56,7 +56,7 @@ Adds `scripts/reconcile-anthropic-receipts.mjs` (362 lines) — an **earlier-nam
 - Local branch `codex-scheduler-ingest-serialization` = `22dc8a8`.
 - Dirty worktrees `/Users/jay/apps/api-usage-monitor-scheduler-admission` and `/Users/jay/.codex/worktrees/api-usage-monitor-scheduler-admission-current-main` (uncommitted edits to `ingest-admission.ts`, `data-retention.ts`, `alert-delivery.ts`, tests).
 
-CODEX-ROOT's own #agent-sync HOLD on this diff said it *"wraps the entire `runDataRetentionMaintenance()` under one admission token, lacks reentrant/nested ownership… no test changes."* **Main's landed #251/#253 fixes exactly that** — `ingest-admission.ts` on main has `acquireInternalUsageWriteAdmissionLease` returning `{ owner, release }` (reentrant, owner-tracked), and `usage-maintenance.ts` uses it. So `4fa4176` is the **inferior earlier attempt**. **Verdict: superseded; do not resurrect.** Prod scheduler is healthy. Clean up the branches and (after eyeballing them once for anything novel) the dirty worktrees.
+CODEX-ROOT's own #ag***-s**c HOLD on this diff said it *"wraps the entire `runDataRetentionMaintenance()` under one admission token, lacks reentrant/nested ownership… no test changes."* **Main's landed #251/#253 fixes exactly that** — `ingest-admission.ts` on main has `acquireInternalUsageWriteAdmissionLease` returning `{ owner, release }` (reentrant, owner-tracked), and `usage-maintenance.ts` uses it. So `4fa4176` is the **inferior earlier attempt**. **Verdict: superseded; do not resurrect.** Prod scheduler is healthy. Clean up the branches and (after eyeballing them once for anything novel) the dirty worktrees.
 
 ### 3.3 `codex-infisical-provider-sync` (dirty worktree `/Users/jay/apps/api-usage-monitor-infisical-provider-sync`, ~36 uncommitted files)
 Superseded by PR #268 (the `-current-main` twin lane that actually merged). The dirty tree is on a **very stale base** (diff-vs-main shows ~30k deletions = it's missing ~250 merged PRs, not adding value). **Verdict: superseded.** I did a structural (not file-by-file) comparison — Monet should do one quick `diff <worktree>/<file> main-ro/<file>` pass on the non-doc files before `git worktree remove` to be certain nothing novel is stranded, but I expect nothing.
@@ -102,7 +102,7 @@ I verified 16 high-value items from the original 84-finding review. **13 FIXED, 
    - Dashboard auto-refresh (60s poll / focus refetch).
    - Auth hardening trio (XFF trust, HMAC key separation, constant-time `CRON_SECRET`).
 3. **Worktree/branch cleanup (§3)** — after a quick eyeball of the dirty scheduler + infisical worktrees for anything novel (I expect nothing): `git worktree remove` the superseded ones and delete the residue branches. There are ~60 stale worktrees under `/Users/jay/apps/api-usage-monitor-*` and `/Users/jay/.codex/worktrees/*` — most correspond to already-merged PRs; prune aggressively but verify each branch is an ancestor of / equivalent to `main` first (`git cherry origin/main <branch>`).
-4. **Close out** — flip the board row (In Progress → Completed/Deployed), and post `[MONET->FLEET]` on #agent-sync naming final state.
+4. **Close out** — flip the board row (In Progress → Completed/Deployed), and post `[MONET->FLEET]` on #ag***-s**c naming final state.
 
 ### Do NOT
 - Do not re-land any of the four §2 lanes — they're live.

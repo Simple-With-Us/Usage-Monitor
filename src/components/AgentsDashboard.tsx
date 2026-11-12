@@ -315,6 +315,7 @@ export function AgentsDashboard() {
                 return (
                   <div
                     key={platform.id}
+                    data-testid={`agent-platform-${platform.id}`}
                     className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-col justify-between transition-all"
                   >
                     <div>
@@ -327,7 +328,7 @@ export function AgentsDashboard() {
                               {platform.provider}
                             </span>
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">{platform.notes}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{withSentenceGaps(platform.notes)}</p>
                         </div>
 
                         {/* Status Badge */}
@@ -350,12 +351,12 @@ export function AgentsDashboard() {
                       </div>
 
                       {/* Stats Overview */}
-                      {!platform.usageIsReliable ? (
+                      {!platform.usageIsReliable || platform.telemetryAccuracy === "partial" ? (
                         <div
                           role="status"
                           className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
                         >
-                          <span className="font-semibold">not reported.</span>
+                          <span className="font-semibold">{platform.telemetryAccuracyLabel}.</span>
                           {SENTENCE_GAP}
                           {withSentenceGaps(platform.telemetryAccuracyNote)}
                         </div>
@@ -436,7 +437,7 @@ export function AgentsDashboard() {
                       </span>
                       <span
                         className={`capitalize font-mono text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
-                          platform.usageIsReliable
+                          platform.usageIsReliable && platform.telemetryAccuracy !== "partial"
                             ? "bg-muted/60"
                             : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
                         }`}

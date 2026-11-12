@@ -27,12 +27,22 @@
 //       log body is never forwarded.
 //   S7  A span's `events` and `links` arrays are dropped, because Sentry
 //       drops them server-side anyway and they can carry content.
+<<<<<<< HEAD
+=======
+//   S8  A scope is PROJECTED, never forwarded as it arrived.  Its attributes
+//       go through the allowlist like every other attribute list.
+>>>>>>> origin/main
 //
 // This module has no imports on purpose: it is the security-critical core
 // and it must stay independently testable.
 
 /**
+<<<<<<< HEAD
  * The complete set of attribute keys that may leave the Mac for Sentry.
+=======
+ * Canonical attribute keys whose values may leave the Mac for Sentry.
+ * The fixed numeric wire aliases below preserve those same values on re-scrub.
+>>>>>>> origin/main
  *
  * There is NO prompt, NO tool argument, NO tool result, NO file path, NO
  * project name, NO user identifier, NO session id, NO conversation id and NO
@@ -40,6 +50,10 @@
  * deliberate edit here, not a config toggle.
  */
 export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
+<<<<<<< HEAD
+=======
+  "agent.platform",
+>>>>>>> origin/main
   "gen_ai.system",
   "gen_ai.operation.name",
   "gen_ai.request.model",
@@ -63,7 +77,56 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
   "service.version",
 ]);
 
+<<<<<<< HEAD
 const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
+=======
+const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "moonshot", "zcode", "xai", "meta", "groq", "together_ai", "openrouter"]);
+export function knownAiVendor(value) {
+  return typeof value === "string" && AI_VENDORS.has(value.toLowerCase()) ? value.toLowerCase() : undefined;
+}
+
+/**
+ * Sentry's own typed span columns.
+ *
+ * Measured Oct-21-2026 against the throwaway Sentry project with one probe
+ * span per shape: a numeric value is stored ONLY on these keys, and a
+ * string on one of them is dropped whole.  Every other key is a string
+ * column for Sentry, and a number on such a key is dropped whole too.  So
+ * the hub keeps a number a number on these keys and sends every other
+ * allowlisted value as a string.  Sending it the other way round loses the
+ * value, which is how `duration_ms`, `ttft_ms`, `context.limit` and
+ * `context.utilization_pct` never reached the stored span.
+ */
+const SENTRY_NUMERIC_ATTRIBUTES = new Set([
+  "gen_ai.usage.input_tokens",
+  "gen_ai.usage.output_tokens",
+  "gen_ai.usage.cache_read_input_tokens",
+  "gen_ai.usage.cache_creation_input_tokens",
+  "gen_ai.usage.total_tokens",
+  "http.response.status_code",
+]);
+
+/**
+ * Sentry filters any attribute whose key carries the word "token" when the
+ * value is a string: the stored value becomes the literal marker
+ * `[Filtered]`.  A number on such a key is dropped instead, so a key with
+ * "token" in its name can only reach Sentry on one of the typed columns
+ * above.  `gen_ai.usage.reasoning_tokens` is not one of them, so it can
+ * never arrive under that name, and neither can `context.tokens`.
+ *
+ * These two attributes therefore travel under a different name on the
+ * Sentry wire.  The producer contract does not move: the internal event
+ * keeps the original keys and the Usage Monitor path reads them unchanged,
+ * so only the Sentry payload is affected.
+ */
+const SENTRY_ATTRIBUTE_RENAMES = new Map([
+  ["context.tokens", "context.used"],
+  ["gen_ai.usage.reasoning_tokens", "gen_ai.usage.reasoning_count"],
+]);
+// Re-scrubbing a Sentry envelope accepts only these deliberate numeric aliases.
+const SENTRY_RENAMED_NUMERIC_ATTRIBUTES = new Set(SENTRY_ATTRIBUTE_RENAMES.values());
+const ALLOWLIST_SET = new Set([...SENTRY_ATTRIBUTE_ALLOWLIST, ...SENTRY_RENAMED_NUMERIC_ATTRIBUTES]);
+>>>>>>> origin/main
 
 /**
  * Producer free-text fields.  These are CONTENT: they belong to the UM path
@@ -140,6 +203,46 @@ export function otlpAttribute(key, value) {
 }
 
 /**
+<<<<<<< HEAD
+=======
+ * Build one attribute for the Sentry path.
+ *
+ * The type follows Sentry's own columns, not the type of the value: the
+ * typed numeric columns keep their numbers, and every other allowlisted
+ * attribute is sent as a string, because a number or a boolean on a string
+ * column is dropped by Sentry.  A key that Sentry filters by name is
+ * renamed first, so the value survives under the new name.
+ */
+function sentryAttribute(key, value) {
+  const outKey = SENTRY_ATTRIBUTE_RENAMES.get(key) ?? key;
+  if (SENTRY_RENAMED_NUMERIC_ATTRIBUTES.has(outKey)) {
+    const number = typeof value === "number" ? value : typeof value === "string" && value.length <= 32 && value !== "" ? Number(value) : NaN;
+    const canonical = typeof value === "number" || String(number) === value;
+    return canonical && Number.isFinite(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? otlpAttribute(outKey, String(number)) : undefined;
+  }
+  if (SENTRY_NUMERIC_ATTRIBUTES.has(outKey)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return otlpAttribute(outKey, value);
+    }
+    //  A numeric string still belongs on a numeric column, so it is
+    //  parsed rather than sent as text and dropped by Sentry.
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed !== "") {
+        const parsed = Number(trimmed);
+        if (Number.isFinite(parsed)) return otlpAttribute(outKey, parsed);
+      }
+    }
+    return undefined;
+  }
+  if (typeof value === "string") return otlpAttribute(outKey, value);
+  if (typeof value === "boolean") return otlpAttribute(outKey, value ? "true" : "false");
+  if (typeof value === "number" && Number.isFinite(value)) return otlpAttribute(outKey, String(value));
+  return undefined;
+}
+
+/**
+>>>>>>> origin/main
  * The core policy gate: an attribute survives only if its key is on the
  * allowlist.  A key that is not allowed is dropped WHOLE, together with its
  * value, so there is nothing left to redact (S2, S3).
@@ -156,7 +259,11 @@ export function scrubOtlpAttributes(attributes, options) {
     if (!keyIsAllowed(key, dropKeys)) continue;
     const scalar = scalarFromAnyValue(entry.value);
     if (scalar === undefined) continue;
+<<<<<<< HEAD
     const attribute = otlpAttribute(key, scalar);
+=======
+    const attribute = sentryAttribute(key, scalar);
+>>>>>>> origin/main
     if (attribute) out.push(attribute);
   }
   return out;
@@ -174,12 +281,20 @@ export function scrubAttributeMap(map, options) {
     if (!keyIsAllowed(key, dropKeys)) continue;
     if (value === undefined || value === null) continue;
     if (typeof value === "string" || typeof value === "boolean") {
+<<<<<<< HEAD
       const attribute = otlpAttribute(key, value);
+=======
+      const attribute = sentryAttribute(key, value);
+>>>>>>> origin/main
       if (attribute) out.push(attribute);
       continue;
     }
     if (typeof value === "number" && Number.isFinite(value)) {
+<<<<<<< HEAD
       const attribute = otlpAttribute(key, value);
+=======
+      const attribute = sentryAttribute(key, value);
+>>>>>>> origin/main
       if (attribute) out.push(attribute);
     }
   }
@@ -236,6 +351,32 @@ function boundedNumber(value) {
 }
 
 /**
+<<<<<<< HEAD
+=======
+ * Project one OTLP scope object.
+ *
+ * The scope is producer controlled, so it is never forwarded as it arrived.
+ * The name and the version are bounded strings, the attributes go through
+ * the same allowlist as every other attribute list, and everything else is
+ * dropped.  A scope with no valid field becomes an empty object.
+ */
+export function projectScope(scope, options) {
+  if (!isPlainObject(scope)) return {};
+  const out = {};
+  const name = boundedName(scope.name);
+  if (name) out.name = name;
+  const version = boundedName(scope.version);
+  if (version) out.version = version;
+  const attributes = scrubOtlpAttributes(scope.attributes, options);
+  out.attributes = attributes;
+  if (Number.isInteger(scope.droppedAttributesCount) && scope.droppedAttributesCount >= 0) {
+    out.droppedAttributesCount = scope.droppedAttributesCount;
+  }
+  return out;
+}
+
+/**
+>>>>>>> origin/main
  * Scrub ONE OTLP span.
  *
  * Keeps the identity and timing fields, filters the attributes through the
@@ -315,7 +456,11 @@ export function scrubResourceSpans(payload, options) {
         const scrubbed = scrubSpan(span, options);
         if (scrubbed) outSpans.push(scrubbed);
       }
+<<<<<<< HEAD
       if (outSpans.length > 0) outScopes.push({ scope: isPlainObject(scope.scope) ? scope.scope : {}, spans: outSpans });
+=======
+      if (outSpans.length > 0) outScopes.push({ scope: projectScope(scope.scope, options), spans: outSpans });
+>>>>>>> origin/main
     }
     if (outScopes.length === 0) continue;
     out.push({
@@ -350,7 +495,11 @@ export function scrubResourceLogs(payload, options) {
         const scrubbed = scrubLogRecord(record, options);
         if (scrubbed) outRecords.push(scrubbed);
       }
+<<<<<<< HEAD
       if (outRecords.length > 0) outScopes.push({ scope: isPlainObject(scope.scope) ? scope.scope : {}, logRecords: outRecords });
+=======
+      if (outRecords.length > 0) outScopes.push({ scope: projectScope(scope.scope, options), logRecords: outRecords });
+>>>>>>> origin/main
     }
     if (outScopes.length === 0) continue;
     out.push({
@@ -382,7 +531,12 @@ export function internalEventAttributes(event, options) {
   const tokens = isPlainObject(event.tokens) ? event.tokens : {};
   const context = isPlainObject(event.context) ? event.context : {};
   const typed = [
+<<<<<<< HEAD
     ["gen_ai.system", event.platform],
+=======
+    ["agent.platform", event.platform],
+    ["gen_ai.system", knownAiVendor(event.vendor)],
+>>>>>>> origin/main
     ["gen_ai.operation.name", event.operation],
     ["gen_ai.request.model", event.model],
     ["gen_ai.response.model", event.model],
@@ -403,8 +557,16 @@ export function internalEventAttributes(event, options) {
   ];
   for (const [key, value] of typed) {
     if (value === undefined || value === null) continue;
+<<<<<<< HEAD
     const attribute = otlpAttribute(key, value);
     if (attribute) merged.set(key, attribute);
+=======
+    const attribute = sentryAttribute(key, value);
+    //  The map is keyed by the attribute's OWN key, so a renamed attribute
+    //  and the producer attribute it renames collapse into one entry
+    //  instead of shipping the same wire key twice.
+    if (attribute) merged.set(attribute.key, attribute);
+>>>>>>> origin/main
   }
   if (Array.isArray(event.toolNames) && event.toolNames.length > 0) {
     const names = event.toolNames
@@ -412,6 +574,7 @@ export function internalEventAttributes(event, options) {
       .map((name) => name.trim())
       .join(",");
     if (names) {
+<<<<<<< HEAD
       const attribute = otlpAttribute("gen_ai.tool.name", names.slice(0, MAX_TOOL_NAME_CHARS));
       if (attribute) merged.set("gen_ai.tool.name", attribute);
     }
@@ -419,6 +582,15 @@ export function internalEventAttributes(event, options) {
   if (typeof event.toolStatus === "string" && event.toolStatus.trim()) {
     const attribute = otlpAttribute("gen_ai.tool.status", event.toolStatus);
     if (attribute) merged.set("gen_ai.tool.status", attribute);
+=======
+      const attribute = sentryAttribute("gen_ai.tool.name", names.slice(0, MAX_TOOL_NAME_CHARS));
+      if (attribute) merged.set(attribute.key, attribute);
+    }
+  }
+  if (typeof event.toolStatus === "string" && event.toolStatus.trim()) {
+    const attribute = sentryAttribute("gen_ai.tool.status", event.toolStatus);
+    if (attribute) merged.set(attribute.key, attribute);
+>>>>>>> origin/main
   }
   return [...merged.values()];
 }
@@ -443,7 +615,16 @@ export function scrubInternalEvent(event, options) {
   if (typeof stripped.durationMs === "number" && Number.isFinite(stripped.durationMs)) {
     out.durationMs = stripped.durationMs;
   }
+<<<<<<< HEAD
   if (typeof stripped.operation === "string") out.name = stripped.operation;
+=======
+  //  The span name is the operation, and the operation is an ALLOWLISTED
+  //  value: it comes from the `gen_ai.operation.name` attribute and never
+  //  from a raw span name.  It is bounded here as well, so a hand edited
+  //  journal row cannot push an unbounded string into the envelope.
+  const name = boundedName(stripped.operation);
+  if (name) out.name = name;
+>>>>>>> origin/main
   if (out.kind === "log") {
     out.body = { stringValue: rebuildLogBody(attributes) };
     out.severityNumber = stripped.status === "error" ? 17 : 9;

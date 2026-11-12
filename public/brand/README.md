@@ -1,6 +1,6 @@
 # Brand icons (web)
 
-Source: iOS **Usage Client Monitor** AppIcon  
+Source: iOS **Usage Monitor Client** AppIcon  
 `ios/UsageMonitor/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png`
 
 | File | Use |
