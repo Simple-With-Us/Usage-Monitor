@@ -99,23 +99,40 @@ test('Next build config wires explicit Sentry release identity',async()=>{
  assert.ok(builder.indexOf('SOURCE_COMMIT=${SOURCE_COMMIT}')<builder.lastIndexOf('npm run build'));
 });
 
-async function nextBuildConfig(env, onPluginLoad=()=>{}) {
+async function nextBuildConfig(env, onPluginLoad=()=>{}, phase='phase-production-build') {
  const {readFileSync}=await import('node:fs');
  const {runInNewContext}=await import('node:vm');
  const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
  let options, calls=0;
  const context={__dirname:'/app',process:{env},module:{exports:{}},require:(name)=>{
    if(name==='path')return {join:()=>'/app'};
+   if(name==='next/constants')return {PHASE_PRODUCTION_BUILD:'phase-production-build',PHASE_DEVELOPMENT_SERVER:'phase-development-server'};
    if(name==='./scripts/sentry-build-release.cjs')return {sentryBuildRelease:()=>sentryBuildRelease(env)};
    assert.equal(name,'@sentry/nextjs/config');
    onPluginLoad();
    return {withSentryConfig:(config,input)=>{calls++;options=input;return config;}};
  }};
  runInNewContext(readFileSync(new URL('../next.config.js',import.meta.url),'utf8'),context);
- return {options,calls,config:context.module.exports};
+ const config=await context.module.exports(phase);
+ return {options,calls,config};
 }
+test('runtime token without source SHA does not load the upload plugin or fail startup',async()=>{
+ for(const phase of ['phase-production-server','phase-development-server']) {
+   for(const source of [undefined,'','unknown',newer.slice(0,12)]) {
+     const {calls,config}=await nextBuildConfig({NODE_ENV:'production',SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:source},()=>{},phase);
+     assert.equal(calls,0);
+     assert.equal(config.poweredByHeader,false);
+   }
+ }
+ const {calls,options}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SENTRY_DSN:'test-only'},()=>{},'phase-production-server');
+ assert.equal(calls,1);
+ assert.equal(options.authToken,undefined);
+ assert.equal(options.sourcemaps.disable,true);
+ assert.equal(options.errorHandler,undefined);
+});
 test('credential-free builds avoid uploads and the plugin when no DSN is set',async()=>{
  assert.equal((await nextBuildConfig({})).calls,0);
+ assert.equal((await nextBuildConfig({SENTRY_AUTH_TOKEN:''})).calls,0);
  const {options}=await nextBuildConfig({NEXT_PUBLIC_SENTRY_DSN:'test-only'});
  assert.equal(options.sourcemaps.disable,true);
  assert.equal(options.authToken,undefined);
@@ -160,13 +177,38 @@ test('Docker exposes the upload token only as an optional build secret',async()=
  const [builder,runtime]=docker.split(/FROM .* AS runtime/);
  const buildRun=builder.match(/RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN[\s\S]*?npm run build/)?.[0];
  assert.ok(buildRun);
- for(const key of ['SENTRY_AUTH_TOKEN','NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
-   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},env=${key}`),`${key} must reach the build in Coolify secret mode`);
+ assert.ok(buildRun.includes('--mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN,required=false'));
+ for(const key of ['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
+   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},required=false \\`),`${key} must reach the build as an optional file`);
+   assert.ok(!buildRun.includes(`env=${key}`),`${key} must preserve build-argument fallbacks when absent`);
  }
  assert.match(builder,/ARG SENTRY_ORG="simple-with-us"/);
  assert.match(builder,/ARG SENTRY_SELF_PROJECT="usage-monitor"/);
  assert.doesNotMatch(docker,/^(?:ARG|ENV)\s+SENTRY_AUTH_TOKEN/m);
  assert.doesNotMatch(runtime,/SENTRY_AUTH_TOKEN/);
+});
+test('Docker public configuration preserves arguments and accepts mounted overrides',async()=>{
+ const {readFileSync,mkdtempSync,writeFileSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const {execFileSync}=await import('node:child_process');
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const exports=docker.match(/for key in NEXT_PUBLIC_SENTRY_DSN[\s\S]*?done/)?.[0].replace(/\\\n/g,'');
+ assert.ok(exports);
+ const keys=['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA'];
+ for(const mode of ['absent','complete','partial','empty']) {
+   const mounted=mode==='absent'?[]:mode==='partial'?[keys[0],keys[3]]:keys;
+   const dir=mkdtempSync(join(tmpdir(),'sentry-public-build-'));
+   try {
+     const env={PATH:process.env.PATH};
+     for(const key of keys) {
+       env[key]=`argument-${key}`;
+       if(mounted.includes(key))writeFileSync(join(dir,key),mode==='empty'?'':`mounted-${key}`);
+     }
+     const actual=JSON.parse(execFileSync('sh',['-ec',exports.replaceAll('/run/secrets/',`${dir}/`)+`\nexec '${process.execPath}' -e 'console.log(JSON.stringify(process.env))'`],{env,encoding:'utf8'}));
+     for(const key of keys)assert.equal(actual[key],`${mounted.includes(key)&&mode!=='empty'?'mounted':'argument'}-${key}`);
+   } finally { rmSync(dir,{recursive:true,force:true}); }
+ }
 });
 
 test('UM attribution refuses incomplete GitHub PR pagination',async()=>{
