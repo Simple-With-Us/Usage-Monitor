@@ -160,7 +160,7 @@ add a test.
 Implementation: `src/lib/app-settings.ts` builds on the fleet-shared
 zero-dependency `createInfisicalSettings` from
 `@jaywedgeworth22/congress-trading-shared`
-(`github:jaywedgeworth22/congress-trading-shared#v2.7.1`, the fleet pin; same commit as the org tag).
+(`github:Simple-With-Us/congress-trading-shared#v2.9.0`, the fleet pin; same commit as the org tag).
 
 ## Admin gating
 

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { budgetViewSchema, formatBudgetMicros, type FleetBudgetView } from "@/lib/fleet-budget/view";
 
-const SENTENCE_GAP = "  ";
+const SENTENCE_GAP = "\u00A0 ";
 
 export default function FleetBudgetCard() {
   const [data, setData] = useState<FleetBudgetView | null>(null);
@@ -44,7 +44,7 @@ export default function FleetBudgetCard() {
   }, [reload]);
 
   const snapshot = data?.snapshot;
-  const state = snapshot?.blocked ? "DeepSeek Blocked" : !data?.enabled ? "Not Activated" : !data.admissionEnabled ? "Admission Paused" : "Admission Enabled";
+  const state = snapshot?.blocked ? "DeepSeek Blocked" : !data?.enabled ? "Not Activated" : !data.admissionEnabled ? "Spending Limits Paused" : "Spending Limits On";
   return (
     <section aria-labelledby="fleet-budget-heading" aria-busy={loading} className="whitespace-pre-wrap rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -62,18 +62,18 @@ export default function FleetBudgetCard() {
             <span className="text-gray-500 dark:text-gray-400">{snapshot.day} · America/Chicago</span>
             <span className="text-gray-500 dark:text-gray-400">Updated {new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" }).format(new Date(data.generatedAt))}</span>
           </div>
-          {snapshot.blocked && <p role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">A cost-bound violation needs review.{SENTENCE_GAP}New DeepSeek calls remain blocked across daily resets.</p>}
-          {!data.enabled && <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">Budget admission is off.{SENTENCE_GAP}Any recorded costs and outstanding requests remain visible.</p>}
+          {snapshot.blocked && <p role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">A spending limit was hit and needs review.{SENTENCE_GAP}New DeepSeek calls remain blocked across daily resets.</p>}
+          {!data.enabled && <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">Spending limits are off.{SENTENCE_GAP}Recorded costs and requests still in progress stay visible.</p>}
           {!snapshot.configured && <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">No budget-controlled requests have been recorded for this Chicago day.</p>}
           <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {[
-              ["Settled Policy Spend", formatBudgetMicros(snapshot.settledPolicyMicros)],
-              ["Reserved Policy Spend", formatBudgetMicros(snapshot.reservedPolicyMicros)],
-              ["MiniMax Routing Threshold", formatBudgetMicros(snapshot.softLimitMicros)],
-              ["DeepSeek Daily Ceiling", formatBudgetMicros(snapshot.hardLimitMicros)],
+              ["Settled Spend", formatBudgetMicros(snapshot.settledPolicyMicros)],
+              ["Reserved Spend", formatBudgetMicros(snapshot.reservedPolicyMicros)],
+              ["MiniMax Warning Level", formatBudgetMicros(snapshot.softLimitMicros)],
+              ["DeepSeek Daily Limit", formatBudgetMicros(snapshot.hardLimitMicros)],
             ].map(([label, value]) => <div key={label} className="rounded-lg bg-gray-50 p-3 dark:bg-gray-900/40"><dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt><dd className="mt-1 break-words text-xl font-semibold tabular-nums">{value}</dd></div>)}
           </dl>
-          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Policy spend includes DeepSeek only.{SENTENCE_GAP}MiniMax has zero routing weight; its financial usage is shown separately below.</p>
+          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">The daily limit covers DeepSeek only.{SENTENCE_GAP}MiniMax is shown separately and does not count toward that limit.</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             {snapshot.providerCosts.map((row) => (
               <div key={row.provider} className="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
@@ -88,7 +88,7 @@ export default function FleetBudgetCard() {
               </div>
             ))}
           </div>
-          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Estimates and provider reports are not verified bills.{SENTENCE_GAP}This view does not authorize a provider call.</p>
+          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Estimates and provider reports are not verified bills.{SENTENCE_GAP}This page does not start a provider request.</p>
         </>
       )}
     </section>
