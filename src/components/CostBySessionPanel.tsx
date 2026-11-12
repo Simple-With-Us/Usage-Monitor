@@ -80,7 +80,7 @@ export default function CostBySessionPanel() {
       setReport(body as Report);
     } catch (caught) {
       setReport(null);
-      setError(caught instanceof Error ? caught.message : "Failed to load cost-by-session");
+      setError(caught instanceof Error ? caught.message : "Could not load session cost.");
     } finally {
       setLoading(false);
     }
@@ -152,8 +152,8 @@ export default function CostBySessionPanel() {
               </p>
             ) : report.unmatchedSessionIds.length > 0 ? (
               <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
-                No claude-code usage found in this window for: {report.unmatchedSessionIds.join(", ")}. That session may not have exported OTLP
-                metrics yet (the exporter only runs while the seat has restarted since it was configured), or it falls outside {report.window.since}
+                No Claude Code usage found in this window for: {report.unmatchedSessionIds.join(", ")}. That session may not have sent
+                usage yet (sending starts after the tool is restarted with it turned on), or it falls outside {report.window.since}
                 {" "}to {report.window.until}
                 {report.window.clampedToRawRetention
                   ? ` (the requested window started ${report.window.requestedSince}, but raw event data only survives back to ${report.window.since} -- older sessions can no longer be matched even though they existed)`

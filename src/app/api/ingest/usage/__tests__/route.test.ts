@@ -1171,6 +1171,95 @@ describe("POST /api/ingest/usage producer scoping", () => {
   });
 });
 
+describe("POST /api/ingest/usage claude quota collector auth (AFC-667)", () => {
+  const collectorToken = "claude-collector-named-token";
+  const orphanMapToken = "claude-map-orphan-token";
+
+  function claudeQuotaBatch(token: string): NextRequest {
+    return nextRequest(
+      {
+        schemaVersion: 2,
+        producerId: "claude-code",
+        producerInstanceId: "mac-quota",
+        events: [{
+          eventId: "subq:anthropic:five_hour:2026-11-12T01:00:00.000Z",
+          provider: "anthropic",
+          service: "claude-code",
+          label: "5h window",
+          metricType: "quota",
+          billingMode: "actual",
+          confidence: "actual",
+          credits: 40,
+          limit: 100,
+          occurredAt: "2026-11-12T01:00:00.000Z",
+        }],
+      },
+      token,
+      "https://usage.jays.services/api/ingest/usage",
+      2
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubEnv(
+      "USAGE_INGEST_PRODUCER_TOKENS",
+      `claude-code:${orphanMapToken},openai-codex:codex-scoped-token`
+    );
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", "");
+    vi.stubEnv("CODEX_INGEST_TOKEN", "");
+  });
+
+  it("returns 401 Unauthorized when the claude map entry has drifted and the named token is unset", async () => {
+    const response = await POST(claudeQuotaBatch(collectorToken));
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      ok: false,
+      schemaVersion: 2,
+      error: {
+        code: "unauthorized",
+        message: "Unauthorized",
+        retryable: false,
+      },
+    });
+    expect(externalUsageMocks.persist).not.toHaveBeenCalled();
+  });
+
+  it("accepts the named CLAUDE_CODE_INGEST_TOKEN for a claude-code quota batch", async () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    const response = await POST(claudeQuotaBatch(collectorToken));
+    expect(response.status).toBe(202);
+    expect(externalUsageMocks.persist.mock.calls[0][0][0]).toMatchObject({
+      sourceApp: "claude-code",
+      provider: "anthropic",
+      service: "claude-code",
+      metricType: "quota",
+    });
+  });
+
+  it("does not let the named claude token write another producer", async () => {
+    vi.stubEnv("CLAUDE_CODE_INGEST_TOKEN", collectorToken);
+    const response = await POST(nextRequest(
+      {
+        schemaVersion: 2,
+        producerId: "openai-codex",
+        events: [{
+          eventId: "codex-window",
+          provider: "openai",
+          occurredAt: "2026-11-12T01:00:00.000Z",
+        }],
+      },
+      collectorToken,
+      "https://usage.jays.services/api/ingest/usage",
+      2
+    ));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: { message: "Credential is not authorized for this producer" },
+    });
+    expect(externalUsageMocks.persist).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/ingest/usage canonical AI block (UM-1592)", () => {
   function aiRequest(ai?: Record<string, unknown>): NextRequest {
     return nextRequest(
