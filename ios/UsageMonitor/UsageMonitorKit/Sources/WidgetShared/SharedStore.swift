@@ -48,13 +48,25 @@ public struct SharedStore {
 
     private func writeUnlocked(_ snapshot: WidgetSnapshot) {
         cleanupLegacyData()
-        let envelope = SnapshotEnvelope(schemaVersion: Self.schemaVersion, snapshot: snapshot)
+        let previousRevision = max(
+            storedFileEnvelope()?.revision ?? 0,
+            storedDefaultsEnvelope()?.revision ?? 0
+        )
+        let nextRevision = previousRevision == UInt64.max
+            ? previousRevision
+            : previousRevision + 1
+        let envelope = SnapshotEnvelope(
+            schemaVersion: Self.schemaVersion,
+            revision: nextRevision,
+            snapshot: snapshot
+        )
         guard let data = try? encoder.encode(envelope) else { return }
 
-        guard let fileURL else {
-            defaults.set(data, forKey: Self.defaultsKey)
-            return
-        }
+        // Always sync to the shared UserDefaults suite so the widget extension
+        // has a persistent, process-safe fallback even if file container access fails.
+        defaults.set(data, forKey: Self.defaultsKey)
+
+        guard let fileURL else { return }
 
         do {
             try data.write(to: fileURL, options: writingOptions)
@@ -73,26 +85,26 @@ public struct SharedStore {
 
     private func readUnlocked() -> WidgetSnapshot? {
         cleanupLegacyData()
-        guard let fileURL else {
-            guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
-            return decodeAndCleanFallback(data)
-        }
 
-        guard isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL) else {
-            try? fileManager.removeItem(at: fileURL)
-            return nil
-        }
+        let fileEnvelope = storedFileEnvelope()
+        let defaultsEnvelope = storedDefaultsEnvelope()
 
-        do {
-            let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-            let envelope = try decoder.decode(SnapshotEnvelope.self, from: data)
-            guard envelope.schemaVersion == Self.schemaVersion else {
-                try? fileManager.removeItem(at: fileURL)
-                return nil
+        switch (fileEnvelope, defaultsEnvelope) {
+        case let (file?, defaults?):
+            // A section merge can keep the original budget generatedAt, so
+            // choose between the two persisted copies using the envelope's
+            // write order instead of a snapshot section timestamp.
+            if (defaults.revision ?? 0) > (file.revision ?? 0) {
+                return defaults.snapshot
             }
-            return envelope.snapshot
-        } catch {
-            try? fileManager.removeItem(at: fileURL)
+            // Old schema-v2 envelopes have no revision.  In a tie, retain the
+            // historical file-first preference for backward compatibility.
+            return file.snapshot
+        case let (file?, nil):
+            return file.snapshot
+        case let (nil, defaults?):
+            return defaults.snapshot
+        case (nil, nil):
             return nil
         }
     }
@@ -115,7 +127,38 @@ public struct SharedStore {
 
     private struct SnapshotEnvelope: Codable {
         let schemaVersion: Int
+        /// Optional for envelopes written before dual-store ordering metadata.
+        let revision: UInt64?
         let snapshot: WidgetSnapshot
+    }
+
+    private func storedFileEnvelope() -> SnapshotEnvelope? {
+        guard let fileURL, fileManager.fileExists(atPath: fileURL.path) else { return nil }
+        guard isSafeRegularFile(fileURL), isWithinSizeLimit(fileURL),
+              let data = try? Data(contentsOf: fileURL),
+              let envelope = decodeEnvelope(data)
+        else {
+            try? fileManager.removeItem(at: fileURL)
+            return nil
+        }
+        return envelope
+    }
+
+    private func storedDefaultsEnvelope() -> SnapshotEnvelope? {
+        guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
+        guard let envelope = decodeEnvelope(data) else {
+            defaults.removeObject(forKey: Self.defaultsKey)
+            return nil
+        }
+        return envelope
+    }
+
+    private func decodeEnvelope(_ data: Data) -> SnapshotEnvelope? {
+        guard data.count <= Self.maximumFileSize,
+              let envelope = try? decoder.decode(SnapshotEnvelope.self, from: data),
+              envelope.schemaVersion == Self.schemaVersion
+        else { return nil }
+        return envelope
     }
 
     private var fileURL: URL? {
@@ -149,17 +192,6 @@ public struct SharedStore {
     private func cleanupLegacyData() {
         if let legacyFileURL { try? fileManager.removeItem(at: legacyFileURL) }
         defaults.removeObject(forKey: Self.legacyDefaultsKey)
-    }
-
-    private func decodeAndCleanFallback(_ data: Data) -> WidgetSnapshot? {
-        guard data.count <= Self.maximumFileSize,
-              let envelope = try? decoder.decode(SnapshotEnvelope.self, from: data),
-              envelope.schemaVersion == Self.schemaVersion
-        else {
-            defaults.removeObject(forKey: Self.defaultsKey)
-            return nil
-        }
-        return envelope.snapshot
     }
 
     private func isSafeRegularFile(_ url: URL) -> Bool {

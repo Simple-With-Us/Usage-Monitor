@@ -2,6 +2,39 @@ import Foundation
 import DesignSystem
 import WidgetShared
 
+// MARK: - Row density
+
+/// How many rows a list-style topic shows.  A small family can only legibly fit
+/// a couple, and a large one wastes space on three, so this is a real choice
+/// rather than a "more is better" default.
+///
+/// The `AppEnum` conformance (and therefore the Edit Widget picker labels) lives
+/// in `BudgetWidgetIntent.swift`: this file is compiled standalone by the widget
+/// unit-test target, which has no AppIntents host.
+enum WidgetRowCount: String, CaseIterable, Sendable {
+    case compact
+    case standard
+    case full
+
+    var maxMeters: Int {
+        switch self {
+        case .compact: return 2
+        case .standard: return 4
+        case .full: return 8
+        }
+    }
+}
+
+// MARK: - Sort order
+
+/// Providers and projects can be ranked two honest ways, and they disagree
+/// often enough to be worth a picker: "who is closest to their cap" is a
+/// different list from "who has cost the most".
+enum WidgetSortOrder: String, CaseIterable, Sendable {
+    case utilisation
+    case spend
+}
+
 /// Which budget the home-screen widget focuses on.
 ///
 /// - `overall` — account-wide provider-scoped totals (default).
@@ -66,11 +99,17 @@ enum WidgetPresentation {
     static func content(
         from snapshot: WidgetSnapshot,
         focus: WidgetBudgetFocus,
-        maxMeters: Int = 3
+        maxMeters: Int = 3,
+        sortOrder: WidgetSortOrder = .utilisation
     ) -> WidgetBudgetContent {
         switch focus {
         case .overall:
-            return overallContent(from: snapshot, maxMeters: maxMeters, fellBack: false)
+            return overallContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                fellBack: false,
+                sortOrder: sortOrder
+            )
         case .project(let id):
             if let project = snapshot.projects.first(where: { $0.id == id }) {
                 let budget = project.budgetUsd ?? 0
@@ -96,14 +135,20 @@ enum WidgetPresentation {
                 )
             }
             // Project removed or not yet in cache — show overall rather than zeros.
-            return overallContent(from: snapshot, maxMeters: maxMeters, fellBack: true)
+            return overallContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                fellBack: true,
+                sortOrder: sortOrder
+            )
         }
     }
 
     private static func overallContent(
         from snapshot: WidgetSnapshot,
         maxMeters: Int,
-        fellBack: Bool
+        fellBack: Bool,
+        sortOrder: WidgetSortOrder = .utilisation
     ) -> WidgetBudgetContent {
         WidgetBudgetContent(
             focus: .overall,
@@ -114,7 +159,7 @@ enum WidgetPresentation {
             percentUsed: snapshot.percentUsed,
             overBudget: snapshot.overBudget,
             warning: snapshot.warning,
-            meters: Array(snapshot.topMeters.prefix(maxMeters)),
+            meters: Array(rank(snapshot.topMeters, by: sortOrder).prefix(maxMeters)),
             deepLink: URL(string: "usageclientmonitor://dashboard"),
             fellBackToOverall: fellBack
         )
@@ -124,6 +169,36 @@ enum WidgetPresentation {
     /// semantic status. The raw values mirror the server's `BudgetLevel`:
     /// `"ok" | "warning" | "exceeded" | "unconfigured"`. Anything unexpected
     /// degrades to `.neutral` so a schema drift never crashes or mis-alarms.
+    /// Rank a meter list for display.  Utilisation sorts by percent-used (a
+    /// row with no budget sorts last rather than as 0%), spend sorts by
+    /// month-to-date dollars, and both fall back to name order so equal rows
+    /// never reshuffle between refreshes.
+    static func rank(
+        _ meters: [WidgetSnapshot.Meter],
+        by order: WidgetSortOrder
+    ) -> [WidgetSnapshot.Meter] {
+        meters.sorted { lhs, rhs in
+            switch order {
+            case .utilisation:
+                let l = lhs.percentUsed
+                let r = rhs.percentUsed
+                switch (l, r) {
+                case let (l?, r?):
+                    if l != r { return l > r }
+                case (nil, .some):
+                    return false
+                case (.some, nil):
+                    return true
+                case (nil, nil):
+                    break
+                }
+            case .spend:
+                if lhs.spentUsd != rhs.spentUsd { return lhs.spentUsd > rhs.spentUsd }
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     static func semanticStatus(forRawStatus raw: String) -> Theme.SemanticStatus {
         switch raw {
         case "exceeded": return .danger
@@ -209,6 +284,13 @@ enum WidgetPresentation {
         return "of \(CurrencyFormat.compactUSD(budgetUsd))"
     }
 
+    /// Public form of `budgetCaption(budgetUsd:)` for topics that aggregate
+    /// their own denominator (Projects sums several project budgets) rather
+    /// than reading the account total off a snapshot.
+    static func budgetCaptionForTotal(_ budgetUsd: Double) -> String? {
+        budgetCaption(budgetUsd: budgetUsd)
+    }
+
     static func displayBudgetCaption(for content: WidgetBudgetContent, redacted: Bool) -> String? {
         if redacted { return WidgetPrivacy.lockedLabel }
         return budgetCaption(for: content)
@@ -286,19 +368,23 @@ enum WidgetPresentation {
 enum WidgetTopic: String, Equatable, Sendable {
     case budget
     case llmQuotas
+    case quotas
     case servers
     case mac
     case alerts
     case providers
+    case projects
 
     var title: String {
         switch self {
         case .budget: return "Budget"
-        case .llmQuotas: return "LLM Quotas"
+        case .llmQuotas: return "LLM Burn"
+        case .quotas: return "Quotas"
         case .servers: return "Servers"
         case .mac: return "Mac"
         case .alerts: return "Alerts"
         case .providers: return "Providers"
+        case .projects: return "Projects"
         }
     }
 
@@ -343,6 +429,27 @@ struct WidgetUnavailableContent: Equatable, Sendable {
     var title: String
     var message: String
     var deepLink: URL?
+
+    /// Build an unavailable state, substituting the actionable "app group is
+    /// broken" message when that is the real cause.
+    ///
+    /// Every topic used to hard-code "Open the app to load ...", which is
+    /// indistinguishable from advice that does not work — the app loads fine
+    /// and the widget says the same thing again. When the shared container is
+    /// unavailable, no amount of tapping will ever populate the widget, so say
+    /// that instead of sending the owner back into the same loop.
+    init(
+        title: String,
+        message: String,
+        deepLink: URL?,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) {
+        self.title = title
+        self.message = appGroupUnavailable
+            ? "Widget storage is unavailable on this install.  Reinstall the app to restore it."
+            : message
+        self.deepLink = deepLink
+    }
 }
 
 struct WidgetLlmContent: Equatable, Sendable {
@@ -383,13 +490,35 @@ struct WidgetProvidersContent: Equatable, Sendable {
     var deepLink: URL?
 }
 
+/// Subscription plan capacity — how much of a Claude / Codex / Grok / MiniMax
+/// window is left.  Deliberately separate from ``WidgetLlmContent``, which is
+/// trailing-window *spend*: one answers "what have I burned", this answers "how
+/// close am I to being cut off".
+struct WidgetQuotaContent: Equatable, Sendable {
+    var generatedAt: Date
+    var windows: [WidgetSnapshot.QuotaSection.Window]
+    var deepLink: URL?
+}
+
+/// All project budgets as their own topic, rather than only reachable as a
+/// per-project *focus* of the Budget topic.
+struct WidgetProjectsContent: Equatable, Sendable {
+    var generatedAt: Date
+    var projects: [WidgetSnapshot.Meter]
+    var totalSpentUsd: Double
+    var totalBudgetUsd: Double
+    var deepLink: URL?
+}
+
 enum WidgetTopicContent: Equatable, Sendable {
     case budget(WidgetBudgetContent)
     case llm(WidgetLlmContent)
+    case quota(WidgetQuotaContent)
     case server(WidgetServerContent)
     case mac(WidgetMacContent)
     case alerts(WidgetAlertsContent)
     case providers(WidgetProvidersContent)
+    case projects(WidgetProjectsContent)
     case unavailable(WidgetUnavailableContent)
 }
 
@@ -400,36 +529,172 @@ enum WidgetTopicPresentation {
         budgetFocus: WidgetBudgetFocus,
         llmProviderId: String?,
         serverFocus: WidgetServerFocus,
-        maxMeters: Int = 3
+        maxMeters: Int = 3,
+        sortOrder: WidgetSortOrder = .utilisation,
+        providersSort: WidgetSortOrder = .spend,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         switch topic {
         case .budget:
             return .budget(
-                WidgetPresentation.content(from: snapshot, focus: budgetFocus, maxMeters: maxMeters)
+                WidgetPresentation.content(
+                    from: snapshot,
+                    focus: budgetFocus,
+                    maxMeters: maxMeters,
+                    sortOrder: sortOrder
+                )
             )
         case .llmQuotas:
-            return llmContent(from: snapshot, providerId: llmProviderId)
+            return llmContent(
+                from: snapshot,
+                providerId: llmProviderId,
+                appGroupUnavailable: appGroupUnavailable
+            )
+        case .quotas:
+            return quotaContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                sortOrder: sortOrder,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .servers:
-            return serverContent(from: snapshot, focus: serverFocus)
+            return serverContent(
+                from: snapshot,
+                focus: serverFocus,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .mac:
-            return macContent(from: snapshot)
+            return macContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .alerts:
-            return alertsContent(from: snapshot)
+            return alertsContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                appGroupUnavailable: appGroupUnavailable
+            )
         case .providers:
-            return providersContent(from: snapshot, maxMeters: max(maxMeters, 6))
+            // Providers is a spend ranking by definition; the shared sortOrder
+            // defaults to .utilisation (which would have been indistinguishable
+            // from an explicit "Closest to Budget" pick), so Providers gets its
+            // own parameter that defaults to .spend. An explicit Closest to
+            // Budget pick on the intent survives via `providersSort`.
+            return providersContent(
+                from: snapshot,
+                maxMeters: max(maxMeters, 6),
+                sortOrder: providersSort,
+                appGroupUnavailable: appGroupUnavailable
+            )
+        case .projects:
+            return projectsContent(
+                from: snapshot,
+                maxMeters: maxMeters,
+                sortOrder: sortOrder,
+                appGroupUnavailable: appGroupUnavailable
+            )
         }
+    }
+
+    static func quotaContent(
+        from snapshot: WidgetSnapshot,
+        maxMeters: Int,
+        sortOrder: WidgetSortOrder = .utilisation,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
+        guard let section = snapshot.quotas else {
+            return .unavailable(
+                WidgetUnavailableContent(
+                    title: "Quotas",
+                    message: "Open the app to load plan quotas.",
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
+                )
+            )
+        }
+        if section.windows.isEmpty {
+            return .unavailable(
+                WidgetUnavailableContent(
+                    title: "Quotas",
+                    message: "No quota windows reported yet.",
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
+                )
+            )
+        }
+        let windows: [WidgetSnapshot.QuotaSection.Window]
+        switch sortOrder {
+        case .utilisation:
+            // Most urgent first: `isExhausted` wins outright (a server-flagged
+            // exhausted window with no number must not be hidden behind a
+            // healthy 100%-remaining one), then lowest remaining fraction, then
+            // a label tiebreak so equal rows keep a stable order. The medium
+            // hero relies on `windows.first` being the worst window.
+            windows = section.windows.sorted { lhs, rhs in
+                if lhs.isExhausted != rhs.isExhausted { return lhs.isExhausted }
+                let l = lhs.remainingFraction ?? 1
+                let r = rhs.remainingFraction ?? 1
+                if l != r { return l < r }
+                return lhs.providerLabel.localizedCaseInsensitiveCompare(rhs.providerLabel) == .orderedAscending
+            }
+        case .spend:
+            windows = section.windows.sorted { lhs, rhs in
+                lhs.providerLabel.localizedCaseInsensitiveCompare(rhs.providerLabel) == .orderedAscending
+            }
+        }
+        return .quota(
+            WidgetQuotaContent(
+                generatedAt: section.generatedAt,
+                windows: Array(windows.prefix(maxMeters)),
+                deepLink: URL(string: "usageclientmonitor://dashboard")
+            )
+        )
+    }
+
+    static func projectsContent(
+        from snapshot: WidgetSnapshot,
+        maxMeters: Int,
+        sortOrder: WidgetSortOrder = .utilisation,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
+        guard !snapshot.projects.isEmpty else {
+            return .unavailable(
+                WidgetUnavailableContent(
+                    title: "Projects",
+                    message: "Open the app to load project budgets.",
+                    deepLink: URL(string: "usageclientmonitor://projects"),
+                    appGroupUnavailable: appGroupUnavailable
+                )
+            )
+        }
+        let rows = Array(WidgetPresentation.rank(snapshot.projects, by: sortOrder).prefix(maxMeters))
+        return .projects(
+            WidgetProjectsContent(
+                generatedAt: snapshot.generatedAt,
+                projects: rows,
+                // Hero figures are project totals: reduce over the full
+                // snapshot list, not the row-truncated one, or the headline
+                // silently becomes a subtotal of the visible rows.
+                totalSpentUsd: snapshot.projects.reduce(0) { $0 + $1.spentUsd },
+                totalBudgetUsd: snapshot.projects.reduce(0) { $0 + ($1.budgetUsd ?? 0) },
+                deepLink: URL(string: "usageclientmonitor://projects")
+            )
+        )
     }
 
     static func llmContent(
         from snapshot: WidgetSnapshot,
-        providerId: String?
+        providerId: String?,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         guard let section = snapshot.llm else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "Open the app to load LLM quotas.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -438,7 +703,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "No LLM activity in the latest window.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -450,7 +716,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "LLM Quotas",
                         message: "That provider is not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://dashboard")
+                        deepLink: URL(string: "usageclientmonitor://dashboard"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -462,7 +729,8 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "LLM Quotas",
                     message: "No LLM activity in the latest window.",
-                    deepLink: URL(string: "usageclientmonitor://dashboard")
+                    deepLink: URL(string: "usageclientmonitor://dashboard"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -479,7 +747,8 @@ enum WidgetTopicPresentation {
 
     static func serverContent(
         from snapshot: WidgetSnapshot,
-        focus: WidgetServerFocus
+        focus: WidgetServerFocus,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         let section = snapshot.servers
         switch focus {
@@ -489,7 +758,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Servers",
                         message: "Open the app to load server status.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -510,7 +780,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Host",
                         message: "Host metrics are not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -530,7 +801,8 @@ enum WidgetTopicPresentation {
                     WidgetUnavailableContent(
                         title: "Servers",
                         message: "That app is not in the latest cache.",
-                        deepLink: URL(string: "usageclientmonitor://serverStatus")
+                        deepLink: URL(string: "usageclientmonitor://serverStatus"),
+                        appGroupUnavailable: appGroupUnavailable
                     )
                 )
             }
@@ -678,6 +950,8 @@ enum WidgetTopicPresentation {
             return WidgetPresentation.showsUpdatedAt(for: snapshot) ? snapshot.generatedAt : nil
         case .llm(let llm):
             return showsUpdatedAt(generatedAt: llm.generatedAt) ? llm.generatedAt : nil
+        case .quota(let quota):
+            return showsUpdatedAt(generatedAt: quota.generatedAt) ? quota.generatedAt : nil
         case .server(let server):
             return showsUpdatedAt(generatedAt: server.generatedAt) ? server.generatedAt : nil
         case .mac(let mac):
@@ -686,18 +960,92 @@ enum WidgetTopicPresentation {
             return showsUpdatedAt(generatedAt: alerts.section.generatedAt) ? alerts.section.generatedAt : nil
         case .providers(let providers):
             return showsUpdatedAt(generatedAt: providers.generatedAt) ? providers.generatedAt : nil
+        case .projects(let projects):
+            return showsUpdatedAt(generatedAt: projects.generatedAt) ? projects.generatedAt : nil
         case .unavailable:
             return nil
         }
     }
 
-    static func macContent(from snapshot: WidgetSnapshot) -> WidgetTopicContent {
+    // MARK: - Quotas
+
+    /// Severity for one quota window. Exhausted wins over near-cap, and a
+    /// window with no number is `neutral` rather than a fabricated 0%.
+    static func quotaStatus(_ window: WidgetSnapshot.QuotaSection.Window) -> Theme.SemanticStatus {
+        if window.isExhausted { return .danger }
+        if window.isNearCap { return .warning }
+        guard let remaining = window.remainingFraction else { return .neutral }
+        if remaining <= 0 { return .danger }
+        if remaining <= 0.2 { return .warning }
+        return .ok
+    }
+
+    /// `"12% left"` / `"Exhausted"` / `"Unknown"`. Never renders a percent the
+    /// server did not send.
+    static func quotaRemainingCaption(_ window: WidgetSnapshot.QuotaSection.Window) -> String {
+        if window.isExhausted { return "Exhausted" }
+        guard let remaining = window.remainingFraction else { return "Unknown" }
+        return "\(Int((remaining * 100).rounded()))% left"
+    }
+
+    /// Fraction **used**, for the meter fill. `nil` renders an empty track.
+    static func quotaFractionUsed(_ window: WidgetSnapshot.QuotaSection.Window) -> Double {
+        guard let remaining = window.remainingFraction else { return 0 }
+        return max(0, min(1, 1 - remaining))
+    }
+
+    static func quotaLabel(_ window: WidgetSnapshot.QuotaSection.Window) -> String? {
+        if window.isExhausted { return "Exhausted" }
+        if window.isNearCap { return "Near cap" }
+        return nil
+    }
+
+    static func quotaSymbol(_ window: WidgetSnapshot.QuotaSection.Window) -> String {
+        if window.isExhausted { return "exclamationmark.octagon.fill" }
+        if window.isNearCap { return "gauge.with.dots.needle.67percent" }
+        return "gauge.with.dots.needle.50percent"
+    }
+
+    /// `"5h"` / `"7d"` / `"Resets in 2 hr"` caption under a quota row.
+    ///
+    /// The reset window is always a *future* target, so the duration is
+    /// computed directly against `now` rather than fed through the past-tense
+    /// ``WidgetPresentation/relativeAge(since:asOf:)`` helper — `relativeAge`
+    /// clamps to zero for any future date and would have read "Resets in just
+    /// now" for a positive countdown and "Resets in 3 hr ago" for an elapsed
+    /// reset. An already-elapsed reset returns `nil` so the row never claims
+    /// the window is about to refresh.
+    static func quotaWindowCaption(_ window: WidgetSnapshot.QuotaSection.Window, asOf now: Date = Date()) -> String? {
+        if let reset = window.resetAt {
+            let seconds = reset.timeIntervalSince(now)
+            guard seconds > 0 else { return nil }
+            if seconds < 3600 {
+                let mins = max(1, Int((seconds / 60).rounded()))
+                return "Resets in \(mins) min"
+            }
+            if seconds < 36 * 3600 {
+                let hours = max(1, Int((seconds / 3600).rounded()))
+                return "Resets in \(hours) hr"
+            }
+            let days = max(1, Int((seconds / 86_400).rounded()))
+            return "Resets in \(days) days"
+        }
+        guard let cadence = window.window, !cadence.isEmpty else { return nil }
+        return cadence
+    }
+
+    static func macContent(
+        from snapshot: WidgetSnapshot,
+        maxMeters: Int = 8,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
         guard let section = snapshot.mac else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Mac",
                     message: "Open the app to load Mac stats.",
-                    deepLink: URL(string: "usageclientmonitor://computers")
+                    deepLink: URL(string: "usageclientmonitor://computers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
@@ -706,31 +1054,60 @@ enum WidgetTopicPresentation {
                 WidgetUnavailableContent(
                     title: "Mac",
                     message: "The Mac has not reported yet.",
-                    deepLink: URL(string: "usageclientmonitor://computers")
+                    deepLink: URL(string: "usageclientmonitor://computers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
+        // `maxMeters` caps the process rows in the Large family. The Mac
+        // section's three live percents (CPU/Memory/Disk) are fixed, so the
+        // cap only narrows `processes`. Keep the original `section` intact
+        // for the hero copy and trim just the list.
+        let trimmed: WidgetSnapshot.MacSection
+        if maxMeters > 0 && section.processes.count > maxMeters {
+            var copy = section
+            copy.processes = Array(section.processes.prefix(maxMeters))
+            trimmed = copy
+        } else {
+            trimmed = section
+        }
         return .mac(
             WidgetMacContent(
-                section: section,
+                section: trimmed,
                 deepLink: URL(string: "usageclientmonitor://computers")
             )
         )
     }
 
-    static func alertsContent(from snapshot: WidgetSnapshot) -> WidgetTopicContent {
+    static func alertsContent(
+        from snapshot: WidgetSnapshot,
+        maxMeters: Int = 8,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    ) -> WidgetTopicContent {
         guard let section = snapshot.alerts else {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Alerts",
                     message: "Open the app to load alerts.",
-                    deepLink: URL(string: "usageclientmonitor://alerts")
+                    deepLink: URL(string: "usageclientmonitor://alerts"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
+        // `maxMeters` caps the open-alert rows so the Rows picker the owner
+        // asked for actually changes what is rendered, rather than silently
+        // no-oping on this tile.
+        let trimmed: WidgetSnapshot.AlertsSection
+        if maxMeters > 0 && section.items.count > maxMeters {
+            var copy = section
+            copy.items = Array(section.items.prefix(maxMeters))
+            trimmed = copy
+        } else {
+            trimmed = section
+        }
         return .alerts(
             WidgetAlertsContent(
-                section: section,
+                section: trimmed,
                 deepLink: URL(string: "usageclientmonitor://alerts")
             )
         )
@@ -738,26 +1115,32 @@ enum WidgetTopicPresentation {
 
     static func providersContent(
         from snapshot: WidgetSnapshot,
-        maxMeters: Int = 6
+        maxMeters: Int = 6,
+        sortOrder: WidgetSortOrder = .spend,
+        appGroupUnavailable: Bool = WidgetSnapshotResolver.shared.isAppGroupUnavailable
     ) -> WidgetTopicContent {
         if snapshot.month.isEmpty {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Providers",
                     message: "Open the app to load providers.",
-                    deepLink: URL(string: "usageclientmonitor://providers")
+                    deepLink: URL(string: "usageclientmonitor://providers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }
-        let meters = Array(
-            (snapshot.spenders.isEmpty ? snapshot.topMeters : snapshot.spenders).prefix(maxMeters)
-        )
+        // Providers is a *spend* ranking by definition — it lists top spenders
+        // — so the source list is re-ranked only when the owner explicitly asks
+        // for budget utilisation instead.
+        let source = snapshot.spenders.isEmpty ? snapshot.topMeters : snapshot.spenders
+        let meters = Array(WidgetPresentation.rank(source, by: sortOrder).prefix(maxMeters))
         if meters.isEmpty {
             return .unavailable(
                 WidgetUnavailableContent(
                     title: "Providers",
                     message: "No provider spend in the latest cache.",
-                    deepLink: URL(string: "usageclientmonitor://providers")
+                    deepLink: URL(string: "usageclientmonitor://providers"),
+                    appGroupUnavailable: appGroupUnavailable
                 )
             )
         }

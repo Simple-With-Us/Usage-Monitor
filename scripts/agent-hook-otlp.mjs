@@ -6,23 +6,42 @@
 // wired through this script.
 //
 // What it does: reads ONE hook-event JSON payload on stdin, maps it through a
-// strict allowlist to ONE OTLP log record, and POSTs it to Sentry's
-// `agent-sessions` project over the OTLP/HTTP JSON logs endpoint -- the same
-// endpoint and `x-sentry-auth` header Claude Code already uses.
+// strict allowlist, and POSTs either:
+//   - an OTLP/HTTP JSON log record (Sentry `agent-sessions`, the original
+//     target), or
+//   - a `{ turns: [...] }` AgentTurn payload when the endpoint path contains
+//     `/traces` or AGENT_HOOK_OTLP_FORMAT=turns (Usage Monitor
+//     POST /api/otlp/v1/traces, or the fleet-telemetry-relay).
+//
+// Why v1 never delivered (2026-10-11 audit):
+//   1. isTrustedSentryEndpoint rejected every non-sentry.io URL, so pointing
+//      the shim at usage.jays.services or a relay was a silent no-op.
+//   2. Missing credentials file / env trio is also a silent no-op (by
+//      design -- a hook must never fail the agent). Run --self-test.
+//   3. Cursor Cloud / non-interactive CLI often never fires
+//      afterAgentResponse / stop; wire afterFileEdit too and use the
+//      in-repo .cursor/hooks.json template for Cloud Agents.
+//   4. Sentry Logs does not index unknown resource attrs such as
+//      agent.platform the way UM traces does -- even a 200 can look like
+//      "nothing landed" in the Sentry UI.
 //
 // Allowlisted fields ONLY -- everything else is dropped on the floor:
 //   agent.platform, seat, event, tool.name, success, duration_ms,
-//   session.id, model
-// No prompt text, tool arguments, file paths, commands, or model output ever
-// leaves this process.  Each platform's hook payload is read once, narrow
-// fields are picked out of it by name, and the rest of the object is never
-// touched again.
+//   session.id / conversationId, generationId, model, token counts,
+//   costUsd, error
+// Prompt/response text is OFF by default.  Jay approved capture behind
+// AGENT_HOOK_OTLP_INCLUDE_CONTENT=1 (truncated at 4000 chars).  Tool
+// arguments, file paths, and commands are never forwarded.
 //
-// Usage (always exactly two args; the platform's hooks.json bakes them in):
+// Usage:
 //   node agent-hook-otlp.mjs <platform> <event>
 //     platform: antigravity | cursor | copilot
 //     event:    the hook name exactly as that platform's own hooks.json uses
 //               it (e.g. PostToolUse, afterFileEdit, postToolUse)
+//   node agent-hook-otlp.mjs --self-test
+//     Prints one secret-free JSON line: configured / trusted / format /
+//     host.  Add AGENT_HOOK_OTLP_SELF_TEST_POST=1 to actually POST a
+//     synthetic turn (still never prints the credential).
 //
 // Contract: reads stdin, builds at most one OTLP log record, and hands it to
 // a DETACHED background process for the actual network POST (bounded there
@@ -104,6 +123,9 @@ import { pathToFileURL } from "node:url";
 
 const HTTP_TIMEOUT_MS = 2000;
 const SERVICE_NAME = "agent-hook-otlp";
+const CONTENT_MAX_CHARS = 4000;
+const ERROR_MAX_CHARS = 1000;
+const BUILTIN_HTTPS_HOSTS = Object.freeze(["usage.jays.services"]);
 
 // ---------------------------------------------------------------------------
 // Credential resolution
@@ -142,10 +164,48 @@ export function resolveCredentials(env = process.env, readFile = readFileSync) {
   }
 }
 
+export function isContentCaptureEnabled(env = process.env) {
+  const raw = env.AGENT_HOOK_OTLP_INCLUDE_CONTENT?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
+
+export function resolvePayloadFormat(endpoint, env = process.env) {
+  const explicit = env.AGENT_HOOK_OTLP_FORMAT?.trim().toLowerCase();
+  if (explicit === "turns" || explicit === "logs") return explicit;
+  try {
+    const pathname = new URL(endpoint).pathname;
+    if (pathname.includes("/traces")) return "turns";
+  } catch {
+    // fall through to logs
+  }
+  return "logs";
+}
+
+function truncate(value, max) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+}
+
+function asSafeInt(value) {
+  if (value == null || value === "") return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  const i = Math.trunc(n);
+  return i >= 0 && i <= 2_147_483_647 ? i : undefined;
+}
+
+function asFiniteNumber(value) {
+  if (value == null || value === "") return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Per-platform field extraction -- narrow picks only, applied once per hook
-// invocation.  Nothing here reads or forwards prompt text, tool arguments,
-// file paths, commands, diffs, or model output.
+// invocation.  Prompt/response stay off unless INCLUDE_CONTENT is set.
+// Tool arguments, file paths, commands, and diffs are never forwarded.
 // ---------------------------------------------------------------------------
 
 const MCP_TOOL_PATTERN = /mcp/i;
@@ -248,19 +308,64 @@ const EXTRACTORS = {
  * throws; an unrecognised platform/event yields an empty field set, which
  * still produces a valid (near-empty) log record.
  */
-export function extractFields(platform, event, payload) {
+export function extractFields(platform, event, payload, env = process.env) {
   const extractor = EXTRACTORS[platform];
   const fields = extractor ? extractor(event, payload ?? {}) : {};
+  const body = payload ?? {};
   // duration_ms is speculative across all three platforms today (none of
   // their documented hook payloads carry it) -- pick it defensively so a
   // future payload version is honoured without a code change, but never
   // fabricate one.
-  const durationRaw = pick(payload, "duration_ms", "durationMs", "duration");
+  const durationRaw = pick(body, "duration_ms", "durationMs", "duration");
   // Number("") is 0, which Number.isFinite treats as finite -- guard it
   // explicitly so an empty string is "absent", not a false duration_ms:0.
   const durationMs =
     durationRaw !== "" && Number.isFinite(Number(durationRaw)) ? Number(durationRaw) : undefined;
-  return { ...fields, durationMs };
+
+  const usage = body.usage && typeof body.usage === "object" ? body.usage : {};
+  const generationId = nonEmptyString(
+    pick(body, "generation_id", "generationId", "generation.id")
+  );
+  const inputTokens = asSafeInt(
+    pick(body, "input_tokens", "inputTokens", "prompt_tokens") ??
+      pick(usage, "input_tokens", "inputTokens", "prompt_tokens")
+  );
+  const outputTokens = asSafeInt(
+    pick(body, "output_tokens", "outputTokens", "completion_tokens") ??
+      pick(usage, "output_tokens", "outputTokens", "completion_tokens")
+  );
+  const cacheTokens = asSafeInt(
+    pick(body, "cache_tokens", "cacheTokens") ?? pick(usage, "cache_tokens", "cacheTokens")
+  );
+  const costUsd = asFiniteNumber(pick(body, "cost_usd", "costUsd") ?? pick(usage, "cost_usd", "costUsd"));
+  // Coarse error only -- never the raw stack/transcript (privacy regression
+  // guard in agent-hook-otlp.test.mjs stuffs SENTINEL into `error`).
+  const error =
+    fields.success === false || nonEmptyString(pick(body, "error", "errorMessage", "exception"))
+      ? "hook_error"
+      : undefined;
+
+  const extra = {
+    durationMs,
+    generationId,
+    inputTokens,
+    outputTokens,
+    cacheTokens,
+    costUsd: costUsd != null && costUsd >= 0 ? costUsd : undefined,
+    error,
+  };
+
+  if (isContentCaptureEnabled(env)) {
+    extra.promptText = truncate(
+      nonEmptyString(pick(body, "prompt", "promptText", "input")),
+      CONTENT_MAX_CHARS
+    );
+    extra.responseText = truncate(
+      nonEmptyString(pick(body, "response", "responseText", "text", "summary")),
+      CONTENT_MAX_CHARS
+    );
+  }
+  return { ...fields, ...extra };
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +412,13 @@ export function buildLogRecord(platform, event, fields, randomBytesImpl = random
     attr("success", fields.success),
     attr("duration_ms", fields.durationMs),
     attr("session.id", fields.sessionId),
+    attr("generation.id", fields.generationId),
     attr("model", fields.model),
+    attr("input_tokens", fields.inputTokens),
+    attr("output_tokens", fields.outputTokens),
+    attr("cache_tokens", fields.cacheTokens),
+    attr("cost_usd", fields.costUsd),
+    attr("error", fields.error),
   ].filter(Boolean);
 
   return {
@@ -333,6 +444,43 @@ export function buildLogRecord(platform, event, fields, randomBytesImpl = random
       },
     ],
   };
+}
+
+/** Direct `{ turns: [...] }` payload for UM /api/otlp/v1/traces or the relay. */
+export function buildTurnRecord(platform, event, fields) {
+  const toolNames = fields.toolName ? [fields.toolName] : undefined;
+  return {
+    turns: [
+      {
+        platform,
+        seat: platform,
+        conversationId: fields.sessionId,
+        generationId: fields.generationId,
+        model: fields.model,
+        inputTokens: fields.inputTokens,
+        outputTokens: fields.outputTokens,
+        cacheTokens: fields.cacheTokens,
+        costUsd: fields.costUsd,
+        durationMs: fields.durationMs,
+        toolCount: toolNames ? toolNames.length : undefined,
+        toolNames,
+        error: fields.error,
+        promptText: fields.promptText,
+        responseText: fields.responseText,
+        occurredAt: new Date().toISOString(),
+        attributes: {
+          event,
+          success: fields.success,
+        },
+      },
+    ],
+  };
+}
+
+export function buildOutboundBody(platform, event, fields, endpoint, env = process.env) {
+  return resolvePayloadFormat(endpoint, env) === "turns"
+    ? buildTurnRecord(platform, event, fields)
+    : buildLogRecord(platform, event, fields);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,11 +524,46 @@ export function isTrustedSentryEndpoint(endpoint) {
 }
 
 /**
- * POST the log record to Sentry, bounded to HTTP_TIMEOUT_MS.  Never throws;
+ * v2 trust gate.  sentry.io stays (v1).  Also allows usage.jays.services,
+ * loopback (self-test / local UM), and extra hosts from
+ * AGENT_HOOK_OTLP_ALLOWED_HOSTS (comma-separated, https only).  This is
+ * why v1 never delivered to UM or the relay: those hosts were dropped
+ * before fetch.
+ */
+export function isTrustedOtlpEndpoint(endpoint, env = process.env) {
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  const isLoopback = host === "localhost" || host === "127.0.0.1";
+  if (isLoopback) return url.protocol === "http:" || url.protocol === "https:";
+  if (url.protocol !== "https:") return false;
+  if (host === "sentry.io" || host.endsWith(".sentry.io")) return true;
+  if (BUILTIN_HTTPS_HOSTS.includes(host)) return true;
+  const extra = (env.AGENT_HOOK_OTLP_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return extra.includes(host);
+}
+
+function endpointHost(endpoint) {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST the record, bounded to HTTP_TIMEOUT_MS.  Never throws;
  * the caller does not need a try/catch.  `fetchImpl` is injectable for tests.
  */
-export async function postOtlp(credentials, body, fetchImpl = fetch) {
-  if (!isTrustedSentryEndpoint(credentials.endpoint)) return;
+export async function postOtlp(credentials, body, fetchImpl = fetch, env = process.env) {
+  if (!isTrustedOtlpEndpoint(credentials.endpoint, env)) return;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
@@ -463,6 +646,14 @@ export async function main(argv = process.argv, env = process.env, deps = {}) {
   const scheduleBackgroundSendImpl = deps.scheduleBackgroundSend ?? scheduleBackgroundSend;
   const platform = argv[2];
 
+  if (platform === "--self-test") {
+    await runSelfTest(env, {
+      postOtlp: postOtlpImpl,
+      write: deps.write ?? ((line) => process.stdout.write(line)),
+    });
+    return;
+  }
+
   // Background-sender mode: a detached child spawned by scheduleBackgroundSend
   // invokes this same script with a single "--send" argv[2].  It reads
   // {credentials, body} (already-built, already-allowlisted) from its own
@@ -490,10 +681,10 @@ export async function main(argv = process.argv, env = process.env, deps = {}) {
     if (!platform || !event || !EXTRACTORS[platform]) return;
     const raw = await readStdinImpl();
     const payload = parsePayload(raw);
-    const fields = extractFields(platform, event, payload);
+    const fields = extractFields(platform, event, payload, env);
     const credentials = resolveCredentials(env);
     if (!credentials) return;
-    const body = buildLogRecord(platform, event, fields);
+    const body = buildOutboundBody(platform, event, fields, credentials.endpoint, env);
     // Schedule-and-return: the actual fetch happens in a detached child
     // (see scheduleBackgroundSend's docstring for why), so this call never
     // awaits the network and this function returns immediately after.
@@ -501,6 +692,59 @@ export async function main(argv = process.argv, env = process.env, deps = {}) {
   } catch {
     // A telemetry shim must never fail the hook it is attached to.
   }
+}
+
+/**
+ * Secret-free diagnostic.  Never prints a token, header value, or payload
+ * body.  Used to debug the four silent-no-op cases that made v1 look dead.
+ */
+export async function runSelfTest(env = process.env, deps = {}) {
+  const write = deps.write ?? ((line) => process.stdout.write(line));
+  const postOtlpImpl = deps.postOtlp ?? postOtlp;
+  const credentials = resolveCredentials(env);
+  const report = {
+    ok: true,
+    configured: Boolean(credentials),
+    trusted: false,
+    format: null,
+    host: null,
+    posted: false,
+    contentCapture: isContentCaptureEnabled(env),
+  };
+  if (!credentials) {
+    report.ok = false;
+    report.reason = "no credentials (set AGENT_HOOK_OTLP_ENDPOINT + HEADER_* or the chmod-600 file)";
+    write(`${JSON.stringify(report)}\n`);
+    return report;
+  }
+  report.host = endpointHost(credentials.endpoint);
+  report.trusted = isTrustedOtlpEndpoint(credentials.endpoint, env);
+  report.format = resolvePayloadFormat(credentials.endpoint, env);
+  if (!report.trusted) {
+    report.ok = false;
+    report.reason =
+      "endpoint host is not trusted (sentry.io, usage.jays.services, localhost, or AGENT_HOOK_OTLP_ALLOWED_HOSTS)";
+    write(`${JSON.stringify(report)}\n`);
+    return report;
+  }
+  const shouldPost = ["1", "true", "on", "yes"].includes(
+    (env.AGENT_HOOK_OTLP_SELF_TEST_POST ?? "").trim().toLowerCase()
+  );
+  if (shouldPost) {
+    const fields = {
+      sessionId: "self-test",
+      model: "self-test",
+      success: true,
+      durationMs: 1,
+    };
+    const body = buildOutboundBody("cursor", "self-test", fields, credentials.endpoint, env);
+    await postOtlpImpl(credentials, body, fetch, env);
+    report.posted = true;
+  } else {
+    report.reason = "dry-run (set AGENT_HOOK_OTLP_SELF_TEST_POST=1 to POST a synthetic turn)";
+  }
+  write(`${JSON.stringify(report)}\n`);
+  return report;
 }
 
 /**

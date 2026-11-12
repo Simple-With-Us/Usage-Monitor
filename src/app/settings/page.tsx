@@ -22,6 +22,7 @@ export type BillingMode = "actual" | "estimated" | "manual";
 type SettingsTab = "connections" | "services" | "projects" | "notifications";
 import NotificationsSettingsPanel from "@/components/NotificationsSettingsPanel";
 import WorkspaceCopyCard from "@/components/WorkspaceCopyCard";
+import InfisicalSettingsPanel from "@/components/InfisicalSettingsPanel";
 
 export interface ProviderPlan {
   billingMode: BillingMode;
@@ -456,7 +457,7 @@ function SettingsPageContent() {
             href="/settings?tab=connections"
             id="settings-tab-connections"
             aria-current={activeTab === "connections" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "connections"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -468,19 +469,19 @@ function SettingsPageContent() {
             href="/settings?tab=services"
             id="settings-tab-services"
             aria-current={activeTab === "services" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "services"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
             }`}
           >
-            Paid services
+            Paid Services
           </Link>
           <Link
             href="/settings?tab=projects"
             id="settings-tab-projects"
             aria-current={activeTab === "projects" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "projects"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -492,7 +493,7 @@ function SettingsPageContent() {
             href="/settings?tab=notifications"
             id="settings-tab-notifications"
             aria-current={activeTab === "notifications" ? "page" : undefined}
-            className={`pb-2.5 px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`inline-flex min-h-11 items-center px-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "notifications"
                 ? "border-blue-500 text-blue-600 dark:text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -509,9 +510,9 @@ function SettingsPageContent() {
                 setEditProvider(null);
                 setModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Add provider
+              Add Provider
             </button>
           ) : activeTab === "services" ? (
             <button
@@ -520,9 +521,9 @@ function SettingsPageContent() {
                 setEditSubscription(null);
                 setSubscriptionModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Track paid service
+              Track Paid Service
             </button>
           ) : activeTab === "projects" ? (
             <button
@@ -531,9 +532,9 @@ function SettingsPageContent() {
                 setEditProject(null);
                 setProjectModalOpen(true);
               }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              className="inline-flex min-h-11 items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Add project
+              Add Project
             </button>
           ) : null}
         </div>
@@ -578,35 +579,36 @@ function SettingsPageContent() {
       <section id={`settings-panel-${activeTab}`} aria-label={`${activeTab} settings`}>
         {activeTab === "connections" ? (
           <div className="space-y-6">
+            <InfisicalSettingsPanel />
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-800 dark:bg-blue-900/30">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
-                How data gets here
+                How Data Gets Here
               </h2>
               <div className="grid gap-4 text-sm text-blue-800 dark:text-blue-200 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic account sync</p>
-                  <p className="text-xs opacity-90">Read-only provider adapters fetch authoritative usage, billing, plan, and quota fields whenever the provider exposes them.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Automatic Account Sync</p>
+                  <p className="text-xs opacity-90">Usage Monitor reads usage, billing, and plan details when the provider account allows it.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed telemetry</p>
-                  <p className="text-xs opacity-90">Apps send metered usage and cost when a provider has no suitable account API or when project-level detail is needed.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Pushed Usage</p>
+                  <p className="text-xs opacity-90">Apps can send usage and cost when the provider has no account report, or when you need cost by project.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">OTLP metrics</p>
-                  <p className="text-xs opacity-90">Claude Code and other OTLP exporters push usage metrics over standard OTLP/HTTP; they land alongside pushed telemetry as Anthropic (Claude Code) cost.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Claude Code Metrics</p>
+                  <p className="text-xs opacity-90">Claude Code can send usage from its metrics feed.{"\u00A0 "}Those figures show up with Anthropic (Claude Code) cost.</p>
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual plan tracking</p>
-                  <p className="text-xs opacity-90">Dashboard-only subscriptions stay explicit instead of being inferred from API traffic, balances, or portfolio assets.</p>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Manual Plan Tracking</p>
+                  <p className="text-xs opacity-90">Plans you add here stay as you entered them.{"\u00A0 "}They are not guessed from traffic or balances.</p>
                 </div>
               </div>
               <p className="mt-4 text-xs text-blue-800 dark:text-blue-200">
-                <span className="font-medium text-blue-900 dark:text-blue-100">Plan price vs subscription:</span>{" "}
-                model a recurring fee as either the provider&apos;s fixed plan price
-                <span className="whitespace-nowrap"> (ProviderPlan.fixedMonthlyCostUsd)</span> or a
-                Subscription row that materializes charges — not both, or month-to-date spend
-                double-counts. Project budgets attribute residual provider spend by allocation
-                percentage only after direct project-tagged events are applied.
+                <span className="font-medium text-blue-900 dark:text-blue-100">Plan price vs paid service:</span>{" "}
+                record a recurring fee either as the provider&apos;s fixed monthly price or as a paid service.
+                {"\u00A0 "}
+                Using both counts the same fee twice.
+                {"\u00A0 "}
+                Project budgets use directly tagged spend first, then split what is left by the percentages you set.
               </p>
             </div>
             <ProviderTable
@@ -634,7 +636,7 @@ function SettingsPageContent() {
           <div className="space-y-8">
             <div className="space-y-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked recurring costs</h2>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Tracked Recurring Costs</h2>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Edit dashboard-only subscriptions or link them to an automatically discovered provider record. Linked records render once and charge once.
                 </p>

@@ -10,6 +10,11 @@
 // Fixtures live in scripts/__tests__/fixtures/.
 
 import { clampPercent, toIsoTimestamp, windowLabelFromSeconds } from "./quota-event.mjs";
+import {
+  claudeAnthropicKeyToToken,
+  normalizeQuotaWindowKeyFromAnthropicKey,
+  quotaWindowDisplayName,
+} from "./quota-window-display.mjs";
 
 function asRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -67,30 +72,9 @@ function reading(partial) {
 
 // ---------------------------------------------------------------- Claude ----
 
-const WORD_NUMBERS = {
-  one: 1,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  ten: 10,
-  twelve: 12,
-  fourteen: 14,
-  thirty: 30,
-};
-
-const UNIT_SUFFIX = { hour: "h", day: "d", week: "w", month: "mo" };
-
-/** "five_hour" -> "5h", "seven_day" -> "7d".  Unknown keys pass through. */
+/** "five_hour" -> "5h", "seven_day" -> "7d".  Unknown keys return null. */
 export function claudeWindowToken(key) {
-  const match = /^([a-z]+)_(hour|day|week|month)s?/.exec(String(key));
-  if (!match) return null;
-  const count = WORD_NUMBERS[match[1]] ?? Number(match[1]);
-  if (!Number.isFinite(count)) return null;
-  return `${count}${UNIT_SUFFIX[match[2]]}`;
+  return claudeAnthropicKeyToToken(key);
 }
 
 const CLAUDE_MODEL_SUFFIXES = ["opus", "sonnet", "haiku"];
@@ -132,7 +116,15 @@ export function parseClaudeUsage(payload, { planType = null } = {}) {
         break;
       }
     }
-    const token = claudeWindowToken(baseKey) ?? claudeWindowToken(key) ?? baseKey;
+    const token = claudeWindowToken(baseKey) ?? claudeWindowToken(key);
+    const { windowKey, rawKey } = normalizeQuotaWindowKeyFromAnthropicKey(key, suffixModel);
+    const resetAt = firstTimestamp(windowRecord, ["resets_at", "resetsAt", "reset_at", "resetAt"]);
+    const displayName = quotaWindowDisplayName({
+      windowKey,
+      rawKey,
+      resetAt,
+      nowMs: Date.now(),
+    });
     const used = utilization != null ? clampPercent(utilization) : null;
     const remaining =
       remainingDirect != null ? clampPercent(remainingDirect) : used == null ? null : 100 - used;
@@ -140,11 +132,11 @@ export function parseClaudeUsage(payload, { planType = null } = {}) {
     readings.push(
       reading({
         bucketId: `anthropic:${key}`,
-        label: suffixModel ? `${token} window (${titleCaseModel(suffixModel)})` : `${token} window`,
-        quotaWindow: token,
+        label: displayName,
+        quotaWindow: token ?? windowKey,
         remainingPercent: remaining,
         usedPercent: used,
-        resetAt: firstTimestamp(windowRecord, ["resets_at", "resetsAt", "reset_at", "resetAt"]),
+        resetAt,
         planType,
         modelId: suffixModel,
         remainingUnknown: remaining == null,
@@ -347,13 +339,77 @@ export function parseGrokBilling(payload) {
 
 // --------------------------------------------------------------- MiniMax ----
 
+function minimaxIntervalWindowToken(row, resetAt) {
+  const windowSeconds = firstNumber(row, ["remains_time", "remainsTime"]);
+  const startIso = firstTimestamp(row, ["start_time", "startTime"]);
+  return startIso && resetAt
+    ? windowLabelFromSeconds((Date.parse(resetAt) - Date.parse(startIso)) / 1000)
+    : windowLabelFromSeconds(windowSeconds);
+}
+
+/** Prefer API remaining_percent; fall back to count math only when total > 0. */
+function minimaxIntervalRemaining(row) {
+  const remainingDirect = firstNumber(row, [
+    "current_interval_remaining_percent",
+    "currentIntervalRemainingPercent",
+    "remaining_percent",
+    "remainingPercent",
+  ]);
+  if (remainingDirect != null) {
+    const remaining = clampPercent(remainingDirect);
+    return {
+      remaining,
+      used: remaining == null ? null : clampPercent(100 - remaining),
+      remainingUnknown: remaining == null,
+    };
+  }
+
+  const usage = firstNumber(row, [
+    "current_interval_usage_count",
+    "currentIntervalUsageCount",
+    "usage_count",
+  ]);
+  const total = firstNumber(row, [
+    "current_interval_total_count",
+    "currentIntervalTotalCount",
+    "total_count",
+  ]);
+  const hasCounts = usage != null && total != null && total > 0;
+  if (!hasCounts) {
+    return { remaining: null, used: null, remainingUnknown: true };
+  }
+  const remaining = clampPercent(((total - usage) / total) * 100);
+  return {
+    remaining,
+    used: clampPercent((usage / total) * 100),
+    remainingUnknown: remaining == null,
+  };
+}
+
+function minimaxWeeklyRemaining(row) {
+  const remainingDirect = firstNumber(row, [
+    "current_weekly_remaining_percent",
+    "currentWeeklyRemainingPercent",
+    "weekly_remaining_percent",
+    "weeklyRemainingPercent",
+  ]);
+  if (remainingDirect == null) return null;
+  const remaining = clampPercent(remainingDirect);
+  return {
+    remaining,
+    used: remaining == null ? null : clampPercent(100 - remaining),
+    remainingUnknown: remaining == null,
+  };
+}
+
 /**
  * Parse `GET /v1/api/openplatform/coding_plan/remains`.
  *
- * Shape: `base_resp.status_code` (0 = ok) plus `model_remains[]` rows carrying
- * `current_interval_usage_count` / `current_interval_total_count`.  Remaining
- * percent is (total - usage) / total.  With more than one model we also emit a
- * plan-wide row so the card can show one headline number.
+ * Shape: `base_resp.status_code` (0 = ok) plus `model_remains[]` rows.  Live
+ * responses include `current_interval_remaining_percent` (and weekly twins) even
+ * when count fields are zero or fully used; prefer those fields.  The plan
+ * headline comes from the `general` model's interval percent, not a sum of
+ * per-model counts.
  */
 export function parseMinimaxRemains(payload) {
   const root = asRecord(payload);
@@ -366,63 +422,68 @@ export function parseMinimaxRemains(payload) {
     : [];
 
   const readings = [];
-  let totalUsed = 0;
-  let totalLimit = 0;
-  let planResetAt = null;
+  let generalInterval = null;
+  let generalResetAt = null;
+  let generalWindowToken = null;
 
   for (const rawRow of rows) {
     const row = asRecord(rawRow);
     const modelName = firstString(row, ["model_name", "modelName", "model"]) ?? "model";
-    const usage = firstNumber(row, [
-      "current_interval_usage_count",
-      "currentIntervalUsageCount",
-      "usage_count",
-    ]);
-    const total = firstNumber(row, [
-      "current_interval_total_count",
-      "currentIntervalTotalCount",
-      "total_count",
-    ]);
     const resetAt = firstTimestamp(row, ["end_time", "endTime", "reset_time", "resetAt"]);
-    if (resetAt && !planResetAt) planResetAt = resetAt;
+    const token = minimaxIntervalWindowToken(row, resetAt);
+    const interval = minimaxIntervalRemaining(row);
 
-    const windowSeconds = firstNumber(row, ["remains_time", "remainsTime"]);
-    const startIso = firstTimestamp(row, ["start_time", "startTime"]);
-    const token =
-      startIso && resetAt
-        ? windowLabelFromSeconds((Date.parse(resetAt) - Date.parse(startIso)) / 1000)
-        : windowLabelFromSeconds(windowSeconds);
-
-    const hasCounts = usage != null && total != null && total > 0;
-    if (hasCounts) {
-      totalUsed += usage;
-      totalLimit += total;
+    if (modelName.toLowerCase() === "general") {
+      generalInterval = interval;
+      generalResetAt = resetAt;
+      generalWindowToken = token;
     }
-    const remaining = hasCounts ? ((total - usage) / total) * 100 : null;
+
     readings.push(
       reading({
         bucketId: `minimax:${modelName}`,
         label: `${modelName}${token ? ` (${token} window)` : ""}`,
         quotaWindow: token,
-        remainingPercent: remaining,
-        usedPercent: hasCounts ? clampPercent((usage / total) * 100) : null,
+        remainingPercent: interval.remaining,
+        usedPercent: interval.used,
         resetAt,
         modelId: modelName,
-        remainingUnknown: remaining == null,
+        remainingUnknown: interval.remainingUnknown,
       }),
     );
+
+    const weekly = minimaxWeeklyRemaining(row);
+    if (weekly) {
+      const weeklyResetAt = firstTimestamp(row, [
+        "weekly_end_time",
+        "weeklyEndTime",
+        "weekly_reset_time",
+        "weeklyResetTime",
+      ]);
+      readings.push(
+        reading({
+          bucketId: `minimax:${modelName}:weekly`,
+          label: `${modelName} (weekly window)`,
+          quotaWindow: "weekly",
+          remainingPercent: weekly.remaining,
+          usedPercent: weekly.used,
+          resetAt: weeklyResetAt,
+          modelId: modelName,
+          remainingUnknown: weekly.remainingUnknown,
+        }),
+      );
+    }
   }
 
-  if (readings.length > 1 && totalLimit > 0) {
-    const remaining = ((totalLimit - totalUsed) / totalLimit) * 100;
+  if (generalInterval && generalInterval.remaining != null && !generalInterval.remainingUnknown) {
     readings.unshift(
       reading({
         bucketId: "minimax:coding-plan",
         label: "Coding plan (all models)",
-        quotaWindow: readings[0].quotaWindow,
-        remainingPercent: remaining,
-        usedPercent: clampPercent((totalUsed / totalLimit) * 100),
-        resetAt: planResetAt,
+        quotaWindow: generalWindowToken,
+        remainingPercent: generalInterval.remaining,
+        usedPercent: generalInterval.used,
+        resetAt: generalResetAt,
         remainingUnknown: false,
       }),
     );

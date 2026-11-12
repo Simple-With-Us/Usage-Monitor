@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { appSettings } from "@/lib/app-settings";
 
 interface IngestAdmissionState {
   owner: symbol | null;
@@ -101,7 +102,7 @@ function isEnvExplicitlyDisabled(configured: string | undefined): boolean {
  * compatible until an operator explicitly disables the variable.
  */
 export function isOtlpMetricsIngestEnabled(
-  configured = process.env.OTLP_METRICS_INGEST_ENABLED
+  configured = appSettings.get("OTLP_METRICS_INGEST_ENABLED")
 ): boolean {
   return !isEnvExplicitlyDisabled(configured);
 }
@@ -113,7 +114,7 @@ export function isOtlpMetricsIngestEnabled(
  * persist them. When unset/false, metrics route maps but does not write rows.
  */
 export function isOtlpSystemMetricsIngestEnabled(
-  configured = process.env.OTLP_SYSTEM_METRICS_INGEST_ENABLED
+  configured = appSettings.get("OTLP_SYSTEM_METRICS_INGEST_ENABLED")
 ): boolean {
   const normalized = configured?.trim().toLowerCase();
   return (

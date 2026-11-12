@@ -79,6 +79,7 @@ describe("quota-event helpers", () => {
       service: "claude-code",
       source: "api.anthropic.com",
       occurredAtIso: "2026-09-12T12:00:00.000Z",
+      machine: "Mac.Jays.Services",
       reading: {
         bucketId: "anthropic:five_hour",
         label: "5h window",
@@ -99,6 +100,10 @@ describe("quota-event helpers", () => {
     expect(event.metadata.quotaWindow).toBe("5h");
     expect(event.metadata.resetAt).toBe("2026-09-12T18:00:00.000Z");
     expect(event.metadata.source).toBe("api.anthropic.com");
+    expect(event.metadata.reportedAt).toBe("2026-09-12T12:00:00.000Z");
+    expect(event.metadata.windowKey).toBe("5h");
+    expect(event.metadata.rawKey).toBe("five_hour");
+    expect(event.metadata.machine).toBe("Mac.Jays.Services");
     // eventId must include the observation time.  Ingest 409s when credits
     // change under the same (producerId, eventId); a reset-only key would
     // freeze remaining % after the first LaunchAgent tick.
@@ -146,22 +151,31 @@ describe("parseClaudeUsage", () => {
 
   it("converts utilization (percent used) into percent remaining per window", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].remainingPercent).toBe(62.5);
-    expect(rows["5h window"].usedPercent).toBe(37.5);
-    expect(rows["7d window"].remainingPercent).toBe(18);
+    expect(rows["5-hour"].remainingPercent).toBe(62.5);
+    expect(rows["5-hour"].usedPercent).toBe(37.5);
+    const weekly = readings.filter((row) => row.label === "7-day");
+    expect(weekly.map((row) => row.remainingPercent).sort((a, b) => a - b)).toEqual([4.5, 18]);
   });
 
-  it("labels the per-model window and keeps its model id", () => {
-    const rows = byLabel(readings);
-    expect(rows["7d window (Opus)"].remainingPercent).toBe(4.5);
-    expect(rows["7d window (Opus)"].modelId).toBe("opus");
-    expect(rows["7d window (Opus)"].quotaWindow).toBe("7d");
+  it("rolls per-model windows up to the platform window label and keeps model id in metadata", () => {
+    const opus = readings.find((row) => row.modelId === "opus");
+    expect(opus?.label).toBe("7-day");
+    expect(opus?.remainingPercent).toBe(4.5);
+    expect(opus?.quotaWindow).toBe("7d");
+  });
+
+  it("maps unknown Anthropic window keys to other-limit display labels", () => {
+    const readings = parseClaudeUsage({
+      iguana_necktie: { utilization: 10, resets_at: "2026-09-12T17:00:00Z" },
+    });
+    expect(readings[0].label).toMatch(/^other-limit · resets /);
+    expect(readings[0].bucketId).toBe("anthropic:iguana_necktie");
   });
 
   it("carries resetAt and the plan type, and ignores non-window keys", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].resetAt).toBe("2026-09-12T18:00:00.000Z");
-    expect(rows["5h window"].planType).toBe("max_20x");
+    expect(rows["5-hour"].resetAt).toBe("2026-09-12T18:00:00.000Z");
+    expect(rows["5-hour"].planType).toBe("max_20x");
     expect(readings).toHaveLength(3);
   });
 
@@ -480,11 +494,21 @@ describe("parseMinimaxRemains", () => {
     expect(rows["MiniMax-Text-01 (daily window)"].remainingPercent).toBe(90);
   });
 
-  it("adds a plan-wide headline row across models", () => {
-    expect(readings[0].label).toBe("Coding plan (all models)");
-    // 50 of 300 used across both models.
-    expect(readings[0].remainingPercent).toBe(83.33);
-    expect(readings[0].resetAt).toBe("2026-09-13T00:00:00.000Z");
+  it("does not invent a plan-wide headline by summing per-model counts", () => {
+    expect(readings.some((r) => r.label === "Coding plan (all models)")).toBe(false);
+    expect(readings).toHaveLength(2);
+  });
+
+  it("prefers remaining_percent over misleading count fields (live API shape)", () => {
+    const live = parseMinimaxRemains(fixture("minimax-coding-plan-remains-live.json"));
+    const rows = byLabel(live);
+    expect(live[0].label).toBe("Coding plan (all models)");
+    expect(live[0].remainingPercent).toBe(97);
+    expect(rows["general (daily window)"].remainingPercent).toBe(97);
+    expect(rows["general (weekly window)"].remainingPercent).toBe(92);
+    expect(rows["general (weekly window)"].resetAt).toBe("2026-10-03T00:00:00.000Z");
+    expect(rows["video (daily window)"].remainingPercent).toBe(100);
+    expect(rows["video (weekly window)"].remainingPercent).toBe(100);
   });
 
   it("returns nothing when base_resp reports a failure", () => {
@@ -524,7 +548,7 @@ describe("collector wiring", () => {
       ["codex", "codex-wham-usage.json", "openai", 2],
       ["grok", "grok-billing-credits.json", "xai", 1],
       ["grok", "grok-billing-config.json", "xai", 1],
-      ["minimax", "minimax-coding-plan-remains.json", "minimax", 3],
+      ["minimax", "minimax-coding-plan-remains.json", "minimax", 2],
     ];
     for (const [providerKey, file, provider, count] of cases) {
       const events = eventsForProvider(providerKey, fixture(file), {

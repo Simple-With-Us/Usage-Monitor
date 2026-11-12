@@ -50,7 +50,7 @@ final class RangeSpendSeriesTests: XCTestCase {
         XCTAssertEqual(thirtyDaySeries.totalCostUsd, 28.0, accuracy: 0.0001)
     }
 
-    func testBuildSumsMultipleRowsPerDay() {
+    func testBuildSumsMultipleRowsPerDay() throws {
         // Two groupKey rows for the same day (one per provider) must be
         // summed into a single daily bar, not kept as separate points.
         let multiGroupResponse = response([
@@ -61,7 +61,8 @@ final class RangeSpendSeriesTests: XCTestCase {
             response: multiGroupResponse, timeframe: .rolling(days: 7), isClamped: false
         )
         XCTAssertEqual(series.points.count, 1)
-        XCTAssertEqual(series.points.first?.value, 5.75, accuracy: 0.0001)
+        let firstValue = try XCTUnwrap(series.points.first?.value)
+        XCTAssertEqual(firstValue, 5.75, accuracy: 0.0001)
     }
 
     func testBuildIsEmptyWithNoRows() {

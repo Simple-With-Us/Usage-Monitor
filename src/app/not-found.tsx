@@ -4,7 +4,7 @@ export default function NotFound() {
   return (
     <section className="mx-auto flex min-h-64 max-w-lg flex-col items-center justify-center gap-4 text-center">
       <div>
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Page not found</h1>
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Page Not Found</h1>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
           The provider or view may have moved or been removed.
         </p>

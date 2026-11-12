@@ -75,7 +75,7 @@ function sentryProject(
   return {
     unresolvedCount: 0,
     hasMore: false,
-    issuesUrl: "https://sentry.io/organizations/jays-services/issues/",
+    issuesUrl: "https://sentry.io/organizations/simple-with-us/issues/",
     ...overrides,
   };
 }
@@ -83,7 +83,7 @@ function sentryProject(
 function sentrySummary(projects: SentryProjectHealth[]): SentryHealthSummary {
   return {
     configured: true,
-    org: "jays-services",
+    org: "simple-with-us",
     projects,
     fetchedAt: "2026-08-11T12:00:00.000Z",
   };
@@ -147,7 +147,7 @@ describe("sentry probe", () => {
 
   it("reports healthy when every tracked project has zero unresolved issues", async () => {
     vi.stubEnv("SENTRY_READ_TOKEN", "sntrys_test-token");
-    vi.stubEnv("SENTRY_ORG", "jays-services");
+    vi.stubEnv("SENTRY_ORG", "simple-with-us");
     fetchSentryHealthMock.mockResolvedValue(
       sentrySummary([
         sentryProject({

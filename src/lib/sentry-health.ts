@@ -13,7 +13,7 @@
 //
 // Conditional by design: entirely absent (returns null, no fetch attempted)
 // unless BOTH SENTRY_READ_TOKEN and SENTRY_ORG are configured. SENTRY_ORG
-// defaults to "jays-services" per the task spec but can be overridden.
+// defaults to "simple-with-us" per the task spec but can be overridden.
 // SENTRY_READ_TOKEN is NEVER sent to the client — this module only runs
 // server-side (API route handler), and the route response contains only the
 // derived counts/links, never the token itself.
@@ -47,21 +47,21 @@ export interface SentryHealthUnconfigured {
   configured: false;
 }
 
-const DEFAULT_ORG = "jays-services";
+const DEFAULT_ORG = "simple-with-us";
 
 // Fallback wait before the single 429 retry when Sentry sends no
 // Retry-After header. Mirrors the adapter helper first-attempt backoff.
 const SENTRY_HEALTH_RETRY_BACKOFF_MS = 1_000;
 
 const SENTRY_DASHBOARDS: Record<string, string> = {
-  "fleet-overview": "https://jays-services.sentry.io/dashboard/9920702/",
-  "congress-trade": "https://jays-services.sentry.io/dashboard/9920703/",
-  "socratic-trade": "https://jays-services.sentry.io/dashboard/9920704/",
-  "usage-monitor": "https://jays-services.sentry.io/dashboard/9920705/",
-  "dealdex": "https://jays-services.sentry.io/dashboard/9920706/",
-  "botfleet": "https://jays-services.sentry.io/dashboard/9920707/",
-  "autorotate": "https://jays-services.sentry.io/dashboard/9920708/",
-  "fleet-infra": "https://jays-services.sentry.io/dashboard/9920709/",
+  "fleet-overview": "https://simple-with-us.sentry.io/dashboard/9920702/",
+  "congress-trade": "https://simple-with-us.sentry.io/dashboard/9920703/",
+  "socratic-trade": "https://simple-with-us.sentry.io/dashboard/9920704/",
+  "usage-monitor": "https://simple-with-us.sentry.io/dashboard/9920705/",
+  "dealdex": "https://simple-with-us.sentry.io/dashboard/9920706/",
+  "botfleet": "https://simple-with-us.sentry.io/dashboard/9920707/",
+  "autorotate": "https://simple-with-us.sentry.io/dashboard/9920708/",
+  "fleet-infra": "https://simple-with-us.sentry.io/dashboard/9920709/",
 };
 
 const DATADOG_SERVICES: Record<string, string> = {

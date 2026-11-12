@@ -3,10 +3,26 @@
 `scripts/agent-hook-otlp.mjs` is a small, dependency-free Node script that lets three
 coding-agent CLIs with a native hook mechanism but no OTel exporter of their own --
 Antigravity CLI (`agy`), Cursor, and GitHub Copilot CLI -- send a narrow, allowlisted
-slice of their hook events to the same Sentry `agent-sessions` project Claude Code
-already exports OTLP logs to.  Claude Code and Codex CLI export OTLP natively
-(`~/.claude/settings.json`, `~/.codex/config.toml [otel]`) and are never wired through
-this script.
+slice of their hook events to Sentry `agent-sessions` (OTLP logs) **or** Usage Monitor
+`POST /api/otlp/v1/traces` / the fleet-telemetry-relay (`{ turns: [...] }`).  Claude Code
+and Codex CLI export OTLP natively (`~/.claude/settings.json`, `~/.codex/config.toml
+[otel]`) and are never wired through this script.
+
+## Why v1 never delivered
+
+1. `isTrustedSentryEndpoint` rejected every non-`sentry.io` URL, so pointing the shim at
+   `usage.jays.services` or a relay was a silent no-op.
+2. Missing credentials (env trio or the chmod-600 file) is also a silent no-op -- a hook
+   must never fail the agent.  Run `node scripts/agent-hook-otlp.mjs --self-test`.
+3. Cursor Cloud / non-interactive CLI often never fires `afterAgentResponse` / `stop`.
+   The in-repo `.cursor/hooks.json` template wires those plus `afterFileEdit` for Cloud
+   Agents (in-repo `node scripts/...` path, not the Mac pinned copy).
+4. Sentry Logs does not index unknown resource attrs such as `agent.platform` the way
+   UM traces does -- a 200 can still look like "nothing landed" in the Sentry UI.
+
+v2 trusts `sentry.io`, `usage.jays.services`, loopback, and extra hosts in
+`AGENT_HOOK_OTLP_ALLOWED_HOSTS`.  Prompt/response stay off unless
+`AGENT_HOOK_OTLP_INCLUDE_CONTENT=1`.
 
 The script's own header comment is the source of truth for the allowlist, the
 credential-resolution order, and the exact (platform, event) pairs each CLI wires.  This

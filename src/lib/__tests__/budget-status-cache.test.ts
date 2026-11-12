@@ -4,6 +4,13 @@ import os from "os";
 import path from "path";
 import { setupPrismaSqliteTestDb } from "./setup-test-db";
 
+const aggregateMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/sqlite-usage-aggregates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sqlite-usage-aggregates")>();
+  return { ...actual, querySqliteUsageAggregate: aggregateMock };
+});
+
 // Covers the stale-while-revalidate cache wrapped around computeBudgetStatus
 // and computeProjectBudgetStatus (see the "Stale-while-revalidate cache for
 // computeBudgetStatus and computeProjectBudgetStatus" block in
@@ -41,6 +48,8 @@ let __resetProjectBudgetStatusCacheForTests: typeof import("../budget-status")._
 let budgetStatusCacheTtlMs: typeof import("../budget-status").budgetStatusCacheTtlMs;
 let bustBudgetStatusCache: typeof import("../budget-status").bustBudgetStatusCache;
 let markBudgetStatusSoftStale: typeof import("../budget-status").markBudgetStatusSoftStale;
+let querySqliteUsageAggregate: typeof import("@/lib/sqlite-usage-aggregates").querySqliteUsageAggregate;
+let summarizeExternalUsageEvents: typeof import("../external-usage-events").summarizeExternalUsageEvents;
 
 let testDir: string;
 
@@ -63,6 +72,10 @@ beforeAll(async () => {
   const dbPath = path.join(testDir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
   setupPrismaSqliteTestDb(dbPath);
+
+  ({ querySqliteUsageAggregate } = await vi.importActual("@/lib/sqlite-usage-aggregates"));
+  aggregateMock.mockImplementation(querySqliteUsageAggregate);
+  ({ summarizeExternalUsageEvents } = await import("../external-usage-events"));
 
   ({ prisma } = await import("@/lib/prisma"));
   ({
@@ -96,6 +109,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  aggregateMock.mockImplementation(querySqliteUsageAggregate);
   __setBudgetStatusCacheOverrideForTests(null);
   __resetBudgetStatusCacheForTests();
   __setProjectBudgetStatusCacheOverrideForTests(null);
@@ -403,38 +417,31 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     const blockedMtdScan = new Promise<never[]>((resolve) => {
       releaseMtdScan = resolve;
     });
-    const originalGroupBy = prisma.externalUsageEvent.groupBy.bind(
-      prisma.externalUsageEvent
-    );
-    const groupBySpy = vi.spyOn(prisma.externalUsageEvent, "groupBy");
     let mtdScanBlocked = false;
-    // Wave H / E1: provider + attribution share one groupBy that always
-    // includes projectId. Block the first such heavy scan only.
-    groupBySpy.mockImplementation((args) => {
-      const by = Array.isArray(args.by) ? args.by : [];
-      if (
-        !mtdScanBlocked &&
-        by.includes("provider") &&
-        by.includes("projectId")
-      ) {
-        mtdScanBlocked = true;
-        return blockedMtdScan as never;
+    let mtdScanCallCount = 0;
+    // Hold the first MTD aggregation at the async worker boundary.  This
+    // keeps the lease interleaving deterministic without depending on Prisma
+    // query internals, which are bypassed by the read-only SQLite worker.
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "mtd") {
+        mtdScanCallCount += 1;
+        if (!mtdScanBlocked) {
+          mtdScanBlocked = true;
+          await blockedMtdScan;
+          return [];
+        }
       }
-      return originalGroupBy(args as never) as never;
+      return querySqliteUsageAggregate(...(args as Parameters<typeof querySqliteUsageAggregate>));
     });
-    const heavyAggregationCallCount = () =>
-      groupBySpy.mock.calls.filter(([args]) => {
-        const by = Array.isArray(args.by) ? args.by : [];
-        return by.includes("provider") && by.includes("projectId");
-      }).length;
+    const heavyAggregationCallCount = () => mtdScanCallCount;
 
     // Drop the Wave H MTD scan memo so the background refresh must re-scan
-    // (otherwise the 5s memo from the warm prime would skip groupBy entirely).
+    // (otherwise the 5s memo from the warm prime would skip the scan entirely).
     const { clearMtdScanMemo } = await import("../mtd-scan-memo");
     clearMtdScanMemo();
 
     // Make both entries stale. The provider call returns its cached object and
-    // starts a background refresh whose heavy groupBy is deliberately held.
+    // starts a background refresh whose heavy MTD scan is deliberately held.
     process.env.BUDGET_STATUS_CACHE_TTL_MS = "0";
     const staleProvider = await computeBudgetStatus(NOW);
     expect(staleProvider).toBe(firstProvider);
@@ -443,7 +450,7 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     // The stale project call must also return immediately. Its background
     // refresh reaches the shared MTD scan, but the exclusive lease keeps it
     // behind the still-held first scan (and the 5s memo means it will not
-    // open a second groupBy once the first completes).
+    // open a second scan once the first completes).
     const staleProject = await computeProjectBudgetStatus(NOW);
     expect(staleProject).toBe(firstProject);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -451,7 +458,7 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
 
     // Stop further zero-TTL refreshes, release the blocked scan. Under vitest
     // the process memo is disabled, so the queued project refresh pays a
-    // second groupBy after the lease releases (still serialized, never
+    // second scan after the lease releases (still serialized, never
     // concurrent). Production keeps the 5s memo so cold provider+project
     // only scan once.
     process.env.BUDGET_STATUS_CACHE_TTL_MS = "60000";
@@ -460,6 +467,173 @@ describe("computeProjectBudgetStatus stale-while-revalidate cache", () => {
     await waitUntil(async () =>
       (await computeProjectBudgetStatus(NOW)) !== firstProject
     );
+  });
+
+  it("lets an MTD budget compute finish while a summary aggregate is still in flight", async () => {
+    const NOW = new Date("2027-04-10T12:00:00.000Z");
+    const provider = await createProviderWithCost(
+      "parallel-summary-mtd-provider",
+      17,
+      new Date("2027-04-10T10:00:00.000Z")
+    );
+
+    let releaseSummary!: () => void;
+    const heldSummary = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    let signalSummaryEntered!: () => void;
+    const summaryEntered = new Promise<void>((resolve) => {
+      signalSummaryEntered = resolve;
+    });
+    let mtdStarted = false;
+
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "summary") {
+        signalSummaryEntered();
+        await heldSummary;
+        return [];
+      }
+      if (args[0] === "mtd") mtdStarted = true;
+      return querySqliteUsageAggregate(
+        ...(args as Parameters<typeof querySqliteUsageAggregate>)
+      );
+    });
+
+    const since = new Date("2027-04-01T00:00:00.000Z");
+    const summaryPromise = summarizeExternalUsageEvents(since, since, NOW);
+    let budgetPromise: Promise<Awaited<ReturnType<typeof computeBudgetStatus>>> | undefined;
+    try {
+      await summaryEntered;
+      budgetPromise = computeBudgetStatus(NOW);
+      const budgetCompletedBeforeSummaryRelease = await Promise.race([
+        budgetPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
+      ]);
+
+      expect(budgetCompletedBeforeSummaryRelease).toBe(true);
+      expect(mtdStarted).toBe(true);
+      releaseSummary();
+      const [summary, budget] = await Promise.all([summaryPromise, budgetPromise]);
+      expect(summary).toBeDefined();
+      expect(budget.providers.find((item) => item.id === provider.id)?.spentUsd).toBe(17);
+    } finally {
+      releaseSummary();
+      await summaryPromise.catch(() => undefined);
+      if (budgetPromise) await budgetPromise.catch(() => undefined);
+    }
+  });
+
+  it("serializes legacy Prisma materialization and releases its lease after a fetch error", async () => {
+    const NOW = new Date("2027-04-10T12:00:00.000Z");
+    const provider = await createProviderWithCost(
+      "legacy-lease-cleanup-provider",
+      23,
+      new Date("2027-04-10T10:00:00.000Z")
+    );
+
+    let releaseFirstReceipt!: () => void;
+    const firstReceiptBlocked = new Promise<void>((resolve) => {
+      releaseFirstReceipt = resolve;
+    });
+    let signalFirstReceipt!: () => void;
+    const firstReceiptEntered = new Promise<void>((resolve) => {
+      signalFirstReceipt = resolve;
+    });
+    let signalRollupRejected!: () => void;
+    const rollupRejected = new Promise<void>((resolve) => {
+      signalRollupRejected = resolve;
+    });
+    let signalMtdCompleted!: () => void;
+    const mtdCompleted = new Promise<void>((resolve) => {
+      signalMtdCompleted = resolve;
+    });
+    const expectedSummaryError = new Error("controlled rollup fetch failure");
+
+    aggregateMock.mockImplementation(async (...args: unknown[]) => {
+      const rows = await querySqliteUsageAggregate(
+        ...(args as Parameters<typeof querySqliteUsageAggregate>)
+      );
+      if (args[0] === "mtd") signalMtdCompleted();
+      return rows;
+    });
+
+    const originalReceiptFindMany = prisma.externalUsageEvent.findMany.bind(
+      prisma.externalUsageEvent
+    );
+    let receiptCalls = 0;
+    let activeReceiptCalls = 0;
+    let maximumActiveReceiptCalls = 0;
+    vi.spyOn(prisma.externalUsageEvent, "findMany").mockImplementation((...args) => {
+      const run = async () => {
+        if (args[0]?.where?.sourceApp !== "billing-receipt-import") {
+          return originalReceiptFindMany(...args);
+        }
+        receiptCalls += 1;
+        activeReceiptCalls += 1;
+        maximumActiveReceiptCalls = Math.max(maximumActiveReceiptCalls, activeReceiptCalls);
+        try {
+          if (receiptCalls === 1) {
+            signalFirstReceipt();
+            await firstReceiptBlocked;
+          }
+          return await originalReceiptFindMany(...args);
+        } finally {
+          activeReceiptCalls -= 1;
+        }
+      };
+      return run() as ReturnType<typeof prisma.externalUsageEvent.findMany>;
+    });
+
+    const originalRollupFindMany =
+      prisma.externalUsageEventDailyRollup.findMany.bind(
+        prisma.externalUsageEventDailyRollup
+      );
+    let rollupCalls = 0;
+    vi.spyOn(prisma.externalUsageEventDailyRollup, "findMany").mockImplementation(
+      (...args) => {
+        const run = async () => {
+          rollupCalls += 1;
+          if (rollupCalls === 1) {
+            signalRollupRejected();
+            throw expectedSummaryError;
+          }
+          return await originalRollupFindMany(...args);
+        };
+        return run() as ReturnType<typeof prisma.externalUsageEventDailyRollup.findMany>;
+      }
+    );
+
+    const since = new Date("2027-03-01T00:00:00.000Z");
+    const rawCutoff = new Date("2027-04-01T00:00:00.000Z");
+    const summaryPromise = summarizeExternalUsageEvents(since, rawCutoff, NOW);
+    const summaryOutcomePromise = summaryPromise.then(
+      () => null,
+      (error: unknown) => error
+    );
+    let budgetPromise: Promise<Awaited<ReturnType<typeof computeBudgetStatus>>> | undefined;
+    try {
+      await Promise.all([firstReceiptEntered, rollupRejected]);
+      budgetPromise = computeBudgetStatus(NOW);
+      await mtdCompleted;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // The MTD native worker starts independently, but its receipt fetch waits
+      // for the held sibling Prisma query even after the rollup query rejects.
+      expect(receiptCalls).toBe(1);
+      expect(rollupCalls).toBe(1);
+      releaseFirstReceipt();
+
+      const summaryError = await summaryOutcomePromise;
+      const budget = await budgetPromise;
+      expect(summaryError).toBe(expectedSummaryError);
+      expect(receiptCalls).toBeGreaterThan(1);
+      expect(maximumActiveReceiptCalls).toBe(1);
+      expect(budget.providers.find((item) => item.id === provider.id)?.spentUsd).toBe(23);
+    } finally {
+      releaseFirstReceipt();
+      await summaryPromise.catch(() => undefined);
+      if (budgetPromise) await budgetPromise.catch(() => undefined);
+    }
   });
 
   it("dedupes concurrent cold callers onto a single underlying compute and the same cached instance", async () => {

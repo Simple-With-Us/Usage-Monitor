@@ -10,6 +10,8 @@ import * as Sentry from "@sentry/nextjs";
 import { nonEmptyEnv, parseTracesSampleRate } from "@/lib/sentry-options";
 import {
   sentryBeforeSend,
+  sentryBeforeSendSpan,
+  sentryPrivacyIntegration,
   sentryBeforeSendLog,
   sentryBeforeSendMetric,
   sentryBeforeSendTransaction,
@@ -22,11 +24,28 @@ if (dsn) {
     dsn,
     environment: nonEmptyEnv(process.env.SENTRY_ENVIRONMENT),
     tracesSampleRate: parseTracesSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE),
-    enableLogs: true,
-    profileSessionSampleRate: parseTracesSampleRate(
-      process.env.SENTRY_PROFILE_SESSION_SAMPLE_RATE ?? "1"
-    ),
-    profileLifecycle: "trace",
+    // v11: `enableLogs` was removed (logs flow via Sentry.logger.* and logging
+    // integrations; the Sentry.logger call sites here are unaffected). v11 also
+    // replaced `sendDefaultPii` with per-category `dataCollection` - a behavior
+    // change, not a rename. This repo never set sendDefaultPii, so v10 was
+    // restrictive-by-default while v11 collects everything unless pinned. Keep
+    // the v10 posture explicitly (migration guide "Keeping the v10 collection
+    // defaults"); the scrubber hooks below remain the last line of defense.
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: {
+        request: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+        response: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      },
+      httpBodies: [],
+      urlQueryParams: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      graphQL: { document: false, variables: false },
+    },
+    // Profiles are outside the permitted final-envelope policy.
+    profileSessionSampleRate: 0,
     // Audit 2026-09-20: any object key whose name contains a sensitive
     // substring (token/secret/key/password/passwd/auth) is replaced with
     // "[REDACTED]" before the event is sent. Defensive guard against
@@ -45,6 +64,7 @@ if (dsn) {
     // re-bundles its own copy of @sentry/core whose event types are
     // structurally identical but nominally distinct from the ones
     // imported inside the scrubber.
+    beforeSendSpan: sentryBeforeSendSpan,
     beforeSend: sentryBeforeSend as unknown as Parameters<typeof Sentry.init>[0]["beforeSend"],
     beforeSendTransaction:
       sentryBeforeSendTransaction as unknown as Parameters<typeof Sentry.init>[0]["beforeSendTransaction"],
@@ -52,6 +72,6 @@ if (dsn) {
       sentryBeforeSendLog as unknown as Parameters<typeof Sentry.init>[0]["beforeSendLog"],
     beforeSendMetric:
       sentryBeforeSendMetric as unknown as Parameters<typeof Sentry.init>[0]["beforeSendMetric"],
-    integrations: [Sentry.nodeRuntimeMetricsIntegration()],
+    integrations: [sentryPrivacyIntegration(), Sentry.nodeRuntimeMetricsIntegration()],
   });
 }
