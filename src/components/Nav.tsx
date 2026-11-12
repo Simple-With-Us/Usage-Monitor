@@ -31,6 +31,7 @@ const PRIMARY_LINKS: NavLink[] = [
 ];
 
 const SECONDARY_LINKS: NavLink[] = [
+  { href: "/learn-more", label: "Learn More" },
   { href: "/attribution", label: "Keys & Apps" },
   { href: "/cost-by-session", label: "Cost by Session" },
 ];
