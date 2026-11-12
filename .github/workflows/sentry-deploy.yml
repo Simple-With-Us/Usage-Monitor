@@ -17,10 +17,12 @@ permissions:
   contents: read
   pull-requests: read
 
-# Serialize every reporter for this environment, including runs for newer SHAs.
+# A newer main revision supersedes an older reporter.  Serialize observers but
+# cancel stale ones so queue depth does not fail on deploy lag (same pattern as
+# Production Deploy Verification).
 concurrency:
   group: sentry-deploy-${{ github.event_name == 'workflow_run' && 'production' || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   test-reporter:
@@ -29,7 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '26'
       - run: node --test scripts/sentry-report-deploy.node-test.mjs
 
   record-production-deploy:
@@ -41,18 +43,39 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.id == github.repository_id
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 65
+    env:
+      PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
     steps:
+      - name: Skip when a newer main revision superseded this CI run
+        id: superseded
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [ "$main_sha" != "$EXPECTED_SHA" ]; then
+            echo "::notice::CI revision $EXPECTED_SHA was superseded by $main_sha; skipping Sentry deploy reporting for the older observer."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '26'
       - name: Test deployment evidence and reporting
+        if: steps.superseded.outputs.superseded != 'true'
         run: node --test scripts/sentry-report-deploy.node-test.mjs
       - name: Verify live revision and record Sentry deployment
+        if: steps.superseded.outputs.superseded != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}

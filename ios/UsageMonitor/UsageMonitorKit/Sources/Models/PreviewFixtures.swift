@@ -385,11 +385,11 @@ public extension PlatformStatusPayload {
                 category: .messaging,
                 configured: true,
                 state: .healthy,
-                headline: "Slack bot token is valid for Jay's Services. Posting as agent-sync-realtime.",
+                headline: "Slack bot token is valid for Jay's Services. Posting as Operator.",
                 metrics: [
                     Metric(label: "Workspace", value: "Jay's Services"),
                     Metric(label: "Workspace ID", value: "T0824ABCDEF"),
-                    Metric(label: "Bot Identity", value: "U0824GHIJKL (agent-sync-realtime)")
+                    Metric(label: "Bot Identity", value: "U0824GHIJKL (Operator)")
                 ],
                 requiredEnv: ["SLACK_BOT_TOKEN"]
             ),

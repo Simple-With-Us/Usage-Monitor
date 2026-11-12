@@ -5,7 +5,7 @@ import {
   normalizeBillingMode,
   projectFromPath,
 } from "../ai-request-mapper";
-import { claudeLogsPayload, codexCompletionPayload } from "./ai-request-fixtures";
+import { claudeLogsPayload, codexApiRequestPayload, codexCompletionPayload } from "./ai-request-fixtures";
 import { summarizeAiRequests, percentile } from "@/lib/ai-request-performance";
 import type { OtlpExportLogsServiceRequest } from "../types";
 
@@ -57,6 +57,87 @@ describe("ai-request-mapper", () => {
       statusCode: 529,
       error: "overloaded",
     });
+  });
+});
+
+describe("ai-request-mapper attribution (UM-1599)", () => {
+  it("defaults the Codex seat to CODEX when the resource names none", () => {
+    for (const payload of [codexApiRequestPayload(), codexCompletionPayload()]) {
+      const { requests } = mapOtlpLogsToAiRequests(payload as OtlpExportLogsServiceRequest);
+      expect(requests).toHaveLength(1);
+      expect(requests[0].seat).toBe("CODEX");
+      expect(requests[0].project).toBeUndefined();
+    }
+  });
+
+  it("keeps a seat and project that OTEL_RESOURCE_ATTRIBUTES put on the Codex resource", () => {
+    const payload = codexCompletionPayload() as any;
+    payload.resourceLogs[0].resource.attributes.push(
+      { key: "seat", value: { stringValue: "claude" } },
+      { key: "project", value: { stringValue: "Usage-Monitor" } }
+    );
+    const [req] = mapOtlpLogsToAiRequests(payload as OtlpExportLogsServiceRequest).requests;
+    expect(req).toMatchObject({ seat: "CLAUDE", project: "Usage-Monitor" });
+  });
+
+  it("does not default a seat for Claude Code rows", () => {
+    const payload = claudeLogsPayload() as any;
+    payload.resourceLogs[0].resource.attributes = payload.resourceLogs[0].resource.attributes.filter(
+      (a: { key: string }) => a.key !== "seat"
+    );
+    const [req] = mapOtlpLogsToAiRequests(payload as OtlpExportLogsServiceRequest).requests;
+    expect(req.seat).toBeUndefined();
+  });
+
+  it("prefers the workspace path over the lowercased vcs.repository.name for project", () => {
+    const withBoth = claudeLogsPayload() as any;
+    withBoth.resourceLogs[0].scopeLogs[0].logRecords[1].attributes.push({
+      key: "vcs.repository.name",
+      value: { stringValue: "usage-monitor" },
+    });
+    expect(mapOtlpLogsToAiRequests(withBoth as OtlpExportLogsServiceRequest).requests[0].project).toBe(
+      "Usage-Monitor"
+    );
+    const onlyVcs = claudeLogsPayload() as any;
+    const record = onlyVcs.resourceLogs[0].scopeLogs[0].logRecords[1];
+    record.attributes = record.attributes.filter((a: { key: string }) => a.key !== "workspace.host_paths");
+    record.attributes.push({ key: "vcs.repository.name", value: { stringValue: "usage-monitor" } });
+    expect(mapOtlpLogsToAiRequests(onlyVcs as OtlpExportLogsServiceRequest).requests[0].project).toBe(
+      "usage-monitor"
+    );
+  });
+
+  it("fills servedModel for Claude api_request logs from the only model attribute", () => {
+    const [req] = mapOtlpLogsToAiRequests(claudeLogsPayload() as OtlpExportLogsServiceRequest).requests;
+    expect(req).toMatchObject({ requestedModel: "claude-opus-5-5", servedModel: "claude-opus-5-5" });
+  });
+
+  it("fills servedModel for llm_request spans and lets gen_ai.response.model win", () => {
+    const base = { start: "1000000000", end: "3000000000" };
+    const span = { startTimeUnixNano: base.start, endTimeUnixNano: base.end };
+    const only = aiRequestFromSpan(
+      "claude_code.llm_request",
+      { request_id: "r1", model: "claude-opus-5-5", "gen_ai.request.model": "claude-opus-5-5" },
+      span
+    );
+    expect(only).toMatchObject({ requestedModel: "claude-opus-5-5", servedModel: "claude-opus-5-5" });
+    const explicit = aiRequestFromSpan(
+      "claude_code.llm_request",
+      { request_id: "r2", "gen_ai.request.model": "claude-opus-5-5", "gen_ai.response.model": "claude-opus-5-5-20261001" },
+      span
+    );
+    expect(explicit).toMatchObject({
+      requestedModel: "claude-opus-5-5",
+      servedModel: "claude-opus-5-5-20261001",
+    });
+  });
+
+  it("sets Codex servedModel from response.completed only, never from the pending api_request", () => {
+    const completion = mapOtlpLogsToAiRequests(codexCompletionPayload() as OtlpExportLogsServiceRequest).requests[0];
+    expect(completion).toMatchObject({ requestedModel: "gpt-6.1-sol", servedModel: "gpt-6.1-sol" });
+    const api = mapOtlpLogsToAiRequests(codexApiRequestPayload() as OtlpExportLogsServiceRequest).requests[0];
+    expect(api.requestedModel).toBe("gpt-6.1-sol");
+    expect(api.servedModel).toBeUndefined();
   });
 });
 

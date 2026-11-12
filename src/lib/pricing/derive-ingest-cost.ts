@@ -23,13 +23,20 @@
 //     snapshot's fetch timestamp is recorded per event so a later pricing
 //     refresh is distinguishable.
 //
-// Scope: only metricType="usage" + unit="token" events with a keyRef that
-// resolves in the LiteLLM snapshot. When the producer supplies a
-// metadata.tokenType (input/output/cacheRead/cacheCreation, plus the 1h cache
-// write names cacheCreation1h / cacheWrite1h, or cacheCreation with
-// metadata.cacheTtl = "1h") the matching rate is used; otherwise the INPUT rate is used as a floor and the event is
-// flagged `_derivedCostIncomplete` (output-side tokens usually cost more, so
-// the floor under-estimates — never over).
+// Scope: only metricType="usage" events whose model resolves in the LiteLLM
+// snapshot.
+//   - Canonical path (UM-1592): when ingest stamped canonical `_ai*` tokens
+//     (from the shared-contract `ai` block or the legacy-key mapping in
+//     ai-usage-metadata.ts), every bucket is priced at its own rate, 1-hour
+//     cache writes included, by `_aiModelServed`, then `_aiModelRequested`,
+//     then keyRef.  Reasoning tokens are inside output and never priced twice.
+//   - Fallback: unit="token" events with a keyRef.  When the producer supplies
+//     a metadata.tokenType (input/output/cacheRead/cacheCreation, plus the 1h
+//     cache write names cacheCreation1h / cacheWrite1h, or cacheCreation with
+//     metadata.cacheTtl = "1h") the matching rate is used; otherwise the INPUT
+//     rate is used as a floor and the event is flagged
+//     `_derivedCostIncomplete` (output-side tokens usually cost more, so the
+//     floor under-estimates — never over).
 
 import {
   canonicalTokenType,
@@ -39,6 +46,7 @@ import {
   PRICING_SNAPSHOT_META,
 } from "./model-pricing";
 import { appSettings } from "@/lib/app-settings";
+import { readCanonicalAiModelCandidates, readCanonicalAiTokens } from "@/lib/ai-usage-metadata";
 
 export const DERIVED_COST_METADATA_KEYS = [
   "_derivedCostUsd",
@@ -75,7 +83,38 @@ export function deriveEventCostEstimate(
   event: CostDerivationEvent
 ): DerivedCostEstimate | null {
   if (event.costUsd != null) return null;
-  if (event.metricType !== "usage" || event.unit !== "token") return null;
+  if (event.metricType !== "usage") return null;
+
+  const canonicalTokens = readCanonicalAiTokens(event.metadata);
+  if (canonicalTokens) {
+    const breakdown = {
+      input: canonicalTokens.input,
+      output: canonicalTokens.output,
+      cacheRead: canonicalTokens.cacheRead,
+      cacheCreation: canonicalTokens.cacheWrite5m,
+      cacheCreation1h: canonicalTokens.cacheWrite1h,
+    };
+    const billed = Object.values(breakdown).reduce<number>((sum, value) => sum + (value ?? 0), 0);
+    if (billed <= 0) return null;
+    // Served model first, then requested, then keyRef:  a served id the
+    // catalog does not know must not hide a priceable requested model.
+    const candidates = readCanonicalAiModelCandidates(event.metadata);
+    if (event.keyRef && !candidates.includes(event.keyRef)) candidates.push(event.keyRef);
+    let resolved: ReturnType<typeof getModelPricing> = null;
+    for (const candidate of candidates) {
+      resolved = getModelPricing(candidate);
+      if (resolved) break;
+    }
+    if (!resolved) return null;
+    const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
+    return {
+      costUsd: derived.costUsd,
+      pricingKey: resolved.key,
+      incomplete: !derived.complete,
+    };
+  }
+
+  if (event.unit !== "token") return null;
   const quantity = event.quantity;
   if (quantity == null || !Number.isFinite(quantity) || quantity <= 0) return null;
   if (!event.keyRef) return null;

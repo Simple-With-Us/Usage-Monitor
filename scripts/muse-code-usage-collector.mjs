@@ -153,7 +153,15 @@ export async function readMuseCodeAccessTokenFromKeychain({
     return null;
   }
   const trimmed = stdout.trim();
-  if (!trimmed) return null;
+  if (!trimmed) {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned empty content; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   let parsed;
   try {
     parsed = JSON.parse(trimmed);
@@ -166,9 +174,25 @@ export async function readMuseCodeAccessTokenFromKeychain({
     );
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed || typeof parsed !== "object") {
+    log(
+      `muse-code: macOS keychain entry "${service}" returned an unexpected JSON shape; ` +
+        "expected a JSON object with a string access_token.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   const token = parsed.access_token;
-  if (typeof token !== "string" || !token.trim()) return null;
+  if (typeof token !== "string" || !token.trim()) {
+    log(
+      `muse-code: macOS keychain entry "${service}" is missing a string access_token; ` +
+        "the CLI may have stored a non-standard payload.  Nothing will appear " +
+        "for Muse Code in Usage Monitor until the entry shape is correct.  " +
+        "Skipping this run (exit 0, zero events).",
+    );
+    return null;
+  }
   return token.trim();
 }
 
@@ -325,6 +349,11 @@ export async function fetchMuseCodeKey(accessToken, {
   if (!response.ok) {
     // Deliberately do not include the response body: it can carry the API
     // key id and account email.
+    if (response.status === 401 || response.status === 403) {
+      const error = new Error(`authorization required from api.meta.ai (HTTP ${response.status})`);
+      error.code = "MUSE_CODE_AUTH_REQUIRED";
+      throw error;
+    }
     throw new Error(`HTTP ${response.status} from api.meta.ai`);
   }
   let parsed = null;
@@ -346,14 +375,34 @@ export async function collectMuseCode({
 } = {}) {
   const accessToken = await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform });
   if (!accessToken) {
-    return { provider: PROVIDER, status: "skipped", events: [] };
+    return { provider: PROVIDER, status: "skipped", reason: "access-token-missing", events: [] };
   }
-  const payload = await fetchMuseCodeKey(accessToken, { fetchImpl });
+  let payload;
+  try {
+    payload = await fetchMuseCodeKey(accessToken, { fetchImpl });
+  } catch (error) {
+    if (error?.code === "MUSE_CODE_AUTH_REQUIRED") {
+      // The keychain token itself was rejected (CLI signed out or the token
+      // revoked).  That is a skip, not a failure: zero events, exit 0, and
+      // the next tick retries quietly once the CLI holds a valid token.
+      log(
+        "muse-code: Meta rejected the keychain access token (401/403); " +
+          "skipping this run (exit 0, zero events).  Sign in with the Muse " +
+          "CLI so the keychain entry holds a valid token.",
+      );
+      return { provider: PROVIDER, status: "skipped", reason: "access-token-rejected", events: [] };
+    }
+    throw error;
+  }
   if (DEBUG) debugLog("fetched /muse-code/key payload (keys omitted)");
   const events = quotaEventsFromMuseCode(payload, now);
   return {
     provider: PROVIDER,
     status: events.length === 0 ? "skipped" : "ok",
+    // Every skipped result carries a distinct reason so callers can tell
+    // the skip causes apart: access-token-missing, access-token-rejected,
+    // or no-quota-windows (inactive subscription or empty payload).
+    ...(events.length === 0 ? { reason: "no-quota-windows" } : {}),
     events,
   };
 }
@@ -362,7 +411,7 @@ async function main() {
   const token = resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   if (!token && !DRY_RUN) {
     log(
-      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure token is set in environment or ~/.secrets/global-api-keys.",
+      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`.",
     );
     process.exit(1);
   }
@@ -380,9 +429,11 @@ async function main() {
 
   if (result.status === "skipped") {
     log(
-      result.events.length === 0
-        ? "skipped (no quota windows emitted; keychain ACL or inactive subscription)"
-        : "skipped",
+      result.reason
+        ? `skipped (${result.reason})`
+        : result.events.length === 0
+          ? "skipped (no quota windows emitted; keychain ACL or inactive subscription)"
+          : "skipped",
     );
     process.exit(0);
   }

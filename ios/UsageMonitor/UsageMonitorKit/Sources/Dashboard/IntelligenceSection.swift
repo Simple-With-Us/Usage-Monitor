@@ -50,9 +50,9 @@ struct LlmBurnCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Text("LLM Burn")
+            Text("Recent Model Use")
                 .font(Theme.Typography.sectionHeader)
-            Text("Trailing window — analytics only, not cash.")
+                Text("Recent window. For comparison only, not a bill.")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.secondaryText)
             ForEach(response.providers.prefix(6)) { row in
@@ -86,7 +86,7 @@ struct ClaudeCostLiteCard: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             Text("Claude Cost Check")
                 .font(Theme.Typography.sectionHeader)
-            Text("OTLP cost vs LiteLLM derivation (analytics).")
+                Text("Reported cost compared with the public price list.\u{00A0} Analytics only.")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.secondaryText)
             if let reported = response.totalReportedCostUsd, let derived = response.totalDerivedCostUsd {

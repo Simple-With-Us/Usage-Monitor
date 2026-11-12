@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isBroadProviderFetchOutage } from "../provider-fetch-outage";
 import {
   captureDatabaseFileBaseline,
   backupLayersGatesOk,
@@ -37,6 +38,32 @@ import {
   markSchedulerTickStarted,
   resetRuntimeHealthForTests,
 } from "../runtime-health";
+
+describe("isBroadProviderFetchOutage", () => {
+  it("ignores one failure when the rest of the poll set was skipped", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 1, skipped: 27 })
+    ).toBe(false);
+  });
+
+  it("pages when two or more attempts failed", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 2, skipped: 25 })
+    ).toBe(true);
+  });
+
+  it("pages when the only provider was attempted and failed", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 1, skipped: 0 })
+    ).toBe(true);
+  });
+
+  it("does not assume a missing skip count means the whole set ran", () => {
+    expect(isBroadProviderFetchOutage({ successes: 0, failures: 1 })).toBe(
+      false
+    );
+  });
+});
 
 describe("runtime health state", () => {
   beforeEach(() => {
@@ -554,6 +581,33 @@ describe("runtime health state", () => {
     it("returns null when the job has never run", () => {
       vi.stubEnv("R2_ARCHIVE_STATUS_PATH", join(tmpdir(), "definitely-absent.json"));
       expect(getR2WeeklyArchiveStatus()).toBeNull();
+    });
+
+    it("re-reads the status file after it is rewritten (memo invalidation)", () => {
+      const path = writeArchiveStatus({
+        ok: true,
+        key: "weekly/first.db.gz",
+        completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        prunedCount: 1,
+      });
+      vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+      // Repeat read of the unchanged file (memo hit) agrees.
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ok: false,
+          reason: "verify_hash_mismatch",
+          checkedAt: new Date().toISOString(),
+        }),
+        "utf8"
+      );
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({
+        ok: false,
+        reason: "verify_hash_mismatch",
+      });
     });
 
     it("reports a fresh successful archive as ok", () => {

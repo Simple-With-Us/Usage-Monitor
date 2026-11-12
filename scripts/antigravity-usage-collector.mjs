@@ -71,7 +71,7 @@ import {
   normalizeQuotaWindowKey,
   rollupQuotaWindowKey,
 } from "./lib/quota-window-display.mjs";
-import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { resolveCollectorToken } from "./lib/antigravity-usage-run-session-token-collector.mjs";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -610,13 +610,13 @@ async function postBatch(events, ingestToken) {
 }
 
 async function main() {
-  const ingestToken = resolveCollectorToken([
+  const ingestToken = await resolveCollectorToken([
     "ANTIGRAVITY_INGEST_TOKEN",
     "USAGE_INGEST_TOKEN",
   ]);
   if (!ingestToken && !DRY_RUN) {
     fail(
-      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure token is set in environment or ~/.secrets/global-api-keys."
+      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`."
     );
   }
 

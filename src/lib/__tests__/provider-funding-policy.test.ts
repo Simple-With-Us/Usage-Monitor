@@ -6,7 +6,7 @@ import { setupPrismaSqliteTestDb } from "./setup-test-db";
 
 let testDir: string;
 let prisma: typeof import("@/lib/prisma").prisma;
-let clearLlmMustKeepFundedFlags: typeof import("@/lib/provider-funding-policy").clearLlmMustKeepFundedFlags;
+let clearLlmMustKeepFundedFlags: typeof import("@/lib/provider-funding-policy-cleanup").clearLlmMustKeepFundedFlags;
 
 beforeAll(async () => {
   testDir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-funding-policy-"));
@@ -14,7 +14,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = `file:${dbPath}`;
   setupPrismaSqliteTestDb(dbPath);
   ({ prisma } = await import("@/lib/prisma"));
-  ({ clearLlmMustKeepFundedFlags } = await import("@/lib/provider-funding-policy"));
+  ({ clearLlmMustKeepFundedFlags } = await import("@/lib/provider-funding-policy-cleanup"));
 }, 60_000);
 
 afterAll(async () => {
@@ -189,9 +189,7 @@ describe("clearLlmMustKeepFundedFlags", () => {
 
 describe("isMustKeepFundedOptionVisible", () => {
   it("hides the option for LLM/AI names and keeps it for everyone else", async () => {
-    const { isMustKeepFundedOptionVisible } = await import(
-      "@/lib/provider-funding-policy"
-    );
+    const { isMustKeepFundedOptionVisible } = await import("@/lib/provider-funding-policy");
     expect(isMustKeepFundedOptionVisible("openrouter")).toBe(false);
     expect(isMustKeepFundedOptionVisible("anthropic")).toBe(false);
     expect(isMustKeepFundedOptionVisible("openai")).toBe(false);

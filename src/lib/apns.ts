@@ -80,6 +80,10 @@ export interface ApnsAlert {
   body: string;
   collapseId?: string;
   data?: Record<string, unknown>;
+  /** `null` omits aps.sound; undefined preserves the historical default sound. */
+  sound?: string | null;
+  category?: string;
+  interruptionLevel?: "passive" | "active" | "time-sensitive" | "critical";
 }
 
 export interface ApnsSendInput extends ApnsAlert {
@@ -261,13 +265,14 @@ function parseReason(body: string): string | undefined {
 }
 
 export function buildApnsPayload(alert: ApnsAlert): Record<string, unknown> {
+  const aps: Record<string, unknown> = {
+    alert: { title: alert.title, body: alert.body },
+    "interruption-level": alert.interruptionLevel ?? "active",
+    category: alert.category ?? "USAGE_ALERT",
+  };
+  if (alert.sound !== null) aps.sound = alert.sound ?? "default";
   return {
-    aps: {
-      alert: { title: alert.title, body: alert.body },
-      sound: "default",
-      "interruption-level": "active",
-      category: "USAGE_ALERT",
-    },
+    aps,
     ...(alert.data ?? {}),
   };
 }

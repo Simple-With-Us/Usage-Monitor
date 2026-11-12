@@ -42,11 +42,13 @@ describe("platform-status registry", () => {
     }
   });
 
-  it("gives every probe a display name, a category and at least one env var", () => {
+  it("gives every probe a display name, category and credential setup metadata", () => {
     for (const probe of PLATFORM_PROBES) {
       expect(probe.name.length).toBeGreaterThan(0);
       expect(probe.category.length).toBeGreaterThan(0);
-      expect(probe.requiredEnv.length).toBeGreaterThan(0);
+      // Infisical also supports encrypted dashboard connections without env credentials.
+      if (probe.id === "infisical") expect(probe.requiredEnv).toEqual([]);
+      else expect(probe.requiredEnv.length).toBeGreaterThan(0);
       for (const name of probe.requiredEnv) {
         // Env var names only — a value would be a credential leak.
         expect(name).toMatch(/^[A-Z][A-Z0-9_]*$/);

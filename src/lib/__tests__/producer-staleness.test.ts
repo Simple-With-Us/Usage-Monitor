@@ -12,6 +12,7 @@ vi.mock("@/lib/r2-usage", () => ({
 import {
   assessStreamAge,
   formatStaleStreamsMessage,
+  PRODUCER_STREAM_RULES,
   resetProducerStalenessForTests,
   runProducerStalenessCheck,
   type ProducerStreamRule,
@@ -31,6 +32,70 @@ describe("assessStreamAge", () => {
   });
   it("treats a stream with no rows as stale", () => {
     expect(assessStreamAge(rule, null, now)).toMatchObject({ lastSeenAt: null, ageHours: null });
+  });
+});
+
+describe("PRODUCER_STREAM_RULES", () => {
+  const find = (sourceApp: string, metricType = "usage") =>
+    PRODUCER_STREAM_RULES.find((r) => r.sourceApp === sourceApp && r.metricType === metricType);
+
+  it("watches the deepseek-dsh and opencode usage streams (UM-1616)", () => {
+    expect(find("deepseek-dsh")?.maxAgeHours).toBe(120);
+    expect(find("opencode")?.maxAgeHours).toBe(96);
+  });
+
+  it("watches the Kimi and ZCode local token streams with a long idle allowance", () => {
+    for (const sourceApp of ["kimi-code", "zcode"]) {
+      expect(find(sourceApp)).toMatchObject({
+        maxAgeHours: 120,
+        requiresTokens: true,
+      });
+    }
+  });
+
+  it("does not fire on the longest quiet gaps measured in prod", () => {
+    // deepseek-dsh: Sep 9 to Sep 13 was ~108h, Oct 6 to Oct 9 ~88h.
+    const dsh = find("deepseek-dsh")!;
+    expect(assessStreamAge(dsh, hoursAgo(108), now)).toBeNull();
+    expect(assessStreamAge(dsh, hoursAgo(88), now)).toBeNull();
+    expect(assessStreamAge(dsh, hoursAgo(125), now)).not.toBeNull();
+    // opencode: the Oct 17-18 weekend was ~50h.
+    const opencode = find("opencode")!;
+    expect(assessStreamAge(opencode, hoursAgo(50), now)).toBeNull();
+    expect(assessStreamAge(opencode, hoursAgo(100), now)).not.toBeNull();
+  });
+
+  it("leaves retired and unwatched streams out so they cannot page forever", () => {
+    for (const app of ["agent-bar", "github-copilot", "fx"]) {
+      expect(PRODUCER_STREAM_RULES.some((r) => r.sourceApp === app)).toBe(false);
+    }
+  });
+
+  it("has one rule per stream", () => {
+    const keys = PRODUCER_STREAM_RULES.map((r) => `${r.sourceApp}:${r.metricType}`);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("judges token streams by token rows, not by heartbeats", () => {
+    // Claude Code kept delivering session.count / active_time rows while
+    // claude_code.token.usage stopped (2026-10-23).  A heartbeat must not
+    // satisfy the token-coverage rule.
+    for (const app of [
+      "claude-code",
+      "openai-codex",
+      "grok-build",
+      "deepseek-dsh",
+      "opencode",
+      "botfleet",
+      "minimax-code",
+      "kimi-code",
+      "zcode",
+    ]) {
+      expect(find(app)?.requiresTokens).toBe(true);
+    }
+    // Quota streams are timer-driven and carry no tokens.
+    expect(find("claude-code", "quota")?.requiresTokens).toBeUndefined();
+    expect(find("openai-codex", "quota")?.requiresTokens).toBeUndefined();
   });
 });
 
@@ -81,6 +146,20 @@ describe("runProducerStalenessCheck", () => {
     expect(result.skipped).toBe("disabled");
     expect(findFirst).not.toHaveBeenCalled();
   });
+
+  it("asks the database for token rows on token-coverage rules", async () => {
+    findFirst.mockResolvedValue({ occurredAt: hoursAgo(1) });
+    await runProducerStalenessCheck(vi.fn() as unknown as typeof fetch, now);
+    const whereArgs = findFirst.mock.calls.map((call) => (call[0] as { where: Record<string, unknown> }).where);
+    const claudeCodeUsage = whereArgs.find(
+      (where) => where.sourceApp === "claude-code" && where.metricType === "usage"
+    );
+    expect(claudeCodeUsage).toMatchObject({ unit: "token" });
+    const claudeCodeQuota = whereArgs.find(
+      (where) => where.sourceApp === "claude-code" && where.metricType === "quota"
+    );
+    expect(claudeCodeQuota).not.toHaveProperty("unit");
+  });
 });
 
 describe("formatStaleStreamsMessage", () => {
@@ -92,5 +171,17 @@ describe("formatStaleStreamsMessage", () => {
     expect(msg.title).toContain("2 producer streams");
     expect(msg.body).toContain("grok-build usage: quiet 60h");
     expect(msg.body).toContain("x usage: no rows at all");
+  });
+
+  it("names the token-coverage streams as token rows", () => {
+    const msg = formatStaleStreamsMessage([
+      {
+        ...rule,
+        requiresTokens: true,
+        lastSeenAt: "2026-10-15T00:00:00.000Z",
+        ageHours: 60,
+      },
+    ]);
+    expect(msg.body).toContain("grok-build usage (token rows): quiet 60h");
   });
 });

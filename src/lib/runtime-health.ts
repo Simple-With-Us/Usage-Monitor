@@ -12,16 +12,19 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
 import { appSettings } from "@/lib/app-settings";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
-/** Total provider-poll outage: every attempted poll failed (skipped excluded). */
+export { isBroadProviderFetchOutage };
+
+/** Total provider-poll outage: every attempted poll failed, and the miss is broad. */
 export function isZeroSuccessProviderFetchOutage(
   lastRun: Pick<
     SchedulerRunSummary,
-    "successes" | "failures" | "providerFetchDegraded"
+    "successes" | "failures" | "skipped" | "providerFetchDegraded"
   > | null
 ): boolean {
   if (!lastRun?.providerFetchDegraded) return false;
-  return lastRun.successes === 0 && lastRun.failures > 0;
+  return isBroadProviderFetchOutage(lastRun);
 }
 
 export interface SchedulerRunSummary {
@@ -275,9 +278,11 @@ export function getSchedulerReadiness(now = new Date()): SchedulerReadiness {
   const zeroSuccessOutage = isZeroSuccessProviderFetchOutage(
     scheduler.lastRun
   );
-  // Partial poll degradation still needs a sustained streak before latching;
-  // a total outage (0 successes, >0 failures) surfaces on the first tick so
+  // Partial poll degradation still needs a sustained streak before latching.
+  // A broad outage (every attempt failed, and more than one provider was
+  // attempted, or nothing was skipped) surfaces on the first tick so
   // paging/readinessReason do not wait three 15-minute ticks (UM-1373).
+  // One failure beside a skip set is that provider, not this outage.
   const providerFetchDegraded =
     scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold ||
     zeroSuccessOutage;
@@ -1067,19 +1072,77 @@ export interface R2WeeklyArchiveStatus {
  */
 const R2_ARCHIVE_MAX_AGE_SECONDS = 8 * 24 * 60 * 60;
 
+interface R2ArchiveStatusFileShape {
+  ok?: unknown;
+  key?: unknown;
+  checkedAt?: unknown;
+  completedAt?: unknown;
+  prunedCount?: unknown;
+  reason?: unknown;
+}
+
+// Liveness (2026-10-29): /api/health reads this status file on every probe.
+// The file changes at most weekly, but the old code re-read and re-parsed it
+// synchronously per probe, which made the fleet's cheapest liveness signal
+// depend on a data read from the /data volume — the same volume the boot
+// backup's integrity_check and Litestream compaction saturate. Memoize the
+// parsed file keyed on (path, mtimeMs, size): an unchanged file costs one
+// stat (metadata only, no data read), and any rewrite invalidates
+// immediately, so the status is never staler than the file itself. The age
+// fields are still computed per call by the caller below.
+let r2ArchiveStatusFileMemo: {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  parsed: R2ArchiveStatusFileShape;
+} | null = null;
+
+function readR2ArchiveStatusFile(
+  statusPath: string
+): R2ArchiveStatusFileShape | null {
+  // Open once and fstat/read the same descriptor: a stat-then-read-by-path
+  // pair would be a check/use race (and CodeQL flags it as one).
+  let fd: number;
+  try {
+    fd = openSync(statusPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    const memo = r2ArchiveStatusFileMemo;
+    if (
+      memo &&
+      memo.path === statusPath &&
+      memo.mtimeMs === stat.mtimeMs &&
+      memo.size === stat.size
+    ) {
+      return memo.parsed;
+    }
+    const parsed = JSON.parse(
+      readFileSync(fd, "utf8")
+    ) as R2ArchiveStatusFileShape;
+    r2ArchiveStatusFileMemo = {
+      path: statusPath,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      parsed,
+    };
+    return parsed;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function getR2WeeklyArchiveStatus(): R2WeeklyArchiveStatus | null {
   const statusPath =
     process.env.R2_ARCHIVE_STATUS_PATH?.trim() || "/data/.r2-archive-status.json";
   try {
-    if (!existsSync(statusPath)) return null;
-    const parsed = JSON.parse(readFileSync(statusPath, "utf8")) as {
-      ok?: unknown;
-      key?: unknown;
-      checkedAt?: unknown;
-      completedAt?: unknown;
-      prunedCount?: unknown;
-      reason?: unknown;
-    };
+    const parsed = readR2ArchiveStatusFile(statusPath);
+    if (parsed === null) return null;
 
     const completedAt =
       typeof parsed.completedAt === "string" ? parsed.completedAt : null;

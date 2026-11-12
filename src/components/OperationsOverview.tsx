@@ -2,7 +2,7 @@
 
 import { ChevronDown, Cloud, Inbox, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import type { FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
+import type { FleetAppBackupStatus, FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
 import type {
   CongressInfrastructureSummary,
   CoolifyFleetSummary,
@@ -25,8 +25,10 @@ import {
 const REFRESH_INTERVAL_MS = 60_000;
 
 import B2AppUsageBreakdownCard from "@/components/B2AppUsageBreakdownCard";
+import PostedExpensesCard from "@/components/PostedExpensesCard";
 import { MacHealthCard } from "@/components/MacHealthCard";
 import SentryHealthCard from "@/components/SentryHealthCard";
+import FleetAlertsCard from "@/components/FleetAlertsCard";
 
 export function markOperationsStale(previous: OperationsHealthSummary): OperationsHealthSummary {
   return {
@@ -176,6 +178,10 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
       if (!parsed.success) throw new Error("Could not read the resolve response");
       if (parsed.data.status === "discarded") {
         setFormNotice("Held expense discarded — nothing was posted.");
+      } else if (parsed.data.record?.tombstoned) {
+        // UM-1659: the owner deleted this expense and its key is
+        // tombstoned, so post-anyway cannot resurrect it.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — it cannot be re-posted.");
       } else if (parsed.data.record?.persisted === 0) {
         // Idempotency replay (or a retention tombstone): this exact entry was
         // recorded before, so post-anyway added nothing new to the ledger.
@@ -253,6 +259,13 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         );
         formEl.reset();
         await fetchQuarantine();
+        return;
+      }
+      if (parsed.data.tombstoned) {
+        // UM-1659: a deleted expense's key is tombstoned; a re-forward of
+        // the same receipt records nothing.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — nothing was posted.");
+        formEl.reset();
         return;
       }
       setFormNotice(
@@ -879,12 +892,25 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
       </section>
     );
   }
-  const state: OperationalState = !data.configured
-    ? "unconfigured"
-    : data.ok
-      ? "healthy"
-      : "degraded";
+  // An offline (skipped) check observed nothing: report it as unavailable
+  // instead of claiming a missing key or a healthy fleet.
+  const state: OperationalState = data.offline
+    ? "unavailable"
+    : !data.configured
+      ? "unconfigured"
+      : data.ok
+        ? "healthy"
+        : "degraded";
   const okApps = data.apps.filter((a) => a.ok).length;
+  // Per-app and per-location pills must not contradict each other: offline,
+  // an app with at least one really observed row derives its pill from those
+  // rows; an app whose rows were all skipped stays unavailable.
+  const appState = (app: FleetAppBackupStatus): OperationalState => {
+    if (!data.offline) return app.ok ? "healthy" : "degraded";
+    const anyObserved = app.locations.some((l) => l.ok != null);
+    if (!anyObserved) return "unavailable";
+    return app.ok ? "healthy" : "degraded";
+  };
   return (
     <section aria-labelledby="fleet-backups-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -895,9 +921,11 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
           <div className="min-w-0">
             <h3 id="fleet-backups-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Fleet Backups</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {data.configured
-                ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
-                : "Backblaze monitor key not configured"}
+              {data.offline
+                ? "Backup checks skipped (offline mode)"
+                : data.configured
+                  ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
+                  : "Backblaze monitor key not configured"}
             </p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Checked <time suppressHydrationWarning dateTime={data.asOf}>{relativeTime(data.asOf)}</time>
@@ -922,22 +950,24 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
                     <span className="ml-1 font-normal text-gray-400">· this app</span>
                   ) : null}
                 </p>
-                <StatePill state={app.ok ? "healthy" : "degraded"} />
+                <StatePill state={appState(app)} />
               </div>
               <ul className="mt-2 space-y-1.5">
                 {app.locations.map((loc) => (
                   <li key={`${app.id}-${loc.id}`} className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">{loc.label}</span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {loc.ok === true
-                        ? "OK"
-                        : loc.ok === false
-                          ? loc.present
-                            ? "Lagging"
-                            : "Missing"
-                          : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
-                            ? "N/A"
-                            : "Unknown"}
+                      {data.offline && loc.ok == null
+                        ? "Unavailable"
+                        : loc.ok === true
+                          ? "OK"
+                          : loc.ok === false
+                            ? loc.present
+                              ? "Lagging"
+                              : "Missing"
+                            : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
+                              ? "N/A"
+                              : "Unknown"}
                       {loc.latestAgeSeconds != null
                         ? ` · ${fleetBackupAgeLabel(loc.latestAgeSeconds)}`
                         : ""}
@@ -1372,10 +1402,18 @@ export default function OperationsOverview() {
           <MacHealthCard />
           <HostStatsCard data={hostMetrics} />
           <SentryHealthCard />
+          {/* Same state the Zulip #alerts channel shows, read from the shared
+              alert ingress so the two cannot drift apart. */}
+          <FleetAlertsCard />
           <R2FleetCard data={data.r2Fleet} />
           <FleetBackupsCard data={data.fleetBackups} />
           <B2AppUsageBreakdownCard />
           <ReceiptInboxCard data={data.receiptInbox} />
+          {/* Posted Expenses spans the full row: its table needs the width.
+              It self-fetches, like the quarantine list inside ReceiptInboxCard. */}
+          <div className="lg:col-span-2">
+            <PostedExpensesCard />
+          </div>
           <SocraticInfrastructureCard data={data.socraticInfrastructure} />
           <CongressInfrastructureCard data={data.congressInfrastructure} />
           <CoolifyFleetCard data={data.coolifyFleet} />

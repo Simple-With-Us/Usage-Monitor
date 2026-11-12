@@ -6,14 +6,20 @@
 set -euo pipefail
 
 INGEST_URL="${INGEST_URL:-https://usage.jays.services/api/ingest/mac-heartbeat}"
-SECRETS_FILE="/Users/jay/.secrets/global-api-keys"
+FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-/Users/jay/.local/bin/fleet-secrets}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
 # refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
+#
+# OPS-818:  the retired flat key file is no longer read.  A name missing from
+# the environment comes from `fleet-secrets get` (root, then the
+# /global-api-keys folder);  the value is captured, never echoed.
 read_secret() {
-  [[ -f "$SECRETS_FILE" ]] || return 0
-  grep -m1 "^$1=" "$SECRETS_FILE" | cut -d'=' -f2- | tr -d '"' || true
+  [[ -x "$FLEET_SECRETS_BIN" ]] || return 0
+  "$FLEET_SECRETS_BIN" get "$1" --path / 2>/dev/null \
+    || "$FLEET_SECRETS_BIN" get "$1" --path /global-api-keys 2>/dev/null \
+    || true
 }
 
 TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
@@ -22,7 +28,7 @@ TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
 [[ -n "$TOKEN" ]] || TOKEN="$(read_secret USAGE_INGEST_TOKEN)"
 
 if [[ -z "$TOKEN" ]]; then
-  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or $SECRETS_FILE" >&2
+  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or fleet-secrets" >&2
   exit 1
 fi
 
@@ -168,7 +174,7 @@ LITESTREAM_STATUS="$(check_process "litestream" "true")"
 # wrong when the runtime is OrbStack).
 ORBSTACK_STATUS="$(check_process "(OrbStack|orbstack)" "true")"
 DOCKER_STATUS="$(check_process "Docker" "true")"
-AGENT_SYNC_STATUS="$(check_process "agent-sync" "false")"
+OPERATOR_STATUS="$(check_process "operator-live" "false")"
 
 # Coding agent live execution checks
 check_agent() {
@@ -220,7 +226,7 @@ PAYLOAD="$(jq -n \
   --arg litestream "$LITESTREAM_STATUS" \
   --arg orbstack "$ORBSTACK_STATUS" \
   --arg docker "$DOCKER_STATUS" \
-  --arg agentSync "$AGENT_SYNC_STATUS" \
+  --arg operator "$OPERATOR_STATUS" \
   --arg claudeAgent "$CLAUDE_STATUS" \
   --arg cursorAgent "$CURSOR_STATUS" \
   --arg grokAgent "$GROK_STATUS" \
@@ -245,7 +251,7 @@ PAYLOAD="$(jq -n \
       litestream: $litestream,
       orbstack: $orbstack,
       docker: $docker,
-      "agent-sync": $agentSync
+      "operator": $operator
     },
     agentProcesses: {
       "claude-code": $claudeAgent,

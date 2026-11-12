@@ -124,7 +124,7 @@ export function claudeLlmRequestSpanPayload(requestId = CLAUDE_REQUEST_ID) {
   };
 }
 
-const codexCommon = (timestamp: string) => [
+const codexCommon = (timestamp: string, withModel = true) => [
   s("event.timestamp", timestamp),
   s("conversation.id", "conv-codex-1590"),
   s("app.version", "0.130.0"),
@@ -132,8 +132,7 @@ const codexCommon = (timestamp: string) => [
   s("originator", "codex_cli_rs"),
   s("user.email", "someone@example.com"),
   s("terminal.type", "iTerm.app"),
-  s("model", "gpt-6.1-sol"),
-  s("slug", "gpt-6.1-sol"),
+  ...(withModel ? [s("model", "gpt-6.1-sol"), s("slug", "gpt-6.1-sol")] : []),
 ];
 
 function codexPayload(records: Array<{ attributes: Attr[] }>) {
@@ -147,7 +146,8 @@ function codexPayload(records: Array<{ attributes: Attr[] }>) {
   };
 }
 
-export function codexApiRequestPayload() {
+/** `withModel: false` is a Codex housekeeping HTTP call: no model attribute (UM-1610). */
+export function codexApiRequestPayload(options: { withModel?: boolean } = {}) {
   return codexPayload([
     {
       attributes: [
@@ -156,7 +156,7 @@ export function codexApiRequestPayload() {
         i("http.response.status_code", 200),
         i("attempt", 1),
         s("endpoint", "/responses"),
-        ...codexCommon("2026-10-17T15:10:00.900Z"),
+        ...codexCommon("2026-10-17T15:10:00.900Z", options.withModel ?? true),
       ],
     },
     {

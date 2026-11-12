@@ -1,28 +1,59 @@
-// Copied verbatim from Simple-With-Us/BotFleet scripts/infisical-fetch.mjs on
-// 2026-09-29, with .github/actions/infisical-secrets, so the Mac release
-// workflow reads its signing certificate the way BotFleet's release.yml does.
-// Keep the two copies in step until the fleet has a shared action.
-//
-// CI-side Infisical fetch: universal-auth login, one bulk secrets list, then
+// CI-side Infisical fetch: service-token bearer read, one bulk secrets list, then
 // per requested name mask + export into $GITHUB_ENV -- falling back to a
 // same-named GH_FALLBACK_<NAME> step env var, warning when a name stays
 // empty everywhere, and failing only for a name listed in `required`.
 //
-// Runs unmodified on GitHub-hosted macOS, Windows and Linux runners: no CLI
-// install (ios-ship.yml's `brew install infisical/get-cli/infisical` is
-// macOS-only), no dependency (`@infisical/sdk` is in neither package.json
-// nor pnpm-lock.yaml) -- just global `fetch`, which every GitHub runner's
-// Node ships with.
+// Runs on GitHub-hosted macOS, Windows and Linux runners without the
+// Infisical CLI.  Needs `zod` (installed by the composite action before
+// this script runs) plus global `fetch` from the runner Node.
 //
 // Never prints a secret value except as the payload of an `::add-mask::`
 // workflow command, which is the mechanism GitHub uses to scrub it from the
 // rendered log from that point on -- one command per LINE of the value, see
 // `maskValue` below, because the runner's parser stops at the first newline.
-// A login/list failure never crashes the job -- callers still get their
-// GH_FALLBACK_<NAME> values, or the missing-name warning/error below.
-import { appendFileSync } from "node:fs";
+// Ordinary list failures may use GH_FALLBACK_<NAME>; metadata verification
+// failures stop before any fallback value is resolved
+import { appendFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { isIP } from "node:net";
+import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
+const SecretsResponseSchema = z
+  .object({
+    secrets: z.array(
+      z.object({
+        secretKey: z.string().min(1),
+        secretValue: z.string(),
+      }).passthrough()
+    ),
+  })
+  .passthrough();
+
+const ServiceTokenScopeSchema = z.object({
+  secretPath: z.string(),
+  environment: z.string(),
+}).strict();
+
+const ServiceTokenMetadataSchema = z.object({
+  projectId: z.string().min(1),
+  workspace: z.string().optional(),
+  expiresAt: z.string().nullable().optional(),
+  scopes: z.array(ServiceTokenScopeSchema),
+  permissions: z.array(z.string()),
+}).passthrough();
+
+const ServiceTokenMetadataResponseSchema = z.union([
+  ServiceTokenMetadataSchema,
+  z.object({ serviceTokenData: ServiceTokenMetadataSchema }).passthrough(),
+]);
+
+export class InfisicalTokenScopeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InfisicalTokenScopeError";
+  }
+}
 
 function splitNames(raw) {
   return String(raw ?? "")
@@ -35,57 +66,100 @@ function stripTrailingSlash(url) {
   return String(url ?? "").replace(/\/+$/, "");
 }
 
-/** POST .../api/v1/auth/universal-auth/login -- returns the bearer token
- * string only.  Body is built with JSON.stringify, never string
- * interpolation, so a client secret containing a quote cannot break the
- * request shape. */
-export async function loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl = fetch, timeoutMs = 30_000 }) {
-  const res = await fetchImpl(`${siteUrl}/api/v1/auth/universal-auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ clientId, clientSecret }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`Infisical login failed: HTTP ${res.status}`);
+function validatedSiteUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Infisical site URL must be a valid base URL");
   }
-  const body = await res.json();
-  const token = body && body.accessToken;
-  if (!token) {
-    throw new Error("Infisical login response carried no accessToken");
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "" && url.pathname !== "/")) {
+    throw new Error("Infisical site URL must be a base origin without credentials, path, query, or fragment");
   }
-  return token;
+  if (url.protocol === "https:") return url.origin;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const loopback = (isIP(hostname) === 4 && hostname.startsWith("127.")) || hostname === "::1";
+  if (url.protocol === "http:" && loopback) return url.origin;
+  throw new Error("Infisical site URL must use HTTPS (HTTP is allowed only for literal loopback test servers)");
 }
 
 /** GET .../api/v3/secrets/raw for the whole path in one call -- returns a
  * Map<secretKey, secretValue>.  viewSecretValue is always "true" here; this
  * script only ever runs where values are needed (it exists to populate
- * GITHUB_ENV), unlike the probe path in server/infisical.ts. */
+ * GITHUB_ENV), unlike the probe path in server/infisical.ts.
+ *
+ * expandSecretReferences is "true": a secret whose stored value is a bare
+ * reference such as ${prod.some-folder.NAME} (the Fleet-OPS root, OPS-818) comes
+ * back as the referenced value.  With "false" the literal reference string
+ * would land in GITHUB_ENV as if it were the credential.  Expanding needs the
+ * scoped service token to be able to read the referenced folder too. */
 export async function listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 30_000 }) {
+  const safeSiteUrl = validatedSiteUrl(siteUrl);
+  await verifyServiceTokenScope({ safeSiteUrl, token, projectId, environment, secretPath, fetchImpl, timeoutMs });
   const qs = new URLSearchParams({
     workspaceId: projectId,
     environment,
     secretPath,
+    recursive: "false",
     viewSecretValue: "true",
-    expandSecretReferences: "false",
+    expandSecretReferences: "true",
     include_imports: "false",
   });
-  const res = await fetchImpl(`${siteUrl}/api/v3/secrets/raw?${qs.toString()}`, {
+  const res = await fetchImpl(`${safeSiteUrl}/api/v3/secrets/raw?${qs.toString()}`, {
     method: "GET",
     headers: { authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(timeoutMs),
+    redirect: "error",
   });
   if (!res.ok) {
     throw new Error(`Infisical secrets list failed: HTTP ${res.status}`);
   }
-  const body = await res.json();
+  const body = SecretsResponseSchema.parse(await res.json());
   const values = new Map();
-  for (const s of body?.secrets ?? []) {
-    if (s && s.secretKey && s.secretValue) {
-      values.set(s.secretKey, s.secretValue);
-    }
+  for (const s of body.secrets) {
+    values.set(s.secretKey, s.secretValue);
   }
   return values;
+}
+
+export async function verifyServiceTokenScope({ safeSiteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 15_000 }) {
+  let response;
+  try {
+    response = await fetchImpl(`${safeSiteUrl}/api/v2/service-token`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "error",
+    });
+  } catch {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata request failed");
+  }
+  if (!response.ok) {
+    throw new InfisicalTokenScopeError(`Infisical service-token metadata returned HTTP ${response.status}`);
+  }
+
+  let responseBody;
+  try {
+    responseBody = await response.json();
+  } catch {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata response was invalid");
+  }
+  const parsed = ServiceTokenMetadataResponseSchema.safeParse(responseBody);
+  if (!parsed.success) {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata did not match the required scope contract");
+  }
+  const metadata = "serviceTokenData" in parsed.data ? parsed.data.serviceTokenData : parsed.data;
+  const valid = metadata.projectId === projectId &&
+    (metadata.workspace === undefined || metadata.workspace === projectId) &&
+    (metadata.expiresAt === undefined || metadata.expiresAt === null ||
+      (Number.isFinite(Date.parse(metadata.expiresAt)) && Date.parse(metadata.expiresAt) > Date.now())) &&
+    metadata.permissions.length === 1 && metadata.permissions[0] === "read" &&
+    metadata.scopes.length === 1 &&
+    metadata.scopes[0]?.environment === environment &&
+    metadata.scopes[0]?.secretPath === secretPath;
+  if (!valid) {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata does not match the requested project and exact read scope");
+  }
 }
 
 /** Registers each LINE of the value as its own mask, and never the joined
@@ -128,20 +202,26 @@ export function writeGithubEnvValue(path, name, value, appendFileImpl = appendFi
   appendFileImpl(path, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
 }
 
-/** Resolves the vault snapshot (empty map when unconfigured or the fetch
- * failed) -- never throws; a failure is reported through `log` and the
- * caller proceeds on GH_FALLBACK_<NAME> alone. */
-async function resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, environment, secretPath, fetchImpl, log }) {
-  if (!projectId || !clientId || !clientSecret) {
+/** A value that is still a bare Infisical reference such as
+ * ${prod.some-folder.NAME}: the server did not expand it (target missing, or
+ * the service token cannot read the referenced folder).  Exporting it would
+ * hand a workflow the literal reference string as if it were the credential. */
+export const UNRESOLVED_REFERENCE = /^\$\{[^}]+\}$/;
+
+export function isUnresolvedReference(value) {
+  return UNRESOLVED_REFERENCE.test(String(value ?? "").trim());
+}
+
+/** Returns an empty map when unconfigured; metadata-scope failures propagate,
+ * while ordinary list failures warn and let the caller use GH_FALLBACK values. */
+async function resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log }) {
+  if (!projectId || !token) {
     return new Map();
   }
   try {
-    const token = await loginUniversalAuth({ siteUrl, clientId, clientSecret, fetchImpl });
-    // The access token rides in an Authorization header below and is never
-    // printed; mask it anyway so no future error path can surface it.
-    maskValue(token, log);
     return await listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
   } catch (err) {
+    if (err instanceof InfisicalTokenScopeError) throw err;
     // Never interpolate the raw error body -- Infisical error payloads have
     // echoed request fields on some 4xx responses in the past, and none of
     // that belongs in a public Actions log.
@@ -158,13 +238,35 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
   const projectId = env.INFISICAL_PROJECT_ID || "";
   const environment = env.INFISICAL_ENVIRONMENT || "prod";
   const secretPath = env.INFISICAL_SECRET_PATH || "/";
-  const clientId = env.INFISICAL_CLIENT_ID || "";
-  const clientSecret = env.INFISICAL_CLIENT_SECRET || "";
+  const token = env.INFISICAL_TOKEN || "";
   const githubEnvPath = env.GITHUB_ENV || "";
 
-  const vaultValues = await resolveVaultValues({ siteUrl, projectId, clientId, clientSecret, environment, secretPath, fetchImpl, log });
+  const legacyMachineIdentityKeys = [
+    "INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
+    "INFISICAL_AUTOMATION_CLIENT_ID", "INFISICAL_AUTOMATION_CLIENT_SECRET",
+    "INFISICAL_UM_CLIENT_ID", "INFISICAL_UM_CLIENT_SECRET",
+    "INFISICAL_SHARED_CLIENT_ID", "INFISICAL_SHARED_CLIENT_SECRET",
+  ];
+  const hasLegacyMachineIdentity = legacyMachineIdentityKeys.some((key) => Boolean(env[key]));
+  const hasInfisicalConfig = Boolean(projectId || env.INFISICAL_SITE_URL || env.INFISICAL_SECRET_PATH || hasLegacyMachineIdentity);
+  if (!token && hasLegacyMachineIdentity) {
+    throw new Error("Infisical machine-identity credentials are no longer accepted here; configure a scoped INFISICAL_TOKEN.");
+  }
+  if (!token && projectId) {
+    throw new Error("Infisical project is configured but INFISICAL_TOKEN is missing.");
+  }
+  if (token && !projectId) {
+    throw new Error("INFISICAL_TOKEN is configured but INFISICAL_PROJECT_ID is missing.");
+  }
+  if (!token && hasInfisicalConfig) {
+    throw new Error("Infisical is configured but INFISICAL_TOKEN is missing.");
+  }
+
+  const vaultValues = await resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log });
 
   const missingRequired = [];
+  const unresolved = [];
   for (const name of names) {
     let value = vaultValues.get(name) || "";
     if (!value) {
@@ -180,8 +282,18 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
       }
       continue;
     }
+    if (isUnresolvedReference(value)) {
+      // Name the KEY only -- never the value, even though it is a reference.
+      unresolved.push(name);
+      log(`::error::${name} is still an unresolved Infisical secret reference after the ${environment} export; check the target exists and the scoped service token can read the referenced folder.`);
+      continue;
+    }
     maskValue(value, log);
     writeGithubEnvValue(githubEnvPath, name, value);
+  }
+
+  if (unresolved.length > 0) {
+    throw new Error(`Unresolved Infisical secret reference(s): ${unresolved.join(", ")}`);
   }
 
   if (missingRequired.length > 0) {
@@ -189,7 +301,18 @@ export async function run({ env = process.env, fetchImpl = fetch, log = (line) =
   }
 }
 
-const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+// Compare physical paths.  Node's ESM loader realpaths the entry module, so an
+// invocation through a symlinked directory (macOS /var -> /private/var) never
+// matches process.argv[1] when compared as text.
+function isEntryModule() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const isMain = isEntryModule();
 if (isMain) {
   run().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));

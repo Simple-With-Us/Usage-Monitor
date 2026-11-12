@@ -2,13 +2,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import prismaModule from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createPrismaClient } from "@/lib/create-prisma-client";
 import { FleetBudgetLedger } from "../ledger";
 import { input, NOW, POLICY } from "./fixture";
 import { budgetViewSchema } from "../view";
-
-const { PrismaClient } = prismaModule;
 let dir: string;
 let clients: InstanceType<typeof PrismaClient>[];
 let ledger: FleetBudgetLedger;
@@ -16,10 +15,10 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "um-fleet-budget-test-"));
   const url = `file:${join(dir, "synthetic.db")}?connection_limit=1`;
   // This is an isolated synthetic database, never an operator DATABASE_URL.
-  execFileSync(process.execPath, ["node_modules/prisma/build/index.js", "db", "push", "--skip-generate"], {
+  execFileSync(process.execPath, ["node_modules/prisma/build/index.js", "db", "push"], {
     cwd: process.cwd(), env: { ...process.env, DATABASE_URL: url }, stdio: "pipe",
   });
-  clients = Array.from({ length: 19 }, () => new PrismaClient({ datasources: { db: { url } } }));
+  clients = Array.from({ length: 19 }, () => createPrismaClient({ databaseUrl: url }));
   // WAL matches the production SQLite setup; short busy waits let independent
   // engines yield instead of blocking the test process for five seconds each.
   await clients[0].$queryRaw`PRAGMA journal_mode=WAL`;

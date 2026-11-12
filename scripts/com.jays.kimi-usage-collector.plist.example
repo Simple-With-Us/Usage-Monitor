@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Scheduled exact Kimi Code turn telemetry.  Install from the detached
+  collector runtime after replacing every absolute-path and hub-host placeholder.
+
+  Provide a scoped custody file; never put secret values in this plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.kimi-usage-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs</string>
+    <string>kimi</string>
+    <string>AUTH_MODE</string>
+    <string>/ABSOLUTE/PATH/TO/CUSTODY.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>COLLECTOR_SENTRY_ENABLED</key>
+    <string>1</string>
+    <key>COLLECTOR_TELEMETRY_HUB_ENDPOINT</key>
+    <string>https://TELEMETRY-HUB-HOST</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/kimi-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/kimi-usage-collector.log</string>
+</dict>
+</plist>
