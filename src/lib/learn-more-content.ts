@@ -42,7 +42,7 @@ export const LEARN_MORE_SECTIONS: readonly LearnMoreSection[] = [
     ],
     bullets: [
       "History window — on Overview, the chart range (for example 7 or 30 days) filters the trend, not your budget month.",
-      "Subscription quotas — on Overview and Agents, each row is a plan capacity window (for example a five-hour or weekly pool). The percentage is what is left, not what you used. Reset time is when the window refreshes.",
+      `Subscription quotas — on Overview and Agents, each row is a plan capacity window (for example a five-hour or weekly pool).${LEARN_MORE_SENTENCE_GAP}The percentage is what is left, not what you used.${LEARN_MORE_SENTENCE_GAP}Reset time is when the window refreshes.`,
       "LLM burn cards — short recent token and cost activity for analytics; they do not change budget math.",
       "Recurring fees — Subscriptions in Settings post one charge per billing period so they count in month-to-date like metered usage.",
     ],

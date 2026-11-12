@@ -68,13 +68,13 @@ public struct LocalLearnMoreTab: View {
       )
       featureRow(
         icon: "gauge.with.dots.needle.67percent",
-        title: "Budget pacing",
+        title: "Budget Pacing",
         detail:
           "How spend lines up with the monthly cap you chose.\(Self.sentenceGap)Yellow or red means you are close to or over budget."
       )
       featureRow(
         icon: "clock.arrow.circlepath",
-        title: "Last checked",
+        title: "Last Checked",
         detail:
           "When this app last asked the provider for fresh usage.\(Self.sentenceGap)Pull to refresh on Providers to check again."
       )
@@ -166,13 +166,13 @@ public struct LocalLearnMoreTab: View {
     Section {
       featureRow(
         icon: "exclamationmark.triangle",
-        title: "No spend showing",
+        title: "No Spend Showing",
         detail:
           "Try a billing-capable API key, or add the plan as a recurring fee if the vendor does not expose cost on the phone."
       )
       featureRow(
         icon: "arrow.clockwise",
-        title: "Numbers look stale",
+        title: "Numbers Look Stale",
         detail: "Open Providers and pull to refresh, or check your network connection."
       )
       featureRow(
