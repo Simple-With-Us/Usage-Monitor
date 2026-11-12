@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CURSOR_ADMIN_POLL_INTERVAL_MS } from "@/lib/cursor-admin-poller";
 import { POLL_INTERVAL_MS } from "@/lib/usage-recorder";
 import {
   SENTRY_CRON_CHECKIN_MARGIN,
   SENTRY_CRON_INTERVAL_MINUTES,
   SENTRY_CRON_MAX_RUNTIME,
   SENTRY_CRON_MONITOR_SLUG,
+  SENTRY_CURSOR_ADMIN_CRON_CHECKIN_MARGIN,
+  SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES,
+  SENTRY_CURSOR_ADMIN_CRON_MAX_RUNTIME,
+  SENTRY_CURSOR_ADMIN_CRON_SLUG,
   sentryCronMonitorConfig,
+  sentryCursorAdminCronMonitorConfig,
 } from "@/lib/sentry-ops";
 
 describe("sentry cron monitor config", () => {
@@ -26,6 +32,56 @@ describe("sentry cron monitor config", () => {
 
   it("does not advertise a 1-minute schedule that would miss healthy ticks", () => {
     expect(sentryCronMonitorConfig().schedule.value).not.toBe(1);
+  });
+
+  it("matches the hourly Cursor admin poller", () => {
+    expect(SENTRY_CURSOR_ADMIN_CRON_SLUG).toBe("usage-monitor-cursor-admin");
+    expect(SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES).toBe(60);
+    expect(CURSOR_ADMIN_POLL_INTERVAL_MS).toBe(
+      SENTRY_CURSOR_ADMIN_CRON_INTERVAL_MINUTES * 60 * 1000
+    );
+    const config = sentryCursorAdminCronMonitorConfig();
+    expect(config.schedule).toEqual({
+      type: "interval",
+      value: 60,
+      unit: "minute",
+    });
+    expect(config.checkinMargin).toBe(SENTRY_CURSOR_ADMIN_CRON_CHECKIN_MARGIN);
+    expect(config.maxRuntime).toBe(SENTRY_CURSOR_ADMIN_CRON_MAX_RUNTIME);
+    expect(config.timezone).toBe("UTC");
+  });
+});
+
+describe("Cursor admin cron check-in", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.doUnmock("@sentry/nextjs");
+    vi.resetModules();
+  });
+
+  it("does not check in while the poller is off", async () => {
+    vi.resetModules();
+    const captureCheckIn = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({ captureCheckIn }));
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "false");
+    const { recordCursorAdminPollerCheckIn } = await import("@/lib/sentry-ops");
+    await recordCursorAdminPollerCheckIn("ok");
+    expect(captureCheckIn).not.toHaveBeenCalled();
+  });
+
+  it("checks in only after the poller is enabled", async () => {
+    vi.resetModules();
+    const captureCheckIn = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({ captureCheckIn }));
+    vi.stubEnv("CURSOR_ADMIN_POLLER_ENABLED", "true");
+    const { recordCursorAdminPollerCheckIn } = await import("@/lib/sentry-ops");
+    await recordCursorAdminPollerCheckIn("error");
+    expect(captureCheckIn).toHaveBeenCalledWith(
+      { monitorSlug: "usage-monitor-cursor-admin", status: "error" },
+      expect.objectContaining({
+        schedule: { type: "interval", value: 60, unit: "minute" },
+      })
+    );
   });
 });
 
@@ -153,6 +209,55 @@ describe("Sentry ops mirror to fleet-infra when SENTRY_FLEET_DSN is set", () => 
   beforeEach(() => {
     process.env.SENTRY_FLEET_DSN =
       "https://abcd1234567890abcd@o0.ingest.sentry.io/123456";
+  });
+
+  it("does not page fleet-infra when the only due provider fails", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { logSchedulerDegraded } = await import("@/lib/sentry-ops");
+    await logSchedulerDegraded({
+      total: 28,
+      successes: 0,
+      failures: 1,
+      skipped: 27,
+      tickBudgetExceeded: false,
+      failingProviders: "unusual-whales:HTTP_ERROR",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("pages fleet-infra when every attempted poll failed and more than one was tried", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { logSchedulerDegraded } = await import("@/lib/sentry-ops");
+    await logSchedulerDegraded({
+      total: 28,
+      successes: 0,
+      failures: 2,
+      skipped: 26,
+      tickBudgetExceeded: false,
+      failingProviders: "alpha:HTTP_ERROR,beta:TIMEOUT",
+    });
+    expect(fetchSpy).toHaveBeenCalled();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
+    const event = JSON.parse(String(init?.body ?? "").split("\n")[2]);
+    expect(event.tags["metric.name"]).toBe("scheduler.provider_fetch_zero_success");
+    expect(event.level).toBe("warning");
+  });
+
+  it("mirrors admission rejection as a trace metric", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { recordIngestAdmissionRejected } = await import("@/lib/sentry-ops");
+    await recordIngestAdmissionRejected({ route: "otlp/v1/traces" });
+    expect(fetchSpy).toHaveBeenCalled();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
+    expect(JSON.parse(String(init?.body ?? "").split("\n")[1]).type).toBe(
+      "trace_metric"
+    );
   });
 
   it("logIngestFailed mirrors to fleet-infra with the route tag", async () => {

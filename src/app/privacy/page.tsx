@@ -4,7 +4,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "Privacy Policy — Usage Monitor",
   description:
-    "Privacy policy for Usage Client Monitor and Usage Local Monitor iOS apps and the Usage Monitor dashboard.",
+    "Privacy policy for Usage Monitor Client and Usage Monitor Local iOS apps and the Usage Monitor dashboard.",
   robots: { index: true, follow: true },
 };
 
@@ -19,9 +19,9 @@ export default function PrivacyPolicyPage() {
           Privacy Policy
         </h1>
         <p className="text-sm text-gray-600 dark:text-gray-400">
-          Effective August 10, 2026 · Applies to{" "}
-          <strong>Usage Client Monitor</strong>,{" "}
-          <strong>Usage Local Monitor</strong>, and the optional{" "}
+          Effective October 29, 2026 · Applies to{" "}
+          <strong>Usage Monitor Client</strong>,{" "}
+          <strong>Usage Monitor Local</strong>, and the optional{" "}
           <strong>Usage Monitor</strong> web dashboard at usage.jays.services.
         </p>
       </header>
@@ -37,12 +37,12 @@ export default function PrivacyPolicyPage() {
             in the iOS apps.
           </li>
           <li>
-            <strong>Usage Local Monitor</strong> processes API keys and cost
+            <strong>Usage Monitor Local</strong> processes API keys and cost
             figures on your device. Your keys leave the device only when you
             choose a provider and the app calls that provider’s HTTPS API.
           </li>
           <li>
-            <strong>Usage Client Monitor</strong> talks only to a Usage Monitor
+            <strong>Usage Monitor Client</strong> talks only to a Usage Monitor
             server URL and read token that <em>you</em> configure (self-hosted
             or fleet). We do not receive that traffic unless you point the app
             at a server we operate and you choose to use it.
@@ -78,10 +78,10 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Data we process
+          Data We Process
         </h2>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Local Monitor (on-device)
+          Usage Monitor Local (On-Device)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -105,7 +105,7 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Usage Client Monitor (server client)
+          Usage Monitor Client (Server Client)
         </h3>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -122,7 +122,7 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <h3 className="font-medium text-gray-900 dark:text-white">
-          Web dashboard (if you use a hosted instance)
+          Web Dashboard (If You Use a Hosted Instance)
         </h3>
         <p>
           A password-protected dashboard may store provider credentials and
@@ -135,7 +135,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Third parties you choose
+          Third Parties You Choose
         </h2>
         <p>
           When you add a provider (for example OpenRouter, OpenAI, Anthropic,
@@ -148,7 +148,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Tracking, ads, analytics
+          Tracking, Ads, Analytics
         </h2>
         <p>
           The iOS apps do not include advertising identifiers for ads, do not
@@ -160,7 +160,7 @@ export default function PrivacyPolicyPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Retention and deletion
+          Retention and Deletion
         </h2>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -175,6 +175,13 @@ export default function PrivacyPolicyPage() {
           <li>
             <strong>Self-hosted server:</strong> delete the instance database
             or provider rows according to your ops practice.
+          </li>
+          <li>
+            <strong>Web dashboard we operate:</strong> server backups are
+            kept for at most 2 weeks: short-term backups for 3 days, and
+            weekly backups for 2 weeks, then deleted.  A few rollback copies made during app
+            updates are also kept on the server until newer updates replace
+            them.
           </li>
         </ul>
       </section>

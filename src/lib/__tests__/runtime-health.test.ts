@@ -8,10 +8,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import type { SchedulerRunFailedProvider } from "@/lib/runtime-health";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isBroadProviderFetchOutage } from "../provider-fetch-outage";
 import {
   captureDatabaseFileBaseline,
   backupLayersGatesOk,
@@ -26,9 +26,12 @@ import {
   getR2WeeklyArchiveStatus,
   presentR2HistoricLayer,
   formatBackupAgeSeconds,
+  getAppliedSchedulerGate,
   getRuntimeIdentity,
   getSchedulerReadiness,
   getSchedulerRuntimeStatus,
+  isSchedulerEnabled,
+  recordSchedulerGate,
   getStartupRuntimeStatus,
   markSchedulerStarted,
   markSchedulerTickCompleted,
@@ -36,10 +39,48 @@ import {
   resetRuntimeHealthForTests,
 } from "../runtime-health";
 
+describe("isBroadProviderFetchOutage", () => {
+  it("ignores one failure when the rest of the poll set was skipped", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 1, skipped: 27 })
+    ).toBe(false);
+  });
+
+  it("pages when two or more attempts failed", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 2, skipped: 25 })
+    ).toBe(true);
+  });
+
+  it("pages when the only provider was attempted and failed", () => {
+    expect(
+      isBroadProviderFetchOutage({ successes: 0, failures: 1, skipped: 0 })
+    ).toBe(true);
+  });
+
+  it("does not assume a missing skip count means the whole set ran", () => {
+    expect(isBroadProviderFetchOutage({ successes: 0, failures: 1 })).toBe(
+      false
+    );
+  });
+});
+
 describe("runtime health state", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     resetRuntimeHealthForTests();
+  });
+
+  it("isSchedulerEnabled() reads live env until recordSchedulerGate pins boot value", () => {
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(false);
+
+    recordSchedulerGate(true);
+    expect(isSchedulerEnabled()).toBe(true);
+    expect(getAppliedSchedulerGate()).toBe(true);
+
+    vi.stubEnv("USAGE_SCHEDULER_ENABLED", "false");
+    expect(isSchedulerEnabled()).toBe(true);
   });
 
   it("records scheduler lifecycle without exposing adapter errors", () => {
@@ -106,14 +147,11 @@ describe("runtime health state", () => {
     expect(JSON.stringify(runtime)).not.toContain("must-not-leak");
   });
 
-  it("includes a bounded, whitelisted failedProviders list in lastRun when a tick has failures (#1478)", () => {
-    markSchedulerStarted();
+  it("preserves scheduler summary fields in lastRun without attaching provider details (AGENTS.md L226-228)", () => {
     const tickAt = new Date("2026-09-12T12:00:00.000Z");
+    const completedAt = new Date("2026-09-12T12:01:00.000Z");
+    markSchedulerStarted(tickAt);
     markSchedulerTickStarted(tickAt);
-    // Symptom from issue #1478: 0 successes, 2 failures, 25 skipped,
-    // providerFetchDegraded. The fix surfaces WHICH providers failed
-    // and WHICH adapter error code, so the operator can diagnose
-    // without grepping Sentry logs.
     const summary = {
       total: 27,
       successes: 0,
@@ -121,76 +159,33 @@ describe("runtime health state", () => {
       skipped: 25,
       maintenanceHealthy: true,
       providerFetchDegraded: true,
-      failedProviders: [
-        { id: "p_openai", name: "openai", errorCode: "TIMEOUT" },
-        { id: "p_anthropic", name: "anthropic", errorCode: "AUTH_FAILED" },
-      ],
       cloudflareLegacyHandoff: "disabled" as const,
     };
-    markSchedulerTickCompleted(true, summary, tickAt);
+    markSchedulerTickCompleted(true, summary, completedAt);
     const runtime = getSchedulerRuntimeStatus();
-    expect(runtime.lastRun?.failedProviders).toEqual([
-      { id: "p_openai", name: "openai", errorCode: "TIMEOUT" },
-      { id: "p_anthropic", name: "anthropic", errorCode: "AUTH_FAILED" },
-    ]);
-  });
-
-  it("caps failedProviders at 5 entries and strips non-string fields (#1478)", () => {
-    markSchedulerStarted();
-    const tickAt = new Date("2026-09-12T12:30:00.000Z");
-    markSchedulerTickStarted(tickAt);
-    const summary = {
-      total: 30,
+    expect(runtime.lastRun).toEqual({
+      total: 27,
       successes: 0,
-      failures: 9,
-      skipped: 21,
+      failures: 2,
+      skipped: 25,
       maintenanceHealthy: true,
       providerFetchDegraded: true,
-      // 9 entries, plus a poisoned entry with non-string fields that
-      // must be filtered out, and an unsafe entry that must be dropped.
-      failedProviders: ([
-        { id: "p1", name: "p1", errorCode: "TIMEOUT" },
-        { id: "p2", name: "p2", errorCode: "AUTH_FAILED" },
-        { id: "p3", name: "p3", errorCode: "RATE_LIMITED" },
-        { id: "p4", name: "p4", errorCode: "UNKNOWN" },
-        { id: "p5", name: "p5", errorCode: "NETWORK" },
-        { id: "p6", name: "p6", errorCode: "TIMEOUT" },
-        { id: "p7", name: "p7", errorCode: "TIMEOUT" },
-        { id: 7, name: "p8", errorCode: "TIMEOUT" }, // id is a number — must be dropped
-        { id: "p9", name: "p9" }, // missing errorCode — must be dropped
-        { id: "p10", errorCode: "x" }, // missing name — must be dropped
-        "not-an-object", // not an object — must be dropped
-      ] as unknown[]) as SchedulerRunFailedProvider[],
-      cloudflareLegacyHandoff: "disabled" as const,
-    };
-    markSchedulerTickCompleted(true, summary, tickAt);
-    const runtime = getSchedulerRuntimeStatus();
-    expect(runtime.lastRun?.failedProviders).toHaveLength(5);
-    expect(runtime.lastRun?.failedProviders).toEqual([
-      { id: "p1", name: "p1", errorCode: "TIMEOUT" },
-      { id: "p2", name: "p2", errorCode: "AUTH_FAILED" },
-      { id: "p3", name: "p3", errorCode: "RATE_LIMITED" },
-      { id: "p4", name: "p4", errorCode: "UNKNOWN" },
-      { id: "p5", name: "p5", errorCode: "NETWORK" },
-    ]);
-  });
-
-  it("omits failedProviders when a tick has zero failures (#1478)", () => {
-    markSchedulerStarted();
-    const tickAt = new Date("2026-09-12T12:45:00.000Z");
-    markSchedulerTickStarted(tickAt);
-    const summary = {
-      total: 27,
-      successes: 5,
-      failures: 0,
-      skipped: 22,
-      maintenanceHealthy: true,
-      providerFetchDegraded: false,
-      cloudflareLegacyHandoff: "disabled" as const,
-    };
-    markSchedulerTickCompleted(true, summary, tickAt);
-    const runtime = getSchedulerRuntimeStatus();
-    expect(runtime.lastRun?.failedProviders).toBeUndefined();
+      cloudflareLegacyHandoff: "disabled",
+    });
+    expect(runtime.lastTickSucceeded).toBe(true);
+    expect(runtime.lastTickProviderPollHealthy).toBe(false);
+    expect(getSchedulerReadiness(completedAt)).toMatchObject({
+      ok: true,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
+      providerFetchDegradedTickThreshold: 3,
+    });
+    expect(getSchedulerRuntimeStatus().consecutiveProviderFetchDegradedTicks).toBe(
+      1
+    );
+    // AGENTS.md lines 226-228: /api/ready exposes the scheduler summary without
+    // attaching target/provider IDs, env values, billing payloads, or provider errors.
+    expect("failedProviders" in (runtime.lastRun ?? {})).toBe(false);
   });
 
   it("reports release identity and backup enforcement from non-secret env", () => {
@@ -586,6 +581,33 @@ describe("runtime health state", () => {
     it("returns null when the job has never run", () => {
       vi.stubEnv("R2_ARCHIVE_STATUS_PATH", join(tmpdir(), "definitely-absent.json"));
       expect(getR2WeeklyArchiveStatus()).toBeNull();
+    });
+
+    it("re-reads the status file after it is rewritten (memo invalidation)", () => {
+      const path = writeArchiveStatus({
+        ok: true,
+        key: "weekly/first.db.gz",
+        completedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        prunedCount: 1,
+      });
+      vi.stubEnv("R2_ARCHIVE_STATUS_PATH", path);
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+      // Repeat read of the unchanged file (memo hit) agrees.
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({ ok: true, key: "weekly/first.db.gz" });
+
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ok: false,
+          reason: "verify_hash_mismatch",
+          checkedAt: new Date().toISOString(),
+        }),
+        "utf8"
+      );
+      expect(getR2WeeklyArchiveStatus()).toMatchObject({
+        ok: false,
+        reason: "verify_hash_mismatch",
+      });
     });
 
     it("reports a fresh successful archive as ok", () => {
@@ -1065,9 +1087,8 @@ describe("runtime health state", () => {
       providerFetchDegraded: false,
     };
 
-    // A single degraded tick must not flip readiness - only a sustained run
-    // does. `succeeded` here stays true throughout: provider-fetch health is
-    // deliberately independent of maintenanceHealthy/lastTickSucceeded.
+    // Partial degradation (some successes) still needs a sustained streak
+    // before readinessReason latches; maintenance stays healthy throughout.
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({ ok: true, reason: null });
     expect(
@@ -1086,8 +1107,6 @@ describe("runtime health state", () => {
     });
     expect(getSchedulerRuntimeStatus()).toMatchObject({
       consecutiveProviderFetchDegradedTicks: 3,
-      // Never affects lastTickSucceeded/consecutiveFailures - the app itself
-      // is still serving; a provider-fetch outage is upstream.
       lastTickSucceeded: true,
       consecutiveFailures: 0,
     });
@@ -1136,13 +1155,15 @@ describe("runtime health state", () => {
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
-      reason: null,
+      reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
     markSchedulerTickCompleted(true, degradedRun);
     expect(getSchedulerReadiness()).toMatchObject({
       ok: true,
       reason: "provider_fetch_degraded",
+      providerFetchDegraded: true,
       providerFetchDegradedTickThreshold: 2,
     });
   });

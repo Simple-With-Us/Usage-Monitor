@@ -1,3 +1,29 @@
 # False-positive: generic-api-key matched seriesKey plus a model id in collector tests.
 # Not a secret.  HEAD already splits the string; this ignores the first-commit finding.
 9fada8d91417c9a2deb6cd563a3a2857ea802879:scripts/test-antigravity-collector.mjs:generic-api-key:330
+
+# False-positive: agent-hook-otlp.test.mjs's "ignores fields beyond the known
+# five" test originally used credential-shaped placeholder strings
+# (curl -H 'authorization: Bearer ...', api_key=...) as adversarial fixture
+# content to prove buildLogRecord never widens what it reads.  Not a real
+# secret -- fixed in a later commit on this same PR to use a non-credential-
+# shaped sentinel string instead, but the earlier commit's content stays in
+# history.  This ignores those first-commit findings.
+8dfa68d18e63490350cb60f1464d5f3cee0aa56e:scripts/__tests__/agent-hook-otlp.test.mjs:curl-auth-header:370
+8dfa68d18e63490350cb60f1464d5f3cee0aa56e:scripts/__tests__/agent-hook-otlp.test.mjs:generic-api-key:367
+
+# False-positive: generic-api-key matched keyRef next to the documented
+# model id claude-4.5-sonnet in the Cursor admin poller test.  Not a secret.
+# A later commit reads the model from the fixture instead; these lines ignore
+# the first-commit finding that remains in this branch's history.
+7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:158
+7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:343
+
+# False-positive: generic-api-key matched hyphenated idempotency-key
+# fixtures in the original key-attribution route test (readable words
+# like matched/unmatched plus a version and "cost").  Not a real secret.
+# Those strings are gone from main; the original commit remains only on
+# the leftover branch that a full-history scan still walks.  Job
+# 131005389954 (Security on main at ed409d65) reported these fingerprints.
+6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:85
+6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:100

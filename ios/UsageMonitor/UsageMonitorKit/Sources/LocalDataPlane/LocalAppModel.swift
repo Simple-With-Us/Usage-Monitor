@@ -33,6 +33,11 @@ public final class LocalAppModel {
 
     public func bootstrap() async {
         do {
+            // No carry-over from earlier bundle IDs: the pre-rename Local app
+            // kept `local.sqlite` in its own sandbox, which a renamed app
+            // cannot read, and its Keychain provider keys do not follow either.
+            // A renamed install starts fresh (testers re-add providers).  See
+            // `docs/rollouts/2026-09-23-usage-identifier-fixes.md`.
             try await store.open()
             schemaVersion = await store.schemaVersion
             // Heal seed-invented catalog-guess fees before materialize.

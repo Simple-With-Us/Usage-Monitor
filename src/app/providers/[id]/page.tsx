@@ -583,7 +583,7 @@ export default function ProviderDetailPage() {
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & alert policy</h2>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & Alert Policy</h2>
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Owner-defined guardrails; these are not provider-reported plan terms.</p>
           </div>
           <Link href={`/settings?tab=connections&edit=${encodeURIComponent(provider.id)}`} className="text-xs font-semibold text-accent hover:opacity-90">

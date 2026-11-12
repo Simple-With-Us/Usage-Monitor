@@ -13,7 +13,10 @@
  * bounded. Uses the read-only Backblaze monitor key (same as the B2 adapter).
  */
 
+import "server-only";
+
 import { getBackupLayersStatus } from "@/lib/runtime-health";
+import { operationsHealthEgressDisabled } from "@/lib/operations-health";
 
 export const FLEET_BACKUP_CACHE_TTL_MS = 180_000; // 3 min
 export const FLEET_BACKUP_FAILURE_RETRY_MS = 45_000;
@@ -40,7 +43,18 @@ export interface FleetBackupLocationStatus {
   /** Short Title Case label for UI. */
   label: string;
   ok: boolean | null;
+  /**
+   * True when the artifact was observed at the location.  An UNOBSERVED
+   * location is `false` here: we never claim a replica exists just because
+   * nobody looked for it.
+   */
   present: boolean;
+  /**
+   * True when the location was never observed at all (the peer was not
+   * probed, the check was skipped), so neither presence nor absence is
+   * known.  Unknown is not failure.
+   */
+  unknown?: boolean;
   latestAgeSeconds: number | null;
   bytes: number | null;
   fileCount: number | null;
@@ -58,6 +72,12 @@ export interface FleetAppBackupStatus {
 
 export interface FleetBackupStatusPayload {
   configured: boolean;
+  /**
+   * True when the check was deliberately skipped (offline e2e run): nothing
+   * was observed, so the payload reports "not checked" instead of claiming
+   * missing credentials or a failed check.
+   */
+  offline?: boolean;
   ok: boolean;
   asOf: string;
   cacheAgeSeconds: number;
@@ -392,6 +412,11 @@ interface PeerStorageHealth {
   litestreamReason: string | null;
   /** True when the peer reports a compaction-tier wedge even if L0 is fresh. */
   litestreamTiersDegraded: boolean;
+  /**
+   * True when the peer state could not be observed at all (offline e2e
+   * run).  The replica is UNKNOWN then, not missing.
+   */
+  stateUnknown?: boolean;
   r2Weekly: PeerR2WeeklyStatus;
 }
 
@@ -471,6 +496,16 @@ function parsePeerR2Weekly(
 async function fetchPeerStorageHealth(
   url: string
 ): Promise<PeerStorageHealth> {
+  // Same offline kill switch as operations-health.ts: no peer egress in e2e.
+  if (operationsHealthEgressDisabled()) {
+    return {
+      litestreamAgeSeconds: null,
+      litestreamReason: "peer_health_offline",
+      litestreamTiersDegraded: false,
+      stateUnknown: true,
+      r2Weekly: missingPeerR2Weekly("peer_health_offline"),
+    };
+  }
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(8_000),
@@ -636,15 +671,24 @@ function summarizeApp(
 
 async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
   const warnings: string[] = [];
-  const creds = resolveMonitorCredentials();
+  // Playwright visual/e2e runs must render fully offline (suite invariant):
+  // drop the Backblaze monitor credentials so no B2 list call fires and the
+  // pinned rows never depend on live Backblaze state.
+  const offline = operationsHealthEgressDisabled();
+  const creds = offline ? null : resolveMonitorCredentials();
   const nowMs = now.getTime();
 
   let auth: B2Auth | null = null;
   let buckets = new Map<string, string>();
 
   if (!creds) {
+    // A deliberately skipped check is NOT a missing-credential claim: keep
+    // the two apart so the card never says the key is absent when it is
+    // simply not being used right now.
     warnings.push(
-      "Backblaze monitor credentials are not configured; B2 dump and LTX inventory unavailable."
+      offline
+        ? "Backblaze monitor check skipped (offline mode); B2 dump and LTX inventory unavailable."
+        : "Backblaze monitor credentials are not configured; B2 dump and LTX inventory unavailable."
     );
   } else {
     try {
@@ -794,10 +838,14 @@ async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
         );
         // Continuous sync (L0) is the Live row.  A wedged higher compaction
         // tier is a warning on that same row, not "the replica is down".
+        // An unobserved peer (offline e2e run) is UNKNOWN: the replica was
+        // never probed, so `present` stays false (we do not claim a replica
+        // exists just because nobody looked) and `ok` stays null.
         const present =
           peer.litestreamAgeSeconds != null || peer.litestreamTiersDegraded;
-        const ok =
-          peer.litestreamAgeSeconds != null
+        const ok = peer.stateUnknown
+          ? null
+          : peer.litestreamAgeSeconds != null
             ? ageOk
             : peer.litestreamTiersDegraded
               ? false
@@ -807,6 +855,7 @@ async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
           label: "Live Litestream",
           ok,
           present,
+          unknown: peer.stateUnknown || undefined,
           latestAgeSeconds: peer.litestreamAgeSeconds,
           bytes: null,
           fileCount: null,
@@ -889,11 +938,19 @@ async function loadFresh(now: Date): Promise<FleetBackupStatusPayload> {
     });
   }
 
+  // A skipped check is not a passed check: stay fail-closed while offline so
+  // a consumer that only reads `ok` never sees an unobserved fleet as
+  // healthy. Consumers that know the `offline` flag render "not checked"
+  // instead of "failing" (the web card does; the iOS model carries the flag).
   const overallOk =
-    apps.length > 0 && apps.every((a) => a.ok) && warnings.length === 0;
+    !offline &&
+    apps.length > 0 &&
+    apps.every((a) => a.ok) &&
+    warnings.length === 0;
 
   return {
     configured: creds != null,
+    offline,
     ok: overallOk,
     asOf: now.toISOString(),
     cacheAgeSeconds: 0,

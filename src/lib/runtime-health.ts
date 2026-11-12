@@ -11,16 +11,20 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
+import { appSettings } from "@/lib/app-settings";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
-export interface SchedulerRunFailedProvider {
-  // Provider id - opaque database identifier, safe to surface.
-  id: string;
-  // Provider display name - safe to surface.
-  name: string;
-  // Adapter error code (TIMEOUT, RATE_LIMITED, AUTH_FAILED, UNKNOWN, ...).
-  // Safe: an enum-style string, never the upstream response body or
-  // credential material. See ProviderFetchError.code in usage-recorder.ts.
-  errorCode: string;
+export { isBroadProviderFetchOutage };
+
+/** Total provider-poll outage: every attempted poll failed, and the miss is broad. */
+export function isZeroSuccessProviderFetchOutage(
+  lastRun: Pick<
+    SchedulerRunSummary,
+    "successes" | "failures" | "skipped" | "providerFetchDegraded"
+  > | null
+): boolean {
+  if (!lastRun?.providerFetchDegraded) return false;
+  return isBroadProviderFetchOutage(lastRun);
 }
 
 export interface SchedulerRunSummary {
@@ -34,20 +38,8 @@ export interface SchedulerRunSummary {
   // usage-recorder.ts. Distinct from maintenanceHealthy: a tick can succeed
   // (maintenance healthy) while most provider polls still failed.
   providerFetchDegraded: boolean;
-  // Bounded, safe-to-surface list of providers that failed THIS tick so an
-  // operator looking at /api/ready.lastRun can see which providers the
-  // "0 successes, 2 failures, providerFetchDegraded" alert came from
-  // without grepping Sentry logs. Capped at FAILED_PROVIDERS_SUMMARY_CAP
-  // (currently 5) to keep the readiness body bounded; the count field
-  // above remains the authoritative failures total.
-  failedProviders?: SchedulerRunFailedProvider[];
   cloudflareLegacyHandoff: CloudflareLegacyHandoffStatus;
 }
-
-// Keep this small enough that a tick with many failures still produces a
-// bounded readiness body, but large enough that an operator can usually
-// see every failing provider at the 15-minute cadence.
-const FAILED_PROVIDERS_SUMMARY_CAP = 5;
 
 export interface SchedulerRuntimeStatus {
   startedAt: string | null;
@@ -55,6 +47,9 @@ export interface SchedulerRuntimeStatus {
   lastTickStartedAt: string | null;
   lastTickCompletedAt: string | null;
   lastTickSucceeded: boolean | null;
+  // Whether THIS tick's provider-fetch phase succeeded (distinct from
+  // maintenanceHealthy / lastTickSucceeded, which stay deploy-gate safe).
+  lastTickProviderPollHealthy: boolean | null;
   consecutiveFailures: number;
   firstFailureAt: string | null;
   // Streak of consecutive ticks whose provider-fetch phase was degraded.
@@ -127,6 +122,8 @@ interface DatabaseFileBaseline {
 
 interface RuntimeHealthState {
   scheduler: SchedulerRuntimeStatus;
+  /** USAGE_SCHEDULER_ENABLED as evaluated once at boot (see recordSchedulerGate). */
+  schedulerGateEnabled: boolean | null;
   databaseFile: DatabaseFileBaseline | null;
   databaseFileCache: { status: DatabaseFileStatus; expiresAtMs: number } | null;
 }
@@ -144,12 +141,14 @@ const state =
       lastTickStartedAt: null,
       lastTickCompletedAt: null,
       lastTickSucceeded: null,
+      lastTickProviderPollHealthy: null,
       consecutiveFailures: 0,
       firstFailureAt: null,
       consecutiveProviderFetchDegradedTicks: 0,
       firstProviderFetchDegradedAt: null,
       lastRun: null,
     },
+    schedulerGateEnabled: null,
     databaseFile: null,
     databaseFileCache: null,
   });
@@ -157,22 +156,6 @@ const state =
 function normalizeSchedulerRunSummary(
   summary: SchedulerRunSummary
 ): SchedulerRunSummary {
-  // Filter + cap failedProviders so the readiness body is bounded and a
-  // caller cannot push arbitrarily large lists through this path. Whitelist
-  // of fields is intentional - any future addition to SchedulerRunSummary
-  // has to be added here explicitly so a leak through a stale summary
-  // cannot surface arbitrary caller-supplied data on /api/ready.
-  const failedProviders = Array.isArray(summary.failedProviders)
-    ? summary.failedProviders
-        .filter(
-          (entry): entry is SchedulerRunFailedProvider =>
-            !!entry &&
-            typeof entry.id === "string" &&
-            typeof entry.name === "string" &&
-            typeof entry.errorCode === "string"
-        )
-        .slice(0, FAILED_PROVIDERS_SUMMARY_CAP)
-    : undefined;
   return {
     total: summary.total,
     successes: summary.successes,
@@ -180,13 +163,60 @@ function normalizeSchedulerRunSummary(
     skipped: summary.skipped,
     maintenanceHealthy: summary.maintenanceHealthy,
     providerFetchDegraded: summary.providerFetchDegraded,
-    ...(failedProviders ? { failedProviders } : {}),
     cloudflareLegacyHandoff: summary.cloudflareLegacyHandoff,
   };
 }
 
 export function markSchedulerStarted(at = new Date()): void {
   state.scheduler.startedAt ??= at.toISOString();
+}
+
+/**
+ * Single source of truth for the USAGE_SCHEDULER_ENABLED knob, resolved
+ * through the settings service (Infisical cache in production, process.env
+ * in env-fallback mode).  instrumentation.ts's scheduler gate and
+ * /api/ready's readiness computation must both use this — never a direct
+ * process.env read — or the two disagree whenever the knob lives only in
+ * Infisical (scheduler disabled at boot while /api/ready still requires
+ * it, or a second poller on a standby host while readiness reports green).
+ *
+ * Boot-vs-live: the scheduler start decision is made exactly once in
+ * instrumentation.register(), which is never re-run, while the underlying
+ * knob is live-refreshable (5-min Infisical refresh).  register() records
+ * the evaluated gate via recordSchedulerGate(); afterwards this returns the
+ * recorded boot value so /api/ready agrees with what the process actually
+ * did.  Otherwise an operator flipping the knob from false to true post-boot
+ * would make readiness report not_ready (and ?strict=1 return 503) forever —
+ * a restart loop with no way out short of a redeploy.
+ */
+export function isSchedulerEnabled(): boolean {
+  if (state.schedulerGateEnabled !== null) return state.schedulerGateEnabled;
+  return (
+    appSettings.get("USAGE_SCHEDULER_ENABLED")?.trim().toLowerCase() !== "false"
+  );
+}
+
+/**
+ * Record the scheduler gate as evaluated at boot.  Called once from
+ * instrumentation.register() right where the start decision is made.
+ */
+export function recordSchedulerGate(enabled: boolean): void {
+  state.schedulerGateEnabled = enabled;
+}
+
+/**
+ * The gate value this process actually booted with, or null when
+ * instrumentation.register() has not run yet.  The admin surface must
+ * report this for the boot-applied USAGE_SCHEDULER_ENABLED knob instead
+ * of the live cache value.
+ */
+export function getAppliedSchedulerGate(): boolean | null {
+  return state.schedulerGateEnabled;
+}
+
+/** Test-only: clear the recorded boot gate between register() runs. */
+export function resetSchedulerGateForTests(): void {
+  state.schedulerGateEnabled = null;
 }
 
 export function markSchedulerTickStarted(at = new Date()): void {
@@ -201,7 +231,15 @@ export function markSchedulerTickCompleted(
 ): void {
   state.scheduler.tickInProgress = false;
   state.scheduler.lastTickCompletedAt = at.toISOString();
+  const normalizedLastRun = lastRun
+    ? normalizeSchedulerRunSummary(lastRun)
+    : null;
+  // Maintenance-only: deploy verification gates on lastTickSucceeded and must
+  // not flip false for upstream provider API outages (see usage-recorder).
   state.scheduler.lastTickSucceeded = succeeded;
+  state.scheduler.lastTickProviderPollHealthy = normalizedLastRun
+    ? !normalizedLastRun.providerFetchDegraded
+    : null;
   if (succeeded) {
     state.scheduler.consecutiveFailures = 0;
     state.scheduler.firstFailureAt = null;
@@ -220,9 +258,7 @@ export function markSchedulerTickCompleted(
     state.scheduler.consecutiveProviderFetchDegradedTicks = 0;
     state.scheduler.firstProviderFetchDegradedAt = null;
   }
-  state.scheduler.lastRun = lastRun
-    ? normalizeSchedulerRunSummary(lastRun)
-    : null;
+  state.scheduler.lastRun = normalizedLastRun;
 }
 
 export function getSchedulerRuntimeStatus(): SchedulerRuntimeStatus {
@@ -239,8 +275,17 @@ export function getSchedulerReadiness(now = new Date()): SchedulerReadiness {
   const staleAfterMs = schedulerStaleAfterMs();
   const failureThreshold = schedulerFailureThreshold();
   const degradedTickThreshold = providerFetchDegradedTickThreshold();
+  const zeroSuccessOutage = isZeroSuccessProviderFetchOutage(
+    scheduler.lastRun
+  );
+  // Partial poll degradation still needs a sustained streak before latching.
+  // A broad outage (every attempt failed, and more than one provider was
+  // attempted, or nothing was skipped) surfaces on the first tick so
+  // paging/readinessReason do not wait three 15-minute ticks (UM-1373).
+  // One failure beside a skip set is that provider, not this outage.
   const providerFetchDegraded =
-    scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold;
+    scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold ||
+    zeroSuccessOutage;
   if (!scheduler.startedAt) {
     return {
       ok: false,
@@ -609,7 +654,7 @@ export function getStartupRuntimeStatus(): {
 const DEFAULT_DISK_WARN_FREE_BYTES = 5 * 1024 * 1024 * 1024;
 
 function diskWarnFreeBytes(): number {
-  const configured = Number(process.env.READY_DISK_WARN_FREE_BYTES);
+  const configured = Number(appSettings.get("READY_DISK_WARN_FREE_BYTES"));
   return Number.isFinite(configured) && configured >= 0
     ? configured
     : DEFAULT_DISK_WARN_FREE_BYTES;
@@ -1027,19 +1072,77 @@ export interface R2WeeklyArchiveStatus {
  */
 const R2_ARCHIVE_MAX_AGE_SECONDS = 8 * 24 * 60 * 60;
 
+interface R2ArchiveStatusFileShape {
+  ok?: unknown;
+  key?: unknown;
+  checkedAt?: unknown;
+  completedAt?: unknown;
+  prunedCount?: unknown;
+  reason?: unknown;
+}
+
+// Liveness (2026-10-29): /api/health reads this status file on every probe.
+// The file changes at most weekly, but the old code re-read and re-parsed it
+// synchronously per probe, which made the fleet's cheapest liveness signal
+// depend on a data read from the /data volume — the same volume the boot
+// backup's integrity_check and Litestream compaction saturate. Memoize the
+// parsed file keyed on (path, mtimeMs, size): an unchanged file costs one
+// stat (metadata only, no data read), and any rewrite invalidates
+// immediately, so the status is never staler than the file itself. The age
+// fields are still computed per call by the caller below.
+let r2ArchiveStatusFileMemo: {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  parsed: R2ArchiveStatusFileShape;
+} | null = null;
+
+function readR2ArchiveStatusFile(
+  statusPath: string
+): R2ArchiveStatusFileShape | null {
+  // Open once and fstat/read the same descriptor: a stat-then-read-by-path
+  // pair would be a check/use race (and CodeQL flags it as one).
+  let fd: number;
+  try {
+    fd = openSync(statusPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    const memo = r2ArchiveStatusFileMemo;
+    if (
+      memo &&
+      memo.path === statusPath &&
+      memo.mtimeMs === stat.mtimeMs &&
+      memo.size === stat.size
+    ) {
+      return memo.parsed;
+    }
+    const parsed = JSON.parse(
+      readFileSync(fd, "utf8")
+    ) as R2ArchiveStatusFileShape;
+    r2ArchiveStatusFileMemo = {
+      path: statusPath,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      parsed,
+    };
+    return parsed;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function getR2WeeklyArchiveStatus(): R2WeeklyArchiveStatus | null {
   const statusPath =
     process.env.R2_ARCHIVE_STATUS_PATH?.trim() || "/data/.r2-archive-status.json";
   try {
-    if (!existsSync(statusPath)) return null;
-    const parsed = JSON.parse(readFileSync(statusPath, "utf8")) as {
-      ok?: unknown;
-      key?: unknown;
-      checkedAt?: unknown;
-      completedAt?: unknown;
-      prunedCount?: unknown;
-      reason?: unknown;
-    };
+    const parsed = readR2ArchiveStatusFile(statusPath);
+    if (parsed === null) return null;
 
     const completedAt =
       typeof parsed.completedAt === "string" ? parsed.completedAt : null;
@@ -1350,12 +1453,14 @@ export function resetRuntimeHealthForTests(): void {
     lastTickStartedAt: null,
     lastTickCompletedAt: null,
     lastTickSucceeded: null,
+    lastTickProviderPollHealthy: null,
     consecutiveFailures: 0,
     firstFailureAt: null,
     consecutiveProviderFetchDegradedTicks: 0,
     firstProviderFetchDegradedAt: null,
     lastRun: null,
   };
+  state.schedulerGateEnabled = null;
   if (state.databaseFile?.fd != null) {
     try {
       closeSync(state.databaseFile.fd);

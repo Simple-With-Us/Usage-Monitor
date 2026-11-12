@@ -1,4 +1,5 @@
 import { adapterHttpAbortStorage } from "@/lib/adapters/helpers";
+import { appSettings } from "@/lib/app-settings";
 import { prisma } from "@/lib/prisma";
 import { fetchProviderUsage } from "@/lib/adapters";
 import { AdapterError, type AdapterErrorCode } from "@/lib/adapters/helpers";
@@ -6,7 +7,7 @@ import {
   isUsageMaintenanceHealthy,
   runUsageMaintenance,
 } from "@/lib/usage-maintenance";
-import { ensureAgentSyncProviderSeeded } from "@/lib/ensure-agent-sync-provider";
+import { ensureSimpleToolsProviderSeeded } from "@/lib/ensure-simple-tools-provider";
 import { ensureCloudflareFleetProvidersSeeded } from "@/lib/ensure-cloudflare-fleet-providers";
 import { ensureRoicProviderSeeded } from "@/lib/ensure-roic-provider";
 import { ensureFleetProjectsSeeded } from "@/lib/ensure-fleet-projects";
@@ -37,6 +38,11 @@ import {
 import { withInternalUsageWriteAdmission } from "@/lib/ingest-admission";
 import { redactProviderRawData } from "@/lib/data-privacy";
 import { budgetPollingPaused } from "@/lib/budget-controls";
+import {
+  assertCursorAdminPollerConfigured,
+  isCursorAdminPollerEnabled,
+} from "@/lib/cursor-admin-config";
+import { pollCursorAdminUsage } from "@/lib/cursor-admin-poller";
 import { isDecommissionedProviderName } from "@/lib/provider-definitions";
 import {
   logSchedulerDegraded,
@@ -44,6 +50,8 @@ import {
   recordSentryCronHeartbeat,
   recordSchedulerDuration,
 } from "@/lib/sentry-ops";
+import * as Sentry from "@sentry/nextjs";
+import { fanoutPollSnapshot } from "@/lib/usage-fanout";
 const DEFAULT_PROVIDER_TIMEOUT_MS = 90_000;
 const providerAttemptTokens = new Map<string, symbol>();
 
@@ -61,7 +69,7 @@ function assertProviderAttemptCurrent(
 }
 
 function resolveProviderTimeoutMs(): number {
-  const raw = process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_PROVIDER_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_PROVIDER_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -127,6 +135,10 @@ export async function recordProviderUsage(
       });
     });
     if (usage.postPersistError) throw usage.postPersistError;
+    void fanoutPollSnapshot(provider.name, {
+      totalCost: snapshot.totalCost,
+      balance: snapshot.balance,
+    });
     return snapshot;
   } finally {
     if (providerAttemptTokens.get(provider.id) === attemptToken) {
@@ -230,10 +242,11 @@ export function isProviderFetchTickDegraded(
 ): boolean {
   const attempted = result.successes + result.failures;
   if (attempted === 0) return false; // nothing attempted (all skipped) - no signal either way
-  // Total-outage fast path: everything attempted failed. Kept as an explicit
-  // check (not just relying on the ratio below) so a complete outage is
-  // always caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is ever
-  // misconfigured above its intended 0-1 range.
+  // Everything attempted failed, so the tick is degraded. Kept as an explicit
+  // check (not just relying on the ratio below) so a complete miss is always
+  // caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is misconfigured.
+  // Fleet paging and the readiness fast path use isBroadProviderFetchOutage,
+  // which does not treat one failure beside a skip set as an outage.
   if (result.successes === 0 && result.failures > 0) return true;
   return result.failures / attempted >= resolveProviderFetchDegradedFailureRatio();
 }
@@ -381,7 +394,7 @@ export async function fetchAllDueProviders(): Promise<FetchAllProvidersResult> {
   }
 
   const run = (async () => {
-    await withInternalUsageWriteAdmission(() => ensureAgentSyncProviderSeeded());
+    await withInternalUsageWriteAdmission(() => ensureSimpleToolsProviderSeeded());
     await withInternalUsageWriteAdmission(() => ensureRoicProviderSeeded());
     await withInternalUsageWriteAdmission(() =>
       ensureCloudflareFleetProvidersSeeded()
@@ -692,18 +705,60 @@ export interface UsagePollingSchedulerTickDependencies {
   runMaintenance?: typeof runUsageMaintenance;
   markTickStarted?: typeof markSchedulerTickStarted;
   markTickCompleted?: typeof markSchedulerTickCompleted;
+  pollCursorAdmin?: () => Promise<unknown>;
+  /** Test override.  Production reads CURSOR_ADMIN_POLLER_ENABLED. */
+  cursorAdminEnabled?: boolean;
 }
 
 export async function runUsagePollingSchedulerTick(
   dependencies: UsagePollingSchedulerTickDependencies = {}
+): Promise<void> {
+  // Root transaction so child fetch/maintenance spans are not dropped as
+  // no_parent_span. forceTransaction is required because the in-process
+  // scheduler is not an HTTP request and otherwise has no active span.
+  return Sentry.startSpan(
+    { name: "usage-scheduler.tick", op: "task", forceTransaction: true },
+    () => runUsagePollingSchedulerTickBody(dependencies)
+  );
+}
+
+async function runUsagePollingSchedulerTickBody(
+  dependencies: UsagePollingSchedulerTickDependencies
 ): Promise<void> {
   const markTickStarted = dependencies.markTickStarted ?? markSchedulerTickStarted;
   const markTickCompleted = dependencies.markTickCompleted ?? markSchedulerTickCompleted;
   markTickStarted();
   const tickStartedAt = Date.now();
   try {
-    const result = await (dependencies.fetchProviders ?? fetchAllDueProviders)();
-    const maintenance = await (dependencies.runMaintenance ?? runUsageMaintenance)();
+    const result = await Sentry.startSpan(
+      { name: "usage-scheduler.fetch-providers", op: "task" },
+      () => (dependencies.fetchProviders ?? fetchAllDueProviders)()
+    );
+    const maintenance = await Sentry.startSpan(
+      { name: "usage-scheduler.maintenance", op: "task" },
+      () => (dependencies.runMaintenance ?? runUsageMaintenance)()
+    );
+    // Billed Cursor usage.  Off unless CURSOR_ADMIN_POLLER_ENABLED is set,
+    // in which case the job is not entered at all (no span, no log, no
+    // Sentry cron check-in).  When it is on, a runtime poll failure stays
+    // isolated so a 429 cannot fail maintenance or readiness.  Enabled
+    // without CURSOR_ADMIN_API_KEY fails in startUsagePollingScheduler
+    // before this interval is armed.
+    const cursorAdminEnabled =
+      dependencies.cursorAdminEnabled ?? isCursorAdminPollerEnabled();
+    if (cursorAdminEnabled) {
+      try {
+        await Sentry.startSpan(
+          { name: "usage-scheduler.cursor-admin-poll", op: "task" },
+          () => (dependencies.pollCursorAdmin ?? pollCursorAdminUsage)()
+        );
+      } catch (error) {
+        console.error(
+          "[cursor-admin] poll failed",
+          error instanceof Error ? error.name : "unknown"
+        );
+      }
+    }
     const tickDurationMs = Date.now() - tickStartedAt;
     const maintenanceHealthy = isUsageMaintenanceHealthy(maintenance);
     // Deliberately NOT folded into `succeeded` (maintenanceHealthy) below: a
@@ -716,16 +771,6 @@ export async function runUsagePollingSchedulerTick(
     // surfaced as a distinct scheduler.providerFetchDegraded signal instead.
     const providerFetchDegraded =
       isProviderFetchTickDegraded(result) || result.tickBudgetExceeded === true;
-    // Surface the failing provider identities on the run summary so the
-    // scheduler.provider_fetch_degraded alert includes actionable detail
-    // (which providers, which error code) without forcing the operator to
-    // dig into Sentry. Normalized + capped inside markTickCompleted via
-    // normalizeSchedulerRunSummary, so this list is best-effort and bounded.
-    const failedProviders = result.errors.map((entry) => ({
-      id: entry.providerId,
-      name: entry.name,
-      errorCode: entry.code,
-    }));
     markTickCompleted(maintenanceHealthy, {
       total: result.total,
       successes: result.successes,
@@ -733,7 +778,6 @@ export async function runUsagePollingSchedulerTick(
       skipped: result.skipped,
       maintenanceHealthy,
       providerFetchDegraded,
-      ...(failedProviders.length > 0 ? { failedProviders } : {}),
       cloudflareLegacyHandoff:
         maintenance.subscriptionAdoption.cloudflareLegacyHandoff,
     });
@@ -751,11 +795,10 @@ export async function runUsagePollingSchedulerTick(
       providerFetchDegraded,
     });
     if (providerFetchDegraded) {
-      // Top-5 failing provider names keep the sparse Sentry log bounded
-      // while still answering "who is this outage" for the common case.
-      const failingNames = failedProviders
+      // Sentry log only — never exposed on unauthenticated /api/ready.
+      const failingNames = result.errors
         .slice(0, 5)
-        .map((entry) => `${entry.name}:${entry.errorCode}`)
+        .map((entry) => `${entry.name}:${entry.code}`)
         .join(",");
       void logSchedulerDegraded({
         total: result.total,
@@ -785,6 +828,10 @@ export function startUsagePollingScheduler(
   tick: () => Promise<void> = runUsagePollingSchedulerTick
 ): void {
   if (schedulerStarted) return; // instrumentation.register() can fire more than once in some Next.js scenarios - guard against double-scheduling
+  // Assert before arming the interval.  A throw leaves schedulerStarted
+  // false so a misconfigured opt-in fails Next register() instead of
+  // leaving a half-started scheduler.  The default (flag unset) no-ops.
+  assertCursorAdminPollerConfigured();
   schedulerStarted = true;
   markSchedulerStarted();
   setInterval(() => void tick(), POLL_INTERVAL_MS);

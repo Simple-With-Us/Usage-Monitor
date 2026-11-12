@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const prismaMock = vi.hoisted(() => ({
+  externalUsageEvent: { findMany: vi.fn() },
+}));
+
+vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+
 import {
   buildSnapshotVariableDayPeaks,
   dailyIncrementsFromSnapshotPeaks,
+  loadMtdDailyVariableUsageByProviderId,
   maxDailySeries,
 } from "../daily-usage-series";
 import { calculateEomForecast, calculateEomForecastFromSeries } from "../forecasting";
@@ -70,6 +78,32 @@ describe("daily-usage-series helpers (Wave J / E11)", () => {
     expect(maxDailySeries(null, [1, 2])).toEqual([1, 2]);
     expect(maxDailySeries([1], null)).toEqual([1]);
     expect(maxDailySeries(null, null)).toBeNull();
+  });
+});
+
+describe("OpenCode daily cash series", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("includes PAYG message cost and excludes OpenCode subscription and Fx estimates", async () => {
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([
+      { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "api-equivalent", metricType: "cost", billingMode: "estimated", costUsd: 12, occurredAt: new Date("2026-07-02T12:00:00.000Z") },
+      { sourceApp: "opencode", provider: "muse-code", service: "opencode", label: "api-equivalent", metricType: "cost", billingMode: "estimated", costUsd: 7, occurredAt: new Date("2026-07-02T12:00:00.000Z") },
+      { sourceApp: "opencode", provider: "anthropic", service: "opencode", label: "other", metricType: "cost", billingMode: "estimated", costUsd: 4, occurredAt: new Date("2026-07-02T12:00:00.000Z") },
+      { sourceApp: "fx", provider: "xai", service: "fx", label: "api-equivalent", metricType: "cost", billingMode: "estimated", costUsd: 3, occurredAt: new Date("2026-07-02T12:00:00.000Z") },
+    ]);
+
+    const series = await loadMtdDailyVariableUsageByProviderId(
+      new Date("2026-07-01T00:00:00.000Z"),
+      new Date("2026-07-03T00:00:00.000Z"),
+      [
+        { id: "anthropic-id", name: "anthropic" },
+        { id: "muse-id", name: "muse-code" },
+        { id: "xai-id", name: "xai" },
+      ]
+    );
+    expect(series.get("anthropic-id")).toEqual([0, 12, 0]);
+    expect(series.has("muse-id")).toBe(false);
+    expect(series.has("xai-id")).toBe(false);
   });
 });
 

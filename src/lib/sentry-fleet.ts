@@ -18,6 +18,9 @@
 //   <event JSON>\n
 // POSTed to <dsn.host>/api/<dsn.projectId>/envelope/?sentry_key=<public_key>&sentry_version=7
 //
+// Healthy metric points use a `trace_metric` item instead of `event` (see
+// recordFleetInfraTraceMetric) so they never become issues.
+//
 // All calls are best-effort: failures are swallowed and the caller's flow
 // continues.  This module must never throw, never block, and never log the
 // DSN value.  Fleet-infra is an observability channel, not a billing path.
@@ -120,6 +123,29 @@ function environmentTag(): string {
   );
 }
 
+async function postEnvelope(
+  dsn: ParsedDsn,
+  envelope: string,
+  label: string
+): Promise<void> {
+  const url =
+    dsn.envelopeBase +
+    `?sentry_key=${encodeURIComponent(dsn.publicKey)}` +
+    `&sentry_version=${SENTRY_VERSION}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-sentry-envelope",
+      "User-Agent": `${SDK_NAME}/${SDK_VERSION}`,
+    },
+    body: envelope,
+  });
+  if (!res.ok && process.env.SENTRY_FLEET_DEBUG === "true") {
+    // Diagnostic only — debug-mode leaks the HTTP status, not the DSN.
+    console.warn(`[sentry-fleet] ${label} returned HTTP ${res.status}`);
+  }
+}
+
 export interface FleetInfraTags {
   app: string;
   agent: string;
@@ -192,74 +218,167 @@ export async function recordFleetInfraEvent(
       eventJson,
       "",
     ].join("\n");
-    const url =
-      dsn.envelopeBase +
-      `?sentry_key=${encodeURIComponent(dsn.publicKey)}` +
-      `&sentry_version=${SENTRY_VERSION}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-sentry-envelope",
-        "User-Agent": `${SDK_NAME}/${SDK_VERSION}`,
-      },
-      body: envelope,
-    });
-    if (!res.ok && process.env.SENTRY_FLEET_DEBUG === "true") {
-      // Diagnostic only — debug-mode leaks the HTTP status, not the DSN.
-      console.warn(
-        `[sentry-fleet] event "${message}" returned HTTP ${res.status}`
-      );
+    await postEnvelope(dsn, envelope, `event "${message}"`);
+  } catch {
+    // Best-effort: the next call is a fresh attempt.
+  }
+}
+
+// Metric kind is decided by the NAME, not the value.  Sentry Application
+// Metrics classify `gauge` vs `counter` by semantics (a measurement vs a
+// count), and `scheduler.duration_ms` is always a gauge even though
+// `Date.now() - tickStartedAt` is an integer.  Anything ending in `_ms`,
+// `duration_*`, `*_ratio`, `latency` or `cost_usd` is a gauge; everything
+// else is a counter.
+const GAUGE_NAME = /(?:^|[._])(?:duration_ms|ttft_ms|duration|ratio|latency|cost_usd)\b/;
+const MILLISECOND_NAME = /(?:^|[._])(?:duration_ms|ttft_ms)\b/;
+
+// Failure-class signals: a `failed|rejected|error|zero_success` segment
+// after a `.` or `_` boundary, so "ingest.events_rejected",
+// "scheduler.tick.failed", "circuit_error" and
+// "scheduler.provider_fetch_zero_success" match while healthy names like
+// "scheduler.duration_ms" or "usage.persisted" do not.
+const FAILURE_NAME = /(?:^|[._])(?:failed|rejected|error|zero_success)\b/;
+
+// Designed SQLite back-pressure. A busy writer answers 503 + Retry-After
+// and the producer retries. That is not an outage, so it must not open a
+// fleet-infra issue on every overlap (FLEET-INFRA-E7). The same name still
+// counts in the usage-monitor project.
+const BACKPRESSURE_METRICS = new Set(["ingest.admission_rejected"]);
+
+/** True when `name` is a failure-class signal that should open an issue. */
+export function isFleetInfraFailureMetric(name: string): boolean {
+  if (BACKPRESSURE_METRICS.has(name)) return false;
+  return FAILURE_NAME.test(name);
+}
+
+function metricKind(name: string): "counter" | "gauge" {
+  return GAUGE_NAME.test(name) ? "gauge" : "counter";
+}
+
+function typedAttribute(
+  value: string | number | boolean
+): { value: string | number | boolean; type: string } {
+  if (typeof value === "boolean") return { value, type: "boolean" };
+  if (typeof value === "number") {
+    return { value, type: Number.isInteger(value) ? "integer" : "double" };
+  }
+  return { value, type: "string" };
+}
+
+function newTraceId(): string {
+  // 32 hex chars, the same shape as an event id.
+  return newEventId();
+}
+
+/**
+ * Emit one point of a metric to fleet-infra as a Sentry Application
+ * Metric (`trace_metric` envelope item).  Metrics land in Explore >
+ * Metrics, are aggregated there, and never open an issue.  No-op when
+ * SENTRY_FLEET_DSN is absent or malformed.  Never throws.
+ *
+ * Wire shape mirrors @sentry/core 11.x `createMetricContainerEnvelopeItem`
+ * and `_buildSerializedMetric`: one container item with `version: 2` and
+ * an `items` array of `{timestamp, trace_id, name, type, unit, value,
+ * attributes}` where every attribute is `{value, type}`.
+ */
+export async function recordFleetInfraTraceMetric(
+  name: string,
+  value: number,
+  attributes: Record<string, string | number | boolean> = {}
+): Promise<void> {
+  const dsn = resolveDsn();
+  if (!dsn) return;
+  try {
+    if (!Number.isFinite(value)) return;
+    const kind = metricKind(name);
+    const attrs: Record<string, { value: string | number | boolean; type: string }> = {
+      app: typedAttribute("usage-monitor"),
+      agent: typedAttribute(process.env.AGENT_TAG?.trim() || "MM"),
+      "sentry.release": typedAttribute(releaseTag()),
+      "sentry.environment": typedAttribute(environmentTag()),
+      "sentry.sdk.name": typedAttribute(SDK_NAME),
+      "sentry.sdk.version": typedAttribute(SDK_VERSION),
+      "server.address": typedAttribute(HOSTNAME),
+    };
+    for (const [k, v] of Object.entries(attributes)) {
+      if (v === undefined || v === null) continue;
+      attrs[k] = typedAttribute(v);
     }
+    const item: Record<string, unknown> = {
+      timestamp: Date.now() / 1000,
+      trace_id: newTraceId(),
+      name,
+      type: kind,
+      value,
+      attributes: attrs,
+    };
+    if (MILLISECOND_NAME.test(name)) item.unit = "millisecond";
+    const payload = JSON.stringify({ version: 2, items: [item] });
+    const envelope = [
+      JSON.stringify({
+        sent_at: nowIso(),
+        sdk: { name: SDK_NAME, version: SDK_VERSION },
+      }),
+      JSON.stringify({
+        type: "trace_metric",
+        item_count: 1,
+        content_type: "application/vnd.sentry.items.trace-metric+json",
+        length: Buffer.byteLength(payload, "utf8"),
+      }),
+      payload,
+      "",
+    ].join("\n");
+    await postEnvelope(dsn, envelope, `metric "${name}"`);
   } catch {
     // Best-effort: the next call is a fresh attempt.
   }
 }
 
 /**
- * Emit a Sentry event that represents one point of a metric (counter
- * increment, gauge reading, duration sample).  This is the fleet-infra
- * mirror of the Sentry Application Metrics that the SDK emits into the
- * usage-monitor project.
+ * Mirror one metric point into fleet-infra.
  *
- * The `value` rides in `extra.metric.value`; `attributes` are stamped
- * into tags.  The `fingerprint` is `[app, name, kind]` so fleet-infra
- * dedupes a stream of `scheduler.tick = 1` events into a single issue
- * that increments per occurrence.
+ * Healthy counters and gauges (`usage.persisted`, `ai.request.duration_ms`,
+ * `scheduler.duration_ms`, ...) go out as Sentry Application Metrics via
+ * `recordFleetInfraTraceMetric`, so they never become issues.  Before this,
+ * every point was an error-type event fingerprinted per metric name, which
+ * turned each healthy metric into a permanently firing fleet-infra issue
+ * (FLEET-INFRA-E3 `usage.persisted` alone passed 300k events) and buried
+ * real errors.
+ *
+ * Failure-class metrics (`ingest.failed`, `ingest.events_rejected`,
+ * `scheduler.provider_fetch_zero_success`, ...) still post a warning-level
+ * event so they keep opening and alerting as fleet-infra issues.  Their
+ * `value` rides in `extra.metric.value` and `attributes` are stamped into
+ * tags with a `[um-fleet, metric, name]` fingerprint.
+ * `ingest.admission_rejected` is excluded: it is the designed 503 when the
+ * single SQLite writer is busy, and one issue event per overlap is what
+ * kept FLEET-INFRA-E7 firing.
  */
 export async function recordFleetInfraMetric(
   name: string,
   value: number,
   attributes: Record<string, string | number | boolean> = {}
 ): Promise<void> {
-  // Metric kind is decided by the NAME, not the value.  Sentry Application
-  // Metrics classify `gauge` vs `counter` by semantics (a measurement vs
-  // a count), and `scheduler.duration_ms` is always a gauge even though
-  // `Date.now() - tickStartedAt` is an integer.  Anything ending in
-  // `_ms`, `duration_*`, or `*_ratio` is a gauge; everything else is a
-  // counter (the typical Sentry Application Metrics shape).
-  const isGauge = /(?:^|[._])(?:duration_ms|duration|ratio|latency)\b/.test(name);
-  const kind = isGauge ? "gauge" : "counter";
+  if (!isFleetInfraFailureMetric(name)) {
+    await recordFleetInfraTraceMetric(name, value, attributes);
+    return;
+  }
   const tags: FleetInfraTags = {
     app: "usage-monitor",
     agent: process.env.AGENT_TAG?.trim() || "MM",
     "metric.name": name,
-    "metric.kind": kind,
+    "metric.kind": metricKind(name),
   };
   for (const [k, v] of Object.entries(attributes)) {
     if (v === undefined || v === null) continue;
     tags[`metric.${k}`] = String(v);
   }
-  // Failure-class metrics are warnings, healthy counters/info events stay info.
-  // Match `failed|rejected|error` after a `.` or `_` segment boundary so
-  // "ingest.admission_rejected", "scheduler.tick.failed", and
-  // "circuit_error" all trip the warning classification while healthy
-  // metric names like "scheduler.duration_ms" do not.
-  const isFailureMetric = /(?:^|[._])(?:failed|rejected|error)\b/.test(name);
   await recordFleetInfraEvent(
     `${name} = ${value}`,
     tags,
     {
-      level: isFailureMetric ? "warning" : "info",
+      level: "warning",
       fingerprint: ["um-fleet", "metric", name],
       extra: { "metric.value": value },
     }

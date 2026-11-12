@@ -2,7 +2,7 @@
 
 > **Note:** The macOS application has been extracted into its own repository and renamed to **AgentBar**.
 >
-> Please visit [jaywedgeworth22/agent-bar](https://github.com/jaywedgeworth22/agent-bar) for the current application source code, build scripts, and documentation.
+> Please visit [Simple-With-Us/agent-bar](https://github.com/Simple-With-Us/agent-bar) for the current application source code, build scripts, and documentation.
 
 The `macos` directory in this repository is kept for historical reference.  The Keychain-prompt fix below still applies to this copy and should be mirrored into AgentBar.
 
@@ -14,7 +14,7 @@ Closing the main window keeps the app running.  Open it again from its menu bar 
 
 Keyboard shortcuts: ⌘1 opens the dashboard, ⌘2 opens Quick Quotas, ⌘R refreshes, and ⌘, opens Settings.
 
-Antigravity displays exactly four shared windows: Gemini Models and Third-Party Models, each with a 5-hour and weekly cap.  Repeated model observations are not additional quotas.  Missing weekly data stays unavailable with no invented reset.  Kimi, Gemini CLI, GitHub Copilot, and Windsurf are hidden, including when the server returns them.  DeepSeek and future supported platforms can be supplied by the server.  MiniMax video allowances are collapsed below its coding windows and do not drive the menu bar percentage.  Expired local sessions require signing in again in the provider's app or CLI.
+Antigravity displays exactly four shared windows: Gemini and Third-Party, each with a 5-Hour and weekly cap.  Repeated model observations are not additional quotas.  Missing weekly data stays unavailable with no invented reset.  Kimi, Gemini CLI, GitHub Copilot, and Windsurf are hidden, including when the server returns them.  DeepSeek and future supported platforms can be supplied by the server.  MiniMax video allowances are collapsed below its coding windows and do not drive the menu bar percentage.  Expired local sessions require signing in again in the provider's app or CLI.
 
 Antigravity's grouped source requires a running Antigravity app or CLI that exposes `RetrieveUserQuotaSummary`.  If no compatible process is running, the installed `antigravity-usage` helper can supply only the 5-hour windows.  Claude reads an existing OAuth credential file automatically.  For a Keychain login, use Settings → Connect Claude once per app session.  That explicit action may show macOS permission UI; its result stays only in memory.  Startup, wake, and quota refreshes never query Keychain.  Missing access does not mean Claude is signed out.  The optional server token likewise loads only from an explicit Save & Refresh action; reconnect it after restarting the app.  Local and server windows are never combined within a provider because they may belong to different accounts.
 
@@ -34,6 +34,6 @@ swift test --package-path macos
 ./script/build_and_run.sh --install
 ```
 
-`--build-only` stages and ad hoc signs `macos/dist/Usage Monitor.app` without terminating or launching an app.  The default command terminates only the staged app executable, then builds and opens the bundle.  `--install` copies only over an existing bundle with identifier `com.jays.usage-monitor.mac`; it refuses any other bundle.
+`--build-only` stages and ad hoc signs `macos/dist/Usage Monitor.app` without terminating or launching an app.  The default command terminates only the staged app executable, then builds and opens the bundle.  `--install` copies only over an existing bundle with identifier `com.simplewithus.usage.macos` (or the pre-2026-09-23 `com.jays.usage-monitor.mac`, so an older install upgrades in place); it refuses any other bundle.  The app shows as **Usage Monitor for Mac** (`CFBundleDisplayName`); the bundle folder stays `Usage Monitor.app`.  The Keychain service string `com.jays.usage-monitor.mac.read-token` in `TokenStore.swift` is an internal namespace, not a bundle ID, and is unchanged.
 
 Local builds use ad hoc signing for development.  This repository does not claim notarized distribution.

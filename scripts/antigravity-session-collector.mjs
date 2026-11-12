@@ -7,6 +7,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
+
 import {
   ANTIGRAVITY_STATUSLINE_PRODUCER_ID,
   filterEventsSince,
@@ -20,12 +22,13 @@ import {
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/antigravity-session-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const PRODUCER_ID =
   process.env.ANTIGRAVITY_STATUSLINE_PRODUCER_ID ||
   ANTIGRAVITY_STATUSLINE_PRODUCER_ID;
+export const STATUSLINE_TOKEN_ENV_NAMES = ["ANTIGRAVITY_STATUSLINE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"];
 const INGEST_URL = process.env.USAGE_MONITOR_INGEST_URL || "https://usage.jays.services/api/ingest/usage";
 
 function log(message) {
@@ -69,13 +72,16 @@ async function main() {
   });
   log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`);
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
     }
     return;
   }
-  const token = resolveCollectorToken(["ANTIGRAVITY_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  // ANTIGRAVITY_INGEST_TOKEN is scoped to the antigravity-cli producer, not
+  // this one, so it is deliberately not a candidate here.
+  const token = await resolveCollectorToken(STATUSLINE_TOKEN_ENV_NAMES);
   try {
     const ack = await postUsageBatches({
       events,

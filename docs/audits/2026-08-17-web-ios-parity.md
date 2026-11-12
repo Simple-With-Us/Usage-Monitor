@@ -5,6 +5,8 @@
 **Branch:** `cursor/web-ios-parity-audit-fc87`  
 **Method:** Static review of `main` at `8db78b5`.  Lanes: desktop/mobile web UX, iOS Client + Local engineering, accessibility, data visualization, product QA, TestFlight readiness, and tests.  No production probes and no product-code edits.
 
+> **[ARCHAEOLOGY / pre-2026-09-22]**  Bundle IDs `services.jays.usage.*` referenced below are the pre-2026-09-22 fleet-wide bundle-ID state and have not been retconned.  Canonical IDs after the fleet-wide rename: `com.simplewithus.usagemonitor.ios` (Client), `com.simplewithus.usagemonitor.local.ios` (Local), App Group `group.com.simplewithus.usagemonitor`.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 **Surfaces:** Next.js web (`usage.jays.services`) at desktop and iPhone Safari / PWA widths; **Usage Client Monitor** (`services.jays.usage.client.monitor`); **Usage Local Monitor** (`services.jays.usage.local.monitor`).
 
 **Prior review:** [`docs/audits/2026-07-20-grok3-full-app-expert-review.md`](2026-07-20-grok3-full-app-expert-review.md).  This pass checks what that review asked for against the code that shipped in the following four weeks.

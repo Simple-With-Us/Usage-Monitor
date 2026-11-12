@@ -1,5 +1,7 @@
 # 2026-08-04 — iOS TestFlight agent ship (Usage Monitor)
 
+> **[ARCHAEOLOGY / pre-2026-09-22]**  Bundle ID `services.jays.usage.monitor` referenced in this rollout is the pre-2026-09-22 fleet-wide bundle-ID state and has not been retconned.  Canonical IDs after the fleet-wide rename: `com.simplewithus.usagemonitor.ios` (Client), `com.simplewithus.usagemonitor.local.ios` (Local), widget `com.simplewithus.usagemonitor.ios.widget`.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 ## Context & Objective
 
 Enable agents to push the Usage Monitor native iOS app (incl. widget extension)

@@ -9,9 +9,11 @@
 /* Begin PBXBuildFile section */
 		015574DB5733115F9AD66A42 /* LocalAdapters in Frameworks */ = {isa = PBXBuildFile; productRef = 6E9A2E2D92F2F0E964E1CD4E /* LocalAdapters */; };
 		0DAE1542F635F3A7312AFC3F /* Settings in Frameworks */ = {isa = PBXBuildFile; productRef = EEF104AFE3B635560BB73E94 /* Settings */; };
+		13B11BCFE10EAD7B0C46C140 /* WidgetTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53350812EA792FF1D3BE5F87 /* WidgetTimeline.swift */; };
 		1BC7DDFCC842993EF462F71D /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 56712F7BC822DA0DB33B2F89 /* DesignSystem */; };
 		276F317A99A928209250BE5E /* UsageMonitorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B30FDC3F50A61E4D10BC24B /* UsageMonitorApp.swift */; };
 		29A5ED6DA3DD8518200726E2 /* WidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792B1B2FC84FE1924C7CD1A6 /* WidgetPresentation.swift */; };
+		2CBA3F2AD12831EE204F84D7 /* WidgetVisualCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4946CC985891D536538A7306 /* WidgetVisualCaptureTests.swift */; };
 		2D970CB0E24D8B1C86CBE1E5 /* WidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 3CBA66112816FD1903144B30 /* WidgetShared */; };
 		2ED5762F45A25A7F881F248C /* OfflineCache in Frameworks */ = {isa = PBXBuildFile; productRef = DCDD9B886592E046087C8AB8 /* OfflineCache */; };
 		2F405C0C02E1C475403A48C0 /* ProjectBudgets in Frameworks */ = {isa = PBXBuildFile; productRef = AC0DB39F15745ACE550BB82F /* ProjectBudgets */; };
@@ -23,12 +25,17 @@
 		43BB491704B8779FB0BAAD2A /* Models in Frameworks */ = {isa = PBXBuildFile; productRef = 578CB27F890CAE1DDEB4F688 /* Models */; };
 		484D7BC266DC175D2274DAD3 /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = F8E4DDCCA164861B780DEDCC /* DesignSystem */; };
 		55874EE36B4368FB887FB24C /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8C50CA96B4A3F94299A6121F /* PrivacyInfo.xcprivacy */; };
+		5617640324CEC8CBE522EBCC /* WidgetSnapshotResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */; };
 		5A881DF7F756C82B4BAB59D7 /* LocalBudget in Frameworks */ = {isa = PBXBuildFile; productRef = 87FAB76F5E354143A475532D /* LocalBudget */; };
 		5C12427D9391EE93838A7FDA /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 01C1A13CED0B1B95124CBDC8 /* DesignSystem */; };
 		5D7B4982B98EF255980605B5 /* WidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792B1B2FC84FE1924C7CD1A6 /* WidgetPresentation.swift */; };
+		624829784F19F73AC58CB930 /* WidgetTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53350812EA792FF1D3BE5F87 /* WidgetTimeline.swift */; };
 		653C8DD8CA2750953F698C58 /* WidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 574A28A99BCD3C462CA17A0D /* WidgetShared */; };
+		67490941A89017E2A0D492D9 /* WidgetScreenViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAA799A4BE3BC4163C6571DD /* WidgetScreenViews.swift */; };
 		6B2191AA76ABBB7C0B9E4EC9 /* LocalStore in Frameworks */ = {isa = PBXBuildFile; productRef = C022422D070736B642E57F94 /* LocalStore */; };
 		6CB37F405426D5B08943A367 /* Alerts in Frameworks */ = {isa = PBXBuildFile; productRef = BCBC6C1579802E15115FA523 /* Alerts */; };
+		6DFF1FD38A8620F504BBE0F0 /* BudgetWidgetIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 345CB985D932922EA66F6D73 /* BudgetWidgetIntent.swift */; };
+		7DD86547166F5249228FEE95 /* WidgetScreenViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAA799A4BE3BC4163C6571DD /* WidgetScreenViews.swift */; };
 		84C98816E8C661773E58A4FE /* AppLock in Frameworks */ = {isa = PBXBuildFile; productRef = 4A50A30B1EBA9441B1967DC6 /* AppLock */; };
 		8F40DA5814B26236048AE760 /* Platforms in Frameworks */ = {isa = PBXBuildFile; productRef = 0772155CEF61EADBA51DAC23 /* Platforms */; };
 		93C8B9B6F84D706A5B9504C4 /* AppUpdatePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7445650B16A6EDC5905BFD04 /* AppUpdatePrompt.swift */; };
@@ -43,7 +50,9 @@
 		C155B87B338BD9E084925657 /* AppLock in Frameworks */ = {isa = PBXBuildFile; productRef = BAF14D074525FC55D08ED25C /* AppLock */; };
 		C3186C23E4A15ACE7390C70A /* UsageMonitorWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F1AEB8CDA324975C39D57883 /* UsageMonitorWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C36A8008C72FC6F54DC9D91F /* AppCore in Frameworks */ = {isa = PBXBuildFile; productRef = BC8AFCFC7A57AE9488201CE1 /* AppCore */; };
+		C584B751698C498F6A6896C8 /* TopicWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 604ADA18306399C45FD1B592 /* TopicWidgets.swift */; };
 		C66672426BD66072764EF255 /* Models in Frameworks */ = {isa = PBXBuildFile; productRef = FB1941171577206B0A52D658 /* Models */; };
+		CC41E88F42A8AC6E94B75655 /* GlanceWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A60D1536CCEEF82C0761204 /* GlanceWidgets.swift */; };
 		D59524D4370F4A67319835B6 /* ServerStatus in Frameworks */ = {isa = PBXBuildFile; productRef = 79E6B0A358710B3AED46C63A /* ServerStatus */; };
 		D7A3794CC04F7C2FC1E5BC8A /* WidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = F5DE3993265E786D85889937 /* WidgetShared */; };
 		DAED714153D252B9557AD1B3 /* WidgetPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FEDFB3CAEE756FB7630C7E0 /* WidgetPresentationTests.swift */; };
@@ -53,6 +62,7 @@
 		EBABF435393E7ED02EE5DF08 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 685168BCC902543D51E9E6BA /* PrivacyInfo.xcprivacy */; };
 		F1082B640C6F53056C21589F /* AppUpdatePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB1FDD22E0727C2B30590AB /* AppUpdatePrompt.swift */; };
 		F3DA80422F5F65435C87288A /* Providers in Frameworks */ = {isa = PBXBuildFile; productRef = AF921547F127906DB1C7629D /* Providers */; };
+		F4EA8AFD794B60D82AE34259 /* TopicWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 604ADA18306399C45FD1B592 /* TopicWidgets.swift */; };
 		FBADF6807BDA77B31864857E /* LocalDataPlane in Frameworks */ = {isa = PBXBuildFile; productRef = 3D1EA8338E0268795F805F14 /* LocalDataPlane */; };
 		FEE74AA132592406B60358C3 /* AppSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8C3B26815D2E6893A2F0BD4 /* AppSmokeTests.swift */; };
 		FF66F17C1AE42AF2DD556265 /* Dashboard in Frameworks */ = {isa = PBXBuildFile; productRef = 6CA467140AF00BE2F6D28D3F /* Dashboard */; };
@@ -99,7 +109,10 @@
 		2B30FDC3F50A61E4D10BC24B /* UsageMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageMonitorApp.swift; sourceTree = "<group>"; };
 		345CB985D932922EA66F6D73 /* BudgetWidgetIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BudgetWidgetIntent.swift; sourceTree = "<group>"; };
 		37A37C7541E4CEA8D9236FFF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		4946CC985891D536538A7306 /* WidgetVisualCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetVisualCaptureTests.swift; sourceTree = "<group>"; };
+		53350812EA792FF1D3BE5F87 /* WidgetTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetTimeline.swift; sourceTree = "<group>"; };
 		5EB1FDD22E0727C2B30590AB /* AppUpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePrompt.swift; sourceTree = "<group>"; };
+		604ADA18306399C45FD1B592 /* TopicWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicWidgets.swift; sourceTree = "<group>"; };
 		685168BCC902543D51E9E6BA /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		6CF0AEBB3717E9EAC8485618 /* LocalUsageMonitor.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LocalUsageMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7445650B16A6EDC5905BFD04 /* AppUpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePrompt.swift; sourceTree = "<group>"; };
@@ -109,6 +122,7 @@
 		8C50CA96B4A3F94299A6121F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		90D22095A081B9D89B4CED0E /* LocalUsageMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUsageMonitorApp.swift; sourceTree = "<group>"; };
 		9EB62C1B4DB2DCA2D9888180 /* UsageMonitorKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = UsageMonitorKit; path = UsageMonitorKit; sourceTree = SOURCE_ROOT; };
+		AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSnapshotResolverTests.swift; sourceTree = "<group>"; };
 		BB83A7A318DCAACF119C1A48 /* LocalUsageMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LocalUsageMonitor.entitlements; sourceTree = "<group>"; };
 		C81B7D14B31665FDA6183BF8 /* OfflineCacheSnapshotSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCacheSnapshotSink.swift; sourceTree = "<group>"; };
 		C8C3B26815D2E6893A2F0BD4 /* AppSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSmokeTests.swift; sourceTree = "<group>"; };
@@ -117,6 +131,7 @@
 		D3FA9AE664C5C606A9368339 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		DA93AC5DCCD01FBB2A560D25 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E62F2FB6F8366000FC474EBD /* ScreenshotDemoSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotDemoSupport.swift; sourceTree = "<group>"; };
+		EAA799A4BE3BC4163C6571DD /* WidgetScreenViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetScreenViews.swift; sourceTree = "<group>"; };
 		EB1864248318F2267ECF38E2 /* AccountChangeNotifyingTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountChangeNotifyingTokenStore.swift; sourceTree = "<group>"; };
 		F1AEB8CDA324975C39D57883 /* UsageMonitorWidgetExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = UsageMonitorWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FCD5897C4158EE40F3B5B676 /* UsageMonitor.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = UsageMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -187,6 +202,8 @@
 			isa = PBXGroup;
 			children = (
 				1FEDFB3CAEE756FB7630C7E0 /* WidgetPresentationTests.swift */,
+				AE57F24A20AF58075EE74D53 /* WidgetSnapshotResolverTests.swift */,
+				4946CC985891D536538A7306 /* WidgetVisualCaptureTests.swift */,
 			);
 			path = UsageMonitorWidgetTests;
 			sourceTree = "<group>";
@@ -211,9 +228,12 @@
 				1A60D1536CCEEF82C0761204 /* GlanceWidgets.swift */,
 				028258141B7C69C684D9238D /* Info.plist */,
 				D3FA9AE664C5C606A9368339 /* PrivacyInfo.xcprivacy */,
+				604ADA18306399C45FD1B592 /* TopicWidgets.swift */,
 				764AB0422F0A2B31B88D25D2 /* UsageMonitorWidget.entitlements */,
 				8A4F16263E10D7A4C46F8FC1 /* UsageMonitorWidgetBundle.swift */,
 				792B1B2FC84FE1924C7CD1A6 /* WidgetPresentation.swift */,
+				EAA799A4BE3BC4163C6571DD /* WidgetScreenViews.swift */,
+				53350812EA792FF1D3BE5F87 /* WidgetTimeline.swift */,
 			);
 			path = UsageMonitorWidget;
 			sourceTree = "<group>";
@@ -509,8 +529,11 @@
 			files = (
 				A33EA13C79DE4913AEC1B6D2 /* BudgetWidgetIntent.swift in Sources */,
 				A4110388FFF447EBB21D6BE5 /* GlanceWidgets.swift in Sources */,
+				C584B751698C498F6A6896C8 /* TopicWidgets.swift in Sources */,
 				E813273A1FAAB7D3E13847EC /* UsageMonitorWidgetBundle.swift in Sources */,
 				5D7B4982B98EF255980605B5 /* WidgetPresentation.swift in Sources */,
+				67490941A89017E2A0D492D9 /* WidgetScreenViews.swift in Sources */,
+				624829784F19F73AC58CB930 /* WidgetTimeline.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -535,8 +558,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6DFF1FD38A8620F504BBE0F0 /* BudgetWidgetIntent.swift in Sources */,
+				CC41E88F42A8AC6E94B75655 /* GlanceWidgets.swift in Sources */,
+				F4EA8AFD794B60D82AE34259 /* TopicWidgets.swift in Sources */,
 				29A5ED6DA3DD8518200726E2 /* WidgetPresentation.swift in Sources */,
 				DAED714153D252B9557AD1B3 /* WidgetPresentationTests.swift in Sources */,
+				7DD86547166F5249228FEE95 /* WidgetScreenViews.swift in Sources */,
+				5617640324CEC8CBE522EBCC /* WidgetSnapshotResolverTests.swift in Sources */,
+				13B11BCFE10EAD7B0C46C140 /* WidgetTimeline.swift in Sources */,
+				2CBA3F2AD12831EE204F84D7 /* WidgetVisualCaptureTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -580,7 +610,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.widget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widget;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -596,13 +626,13 @@
 				DEVELOPMENT_TEAM = CC8UTF7ATG;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = LocalApp/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Usage Local Monitor";
+				INFOPLIST_KEY_CFBundleDisplayName = "Local Monitor";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.local.monitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local.ios;
 				PRODUCT_NAME = LocalUsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -645,7 +675,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 202610290000;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -659,7 +689,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -706,7 +736,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 202610290000;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -726,7 +756,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -749,7 +779,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.widgettests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widgettests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -765,13 +795,13 @@
 				DEVELOPMENT_TEAM = CC8UTF7ATG;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = LocalApp/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Usage Local Monitor";
+				INFOPLIST_KEY_CFBundleDisplayName = "Local Monitor";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.local.monitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.local.ios;
 				PRODUCT_NAME = LocalUsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -789,13 +819,13 @@
 				DEVELOPMENT_TEAM = CC8UTF7ATG;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = App/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Usage Client Monitor";
+				INFOPLIST_KEY_CFBundleDisplayName = "Usage Monitor";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios;
 				PRODUCT_NAME = UsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -813,7 +843,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UsageMonitor.app/UsageMonitor";
@@ -830,13 +860,13 @@
 				DEVELOPMENT_TEAM = CC8UTF7ATG;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = App/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Usage Client Monitor";
+				INFOPLIST_KEY_CFBundleDisplayName = "Usage Monitor";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios;
 				PRODUCT_NAME = UsageMonitor;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -854,7 +884,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UsageMonitor.app/UsageMonitor";
@@ -873,7 +903,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.widget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widget;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -889,7 +919,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = services.jays.usage.client.monitor.widgettests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.simplewithus.usage.client.ios.widgettests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

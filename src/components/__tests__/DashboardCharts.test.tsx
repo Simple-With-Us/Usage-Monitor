@@ -109,10 +109,10 @@ describe("DashboardCharts — non-current-month ranges (test c: no month name, n
     expect(screen.getByText("Spend — Past 30 days")).toBeTruthy();
     // History chart, never the MTD linear-projection chart.
     expect(screen.getByText("Daily history — not a projection")).toBeTruthy();
-    expect(screen.queryByText(/Month pace/)).toBeNull();
+    expect(screen.queryByText(/Month Pace/)).toBeNull();
     // Pie is labeled as actual range spend, not a month-to-date projection.
-    expect(screen.getByText("Spend by provider")).toBeTruthy();
-    expect(screen.queryByText("Projected cost breakdown")).toBeNull();
+    expect(screen.getByText("Spend by Provider")).toBeTruthy();
+    expect(screen.queryByText("Projected Cost Breakdown")).toBeNull();
   });
 
   it("does the same for a different rolling range (90d)", () => {
@@ -124,8 +124,8 @@ describe("DashboardCharts — non-current-month ranges (test c: no month name, n
       />
     );
     expect(screen.getByText("Spend — Past 90 days")).toBeTruthy();
-    expect(screen.queryByText("Projected cost breakdown")).toBeNull();
-    expect(screen.queryByText(/Month pace/)).toBeNull();
+    expect(screen.queryByText("Projected Cost Breakdown")).toBeNull();
+    expect(screen.queryByText(/Month Pace/)).toBeNull();
   });
 });
 

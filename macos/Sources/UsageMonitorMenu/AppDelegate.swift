@@ -6,11 +6,17 @@ import SwiftUI
 enum UsageMonitorMain {
     @MainActor
     static func main() {
-        if let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "com.jays.usage-monitor.mac")
+        // Current ID first; the pre-2026-09-23 ID still matches an older build
+        // that is already running.
+        let bundleIdentifiers = ["com.simplewithus.usage.macos", "com.jays.usage-monitor.mac"]
+        if let existing = bundleIdentifiers
+            .flatMap({ NSRunningApplication.runningApplications(withBundleIdentifier: $0) })
             .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }) {
             existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             return
         }
+        // Must run before AppDelegate creates MonitorModel, which reads these keys.
+        LegacyDefaultsMigration.run()
         let app = NSApplication.shared
         app.disableRelaunchOnLogin()
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -18,6 +24,30 @@ enum UsageMonitorMain {
         app.delegate = delegate
         app.run()
         withExtendedLifetime(delegate) {}
+    }
+}
+
+/// #1525 moved the bundle ID from com.jays.usage-monitor.mac to
+/// com.simplewithus.usage.macos, which moves UserDefaults.standard to a new
+/// domain. Copy the settings MonitorModel reads from the legacy domain once.
+/// Values already set under the new ID always win, and the legacy domain is
+/// left in place. Reading another app's domain works because this app is not
+/// sandboxed (script-built, ad-hoc signed, no entitlements).
+enum LegacyDefaultsMigration {
+    static let legacyDomain = "com.jays.usage-monitor.mac"
+    static let markerKey = "migratedFromLegacyBundleID"
+    static let keys = ["displayMode", "quotaViewLayout", "localEnabled", "serverEnabled", "endpoint", "hasSavedToken"]
+
+    static func run(defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: markerKey) else { return }
+        copy(from: defaults.persistentDomain(forName: legacyDomain) ?? [:], into: defaults)
+        defaults.set(true, forKey: markerKey)
+    }
+
+    static func copy(from legacy: [String: Any], into defaults: UserDefaults) {
+        for key in keys where defaults.object(forKey: key) == nil {
+            if let value = legacy[key] { defaults.set(value, forKey: key) }
+        }
     }
 }
 
@@ -33,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .aqua)
         configureMenu()
+        AppUpdater.shared.start()
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 410, height: 600)
         popover.contentViewController = NSHostingController(rootView:
@@ -132,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func refresh() { model.refresh() }
+    @objc private func checkForUpdates() { AppUpdater.shared.checkForUpdates() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func configureMenu() {
@@ -147,6 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         add("Quick Quotas", #selector(togglePopover), "2")
         add("Settings…", #selector(showSettings), ",")
         add("Refresh Quotas", #selector(refresh), "r")
+        add("Check For Updates…", #selector(checkForUpdates))
         appMenu.addItem(.separator())
         add("Quit Usage Monitor", #selector(quit), "q")
         appItem.submenu = appMenu

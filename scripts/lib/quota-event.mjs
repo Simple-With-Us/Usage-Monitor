@@ -1,3 +1,8 @@
+import {
+  normalizeQuotaWindowKey,
+  rollupQuotaWindowKey,
+} from "./quota-window-display.mjs";
+
 // Shared builder for `metricType: "quota"` remaining-percent events.
 //
 // The Antigravity collector (scripts/fleet-usage-collector.mjs and
@@ -24,6 +29,25 @@
  * @property {boolean} remainingUnknown
  * @property {boolean} isExhausted
  */
+
+/**
+ * Display name for Antigravity's shared non-Gemini model pool.  `agy` and
+ * `antigravity-usage` name that group "Claude and GPT models"; the dashboard,
+ * the iOS app and the Mac app all show it as "Third-Party Models".  Only the
+ * human `label` is rewritten -- `metadata.modelGroup`, bucket ids, series keys
+ * and event ids keep the raw CLI value so stored data and idempotency do not
+ * move.  Mirrors `antigravityDisplayLabel` in src/lib/quota-windows.ts, which
+ * also fixes labels already ingested.
+ */
+export const ANTIGRAVITY_THIRD_PARTY_LABEL = "Third-Party";
+
+/** Map a raw Antigravity group name onto its display name; others pass through. */
+export function antigravityGroupDisplayName(name) {
+  if (typeof name !== "string") return name;
+  return /^\s*claude\s*(?:and|&|\/|\+|,)\s*gpt(?:[\s-]*models?)?\s*$/i.test(name)
+    ? ANTIGRAVITY_THIRD_PARTY_LABEL
+    : name;
+}
 
 /** Clamp to a sane 0-100 percentage, or null when the input is not a number. */
 export function clampPercent(value) {
@@ -93,6 +117,8 @@ export function buildQuotaEvent({
   reading,
   source,
   occurredAtIso = new Date().toISOString(),
+  reportedAtIso,
+  machine,
 }) {
   const remaining = reading.remainingUnknown ? null : clampPercent(reading.remainingPercent);
   const used =
@@ -102,6 +128,14 @@ export function buildQuotaEvent({
         ? null
         : Math.round((100 - remaining) * 100) / 100;
   const seriesKey = reading.resetAt ?? `${occurredAtIso.slice(0, 13)}:00`;
+  const reportedAt = toIsoTimestamp(reportedAtIso ?? reading.reportedAt ?? occurredAtIso);
+  const { windowKey: normalizedKey, rawKey } = normalizeQuotaWindowKey({
+    quotaWindow: reading.quotaWindow,
+    bucketId: reading.bucketId,
+    label: reading.label,
+    modelId: reading.modelId,
+  });
+  const windowKey = rollupQuotaWindowKey(normalizedKey);
   return {
     eventId: `subq:${provider}:${reading.bucketId}:${seriesKey}:${occurredAtIso}`,
     provider,
@@ -121,6 +155,12 @@ export function buildQuotaEvent({
     // lives in metadata.quotaWindow, which is what projectQuotaWindows reads.
     occurredAt: occurredAtIso,
     metadata: {
+      // Extras first so the shared contract fields below always win.
+      ...(reading.metadataExtras &&
+      typeof reading.metadataExtras === "object" &&
+      !Array.isArray(reading.metadataExtras)
+        ? reading.metadataExtras
+        : {}),
       bucketId: reading.bucketId,
       quotaWindow: reading.quotaWindow,
       resetAt: reading.resetAt,
@@ -131,6 +171,10 @@ export function buildQuotaEvent({
       remainingUnknown: Boolean(reading.remainingUnknown),
       scale: "percent_0_100",
       source,
+      reportedAt,
+      windowKey,
+      rawKey,
+      ...(machine ? { machine } : {}),
     },
   };
 }

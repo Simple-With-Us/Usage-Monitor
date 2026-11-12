@@ -55,20 +55,45 @@ echo "== apps.json Apple IDs =="
 eval "$(python3 - "$APPS" <<'PY'
 import json, sys
 apps = json.load(open(sys.argv[1]))["apps"]
-print(f"usage_appleId={apps.get('usage', {}).get('appleId', '')}")
-print(f"usage_local_appleId={apps.get('usage-local', {}).get('appleId', '')}")
+def s(v):
+    return "" if v is None else str(v)
+print(f"usage_appleId={s(apps.get('usage', {}).get('appleId'))}")
+print(f"usage_local_appleId={s(apps.get('usage-local', {}).get('appleId'))}")
+print(f"usage_pending={s(apps.get('usage', {}).get('ascRecordPending'))}")
+print(f"usage_local_pending={s(apps.get('usage-local', {}).get('ascRecordPending'))}")
 print(f"socratic_appleId={apps.get('socratic', {}).get('appleId', '')}")
 print(f"congress_appleId={apps.get('congress', {}).get('appleId', '')}")
 print(f"dealdex_appleId={apps.get('dealdex', {}).get('appleId', '')}")
 print(f"dealdex_bundleId={apps.get('dealdex', {}).get('bundleId', '')}")
+print(f"usage_bundleId={apps.get('usage', {}).get('bundleId', '')}")
+print(f"usage_local_bundleId={apps.get('usage-local', {}).get('bundleId', '')}")
 PY
 )"
-check "usage appleId" "6799230435" "${usage_appleId}"
-check "usage-local appleId" "6799230729" "${usage_local_appleId}"
+# Usage + Local ship under com.simplewithus.usage.{client,local}.ios as of the
+# owner ruling on 2026-10-11.  The live App Store Connect records carry that
+# trailing .ios, and an ASC bundle ID is immutable, so the apps align to the
+# records.  Their old Apple IDs (6799230435 / 6799230729) belong to the retired
+# services.jays.usage.* records and must not come back.
+check "usage appleId" "6820881005" "${usage_appleId}"
+check "usage-local appleId" "6820885210" "${usage_local_appleId}"
+check "usage ascRecordPending cleared" "" "${usage_pending}"
+check "usage-local ascRecordPending cleared" "" "${usage_local_pending}"
+if grep -Eq '6799230435|6799230729' "$APPS"; then
+  check "old Usage Apple IDs gone from apps.json" "absent" "present"
+else
+  check "old Usage Apple IDs gone from apps.json" "absent" "absent"
+fi
+if grep -q 'ascRecordPending' "${SCRIPT_DIR}/ios-fleet/ship-testflight.sh"; then
+  check "ship-testflight refuses pending ASC records" "present" "present"
+else
+  check "ship-testflight refuses pending ASC records" "present" "absent"
+fi
 check "socratic appleId" "6799238379" "${socratic_appleId}"
 check "congress appleId" "6798076688" "${congress_appleId}"
 check "live DealDex bundle" "net.dealdex" "${dealdex_bundleId}"
 check "live DealDex appleId" "6802474288" "${dealdex_appleId}"
+check "usage bundle" "com.simplewithus.usage.client.ios" "${usage_bundleId}"
+check "usage-local bundle" "com.simplewithus.usage.local.ios" "${usage_local_bundleId}"
 
 echo "== testers.json untouched =="
 if [[ -e "${REPO_ROOT}/scripts/ios-fleet/testers.json" ]] || [[ -e "${REPO_ROOT}/testers.json" ]]; then

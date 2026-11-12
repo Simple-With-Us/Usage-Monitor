@@ -17,6 +17,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
+
 import {
   GROK_PRODUCER_ID,
   filterEventsSince,
@@ -33,7 +35,7 @@ import {
   resolveCollectorToken,
   sessionKeyFor,
   walkFiles,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/grok-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -94,13 +96,14 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
     }
     return;
   }
-  const token = resolveCollectorToken([
+  const token = await resolveCollectorToken([
     "GROK_INGEST_TOKEN",
     "USAGE_INGEST_TOKEN",
   ]);

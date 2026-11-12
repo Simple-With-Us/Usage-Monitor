@@ -4,6 +4,8 @@
 **Board:** `b4ebf716`
 **App:** Usage Local Monitor (`services.jays.usage.local.monitor`)
 
+> **[ARCHAEOLOGY / pre-2026-09-22]**  Bundle ID `services.jays.usage.local.monitor` referenced in this rollout is the pre-2026-09-22 fleet-wide bundle-ID state and has not been retconned.  Canonical ID after the fleet-wide rename: `com.simplewithus.usagemonitor.local.ios`.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 ## Why
 
 Owner could not tap **Import Package** in Usage Local Monitor.  A List Picker for Merge / Replace All sat in the same Settings section and stole the button tap, so every press opened that dropdown.  Splitting the picker and button into separate SwiftUI views (2026-09-04) was not enough — iOS still groups a Picker with the next row in one Section.

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-**Production (2026-08-07+):** Production fleet box running Coolify (see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`).
+**Production (2026-08-07+):** Production fleet box running Coolify (see private `Simple-With-Us/fleet-ops:ATTACK-MAP.md`).
 SSH: `ssh coolify` (see `~/.ssh/config` Host `coolify` / `host.jays.services`).
 Public edge: Cloudflare → `usage.jays.services`.
 
@@ -80,6 +80,51 @@ deliberate rollback.
    the writer and restoring the latest verified **B2** lineage (or the weekly
    R2 archive if B2 is gone) before transferring writer authority — never just re-point
    DNS at a stale host.
+
+## Sentry Build Release Prerequisite
+
+The production Docker build creates the Sentry bundler release and uploads its
+sourcemaps; the Sentry Deploy workflow only attaches deployment evidence to that
+existing release.  Its GitHub Actions token does not reach Coolify's separate
+Docker build.  Runtime Infisical injection also happens after compilation.
+
+Configure the production builder to supply `SENTRY_AUTH_TOKEN` as a BuildKit secret
+from the existing authorized Infisical source.  The Dockerfile mounts that secret
+only into the build command's environment.  Do not pass the token as a Docker
+build argument, persist it with `ENV`, or put it in the build context.
+
+An already-authorized build process with the token in its process environment can
+use `docker build --secret id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN` alongside
+`--build-arg SOURCE_COMMIT=<full-40-character-source-SHA>`.  Non-secret routing
+defaults to organization `simple-with-us` and project `usage-monitor`; override
+with the `SENTRY_ORG` and `SENTRY_SELF_PROJECT` build arguments only when the
+deployment reporter targets the same destination.  Keep
+`NEXT_PUBLIC_SENTRY_DSN` configured at build time for browser telemetry.
+Coolify's **Docker BuildKit secrets** mode supplies every build variable as a
+secret instead of a build argument.  Enable source-commit availability during
+build and supply the public secret IDs `SOURCE_COMMIT`, `GIT_COMMIT_SHA`,
+`NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ORG`, and `SENTRY_SELF_PROJECT` as applicable.
+The Dockerfile reads non-empty public secret files only; absent or empty files
+preserve its argument/environment defaults.  All mounts are explicitly optional.
+Coolify separately injects the deployed `SOURCE_COMMIT` into the runtime
+environment, which `/api/health` prefers for its revision.  A different builder
+using only a source-commit secret must also inject that SHA at runtime or pass
+the public `SOURCE_COMMIT` build argument to bake it into the runtime image;
+the builder's temporary secret export is not persisted in that image.
+
+With an upload token present, a missing or invalid source SHA fails configuration
+before the plugin loads, preventing a fallback to an automatically inferred release.
+Authenticated release creation or sourcemap upload failures also fail the build
+with a fixed message that excludes provider error details.
+
+Credential-free Docker/CI builds continue without upload.  This code path alone
+does not establish that Coolify supplies the secret, that its token can upload,
+or that a release exists.  After an authorized rebuild, verify the exact source
+SHA release and sourcemap upload in Sentry before rerunning the deployment
+reporter.  The reporter intentionally refuses to invent a parallel release.
+When enabling or replacing the secret for an already-built SHA, force the build
+stage to rerun (`--no-cache-filter build` with buildx, or `--no-cache` with
+`docker build`); secret contents do not invalidate Docker's layer cache.
 
 ## Verify a deployment
 
@@ -187,7 +232,7 @@ defaults and valid values for local development.
 - `SENTRY_READ_TOKEN` (optional; enables the read-only Sentry Health dashboard card, an org-auth
   token or internal integration token with `project:read`/`event:read` scope — never sent to the
   client, absent by default)
-- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `jays-services`)
+- `SENTRY_ORG` (optional; Sentry org slug for the Health card, defaults to `simple-with-us`)
 - `ALERT_SLACK_WEBHOOK_URL` / `ALERT_WEBHOOK_URL` / `ALERT_RESEND_API_KEY` +
   `ALERT_EMAIL_FROM` + `ALERT_EMAIL_TO` / `ALERT_PAGERDUTY_ROUTING_KEY` (optional delivery
   destinations; Resend needs all three email values)
@@ -278,7 +323,7 @@ up to five verified offline SQLite snapshots for automatic code rollback.
 
 [Litestream](https://litestream.io/) continuously replicates `/data/prod.db`
 to **Backblaze B2** (bucket `jays-usage-monitor-eu`) with disaster-recovery
-restore points (24 h snapshot retention, 24 h snapshot interval, 1 h
+restore points (72 h snapshot retention, 24 h snapshot interval, 1 h
 sync-interval — not continuous second-scale PITR; see `litestream.yml`).
 **Cloudflare R2 remains historic** until the owner deletes it after B2 is
 proven. The external singleton at

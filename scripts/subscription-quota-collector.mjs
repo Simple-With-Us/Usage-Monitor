@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Mac-side subscription quota collector: percent REMAINING per plan window for
-// Claude, Codex, Grok and MiniMax.
+// Claude, Codex, Grok, MiniMax and Grok Bot (via `gbu --json`).
 //
 // Why this runs on the Mac and not on the server: each of these endpoints is
 // the one the vendor's OWN CLI calls, authenticated with the OAuth token that
@@ -13,7 +13,7 @@
 // already emits its quota windows, and duplicating them would double-count.
 //
 // Usage:
-//   node scripts/subscription-quota-collector.mjs [--provider claude|codex|grok|minimax|all]
+//   node scripts/subscription-quota-collector.mjs [--provider claude|codex|grok|minimax|grok-bot|all]
 //                                                 [--dry-run] [--redacted]
 //                                                 [--fixture path.json] [--debug]
 //
@@ -30,11 +30,25 @@
 //   launchctl bootout gui/$(id -u)/com.jays.subscription-quota-collector
 //
 // Env:
-//   USAGE_INGEST_TOKEN (or SUBSCRIPTION_QUOTA_INGEST_TOKEN), falling back to
-//     ~/.secrets/global-api-keys via resolveCollectorToken
+//   Per-producer scoped ingest tokens, one per provider batch:
+//     CLAUDE_CODE_INGEST_TOKEN (claude-code), CODEX_INGEST_TOKEN (openai-codex),
+//     GROK_INGEST_TOKEN (grok-build), MINIMAX_INGEST_TOKEN (minimax-code),
+//     GBU_INGEST_TOKEN (gbu).
+//   Each falls back to SUBSCRIPTION_QUOTA_INGEST_TOKEN, then USAGE_INGEST_TOKEN
+//     (unscoped; refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true).  Every
+//     name is read from the environment first, then `fleet-secrets get`
+//     via resolveCollectorToken.
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
-//   CLAUDE_HOME / CODEX_HOME / GROK_HOME / MINIMAX_CONFIG_PATH to override
-//     credential locations
+//   CLAUDE_CODE_OAUTH_CREDENTIALS_JSON — Claude Code OAuth credential JSON
+//     (same shape as ~/.claude/.credentials.json).  The LaunchAgent injects it
+//     through scripts/run-subscription-quota-collector.sh, which reads the
+//     "Claude Code-credentials" Keychain item (UM-1616); one-off dry runs can
+//     use scripts/claude-code-oauth-credentials-from-keychain.sh.  See
+//     docs/rollouts/2026-09-12-subscription-quota-collector.md.
+//   CLAUDE_HOME / CODEX_HOME / GROK_HOME / MINIMAX_CONFIG_PATH / GBU_BIN to override
+//     credential locations or the gbu binary path
+//   PATH should include $HOME/.gbu/bin and $HOME/.local/bin so `gbu` resolves
+//     (LaunchAgent plist.example is updated accordingly).
 //
 // SECRETS: this script reads local credential files and never prints, logs or
 // posts their contents.  The only credential-derived value that ever leaves it
@@ -42,7 +56,11 @@
 // bodies are never printed under any flag, because they can carry account ids.
 
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { homedir, hostname } from "node:os";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -51,7 +69,7 @@ import {
   GROK_PRODUCER_ID,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
-import { expandHome, resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { expandHome, resolveCollectorToken } from "./lib/subscription-quota-run-session-token-collector.mjs";
 import { planTypeFromCodexAuth } from "./lib/codex-observed-plan.mjs";
 import { buildQuotaEvent } from "./lib/quota-event.mjs";
 import {
@@ -59,10 +77,19 @@ import {
   parseCodexUsage,
   parseGrokBilling,
   parseMinimaxRemains,
+  parseGbuJson,
 } from "./lib/subscription-quota-parsers.mjs";
+import { parseClaudeCodeCredentialsJson } from "./lib/claude-code-oauth-credentials.mjs";
 
 /** MiniMax has no seat in session-token-collectors yet; give it its own id. */
 export const MINIMAX_PRODUCER_ID = "minimax-code";
+
+/** Grok Bot weekly via `gbu --json` (EXTRA source beside CodeCaps Cursor reader). */
+export const GBU_PRODUCER_ID = "gbu";
+
+const execFileAsync = promisify(execFile);
+const GBU_TIMEOUT_MS = 20_000;
+const GBU_MAX_STDOUT_BYTES = 1_048_576;
 
 const INGEST_URL =
   process.env.USAGE_MONITOR_INGEST_URL ||
@@ -80,6 +107,24 @@ function log(message) {
 async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Read Claude OAuth credentials from CLAUDE_CODE_OAUTH_CREDENTIALS_JSON only. */
+function readClaudeCredentialsFromEnv() {
+  const raw = process.env.CLAUDE_CODE_OAUTH_CREDENTIALS_JSON;
+  if (raw == null || !String(raw).trim()) return null;
+  return parseClaudeCodeCredentialsJson(raw, { logImpl: log });
+}
+
+/** Legacy file path when env injection is unset (older CLI releases). */
+async function readClaudeCredentialsFromFile() {
+  const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
+  try {
+    const text = await readFile(path, "utf8");
+    return parseClaudeCodeCredentialsJson(text, { logImpl: log });
   } catch {
     return null;
   }
@@ -175,6 +220,82 @@ function hostOf(url) {
   }
 }
 
+
+// -------------------------------------------------------------- gbu CLI ---
+
+/** Resolve the gbu binary.  Never shells; callers use execFile on this path. */
+export async function findGbuBin(env = process.env) {
+  if (env.GBU_BIN && String(env.GBU_BIN).trim()) {
+    const forced = String(env.GBU_BIN).trim();
+    try {
+      await access(forced, fsConstants.X_OK);
+      return forced;
+    } catch {
+      return null;
+    }
+  }
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const candidates = [
+    join(home, ".gbu", "bin", "gbu"),
+    join(home, ".local", "bin", "gbu"),
+    "/opt/homebrew/bin/gbu",
+    "/usr/local/bin/gbu",
+  ];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+/**
+ * Run `gbu --json` with a PATH that includes ~/.gbu/bin and ~/.local/bin so a
+ * LaunchAgent that only has Homebrew on PATH still finds the binary when
+ * GBU_BIN is unset and findGbuBin somehow missed (symlink races).
+ */
+export async function runGbuJson({ env = process.env, execFileImpl = execFileAsync } = {}) {
+  const bin = await findGbuBin(env);
+  if (!bin) return { skipped: "gbu not installed (expected ~/.gbu/bin/gbu or ~/.local/bin/gbu)" };
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const pathPrefix = `${join(home, ".gbu", "bin")}:${join(home, ".local", "bin")}`;
+  const childEnv = {
+    ...env,
+    PATH: `${pathPrefix}:${env.PATH || "/usr/bin:/bin"}`,
+    NO_COLOR: "1",
+  };
+  let stdout;
+  try {
+    const result = await execFileImpl(bin, ["--json"], {
+      env: childEnv,
+      timeout: GBU_TIMEOUT_MS,
+      maxBuffer: GBU_MAX_STDOUT_BYTES,
+      encoding: "utf8",
+    });
+    stdout = result.stdout;
+  } catch (error) {
+    const code = error && typeof error === "object" ? error.code : null;
+    // execFile's timeout kills the child with SIGTERM; its rejection has
+    // code=null, signal=SIGTERM, killed=true (not ETIMEDOUT).
+    if (error && typeof error === "object" && error.killed === true && error.signal === "SIGTERM") {
+      throw new Error("gbu --json timed out");
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    // Never include stdout/stderr: they can carry account emails.
+    throw new Error(`gbu --json failed${code ? ` (${code})` : ""}: ${message.split("\n")[0]}`);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(String(stdout || ""));
+  } catch {
+    throw new Error("gbu --json returned non-JSON output");
+  }
+  return { payload, source: "gbu" };
+}
+
 // -------------------------------------------------------------- providers ---
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -190,11 +311,16 @@ const PROVIDERS = {
     provider: "anthropic",
     service: "claude-code",
     producerId: CLAUDE_PRODUCER_ID,
+    // Per-producer scoped ingest token (USAGE_INGEST_PRODUCER_TOKENS).
+    tokenEnv: "CLAUDE_CODE_INGEST_TOKEN",
     defaultSource: hostOf(CLAUDE_USAGE_URL),
     parse: (payload, context) => parseClaudeUsage(payload, context),
     async fetch() {
-      const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
-      const credentials = await readJson(path);
+      // Env-injected JSON first (launchd wrapper or operator export), then the
+      // legacy file path for older CLI releases.  Keychain is never read here;
+      // scripts/run-subscription-quota-collector.sh does that and injects it.
+      const credentials =
+        readClaudeCredentialsFromEnv() ?? (await readClaudeCredentialsFromFile());
       const oauth = asRecord(asRecord(credentials).claudeAiOauth);
       const token = resolveCredentialField(oauth, ["accessToken", "access_token"]);
       if (!token) return { skipped: "no Claude Code OAuth credential found" };
@@ -218,6 +344,8 @@ const PROVIDERS = {
     provider: "openai",
     service: "codex-cli",
     producerId: CODEX_PRODUCER_ID,
+    // Per-producer scoped ingest token (USAGE_INGEST_PRODUCER_TOKENS).
+    tokenEnv: "CODEX_INGEST_TOKEN",
     defaultSource: hostOf(CODEX_USAGE_URL),
     parse: (payload, context) => parseCodexUsage(payload, context),
     async fetch() {
@@ -242,6 +370,8 @@ const PROVIDERS = {
     provider: "xai",
     service: "grok-cli",
     producerId: GROK_PRODUCER_ID,
+    // Per-producer scoped ingest token (USAGE_INGEST_PRODUCER_TOKENS).
+    tokenEnv: "GROK_INGEST_TOKEN",
     defaultSource: hostOf(GROK_BILLING_URL),
     parse: (payload) => parseGrokBilling(payload),
     async fetch({ debug }) {
@@ -277,6 +407,8 @@ const PROVIDERS = {
     provider: "minimax",
     service: "minimax-code",
     producerId: MINIMAX_PRODUCER_ID,
+    // Per-producer scoped ingest token (USAGE_INGEST_PRODUCER_TOKENS).
+    tokenEnv: "MINIMAX_INGEST_TOKEN",
     defaultSource: hostOf(MINIMAX_URLS[0]),
     parse: (payload) => parseMinimaxRemains(payload),
     async fetch({ debug }) {
@@ -313,6 +445,21 @@ const PROVIDERS = {
       throw lastError ?? new Error("MiniMax request failed");
     },
   },
+
+  "grok-bot": {
+    provider: "grok-bot",
+    service: "gbu",
+    producerId: GBU_PRODUCER_ID,
+    // Per-producer scoped ingest token (USAGE_INGEST_PRODUCER_TOKENS).
+    // Falls back to SUBSCRIPTION_QUOTA_INGEST_TOKEN / USAGE_INGEST_TOKEN.
+    // Document GBU_INGEST_TOKEN for Jay when scoped tokens are required.
+    tokenEnv: "GBU_INGEST_TOKEN",
+    defaultSource: "gbu",
+    parse: (payload) => parseGbuJson(payload),
+    async fetch() {
+      return runGbuJson();
+    },
+  },
 };
 
 export const PROVIDER_KEYS = Object.keys(PROVIDERS);
@@ -347,11 +494,19 @@ export function parseArgs(argv) {
   return args;
 }
 
+const COLLECTOR_MACHINE = hostname();
+
 /** Turn one provider's raw payload into ingest events.  Pure; used by tests. */
-export function eventsForProvider(providerKey, payload, { context, source, occurredAtIso } = {}) {
+export function eventsForProvider(
+  providerKey,
+  payload,
+  { context, source, occurredAtIso, machine } = {},
+) {
   const definition = PROVIDERS[providerKey];
   if (!definition) throw new Error(`Unknown provider ${providerKey}`);
   const readings = definition.parse(payload, context ?? {});
+  const observedAtIso = occurredAtIso ?? new Date().toISOString();
+  const host = machine ?? COLLECTOR_MACHINE;
   // A window whose remaining percent we could not read is dropped, not posted.
   // The read path's "N/A remaining means none remains" rule is an Antigravity
   // ruling (owner 2026-09-04); applying it to a field-name mismatch would tell
@@ -365,7 +520,9 @@ export function eventsForProvider(providerKey, payload, { context, source, occur
         service: definition.service,
         reading: r,
         source: source ?? definition.defaultSource,
-        occurredAtIso: occurredAtIso ?? new Date().toISOString(),
+        occurredAtIso: observedAtIso,
+        reportedAtIso: r.reportedAt ?? observedAtIso,
+        machine: host,
       }),
     );
 }
@@ -428,6 +585,20 @@ async function collectProvider(providerKey, args) {
   }
 }
 
+/**
+ * Token lookup order for one provider's batch: that producer's scoped token
+ * first, then the legacy collector-wide names.  With
+ * USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true only the first can succeed, because
+ * a scoped token authorizes exactly one producerId.
+ */
+export function ingestTokenEnvNames(definition) {
+  return [
+    ...(definition.tokenEnv ? [definition.tokenEnv] : []),
+    "SUBSCRIPTION_QUOTA_INGEST_TOKEN",
+    "USAGE_INGEST_TOKEN",
+  ];
+}
+
 async function main() {
   let args;
   try {
@@ -446,12 +617,11 @@ async function main() {
 
   const withEvents = results.filter((r) => r.events.length > 0);
   if (withEvents.length > 0 && !args.dryRun) {
-    const token = resolveCollectorToken([
-      "SUBSCRIPTION_QUOTA_INGEST_TOKEN",
-      "USAGE_INGEST_TOKEN",
-    ]);
     for (const result of withEvents) {
       const definition = PROVIDERS[result.providerKey];
+      // Each provider posts as its own producerId, and a scoped ingest token
+      // only authorizes its own producer, so resolve one token per producer.
+      const token = await resolveCollectorToken(ingestTokenEnvNames(definition));
       try {
         const ack = await postUsageBatches({
           events: result.events,
@@ -492,4 +662,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
 }
 
-export { PROVIDERS };
+export { PROVIDERS, fetchJson, hostOf };

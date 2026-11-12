@@ -1,8 +1,10 @@
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildQuotaEvent,
@@ -16,12 +18,19 @@ import {
   parseCodexUsage,
   parseGrokBilling,
   parseMinimaxRemains,
+  parseGbuJson,
 } from "../lib/subscription-quota-parsers.mjs";
 import {
+  PROVIDERS,
   eventsForProvider,
+  fetchJson,
   grokAuthRecord,
+  hostOf,
+  ingestTokenEnvNames,
   parseArgs,
   resolveCredentialField,
+  runGbuJson,
+  GBU_PRODUCER_ID,
 } from "../subscription-quota-collector.mjs";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -70,6 +79,7 @@ describe("quota-event helpers", () => {
       service: "claude-code",
       source: "api.anthropic.com",
       occurredAtIso: "2026-09-12T12:00:00.000Z",
+      machine: "Mac.Jays.Services",
       reading: {
         bucketId: "anthropic:five_hour",
         label: "5h window",
@@ -90,6 +100,10 @@ describe("quota-event helpers", () => {
     expect(event.metadata.quotaWindow).toBe("5h");
     expect(event.metadata.resetAt).toBe("2026-09-12T18:00:00.000Z");
     expect(event.metadata.source).toBe("api.anthropic.com");
+    expect(event.metadata.reportedAt).toBe("2026-09-12T12:00:00.000Z");
+    expect(event.metadata.windowKey).toBe("5h");
+    expect(event.metadata.rawKey).toBe("five_hour");
+    expect(event.metadata.machine).toBe("Mac.Jays.Services");
     // eventId must include the observation time.  Ingest 409s when credits
     // change under the same (producerId, eventId); a reset-only key would
     // freeze remaining % after the first LaunchAgent tick.
@@ -137,22 +151,31 @@ describe("parseClaudeUsage", () => {
 
   it("converts utilization (percent used) into percent remaining per window", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].remainingPercent).toBe(62.5);
-    expect(rows["5h window"].usedPercent).toBe(37.5);
-    expect(rows["7d window"].remainingPercent).toBe(18);
+    expect(rows["5-hour"].remainingPercent).toBe(62.5);
+    expect(rows["5-hour"].usedPercent).toBe(37.5);
+    const weekly = readings.filter((row) => row.label === "7-day");
+    expect(weekly.map((row) => row.remainingPercent).sort((a, b) => a - b)).toEqual([4.5, 18]);
   });
 
-  it("labels the per-model window and keeps its model id", () => {
-    const rows = byLabel(readings);
-    expect(rows["7d window (Opus)"].remainingPercent).toBe(4.5);
-    expect(rows["7d window (Opus)"].modelId).toBe("opus");
-    expect(rows["7d window (Opus)"].quotaWindow).toBe("7d");
+  it("rolls per-model windows up to the platform window label and keeps model id in metadata", () => {
+    const opus = readings.find((row) => row.modelId === "opus");
+    expect(opus?.label).toBe("7-day");
+    expect(opus?.remainingPercent).toBe(4.5);
+    expect(opus?.quotaWindow).toBe("7d");
+  });
+
+  it("maps unknown Anthropic window keys to other-limit display labels", () => {
+    const readings = parseClaudeUsage({
+      iguana_necktie: { utilization: 10, resets_at: "2026-09-12T17:00:00Z" },
+    });
+    expect(readings[0].label).toMatch(/^other-limit · resets /);
+    expect(readings[0].bucketId).toBe("anthropic:iguana_necktie");
   });
 
   it("carries resetAt and the plan type, and ignores non-window keys", () => {
     const rows = byLabel(readings);
-    expect(rows["5h window"].resetAt).toBe("2026-09-12T18:00:00.000Z");
-    expect(rows["5h window"].planType).toBe("max_20x");
+    expect(rows["5-hour"].resetAt).toBe("2026-09-12T18:00:00.000Z");
+    expect(rows["5-hour"].planType).toBe("max_20x");
     expect(readings).toHaveLength(3);
   });
 
@@ -284,6 +307,31 @@ describe("parseGrokBilling", () => {
     expect(row.remainingUnknown).toBe(false);
   });
 
+  it("falls back to config billingPeriodStart/End when currentPeriod has no dates", () => {
+    const [row] = parseGrokBilling({
+      config: {
+        creditUsagePercent: 25,
+        billingPeriodStart: "2026-09-01T00:00:00Z",
+        billingPeriodEnd: "2026-10-01T00:00:00Z",
+      },
+    });
+    expect(row.remainingPercent).toBe(75);
+    expect(row.usedPercent).toBe(25);
+    expect(row.quotaWindow).toBe("monthly");
+    expect(row.resetAt).toBe("2026-10-01T00:00:00.000Z");
+    expect(row.label).toBe("monthly window");
+  });
+
+  it("labels a config window without dates as Subscription window", () => {
+    const [row] = parseGrokBilling({
+      config: { creditUsagePercent: 10 },
+    });
+    expect(row.label).toBe("Subscription window");
+    expect(row.quotaWindow).toBeNull();
+    expect(row.remainingPercent).toBe(90);
+    expect(row.resetAt).toBeNull();
+    expect(row.remainingUnknown).toBe(false);
+  });
   it("labels a config period with no dates as Subscription window", () => {
     const [row] = parseGrokBilling({ config: { creditUsagePercent: 10 } });
     expect(row.remainingPercent).toBe(90);
@@ -325,6 +373,106 @@ describe("grokAuthRecord", () => {
     });
   });
 
+  it("does not unwrap when two object profiles are present", () => {
+    const auth = {
+      "https://auth.x.ai::a": { key: "a-secret" },
+      "https://auth.x.ai::b": { key: "b-secret" },
+    };
+    expect(grokAuthRecord(auth)).toEqual(auth);
+    expect(resolveCredentialField(grokAuthRecord(auth), ["key"])).toBeNull();
+  });
+
+  it("ignores a lone array value instead of treating it as a profile", () => {
+    const auth = { items: [{ key: "nope" }] };
+    expect(grokAuthRecord(auth)).toEqual(auth);
+  });
+
+  it("returns an empty record for a non-object auth file", () => {
+    expect(grokAuthRecord(null)).toEqual({});
+    expect(grokAuthRecord("not-json-object")).toEqual({});
+  });
+});
+
+describe("fetchJson error wrapping", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("maps TimeoutError to timeout from host", async () => {
+    const err = new Error("aborted");
+    err.name = "TimeoutError";
+    vi.stubGlobal("fetch", async () => {
+      throw err;
+    });
+    await expect(fetchJson("https://cli-chat-proxy.grok.com/v1/billing")).rejects.toThrow(
+      "timeout from cli-chat-proxy.grok.com",
+    );
+  });
+
+  it("surfaces ETIMEDOUT cause codes on a generic fetch failure", async () => {
+    const err = new Error("fetch failed");
+    err.cause = { code: "ETIMEDOUT" };
+    vi.stubGlobal("fetch", async () => {
+      throw err;
+    });
+    await expect(fetchJson("https://api.minimax.io/v1/x")).rejects.toThrow(
+      "fetch failed from api.minimax.io (ETIMEDOUT)",
+    );
+  });
+
+  it("omits a cause code when the thrown value has none", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("network down");
+    });
+    await expect(fetchJson("https://api.anthropic.com/api/oauth/usage")).rejects.toThrow(
+      "fetch failed from api.anthropic.com",
+    );
+  });
+
+  it("keeps an unparseable URL as the host label", () => {
+    expect(hostOf("not a url")).toBe("not a url");
+    expect(hostOf("https://cli-chat-proxy.grok.com/v1/billing")).toBe("cli-chat-proxy.grok.com");
+  });
+});
+
+describe("Grok fetch credential skips", () => {
+  afterEach(() => {
+    delete process.env.GROK_HOME;
+  });
+
+  async function writeGrokHome(auth) {
+    const dir = await mkdtemp(join(tmpdir(), "grok-auth-"));
+    await writeFile(join(dir, "auth.json"), JSON.stringify(auth));
+    process.env.GROK_HOME = dir;
+    return dir;
+  }
+
+  it("skips when the nested Grok CLI token is expired", async () => {
+    const dir = await writeGrokHome({
+      "https://auth.x.ai::fixture-id": {
+        key: "nested-secret",
+        expires_at: "2020-01-01T00:00:00Z",
+      },
+    });
+    try {
+      await expect(PROVIDERS.grok.fetch({ debug: false })).resolves.toEqual({
+        skipped: "Grok CLI access token is expired; skipping this tick",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips when no Grok CLI credential is present", async () => {
+    const dir = await writeGrokHome({ empty: true });
+    try {
+      await expect(PROVIDERS.grok.fetch({ debug: false })).resolves.toEqual({
+        skipped: "no Grok CLI credential found",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   it("does not unwrap when more than one nested profile exists", () => {
     const auth = { a: { key: "one" }, b: { key: "two" } };
     expect(grokAuthRecord(auth)).toBe(auth);
@@ -346,11 +494,21 @@ describe("parseMinimaxRemains", () => {
     expect(rows["MiniMax-Text-01 (daily window)"].remainingPercent).toBe(90);
   });
 
-  it("adds a plan-wide headline row across models", () => {
-    expect(readings[0].label).toBe("Coding plan (all models)");
-    // 50 of 300 used across both models.
-    expect(readings[0].remainingPercent).toBe(83.33);
-    expect(readings[0].resetAt).toBe("2026-09-13T00:00:00.000Z");
+  it("does not invent a plan-wide headline by summing per-model counts", () => {
+    expect(readings.some((r) => r.label === "Coding plan (all models)")).toBe(false);
+    expect(readings).toHaveLength(2);
+  });
+
+  it("prefers remaining_percent over misleading count fields (live API shape)", () => {
+    const live = parseMinimaxRemains(fixture("minimax-coding-plan-remains-live.json"));
+    const rows = byLabel(live);
+    expect(live[0].label).toBe("Coding plan (all models)");
+    expect(live[0].remainingPercent).toBe(97);
+    expect(rows["general (daily window)"].remainingPercent).toBe(97);
+    expect(rows["general (weekly window)"].remainingPercent).toBe(92);
+    expect(rows["general (weekly window)"].resetAt).toBe("2026-10-03T00:00:00.000Z");
+    expect(rows["video (daily window)"].remainingPercent).toBe(100);
+    expect(rows["video (weekly window)"].remainingPercent).toBe(100);
   });
 
   it("returns nothing when base_resp reports a failure", () => {
@@ -390,7 +548,7 @@ describe("collector wiring", () => {
       ["codex", "codex-wham-usage.json", "openai", 2],
       ["grok", "grok-billing-credits.json", "xai", 1],
       ["grok", "grok-billing-config.json", "xai", 1],
-      ["minimax", "minimax-coding-plan-remains.json", "minimax", 3],
+      ["minimax", "minimax-coding-plan-remains.json", "minimax", 2],
     ];
     for (const [providerKey, file, provider, count] of cases) {
       const events = eventsForProvider(providerKey, fixture(file), {
@@ -428,6 +586,7 @@ describe("collector wiring", () => {
       "codex",
       "grok",
       "minimax",
+      "grok-bot",
     ]);
     expect(() => parseArgs(["node", "s.mjs", "--provider", "gemini"])).toThrow(/Unknown --provider/);
     expect(() => parseArgs(["node", "s.mjs", "--fixture", "x.json"])).toThrow(/single --provider/);
@@ -455,6 +614,7 @@ describe("shared-contract compliance", () => {
       ["claude", "claude-oauth-usage.json"],
       ["codex", "codex-wham-usage.json"],
       ["grok", "grok-billing-credits.json"],
+      ["grok", "grok-billing-config.json"],
       ["minimax", "minimax-coding-plan-remains.json"],
     ];
     for (const [providerKey, file] of cases) {
@@ -466,5 +626,151 @@ describe("shared-contract compliance", () => {
         ).toBe(true);
       }
     }
+  });
+});
+
+describe("per-producer ingest tokens", () => {
+  it("looks up each provider's scoped token before the collector-wide fallbacks", () => {
+    expect(ingestTokenEnvNames(PROVIDERS.claude)).toEqual([
+      "CLAUDE_CODE_INGEST_TOKEN",
+      "SUBSCRIPTION_QUOTA_INGEST_TOKEN",
+      "USAGE_INGEST_TOKEN",
+    ]);
+    expect(ingestTokenEnvNames(PROVIDERS.codex)[0]).toBe("CODEX_INGEST_TOKEN");
+    expect(ingestTokenEnvNames(PROVIDERS.grok)[0]).toBe("GROK_INGEST_TOKEN");
+    expect(ingestTokenEnvNames(PROVIDERS.minimax)[0]).toBe("MINIMAX_INGEST_TOKEN");
+  });
+
+  it("gives every provider a distinct token name", () => {
+    const names = Object.values(PROVIDERS).map((definition) => definition.tokenEnv);
+    expect(names.every(Boolean)).toBe(true);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+
+describe("parseGbuJson", () => {
+  it("maps weeklyUsagePercent to remaining and keeps absolutes in metadataExtras", () => {
+    const readings = parseGbuJson(fixture("gbu-json.json"));
+    expect(readings).toHaveLength(1);
+    const [row] = readings;
+    expect(row.bucketId).toBe("gbu-weekly");
+    expect(row.quotaWindow).toBe("weekly");
+    expect(row.label).toBe("Grok Bot weekly");
+    expect(row.remainingPercent).toBe(14.63);
+    expect(row.usedPercent).toBe(85.37);
+    expect(row.resetAt).toBe("2026-09-28T18:35:19.304Z");
+    expect(row.planType).toBe("Grok Bot Plan");
+    expect(row.isExhausted).toBe(false);
+    expect(row.remainingUnknown).toBe(false);
+    expect(row.metadataExtras.includedSpend).toBe(33262);
+    expect(row.metadataExtras.includedLimit).toBe(40000);
+    expect(row.metadataExtras.includedRemaining).toBe(6738);
+    expect(row.metadataExtras.onDemandUsed).toBe(0);
+    expect(row.metadataExtras.email).toBe("mail@example.com");
+  });
+
+  it("marks unavailable accounts exhausted", () => {
+    const readings = parseGbuJson({
+      active: "a@example.com",
+      accounts: [
+        {
+          account: "a@example.com",
+          email: "a@example.com",
+          active: true,
+          weeklyUsagePercent: 100,
+          available: false,
+          resetsAt: "2026-09-28T18:35:19.304Z",
+          planLabel: "Grok Bot Plan",
+        },
+      ],
+    });
+    expect(readings[0].remainingPercent).toBe(0);
+    expect(readings[0].isExhausted).toBe(true);
+  });
+
+  it("gives non-active accounts a distinct bucketId so they do not collapse", () => {
+    const readings = parseGbuJson({
+      active: "a@example.com",
+      accounts: [
+        {
+          account: "a@example.com",
+          email: "a@example.com",
+          active: true,
+          weeklyUsagePercent: 10,
+          available: true,
+          resetsAt: "2026-09-28T18:35:19.304Z",
+        },
+        {
+          account: "b@example.com",
+          email: "b@example.com",
+          active: false,
+          weeklyUsagePercent: 50,
+          available: true,
+          resetsAt: "2026-09-28T18:35:19.304Z",
+        },
+      ],
+    });
+    expect(readings.map((r) => r.bucketId)).toEqual(["gbu-weekly", "gbu-weekly:b@example.com"]);
+  });
+});
+
+describe("grok-bot provider wiring", () => {
+  it("classifies an execFile timeout as a timeout, not a generic failure", async () => {
+    const home = await mkdtemp(join(tmpdir(), "gbu-timeout-"));
+    const bin = join(home, "gbu");
+    try {
+      await writeFile(bin, "#!/bin/sh\nexit 0\n");
+      await chmod(bin, 0o755);
+      const error = Object.assign(new Error("Command failed"), { code: null, signal: "SIGTERM", killed: true });
+      await expect(runGbuJson({ env: { HOME: home, GBU_BIN: bin }, execFileImpl: async () => { throw error; } }))
+        .rejects.toThrow("gbu --json timed out");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mistake an ordinary SIGTERM for a timeout", async () => {
+    const home = await mkdtemp(join(tmpdir(), "gbu-signal-"));
+    const bin = join(home, "gbu");
+    try {
+      await writeFile(bin, "#!/bin/sh\nexit 0\n");
+      await chmod(bin, 0o755);
+      const error = Object.assign(new Error("Command failed"), { code: null, signal: "SIGTERM", killed: false });
+      await expect(runGbuJson({ env: { HOME: home, GBU_BIN: bin }, execFileImpl: async () => { throw error; } }))
+        .rejects.toThrow(/^gbu --json failed:/);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+  it("is registered with producer gbu and source gbu", () => {
+    expect(PROVIDERS["grok-bot"].provider).toBe("grok-bot");
+    expect(PROVIDERS["grok-bot"].service).toBe("gbu");
+    expect(PROVIDERS["grok-bot"].producerId).toBe(GBU_PRODUCER_ID);
+    expect(PROVIDERS["grok-bot"].defaultSource).toBe("gbu");
+    expect(ingestTokenEnvNames(PROVIDERS["grok-bot"])[0]).toBe("GBU_INGEST_TOKEN");
+  });
+
+  it("builds an ingest event with bucketId gbu-weekly and metadata.source gbu", () => {
+    const events = eventsForProvider("grok-bot", fixture("gbu-json.json"), {
+      source: "gbu",
+      occurredAtIso: "2026-09-26T04:00:00.000Z",
+    });
+    expect(events).toHaveLength(1);
+    const event = events[0];
+    expect(event.provider).toBe("grok-bot");
+    expect(event.service).toBe("gbu");
+    expect(event.credits).toBe(14.63);
+    expect(event.metadata.bucketId).toBe("gbu-weekly");
+    expect(event.metadata.quotaWindow).toBe("weekly");
+    expect(event.metadata.source).toBe("gbu");
+    expect(event.metadata.includedSpend).toBe(33262);
+    expect(event.metadata.includedLimit).toBe(40000);
+    expect(event.metadata.includedRemaining).toBe(6738);
+    expect(event.eventId).toContain("subq:grok-bot:gbu-weekly:");
+  });
+
+  it("accepts --provider grok-bot", () => {
+    expect(parseArgs(["--provider", "grok-bot"]).providers).toEqual(["grok-bot"]);
   });
 });

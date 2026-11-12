@@ -5,9 +5,14 @@ MODE="${1:-run}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE_DIR="$ROOT_DIR/macos"
 DIST_DIR="$PACKAGE_DIR/dist"
+# The .app folder keeps its "Usage Monitor.app" name so --install replaces
+# the existing install in place; the user-facing name is DISPLAY_NAME.
 APP_NAME="Usage Monitor"
+DISPLAY_NAME="Usage Monitor for Mac"
 PRODUCT_NAME="UsageMonitorMenu"
-BUNDLE_ID="com.jays.usage-monitor.mac"
+BUNDLE_ID="com.simplewithus.usage.macos"
+# Pre-2026-09-23 identifier.  --install may replace a bundle carrying it.
+LEGACY_BUNDLE_ID="com.jays.usage-monitor.mac"
 MIN_SYSTEM_VERSION="14.0"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -48,6 +53,19 @@ build_and_stage() {
   mkdir -p "$APP_MACOS" "$APP_RESOURCES"
   cp "$build_binary" "$APP_EXECUTABLE"
   chmod +x "$APP_EXECUTABLE"
+  # Frameworks from SwiftPM binary targets (Sparkle) sit beside the executable
+  # in the build dir; the staged bundle needs them in Contents/Frameworks or
+  # dyld fails at launch.  ditto preserves the framework symlinks codesign
+  # requires.
+  for framework in "$build_bin_dir"/*.framework; do
+    [[ -d "$framework" ]] || continue
+    mkdir -p "$APP_CONTENTS/Frameworks"
+    /usr/bin/ditto "$framework" "$APP_CONTENTS/Frameworks/$(basename "$framework")"
+  done
+  if [[ -d "$APP_CONTENTS/Frameworks/Sparkle.framework" ]] && \
+     ! /usr/bin/otool -l "$APP_EXECUTABLE" | /usr/bin/grep -q '@executable_path/../Frameworks'; then
+    /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE"
+  fi
   build_resources="$(find "$build_bin_dir" -maxdepth 1 -type d \( -name "*_"$PRODUCT_NAME.bundle -o -name "*_"$PRODUCT_NAME.resources \) -print -quit)"
   [[ -n "$build_resources" ]] || {
     echo "SwiftPM resource bundle not found in: $build_bin_dir" >&2
@@ -83,7 +101,7 @@ build_and_stage() {
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key>
-  <string>$APP_NAME</string>
+  <string>$DISPLAY_NAME</string>
   <key>CFBundleExecutable</key>
   <string>$PRODUCT_NAME</string>
   <key>CFBundleIconFile</key>
@@ -122,7 +140,7 @@ install_owned_app() {
     [[ ! -L "$destination" && -d "$destination" ]] || { echo "refusing symlink or non-bundle destination: $destination" >&2; exit 1; }
     local existing_id
     existing_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$destination/Contents/Info.plist" 2>/dev/null || true)"
-    [[ "$existing_id" == "$BUNDLE_ID" ]] || {
+    [[ "$existing_id" == "$BUNDLE_ID" || "$existing_id" == "$LEGACY_BUNDLE_ID" ]] || {
       echo "refusing to overwrite bundle with identifier '$existing_id': $destination" >&2
       exit 1
     }

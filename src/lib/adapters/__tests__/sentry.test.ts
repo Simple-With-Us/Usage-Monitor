@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { redactProviderRawData } from "../../data-privacy";
 import { fetchUsage } from "../sentry";
 
-const ORG_SLUG = "jays-services";
+const ORG_SLUG = "simple-with-us";
 const PROJECTS_PATH = `/api/0/organizations/${ORG_SLUG}/projects/`;
 
 function jsonResponse(
