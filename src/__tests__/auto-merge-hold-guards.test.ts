@@ -416,6 +416,37 @@ describe("auto-merge hold guards", () => {
     }
   });
 
+  it.each(WORKFLOWS)("no-ops when workflow_run pull_requests and the run API are both empty in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const empty = await runBlock(initial, [], {
+      eventPrNumber: "",
+      reviewPullRequests: [],
+      signalRunId: "42948105904",
+      signalRunPullRequests: [],
+    });
+    expect(empty.status).toBe(0);
+    expect(empty.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
+    expect(empty.calls.trim()).toBe(`token=repo api repos/${REPO}/actions/runs/42948105904 --jq .pull_requests`);
+    expect(empty.stdout).toContain("exiting without arming or disarming");
+  });
+
+  it.each(WORKFLOWS)("no-ops when workflow_run event PR number is unusable and review metadata is empty in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    for (const eventPrNumber of ["null", "0", "invalid"]) {
+      const empty = await runBlock(initial, [], {
+        eventPrNumber,
+        reviewPullRequests: [],
+        signalRunId: "42948105904",
+        signalRunPullRequests: [],
+      });
+      expect(empty.status, eventPrNumber).toBe(0);
+      expect(empty.output, eventPrNumber).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
+      expect(empty.stdout, eventPrNumber).toContain("exiting without arming or disarming");
+    }
+  });
+
   it.each(WORKFLOWS)("falls back to the review-signal workflow run API when the webhook omits pull_requests in %s", async (workflow) => {
     const source = await readFile(workflow, "utf8");
     const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
