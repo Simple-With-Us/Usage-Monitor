@@ -1,6 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "@/lib/prisma";
-import { computeAgentsOverview } from "../agents-overview";
+import type { ExternalUsageEvent, Prisma } from "@prisma/client";
+
+const prismaMock = vi.hoisted(() => ({
+  subscription: { findMany: vi.fn() },
+  externalUsageEvent: {
+    findMany: vi.fn(),
+    findFirst: vi.fn(),
+    groupBy: vi.fn(),
+  },
+  externalUsageEventDailyRollup: {
+    groupBy: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/cursor-admin-poller", () => ({ CURSOR_ADMIN_SOURCE_APP: "cursor-admin" }));
+vi.mock("@/lib/ingest-admission", () => ({
+  withInternalUsageWriteAdmission: vi.fn((operation: () => unknown) => operation()),
+}));
+
+import {
+  AGENT_PLATFORMS,
+  computeAgentsOverview,
+  preferPlatformEstimatedCostUsd,
+  platformIdForSourceApp,
+} from "../agents-overview";
 import * as retention from "../data-retention";
 import { getLatestMacHealth } from "@/lib/mac-health";
 
@@ -10,19 +34,73 @@ vi.mock("@/lib/mac-health", () => ({
 
 const mockedMacHealth = vi.mocked(getLatestMacHealth);
 
+type UsageGroupByArgs = Prisma.ExternalUsageEventGroupByArgs;
+type UsageFindManyArgs = Prisma.ExternalUsageEventFindManyArgs;
+type UsageFindFirstArgs = Prisma.ExternalUsageEventFindFirstArgs;
+type RollupGroupByArgs = Prisma.ExternalUsageEventDailyRollupGroupByArgs;
+
+type UsageGroupByRow = Pick<
+  Prisma.ExternalUsageEventGroupByOutputType,
+  "sourceApp" | "provider" | "keyRef" | "label"
+> & {
+  service?: string | null;
+  confidence?: string;
+  _sum?: { quantity?: number | null; costUsd?: number | null };
+};
+
+function usageGroupByRows(rows: UsageGroupByRow[]): Prisma.ExternalUsageEventGroupByOutputType[] {
+  return rows as Prisma.ExternalUsageEventGroupByOutputType[];
+}
+
+type RollupGroupByRow = Pick<
+  Prisma.ExternalUsageEventDailyRollupGroupByOutputType,
+  "sourceApp" | "provider" | "keyRef" | "label"
+> & {
+  service?: string | null;
+  confidence?: string;
+  _sum?: { totalQuantity?: number | null; totalCostUsd?: number | null };
+};
+
+function rollupGroupByRows(
+  rows: RollupGroupByRow[],
+): Prisma.ExternalUsageEventDailyRollupGroupByOutputType[] {
+  return rows as Prisma.ExternalUsageEventDailyRollupGroupByOutputType[];
+}
+
+type CursorAdminEventRow = Pick<
+  ExternalUsageEvent,
+  "keyRef" | "quantity" | "unit" | "costUsd" | "metadata" | "occurredAt"
+>;
+
+function cursorAdminEvents(rows: CursorAdminEventRow[]): ExternalUsageEvent[] {
+  return rows as ExternalUsageEvent[];
+}
+
+function metricTypeFromWhere(where: { metricType?: unknown } | undefined): string | undefined {
+  if (!where || typeof where !== "object") return undefined;
+  const { metricType } = where;
+  return typeof metricType === "string" ? metricType : undefined;
+}
+
+function sourceAppFromFindManyWhere(
+  where: Prisma.ExternalUsageEventWhereInput | undefined,
+): string | undefined {
+  if (!where || typeof where !== "object") return undefined;
+  const { sourceApp } = where;
+  return typeof sourceApp === "string" ? sourceApp : undefined;
+}
+
 function emptyGroupBy() {
-  vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockResolvedValue([] as any);
-  vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue(
-    [] as any,
-  );
+  prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
+  prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
 }
 
 describe("agents-overview", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(prisma.subscription as any, "findMany").mockResolvedValue([]);
-    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockResolvedValue([]);
-    vi.spyOn(prisma.externalUsageEvent as any, "findFirst").mockResolvedValue(null);
+    prismaMock.subscription.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findFirst.mockResolvedValue(null);
     mockedMacHealth.mockResolvedValue({
       ok: false,
       status: "offline",
@@ -32,14 +110,99 @@ describe("agents-overview", () => {
     });
   });
 
+  it("registers exact Kimi and ZCode local-ledger coverage", () => {
+    const kimi = AGENT_PLATFORMS.find((platform) => platform.id === "kimi-code");
+    const zcode = AGENT_PLATFORMS.find((platform) => platform.id === "zcode");
+    expect(kimi).toMatchObject({
+      tokenTelemetryKind: "session_jsonl",
+      fidelityTier: "session_jsonl",
+      dataCapability: expect.stringContaining("per-turn tokens"),
+    });
+    expect(kimi?.notes).toContain("per-turn");
+    expect(zcode).toMatchObject({
+      provider: "Z.ai",
+      tokenTelemetryKind: "local_database",
+      fidelityTier: "local_database",
+      dataCapability: expect.stringContaining("local database"),
+    });
+    expect(platformIdForSourceApp("moonshot-kimi")).toBe("kimi-code");
+    for (const alias of ["z.ai", "zai", "glm", "bigmodel.cn"]) {
+      expect(platformIdForSourceApp(alias)).toBe("zcode");
+    }
+  });
+
+  it("queries the exact Kimi and ZCode source apps for overview telemetry", async () => {
+    const sourceFilters: unknown[] = [];
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      sourceFilters.push(args.where?.OR);
+      if (metricTypeFromWhere(args.where) !== "usage") return [];
+      return usageGroupByRows([
+        {
+          sourceApp: "kimi-code",
+          provider: "moonshot",
+          keyRef: "kimi-k2",
+          label: "token:input",
+          _sum: { quantity: 11 },
+        },
+        {
+          sourceApp: "zcode",
+          provider: "zcode",
+          keyRef: "glm-4.6",
+          label: "token:output",
+          _sum: { quantity: 17 },
+        },
+      ]);
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const serializedFilters = JSON.stringify(sourceFilters);
+    expect(serializedFilters).toContain("kimi-code");
+    expect(serializedFilters).toContain("zcode");
+    expect(result.platforms.find((platform) => platform.id === "kimi-code")?.totalTokens).toBe(11);
+    expect(result.platforms.find((platform) => platform.id === "zcode")?.totalTokens).toBe(17);
+  });
+
+  it("keeps estimated Kimi rows visible while reporting partial lower-bound accuracy", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) !== "usage") return [];
+      return usageGroupByRows([
+        {
+          sourceApp: "kimi-code",
+          provider: "moonshot",
+          keyRef: "kimi-k2",
+          label: "token:input",
+          confidence: "estimated",
+          _sum: { quantity: 11 },
+        },
+      ]);
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const kimi = result.platforms.find((platform) => platform.id === "kimi-code");
+    expect(kimi).toMatchObject({
+      telemetryAccuracy: "partial",
+      telemetryAccuracyLabel: "partial report",
+      usageIsReliable: true,
+      totalTokens: 11,
+    });
+    expect(kimi?.telemetryAccuracyNote).toContain("lower bound");
+    expect(result.summary.totalTokens).toBe(11);
+    expect(result.summary.telemetryIncomplete).toBe(true);
+    expect(result.summary.telemetryIncompleteNote).toContain("lower bound");
+    expect(result.summary.telemetryIncompleteNote).not.toContain("omit Kimi Code");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   it("computes agent overview with Max/Heavy seat costs from the catalog", async () => {
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
-      if (args.where?.metricType === "usage") {
-        return [
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      const metricType = metricTypeFromWhere(args.where);
+      if (metricType === "usage") {
+        return usageGroupByRows([
           {
             sourceApp: "claude-code",
             provider: "anthropic",
@@ -57,37 +220,37 @@ describe("agents-overview", () => {
           {
             sourceApp: "openai-codex",
             provider: "openai",
-            keyRef: "o3-mini",
+            keyRef: "gpt-5.6-sol",
             label: "input_tokens",
             _sum: { quantity: 50_000 },
           },
-        ] as any;
+        ]);
       }
-      if (args.where?.metricType === "cost") {
-        return [
+      if (metricType === "cost") {
+        return usageGroupByRows([
           {
             sourceApp: "claude-code",
             provider: "anthropic",
+            service: "claude-code",
             keyRef: "claude-sonnet",
+            label: null,
             _sum: { costUsd: 0.6 },
           },
-        ] as any;
+        ]);
       }
-      return [] as any;
+      return [];
     });
 
-    const rollupSpy = vi
-      .spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy")
-      .mockResolvedValue([] as any);
-    vi.spyOn(prisma.externalUsageEvent as any, "findFirst").mockImplementation(async (args: any) => {
-      if (args?.where?.label === "observed-plan") return { keyRef: "plus" };
+    const rollupSpy = prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findFirst.mockImplementation(async (args: UsageFindFirstArgs) => {
+      if (args?.where?.label === "observed-plan") return { keyRef: "plus" } as ExternalUsageEvent;
       return null;
     });
 
     const result = await computeAgentsOverview(30);
     expect(result.ok).toBe(true);
     expect(result.summary.totalTokens).toBe(170_000);
-    expect(result.platforms.length).toBe(10);
+    expect(result.platforms.length).toBe(13);
     // 30-day window sits inside the raw-event retention window, so rollups
     // must not be queried (they would double-count the same days).
     expect(rollupSpy).not.toHaveBeenCalled();
@@ -121,45 +284,336 @@ describe("agents-overview", () => {
     expect(minimax?.billedMonthlySeatCostUsd).toBe(0);
     expect(result.platforms.find((p) => p.id === "deepseek-dsh")).toBeDefined();
     expect(result.platforms.find((p) => p.id === "kimi-code")).toBeDefined();
+    expect(result.platforms.find((p) => p.id === "zcode")).toBeDefined();
   });
 
   it("uses rollups only for days before the raw-event cutoff", async () => {
     vi.spyOn(retention, "getExternalEventRawCutoff").mockReturnValue(
-      new Date("2026-08-01T00:00:00.000Z")
+      new Date("2026-08-01T00:00:00.000Z"),
     );
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockResolvedValue([] as any);
-    vi.spyOn(prisma.externalUsageEvent as any, "findFirst").mockImplementation(async (args: any) => {
-      if (args?.where?.label === "observed-plan") return { keyRef: "plus" };
-      return { occurredAt: new Date("2026-06-15T00:00:00.000Z") };
+    prismaMock.externalUsageEvent.groupBy.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findFirst.mockImplementation(async (args: UsageFindFirstArgs) => {
+      if (args?.where?.label === "observed-plan") return { keyRef: "plus" } as ExternalUsageEvent;
+      return { occurredAt: new Date("2026-06-15T00:00:00.000Z") } as ExternalUsageEvent;
     });
-    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockImplementation(
-      async (args: any) => {
-        expect(args.where.day.lt.getTime()).toBe(new Date("2026-08-01T00:00:00.000Z").getTime());
-        if (args.where?.metricType === "usage") {
-          return [
-            {
-              sourceApp: "openai-codex",
-              provider: "openai",
-              keyRef: "o3-mini",
-              label: "input_tokens",
-              _sum: { totalQuantity: 50_000 },
-            },
-          ] as any;
-        }
-        return [] as any;
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockImplementation(async (args: RollupGroupByArgs) => {
+      const dayFilter = args.where?.day;
+      const lt =
+        dayFilter && typeof dayFilter === "object" && "lt" in dayFilter
+          ? dayFilter.lt
+          : undefined;
+      expect(lt instanceof Date ? lt.getTime() : lt).toBe(
+        new Date("2026-08-01T00:00:00.000Z").getTime(),
+      );
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return rollupGroupByRows([
+          {
+            sourceApp: "openai-codex",
+            provider: "openai",
+            keyRef: "gpt-5.6-sol",
+            label: "input_tokens",
+            _sum: { totalQuantity: 50_000 },
+          },
+        ]);
       }
-    );
+      return [];
+    });
 
     const result = await computeAgentsOverview(3650);
     const codexFromRollup = result.platforms.find((p) => p.id === "openai-codex");
     expect(codexFromRollup?.totalTokens).toBe(50_000);
   });
 
-  it("reconciles 5h burn cost with max(reported, derived) instead of sum", async () => {
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
-      if (args.where?.occurredAt?.gte && args.where.occurredAt.gte.getTime() > Date.now() - 6 * 3600 * 1000) {
-        if (args.where?.metricType === "usage") {
-          return [
+  it("includes OpenCode and Fx token events in totals, model mix, and platform cards", async () => {
+    expect(platformIdForSourceApp("opencode")).toBe("opencode");
+    expect(platformIdForSourceApp("fx")).toBe("fx");
+
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:input",
+            _sum: { quantity: 120_000 },
+          },
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:output",
+            _sum: { quantity: 30_000 },
+          },
+          {
+            sourceApp: "opencode",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-4-5",
+            label: "token:cacheRead",
+            _sum: { quantity: 15_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:input",
+            _sum: { quantity: 200_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:output",
+            _sum: { quantity: 40_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:cacheRead",
+            _sum: { quantity: 20_000 },
+          },
+          {
+            sourceApp: "fx",
+            provider: "xai",
+            keyRef: "grok-4",
+            label: "token:cacheCreation",
+            _sum: { quantity: 5_000 },
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+
+    expect(result.summary.totalTokens).toBe(430_000);
+    expect(result.modelDistribution.map((model) => model.model)).toEqual([
+      "grok-4",
+      "claude-sonnet-4-5",
+    ]);
+    const opencode = result.platforms.find((platform) => platform.id === "opencode");
+    expect(opencode?.totalTokens).toBe(165_000);
+    expect(opencode?.usageIsReliable).toBe(true);
+    expect(opencode?.modelsUsed.map((model) => model.model)).toEqual(["claude-sonnet-4-5"]);
+    const fx = result.platforms.find((platform) => platform.id === "fx");
+    expect(fx?.totalTokens).toBe(265_000);
+    expect(fx?.cacheReadTokens).toBe(20_000);
+    expect(fx?.cacheCreationTokens).toBe(5_000);
+    expect(fx?.usageIsReliable).toBe(true);
+    expect(fx?.modelsUsed.map((model) => model.model)).toEqual(["grok-4"]);
+
+    const usageQuery = prismaMock.externalUsageEvent.groupBy.mock.calls.find(
+      ([args]) => metricTypeFromWhere(args.where) === "usage",
+    )?.[0];
+    const sourceFilter = JSON.stringify(usageQuery?.where?.OR);
+    expect(sourceFilter).toContain('"opencode"');
+    expect(sourceFilter).toContain('"fx"');
+  });
+
+  it("keeps OpenCode PAYG cash out of raw and rolled-up reported seat estimates", async () => {
+    vi.spyOn(retention, "getExternalEventRawCutoff").mockReturnValue(
+      new Date("2026-08-01T00:00:00.000Z"),
+    );
+    const cash = {
+      sourceApp: "opencode",
+      provider: "openrouter",
+      service: "opencode",
+      keyRef: "claude-sonnet-4-5",
+      label: "api-equivalent",
+    };
+    const seatEstimate = { ...cash, provider: "muse-code" };
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([{
+          ...cash,
+          label: "token:input",
+          _sum: { quantity: 500_000 },
+        }]);
+      }
+      if (metricTypeFromWhere(args.where) === "cost") {
+        return usageGroupByRows([
+          { ...cash, _sum: { costUsd: 5 } },
+          { ...seatEstimate, _sum: { costUsd: 7 } },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockImplementation(async (args: RollupGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return rollupGroupByRows([{
+          ...cash,
+          label: "token:input",
+          _sum: { totalQuantity: 500_000 },
+        }]);
+      }
+      if (metricTypeFromWhere(args.where) === "cost") {
+        return rollupGroupByRows([
+          { ...cash, _sum: { totalCostUsd: 4 } },
+          { ...seatEstimate, _sum: { totalCostUsd: 2 } },
+        ]);
+      }
+      return [];
+    });
+
+    const result = await computeAgentsOverview(3650);
+    const opencode = result.platforms.find((platform) => platform.id === "opencode");
+    expect(opencode?.totalTokens).toBe(1_000_000);
+    expect(opencode?.reportedCostUsd).toBe(9);
+    expect(opencode?.estimatedCostUsd).toBe(9);
+    expect(opencode?.tokenDerivedCostUsd).toBe(3);
+    expect(result.burn5h.costEstimate5hUsd).toBe(7);
+  });
+
+  it("prefers Claude Code OTLP reported cost over token-derived PAYG when both exist", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      const metricType = metricTypeFromWhere(args.where);
+      if (metricType === "usage") {
+        return usageGroupByRows([
+          {
+            sourceApp: "claude-code",
+            provider: "anthropic",
+            keyRef: "claude-sonnet-5",
+            label: "input_tokens",
+            _sum: { quantity: 1_000_000 },
+          },
+        ]);
+      }
+      if (metricType === "cost") {
+        return usageGroupByRows([
+          {
+            sourceApp: "claude-code",
+            provider: "anthropic",
+            service: "claude-code",
+            keyRef: "claude-sonnet-5",
+            label: null,
+            _sum: { costUsd: 0.25 },
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const claude = result.platforms.find((p) => p.id === "claude-code");
+    expect(claude?.tokenDerivedCostUsd).toBeCloseTo(2, 2);
+    expect(claude?.reportedCostUsd).toBeCloseTo(0.25, 2);
+    expect(claude?.estimatedCostUsd).toBeCloseTo(0.25, 2);
+    expect(preferPlatformEstimatedCostUsd("claude-code", 2, 0.25)).toBe(0.25);
+  });
+
+  it("folds cursor-admin billed rows into the Cursor platform without double-counting cursor-agent", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      const metricType = metricTypeFromWhere(args.where);
+      if (metricType === "usage") {
+        return usageGroupByRows([
+          {
+            sourceApp: "cursor-agent",
+            provider: "cursor",
+            keyRef: "gpt-5",
+            label: "input_tokens",
+            _sum: { quantity: 99_000 },
+          },
+        ]);
+      }
+      if (metricType === "cost") {
+        return usageGroupByRows([
+          {
+            sourceApp: "cursor-admin",
+            provider: "cursor",
+            keyRef: "claude-sonnet-4-5",
+            label: null,
+            _sum: { costUsd: 1.5 },
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEvent.findMany.mockImplementation(async (args: UsageFindManyArgs) => {
+      if (sourceAppFromFindManyWhere(args?.where) === "cursor-admin") {
+        return cursorAdminEvents([
+          {
+            keyRef: "claude-sonnet-4-5",
+            quantity: 30_000,
+            unit: "token",
+            costUsd: 1.5,
+            metadata: {
+              inputTokens: 20_000,
+              outputTokens: 10_000,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+            },
+            occurredAt: new Date(),
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    expect(platformIdForSourceApp("cursor-admin")).toBe("cursor-agent");
+    const cursor = result.platforms.find((p) => p.id === "cursor-agent");
+    expect(cursor?.usageIsReliable).toBe(true);
+    expect(cursor?.totalTokens).toBe(30_000);
+    expect(cursor?.reportedCostUsd).toBeCloseTo(1.5, 2);
+    expect(cursor?.fidelityTier).toBe("session_jsonl");
+    expect(result.summary.totalTokens).toBe(30_000);
+  });
+
+  it("does not treat request-based cursor-admin quantity as tokens", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "cost") {
+        return usageGroupByRows([
+          {
+            sourceApp: "cursor-admin",
+            provider: "cursor",
+            keyRef: "claude-sonnet-4-5",
+            label: null,
+            _sum: { costUsd: 2 },
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEvent.findMany.mockImplementation(async (args: UsageFindManyArgs) => {
+      if (sourceAppFromFindManyWhere(args?.where) === "cursor-admin") {
+        return cursorAdminEvents([
+          {
+            keyRef: "claude-sonnet-4-5",
+            quantity: 7,
+            unit: "request",
+            costUsd: 2,
+            metadata: {},
+            occurredAt: new Date(),
+          },
+        ]);
+      }
+      return [];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const cursor = result.platforms.find((p) => p.id === "cursor-agent");
+    expect(cursor?.totalTokens).toBe(0);
+    expect(cursor?.usageIsReliable).toBe(false);
+    expect(cursor?.fidelityTier).toBe("session_jsonl");
+    expect(result.summary.totalTokens).toBe(0);
+  });
+
+  it("reconciles 5h burn cost with max(reported, derived) except Claude Code prefers reported", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      const occurredAt = args.where?.occurredAt;
+      const gte =
+        occurredAt && typeof occurredAt === "object" && "gte" in occurredAt
+          ? occurredAt.gte
+          : undefined;
+      if (gte instanceof Date && gte.getTime() > Date.now() - 6 * 3600 * 1000) {
+        const metricType = metricTypeFromWhere(args.where);
+        if (metricType === "usage") {
+          return usageGroupByRows([
             {
               sourceApp: "claude-code",
               provider: "anthropic",
@@ -167,34 +621,36 @@ describe("agents-overview", () => {
               label: "input_tokens",
               _sum: { quantity: 100_000 },
             },
-          ] as any;
+          ]);
         }
-        if (args.where?.metricType === "cost") {
-          return [
+        if (metricType === "cost") {
+          return usageGroupByRows([
             {
               sourceApp: "claude-code",
               provider: "anthropic",
+              service: "claude-code",
               keyRef: "claude-sonnet",
+              label: null,
               _sum: { costUsd: 0.5 },
             },
-          ] as any;
+          ]);
         }
       }
-      return [] as any;
+      return [];
     });
 
-    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
 
     const result = await computeAgentsOverview(30);
     expect(result.burn5h.tokens5h).toBe(100_000);
-    // Derived for 100k input tokens on claude-3-7-sonnet is $0.30; reported is $0.50. Max is 0.50.
+    // Derived for 100k input tokens on claude-sonnet is below reported; Claude prefers reported.
     expect(result.burn5h.costEstimate5hUsd).toBe(0.5);
   });
 
   it("uses $70 net Antigravity seat cost and never treats its estimates as usage", async () => {
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
-      if (args.where?.metricType === "usage") {
-        return [
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([
           {
             sourceApp: "antigravity-cli",
             provider: "google",
@@ -209,11 +665,11 @@ describe("agents-overview", () => {
             label: "input_tokens",
             _sum: { quantity: 100_000 },
           },
-        ] as any;
+        ]);
       }
-      return [] as any;
+      return [];
     });
-    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
 
     const result = await computeAgentsOverview(30);
     const antigravity = result.platforms.find((p) => p.id === "antigravity-cli");
@@ -249,7 +705,7 @@ describe("agents-overview", () => {
         lastHeartbeatAt: "2026-09-03T12:00:00.000Z",
         agentProcesses: { "grok-build": "running" },
       },
-    } as any);
+    });
     emptyGroupBy();
 
     const result = await computeAgentsOverview(30);
@@ -260,7 +716,7 @@ describe("agents-overview", () => {
     expect(grok?.telemetryAccuracyNote).toContain("not confirmed as zero usage");
   });
 
-  it("always marks Cursor usage as not reported", async () => {
+  it("marks Cursor usage as not reported when Admin API rows are absent", async () => {
     emptyGroupBy();
     const result = await computeAgentsOverview(30);
     const cursor = result.platforms.find((p) => p.id === "cursor-agent");
@@ -270,9 +726,9 @@ describe("agents-overview", () => {
   });
 
   it("prices DeepSeek flash output from the event UTC hour", async () => {
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
-      if (args.where?.metricType === "usage") {
-        return [
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([
           {
             sourceApp: "deepseek-dsh",
             provider: "deepseek",
@@ -280,21 +736,24 @@ describe("agents-overview", () => {
             label: "token:output",
             _sum: { quantity: 1_000_000 },
           },
-        ] as any;
+        ]);
       }
-      return [] as any;
+      return [];
     });
-    vi.spyOn(prisma.externalUsageEvent as any, "findMany").mockResolvedValue([
-      {
-        sourceApp: "deepseek-dsh",
-        keyRef: "deepseek-v4-flash",
-        label: "token:output",
-        quantity: 1_000_000,
-        // Monday 02:30 UTC is inside the first peak window.  Flash output peak is $1.20 / 1M.
-        occurredAt: new Date("2026-09-21T02:30:00.000Z"),
-      },
-    ] as any);
-    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+    prismaMock.externalUsageEvent.findMany.mockImplementation(async (args: UsageFindManyArgs) => {
+      if (sourceAppFromFindManyWhere(args?.where) === "cursor-admin") return [];
+      return [
+        {
+          sourceApp: "deepseek-dsh",
+          keyRef: "deepseek-v4-flash",
+          label: "token:output",
+          quantity: 1_000_000,
+          // Monday 02:30 UTC is inside the first peak window.  Flash output peak is $1.20 / 1M.
+          occurredAt: new Date("2026-09-21T02:30:00.000Z"),
+        },
+      ] as ExternalUsageEvent[];
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
 
     const result = await computeAgentsOverview(30);
     const deepseek = result.platforms.find((p) => p.id === "deepseek-dsh");
@@ -310,9 +769,9 @@ describe("agents-overview", () => {
   });
 
   it("does not include cache-unsplit input in the known API-equivalent subtotal", async () => {
-    vi.spyOn(prisma.externalUsageEvent as any, "groupBy").mockImplementation(async (args: any) => {
-      if (args.where?.metricType === "usage") {
-        return [
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) === "usage") {
+        return usageGroupByRows([
           {
             sourceApp: "antigravity-statusline",
             provider: "google-antigravity",
@@ -327,11 +786,11 @@ describe("agents-overview", () => {
             label: "token:output",
             _sum: { quantity: 10_000 },
           },
-        ] as any;
+        ]);
       }
-      return [] as any;
+      return [];
     });
-    vi.spyOn(prisma.externalUsageEventDailyRollup as any, "groupBy").mockResolvedValue([] as any);
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
 
     const result = await computeAgentsOverview(30);
     const antigravity = result.platforms.find((p) => p.id === "antigravity-cli");

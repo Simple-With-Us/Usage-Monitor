@@ -20,14 +20,19 @@ __pycache__/
 
 # Cursor IDE metadata (not source)
 .cursor/
+# Cursor cloud agent environment (must be committed so Builds pick it up).
+!.cursor/
+!.cursor/environment.json
+!.cursor/infisical.env
+!.cursor/hooks.json
 .wrangler/
 
 # Downloaded by scripts/fetch-litestream.sh at build time - never committed.
 /bin/
 coverage/
 
-# Apple private keys (App Store Connect API keys, APNs auth keys). These live in ~/.secrets/
-# ONLY. A .p8 dropped in the repo root is untracked but NOT ignored without this rule, so a
+# Apple private keys (App Store Connect API keys, APNs auth keys). These live in Infisical (fleet-secrets get),
+# never in the repo. A .p8 dropped in the repo root is untracked but NOT ignored without this rule, so a
 # single `git add -A` would stage a credential that signs pushes for every app in the team.
 # One APNs key is team-wide, so leaking it is not scoped to one app.
 *.p8

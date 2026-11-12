@@ -58,6 +58,33 @@ describe("agent-telemetry-accuracy", () => {
     expect(claude.label).toBe("no events in this window");
   });
 
+  it("keeps partial token observations visible and labels them as lower bounds", () => {
+    const kimi = resolveTelemetryAccuracy({
+      name: "Kimi Code",
+      tokenTelemetryKind: "session_jsonl",
+      totalTokens: 35,
+      isRunningOnMac: false,
+      isPartial: true,
+    });
+    expect(kimi.accuracy).toBe("partial");
+    expect(kimi.usageIsReliable).toBe(true);
+    expect(kimi.label).toBe("partial report");
+    expect(kimi.note).toContain("lower bound");
+  });
+
+  it("treats billing_api telemetry as reliable when tokens are present", () => {
+    expect(isReliableTokenTelemetryKind("billing_api")).toBe(true);
+    expect(isReliableTokenTelemetryKind("local_database")).toBe(true);
+    const cursor = resolveTelemetryAccuracy({
+      name: "Cursor",
+      tokenTelemetryKind: "billing_api",
+      totalTokens: 50_000,
+      isRunningOnMac: false,
+    });
+    expect(cursor.usageIsReliable).toBe(true);
+    expect(cursor.note).toContain("team account");
+  });
+
   it("marks idle session-jsonl zero as not a confirmed zero", () => {
     const codex = resolveTelemetryAccuracy({
       name: "OpenAI Codex",
@@ -113,5 +140,12 @@ describe("agent-telemetry-accuracy", () => {
       isReliableTokenTelemetryKind("character_estimate"),
     ).toBe(false);
     expect(isReliableTokenTelemetryKind("otlp")).toBe(true);
+  });
+
+  it("describes partial platforms as lower bounds without saying their rows were omitted", () => {
+    const note = telemetryIncompleteNoteFor([], ["Kimi Code"]);
+    expect(note).toContain("Kimi Code");
+    expect(note).toContain("lower bound");
+    expect(note).not.toContain("omit");
   });
 });

@@ -4,6 +4,7 @@ import {
   type AnomalyConfig,
   dailyIncrementsFromCumulative,
   describeAnomaly,
+  countPositiveBaselineDays,
   detectAnomaly,
   detectSeriesAnomaly,
   median,
@@ -58,6 +59,22 @@ describe("detectAnomaly", () => {
     const flatZero = [0, 0, 0, 0, 0, 0, 0, 0];
     // 0.5 < ANOMALY_MIN_COST_USD default of 1 → suppressed despite a $0 baseline.
     expect(detectAnomaly(0.5, flatZero, "cost", CONFIG)).toBeNull();
+  });
+
+  it("does not CRITICAL-page on first-seen traffic off a zero baseline (B2 integration)", () => {
+    const coldZero = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Legitimate multipart backup / inventory day-one spend — no positive history.
+    expect(detectAnomaly(85, coldZero, "cost", CONFIG, "2026-10-04")).toBeNull();
+    expect(countPositiveBaselineDays(coldZero, "cost", CONFIG)).toBe(0);
+  });
+
+  it("waits for minPositiveBaselineDays before alerting off a near-zero baseline", () => {
+    const ramping = [0, 0, 0, 0, 0, 1.5, 1.5, 0, 0, 0, 0, 0, 0, 0];
+    expect(countPositiveBaselineDays(ramping, "cost", CONFIG)).toBe(2);
+    expect(detectAnomaly(120, ramping, "cost", CONFIG)).toBeNull();
+    const warmed = [1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 0, 0, 0, 0, 0, 0, 0];
+    expect(countPositiveBaselineDays(warmed, "cost", CONFIG)).toBe(7);
+    expect(detectAnomaly(120, warmed, "cost", CONFIG)).not.toBeNull();
   });
 
   it("only flags upward spikes by default (a drop is not a budget risk)", () => {
@@ -159,6 +176,7 @@ describe("resolveAnomalyConfig", () => {
       ANOMALY_SIGMA_THRESHOLD: "4",
       ANOMALY_CRITICAL_SIGMA: "2", // below threshold → clamped up to threshold
       ANOMALY_MIN_COST_USD: "5",
+      ANOMALY_MIN_POSITIVE_BASELINE_DAYS: "5",
       ANOMALY_DIRECTION: "both",
     });
     expect(config.enabled).toBe(false);
@@ -166,6 +184,7 @@ describe("resolveAnomalyConfig", () => {
     expect(config.sigmaThreshold).toBe(4);
     expect(config.criticalSigma).toBe(4); // clamped to be >= threshold
     expect(config.minObserved.cost).toBe(5);
+    expect(config.minPositiveBaselineDays).toBe(5);
     expect(config.direction).toBe("both");
   });
 });

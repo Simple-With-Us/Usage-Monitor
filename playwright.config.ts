@@ -15,6 +15,8 @@ const testEnv = {
   SESSION_SECRET: process.env.SESSION_SECRET ?? 'visual-test-session-secret-not-production',
   E2E_TEST_PASSWORD: process.env.E2E_TEST_PASSWORD ?? 'visual-test-password',
   DD_TRACE_ENABLED: 'false',
+  // Visual suite must render fully offline: no server-side health egress.
+  OPERATIONS_HEALTH_OFFLINE: 'true',
 };
 
 export default defineConfig({

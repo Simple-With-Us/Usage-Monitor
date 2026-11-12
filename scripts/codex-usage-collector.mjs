@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
 // Local collector for OpenAI Codex CLI session JSONL.
 //
 // Reads ${CODEX_HOME:-~/.codex}/sessions and archived_sessions (same layout
@@ -16,7 +17,7 @@
 //   CODEX_HOME (default ~/.codex)
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -30,6 +31,10 @@ import {
   readCodexObservedPlan,
 } from "./lib/codex-observed-plan.mjs";
 import {
+  BOTFLEET_LAUNCHER_METADATA,
+  botFleetWorkspaceRoots,
+  codexSessionCwd,
+  codexSessionId,
   codexSessionKeyFor,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
@@ -41,7 +46,8 @@ import {
   resolveCollectorArgs,
   resolveCollectorToken,
   walkFiles,
-} from "./lib/run-session-token-collector.mjs";
+  withCorrelationMetadata,
+} from "./lib/codex-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -63,6 +69,7 @@ export async function collectCodexEvents({
   codexHome = expandHome(process.env.CODEX_HOME || join(homedir(), ".codex")),
   since,
   scanStatus,
+  env = process.env,
 } = {}) {
   const markIncomplete = () => {
     if (scanStatus) scanStatus.complete = false;
@@ -75,11 +82,23 @@ export async function collectCodexEvents({
       if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
       const text = await readIfFresh(file, { onReadError: markIncomplete });
       if (!text) continue;
-      if (botFleetChildExclusionEnabled() && isBotFleetManagedCodexSession(text)) continue;
+      const botFleetChild = isBotFleetManagedCodexSession(text);
+      if (botFleetChild && botFleetChildExclusionEnabled(env)) continue;
+      // Workspace membership is a non-authoritative hint, never evidence of
+      // launch provenance or duplicate billing, and never expands exclusion.
+      const cwd = codexSessionCwd(text);
+      const configuredBotFleetWorkspace = cwd && botFleetWorkspaceRoots(env)
+        .some((root) => resolve(cwd).startsWith(`${resolve(root)}/`));
       const parsed = parseCodexJsonl(text, {
         sessionKey: codexSessionKeyFor(codexHome, file),
       });
-      events.push(...filterEventsSince(parsed, since));
+      events.push(
+        ...withCorrelationMetadata(filterEventsSince(parsed, since), {
+          "session.id": codexSessionId(text),
+          ...(botFleetChild ? BOTFLEET_LAUNCHER_METADATA : {}),
+          ...(configuredBotFleetWorkspace ? { "workspace.botfleetHint": "configured-root" } : {}),
+        })
+      );
     }
   }
   return events;
@@ -111,13 +130,14 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
     }
     return;
   }
-  const token = resolveCollectorToken([
+  const token = await resolveCollectorToken([
     "CODEX_INGEST_TOKEN",
     "USAGE_INGEST_TOKEN",
   ]);

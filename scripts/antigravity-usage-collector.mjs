@@ -66,8 +66,12 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { antigravityGroupDisplayName } from "./lib/quota-event.mjs";
-import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { antigravityGroupDisplayName, toIsoTimestamp } from "./lib/quota-event.mjs";
+import {
+  normalizeQuotaWindowKey,
+  rollupQuotaWindowKey,
+} from "./lib/quota-window-display.mjs";
+import { resolveCollectorToken } from "./lib/antigravity-usage-run-session-token-collector.mjs";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -468,7 +472,7 @@ function eventIdFor(occurredAtIso, seriesKey) {
     .digest("hex");
 }
 
-export function toTelemetryEvent(record, occurredAtIso) {
+export function toTelemetryEvent(record, occurredAtIso, { machine } = {}) {
   // Prefer real absolute counts when the CLI provides them; otherwise fall
   // back to a normalized 0-100 percentage scale (limit=100). Either way,
   // `limit`/`credits` stay on the SAME scale so downstream percentage math
@@ -504,6 +508,19 @@ export function toTelemetryEvent(record, occurredAtIso) {
         : undefined);
     if (percentUsed != null) metadata.rawPercentUsed = percentUsed;
   }
+
+  const reportedAt =
+    toIsoTimestamp(record.reportedAt) ?? toIsoTimestamp(occurredAtIso) ?? occurredAtIso;
+  const { windowKey: normalizedKey, rawKey } = normalizeQuotaWindowKey({
+    quotaWindow: record.window,
+    bucketId: record.bucketId,
+    label: record.label,
+    modelId: record.modelId,
+  });
+  metadata.reportedAt = reportedAt;
+  metadata.windowKey = rollupQuotaWindowKey(normalizedKey);
+  metadata.rawKey = rawKey;
+  if (machine) metadata.machine = machine;
 
   return {
     eventId: eventIdFor(occurredAtIso, record.seriesKey),
@@ -544,7 +561,8 @@ export function assertUniqueSeriesKeys(records) {
 export function buildEvents(envelope, occurredAtIso, options = {}) {
   const records = extractQuotaRecords(envelope, options);
   assertUniqueSeriesKeys(records);
-  return records.map((record) => toTelemetryEvent(record, occurredAtIso));
+  const machine = options.machine ?? hostname();
+  return records.map((record) => toTelemetryEvent(record, occurredAtIso, { machine }));
 }
 
 export function extractAntigravityUsageModels(payload) {
@@ -559,7 +577,7 @@ async function postBatch(events, ingestToken) {
   const body = JSON.stringify({
     schemaVersion: 2,
     producerId: PRODUCER_ID,
-    producerInstanceId: hostname(),
+    producerInstanceId: process.env.USAGE_MACHINE_ID?.trim() || hostname(),
     events,
   });
 
@@ -592,13 +610,13 @@ async function postBatch(events, ingestToken) {
 }
 
 async function main() {
-  const ingestToken = resolveCollectorToken([
+  const ingestToken = await resolveCollectorToken([
     "ANTIGRAVITY_INGEST_TOKEN",
     "USAGE_INGEST_TOKEN",
   ]);
   if (!ingestToken && !DRY_RUN) {
     fail(
-      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure token is set in environment or ~/.secrets/global-api-keys."
+      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`."
     );
   }
 

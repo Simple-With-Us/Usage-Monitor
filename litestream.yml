@@ -26,8 +26,10 @@
 
 snapshot:
   interval: 24h
-  # B2 is not free-tier–capped like R2; 24h retention is enough for DR.
-  retention: 24h
+  # Jay 2026-10-29 fleet policy: short-term backups are kept 3 days (72h), and the
+  # privacy policy (src/app/privacy/page.tsx) says so.  B2 is paid capacity, and
+  # compaction is L1-only, so the 3x window does not reopen the Aug 2026 R2 growth mode.
+  retention: 72h
 
 # Product compaction is L0 + bounded L1 + 24h snapshots.  L2 and L3 are OFF.
 #
@@ -50,8 +52,21 @@ snapshot:
 levels:
   - interval: 30s
 
+# Checkpoints are owned by Litestream: the app sets PRAGMA wal_autocheckpoint=0
+# when LITESTREAM_ACTIVE=true (src/lib/prisma.ts), so Litestream's defaults
+# (PASSIVE at 1000 pages / 1m, emergency TRUNCATE at ~500 MB) are the only
+# checkpointer.  Do NOT set truncate-page-n: 0 here; on 0.5.13 that disables
+# the emergency TRUNCATE backstop (fixed upstream in 0.5.16, #1348).
+#
+# Shutdown sync retries for up to this long before Litestream exits.  The
+# 30s default cut uploads off mid-flight on restarts.  Coolify's stop grace
+# period is 60s (docs/litestream.md), so 45s leaves room to stop the child.
+shutdown-sync-timeout: 45s
+
 dbs:
   - path: /data/prod.db
+    # Keep this replica generation separate from the previous local LTX chain.
+    meta-path: /data/.prod-recovery-v1.db-litestream
     replica:
       type: s3
       # Expected production values (Infisical prod):
@@ -60,7 +75,9 @@ dbs:
       #   LITESTREAM_S3_REGION=eu-central-003
       #   keys: fleet-usage-monitor-backup (write) — NOT the monitor read-only key
       bucket: ${LITESTREAM_S3_BUCKET}
-      path: api-usage-monitor/prod.db
+      # Fresh baseline after the prior chain failed an independent restore.
+      # Keep the previous prefix intact for incident recovery and inspection.
+      path: api-usage-monitor/prod-recovery-v1.db
       region: ${LITESTREAM_S3_REGION}
       endpoint: ${LITESTREAM_S3_ENDPOINT}
       access-key-id: ${LITESTREAM_S3_ACCESS_KEY_ID}

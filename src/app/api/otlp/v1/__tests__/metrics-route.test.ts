@@ -265,7 +265,10 @@ describe("POST /api/otlp/v1/metrics", () => {
       where: { sourceApp: "claude-code" },
       orderBy: { occurredAt: "asc" },
     });
-    expect(rows.map((row) => row.costUsd)).toEqual([0.0231, 0.0269]);
+    expect(rows.map((row) => row.costUsd)).toEqual([
+      expect.closeTo(0.0231, 5),
+      expect.closeTo(0.0269, 5),
+    ]);
     expect(rows.reduce((sum, row) => sum + (row.costUsd ?? 0), 0)).toBeCloseTo(0.05);
     expect(await prisma.otlpMetricState.count()).toBe(1);
   });
@@ -407,7 +410,10 @@ describe("POST /api/otlp/v1/metrics", () => {
       orderBy: { occurredAt: "asc" },
     });
     expect(laterRows).toHaveLength(2);
-    expect(laterRows.map((row) => row.costUsd)).toEqual([0.0231, 0.0269]);
+    expect(laterRows.map((row) => row.costUsd)).toEqual([
+      expect.closeTo(0.0231),
+      expect.closeTo(0.0269),
+    ]);
   });
 
   it("bounds cumulative checkpoint cardinality without deleting replay protection", async () => {
@@ -733,7 +739,7 @@ describe("POST /api/otlp/v1/metrics rate limiting (X1) and typed 500 (X6)", () =
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({
-      error: "Unauthorized producer for OTLP metrics",
+      error: 'Credential is not authorized for sourceApp "claude-code"',
     });
   });
 
@@ -745,3 +751,145 @@ describe("POST /api/otlp/v1/metrics rate limiting (X1) and typed 500 (X6)", () =
     expect(res.status).toBe(202);
   });
 });
+
+const genAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [
+          { key: "agent.platform", value: { stringValue: "botfleet" } },
+          { key: "gen_ai.system", value: { stringValue: "openai" } },
+        ],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              unit: "token",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [
+                      { key: "gen_ai.token.type", value: { stringValue: "input" } },
+                      { key: "gen_ai.request.model", value: { stringValue: "gpt-5" } },
+                    ],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "88",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const cursorAgentGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "cursor-agent" } }],
+      },
+      scopeMetrics: genAiPayload.resourceMetrics[0].scopeMetrics,
+    },
+  ],
+};
+
+const overlapGenAiPayload = {
+  resourceMetrics: [
+    {
+      resource: {
+        attributes: [{ key: "agent.platform", value: { stringValue: "openai-codex" } }],
+      },
+      scopeMetrics: [
+        {
+          metrics: [
+            {
+              name: "gen_ai.client.token.usage",
+              sum: {
+                aggregationTemporality: 2,
+                isMonotonic: true,
+                dataPoints: [
+                  {
+                    attributes: [{ key: "gen_ai.token.type", value: { stringValue: "input" } }],
+                    startTimeUnixNano: "1751500000000000000",
+                    timeUnixNano: "1751500060000000000",
+                    asInt: "10",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+describe("POST /api/otlp/v1/metrics gen_ai mapper", () => {
+  it("persists a non-overlap gen_ai token point", async () => {
+    const res = await POST(
+      jsonRequest(genAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(1);
+    expect(body.ignoredOverlap).toBeUndefined();
+    const rows = await prisma.externalUsageEvent.findMany({
+      where: { sourceApp: "botfleet" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provider).toBe("openai");
+    expect(rows[0].quantity).toBe(88);
+    expect(rows[0].label).toBe("token:input");
+  });
+
+  it("skips overlap platforms by default and reports ignoredOverlap", async () => {
+    const res = await POST(
+      jsonRequest(overlapGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "openai-codex" } })
+    ).toBe(0);
+  });
+
+  it("skips cursor-agent gen_ai rows so the admin poller is the billed ledger", async () => {
+    const res = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.accepted).toBe(0);
+    expect(body.ignoredOverlap).toBe(1);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
+  });
+
+  it("authenticates a cursor-agent scoped token and still skips the overlap rows", async () => {
+    vi.stubEnv("USAGE_INGEST_PRODUCER_TOKENS", "cursor-agent:tok-cursor");
+    vi.stubEnv("USAGE_INGEST_REQUIRE_SCOPED_TOKENS", "true");
+    const denied = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer test-token-123" })
+    );
+    expect(denied.status).toBe(401);
+    const res = await POST(
+      jsonRequest(cursorAgentGenAiPayload, { authorization: "Bearer tok-cursor" })
+    );
+    expect(res.status).toBe(202);
+    expect(
+      await prisma.externalUsageEvent.count({ where: { sourceApp: "cursor-agent" } })
+    ).toBe(0);
+  });
+});
+

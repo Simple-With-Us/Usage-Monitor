@@ -7,15 +7,14 @@
 # usage cap mid-script.  Finished 2026-08-14.
 #
 # Usage:
-#   set -a; . ~/.secrets/global-api-keys; set +a
 #   bash scripts/cf-token-map.sh
+#   (Infisical credentials come from the environment.)
 #
 # Env (all optional):
 #   INFISICAL_PROJECT_ID   (see fleet-ops:ATTACK-MAP.md)
 #   INFISICAL_ENV          default prod
 #   INFISICAL_API_URL      Infisical host if not the public default
-#   INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET
-#     or INFISICAL_AUTOMATION_* / INFISICAL_UM_* / CID+CSEC aliases
+#   INFISICAL_UM_READ_TOKEN, or an explicit UM machine-identity pair
 #
 # Output is names, lengths, an 8-hex SHA-256 fingerprint (so two names holding
 # the same token can be spotted), and the Cloudflare account list each token
@@ -23,7 +22,9 @@
 
 set -euo pipefail
 
-UM="${INFISICAL_PROJECT_ID:-${INFISICAL_UM_PROJECT_ID:-}}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+UM="${INFISICAL_UM_PROJECT_ID:-${INFISICAL_PROJECT_ID:-${INFISICAL_APP_PROJECT_ID:-}}}"
+SECRET_PATH="${INFISICAL_UM_SECRET_PATH:-${INFISICAL_PATH:-/}}"
 ENV_SLUG="${INFISICAL_ENV:-prod}"
 INF_URL="${INFISICAL_API_URL:-${INF_URL:-}}"
 
@@ -32,22 +33,27 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 command -v infisical >/dev/null 2>/dev/null || die "infisical CLI not found on PATH."
 command -v curl >/dev/null 2>/dev/null || die "curl not found on PATH."
 command -v python3 >/dev/null 2>/dev/null || die "python3 not found on PATH."
+node "$ROOT/scripts/check-infisical-token.mjs" config || die "Infisical target configuration rejected."
 
-CID="${INFISICAL_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_AUTOMATION_CLIENT_ID:-${CID:-}}}}"
-CSEC="${INFISICAL_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_AUTOMATION_CLIENT_SECRET:-${CSEC:-}}}}"
-[ -n "$CID" ] && [ -n "$CSEC" ] || die \
-  "No Infisical credentials. Load them first, e.g.:
-  set -a; . ~/.secrets/global-api-keys; set +a"
+TOKEN="${INFISICAL_UM_READ_TOKEN:-${INFISICAL_TOKEN:-}}"
+if [ -z "$TOKEN" ]; then
+  CID="${INFISICAL_UM_CLIENT_ID:-}"
+  CSEC="${INFISICAL_UM_CLIENT_SECRET:-}"
+  [ -n "$CID" ] && [ -n "$CSEC" ] || die \
+    "No Infisical read credential. Export INFISICAL_UM_READ_TOKEN or an explicit project machine-identity pair."
 
-# Credentials via env, not argv (avoids `ps` / debug-echo leaks).
-export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CID"
-export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CSEC"
-if [ -n "$INF_URL" ]; then
-  export INFISICAL_API_URL="$INF_URL"
+  # Credentials via env, not argv (avoids `ps` / debug-echo leaks).
+  export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CID"
+  export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CSEC"
+  if [ -n "$INF_URL" ]; then
+    export INFISICAL_API_URL="$INF_URL"
+  fi
+  TOKEN="$(infisical login --method=universal-auth --plain --silent 2>/dev/null || true)"
+  unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET CID CSEC
 fi
-TOKEN="$(infisical login --method=universal-auth --plain --silent 2>/dev/null || true)"
-unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
 [ -n "${TOKEN:-}" ] || die "infisical login failed"
+INFISICAL_TOKEN="$TOKEN" INFISICAL_UM_PROJECT_ID="$UM" INFISICAL_UM_SECRET_PATH="$SECRET_PATH" \
+  node "$ROOT/scripts/check-infisical-token.mjs" read || die "Infisical credential verification failed."
 
 # Expected slots (same as src/lib/ensure-cloudflare-fleet-providers.ts).
 # Probe every name that has ever been used for a CF dashboard token in UM.
@@ -74,10 +80,10 @@ infisical_get() {
   local name="$1"
   if [ -n "$INF_URL" ]; then
     INFISICAL_API_URL="$INF_URL" INFISICAL_TOKEN="$TOKEN" \
-      infisical secrets get "$name" --plain --projectId "$UM" --env "$ENV_SLUG" 2>/dev/null || true
+      infisical secrets get "$name" --plain --projectId "$UM" --env "$ENV_SLUG" --path "$SECRET_PATH" 2>/dev/null || true
   else
     INFISICAL_TOKEN="$TOKEN" \
-      infisical secrets get "$name" --plain --projectId "$UM" --env "$ENV_SLUG" 2>/dev/null || true
+      infisical secrets get "$name" --plain --projectId "$UM" --env "$ENV_SLUG" --path "$SECRET_PATH" 2>/dev/null || true
   fi
 }
 
@@ -160,5 +166,5 @@ for a in rows:
   fi
 done
 
-# Token is a session JWT; drop it before exit.
-unset TOKEN CID CSEC
+# Drop the Infisical credential from this shell before exit.
+unset TOKEN

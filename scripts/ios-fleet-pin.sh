@@ -11,9 +11,9 @@
 #   GitHub-hosted macos-latest has no /Users/jay/apps/ios-fleet. This repo
 #   vendors the fleet scripts (Congress.Trade / Socratic.Trade #3089 protocol)
 #   and pins their sha256 so an unreviewed edit to ship-testflight.sh /
-#   apps.json / asc-api.mjs / AppUpdatePrompt.swift cannot silently change
-#   what TestFlight uploads or what each iOS target prompts.  Refreshing
-#   the pin is a reviewed PR.
+#   apps.json / asc-api.mjs / asc-key.mjs / AppUpdatePrompt.swift cannot
+#   silently change what TestFlight uploads or what each iOS target prompts.
+#   Refreshing the pin is a reviewed PR.
 #
 # ON DRIFT
 #   Read the diff, decide whether the tooling change is wanted, then either
@@ -30,7 +30,16 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 
 # Exactly the runtime files that can change what this repo ships, plus the
 # one AppUpdatePrompt.swift that every iOS target must copy byte-for-byte.
-PINNED_FILES="ship-testflight.sh asc-api.mjs apps.json AppUpdatePrompt.swift"
+# version-plan.mjs is here because asc-api.mjs imports it:  it holds the
+# version-numbering rules, so an unreviewed edit to it would change what
+# version a ship gets without the pin noticing.  shared-build.mjs is here for
+# the same reason:  it decides the uploaded build in fixed mode.
+# publish-ios-versions.sh writes the public manifest.  assign-external-beta.sh
+# is the gate that keeps that App Store Connect write inside the ship job.
+# tf-ready-rc.sh is here because ship-testflight.sh sources it:  it maps
+# ensure-tf-ready exit codes to the readiness labels a ship reports, so an
+# unreviewed edit would change reported readiness without the pin noticing.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs publish-ios-versions.sh assign-external-beta.sh tf-ready-rc.sh"
 COPIED_PROMPT_TARGETS="ios/UsageMonitor/App/AppUpdatePrompt.swift ios/UsageMonitor/LocalApp/AppUpdatePrompt.swift"
 
 MODE="check"
