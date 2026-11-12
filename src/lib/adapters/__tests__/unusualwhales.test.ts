@@ -108,6 +108,21 @@ describe("unusualwhales adapter", () => {
     });
   });
 
+  it("keeps a stable auth reason and drops the free-form message", async () => {
+    stubResponse(401, {}, {
+      reason: "unrecognized_token",
+      message: "token sk-live-secret was revoked",
+      retryable: false,
+    });
+
+    await expect(fetchUsage("123e4567-e89b-12d3-a456-426614174000")).rejects.toMatchObject({
+      code: "HTTP_ERROR",
+      status: 401,
+      retryable: false,
+      message: "Provider API returned HTTP 401: unrecognized_token",
+    });
+  });
+
   it("surfaces a forbidden key as an HTTP adapter error", async () => {
     stubResponse(403, {}, { error: "Forbidden" });
 
