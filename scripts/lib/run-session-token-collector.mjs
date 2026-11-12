@@ -8,21 +8,33 @@ import { homedir } from "node:os";
 // exact-name placement and reference-expansion continuity remain unverified.
 const COLLECTOR_TOKEN_FOLDERS = ["/", "/global-api-keys"];
 
-// Matches ONLY the Infisical CLI's missing-secret wording.  A missing secret
-// in one folder is a confirmed miss there, so the folder search continues;
-// anything else that exits non-zero is a read/auth failure and throws.
-// stderr is matched against this fixed pattern as a boolean and its content
-// is never used, logged or propagated (a CLI error can echo its input).
-const INFISICAL_MISS_PATTERN = /not[\s-]*found|doesn'?t exist|does not exist|no secret/i;
+// A non-zero exit is a confirmed miss only when stderr names the secret or
+// the folder as the thing that is absent.  Project, environment, and route
+// failures use the same "not found" / "doesn't exist" words, and the CLI's
+// pretty 404 printer always appends "Response Code: 404 Not Found", so a
+// generic not-found match would hide a bad project or environment as a miss.
+// A missing folder still falls through: the next candidate path can exist.
+// stderr is matched as a boolean and its content is never used, logged, or
+// propagated (a CLI error can echo its input).
+const INFISICAL_SECRET_MISS_PATTERN = /secret with name\b[^\n]{0,240}?(?:not[\s-]*found|does not exist|doesn't exist)|the secret (?:does not exist|doesn't exist)|secret ["'][^"'\n]{1,200}["'] (?:does not exist|doesn't exist)/i;
+const INFISICAL_FOLDER_MISS_PATTERN = /folder with (?:path|id)\b[^\n]{0,300}?not[\s-]*found|folder ["'][^"'\n]{1,200}["'] (?:does not exist|doesn't exist)/i;
+const INFISICAL_SCOPE_FAILURE_PATTERN = /project\b[^\n]{0,240}?(?:not[\s-]*found|does not exist|doesn't exist)|environment with slug\b[^\n]{0,240}?not[\s-]*found|environment ["'][^"'\n]+["'] (?:does not exist|doesn't exist)|route\b[^\n]{0,400}?not[\s-]*found/i;
+
+function infisicalNonZeroExitIsMiss(stderrText) {
+  const text = String(stderrText).replace(/\u001b\[[0-9;]*m/g, "");
+  if (INFISICAL_SCOPE_FAILURE_PATTERN.test(text)) return false;
+  return INFISICAL_SECRET_MISS_PATTERN.test(text) || INFISICAL_FOLDER_MISS_PATTERN.test(text);
+}
 
 // Default token lookup: this consumer's scoped direct Infisical read
 // (INFISICAL_TOKEN + INFISICAL_FLEET_OPS_PROJECT_ID in the environment),
 // replacing the retired fleet-secrets CLI.  No binding means env-only
 // operation: null WITHOUT spawning the CLI, so no personal login session
 // can serve the read.  Exit 0 + empty stdout is a confirmed miss in that
-// folder (the next folder is tried); a missing-secret non-zero exit is a
-// confirmed miss too (INFISICAL_MISS_PATTERN); any other non-zero exit is a
-// read/auth failure and throws instead of looking like a miss.
+// folder (the next folder is tried); a missing-secret or missing-folder
+// non-zero exit is a confirmed miss too (infisicalNonZeroExitIsMiss); any
+// other non-zero exit is a read/auth failure and throws instead of looking
+// like a miss.
 // --expand=false is deliberate: the stored value is read as-is; each name's
 // literal/reference status is verified separately before continuity is
 // claimed for it.
@@ -53,7 +65,7 @@ function scopedInfisicalRead(name, env) {
       // stderr is read ONLY as a boolean miss classification against the
       // fixed wording whitelist; its content never leaves this check.
       const stderrText = typeof err.stderr === "string" ? err.stderr : "";
-      if (INFISICAL_MISS_PATTERN.test(stderrText)) continue;
+      if (infisicalNonZeroExitIsMiss(stderrText)) continue;
       // Whitelisted diagnostics only - spawn code, timeout-kill, signal or
       // exit status; never err.stderr/cause/message (a CLI error can echo
       // its input).
