@@ -287,11 +287,11 @@ export function normalizeSpan(span, resourceAttributes = {}, authenticatedIdenti
     cacheCreation: readInt(
       flat["gen_ai.usage.cache_creation_input_tokens"] ?? flat["gen_ai.usage.cache_creation_tokens"],
     ),
-    reasoning: readInt(flat["gen_ai.usage.reasoning_tokens"]),
+    reasoning: readInt(flat["gen_ai.usage.reasoning_tokens"] ?? flat["gen_ai.usage.reasoning_count"]),
   };
 
   const context = {
-    tokens: readInt(flat["context.tokens"]),
+    tokens: readInt(flat["context.tokens"] ?? flat["context.used"]),
     limit: readInt(flat["context.limit"]),
     utilizationPct: readNumber(flat["context.utilization_pct"]),
   };
@@ -380,7 +380,7 @@ export function normalizeLogRecord(record, resourceAttributes = {}, authenticate
       output: readInt(flat["gen_ai.usage.output_tokens"]),
       cacheRead: readInt(flat["gen_ai.usage.cache_read_input_tokens"]),
       cacheCreation: readInt(flat["gen_ai.usage.cache_creation_input_tokens"]),
-      reasoning: readInt(flat["gen_ai.usage.reasoning_tokens"]),
+      reasoning: readInt(flat["gen_ai.usage.reasoning_tokens"] ?? flat["gen_ai.usage.reasoning_count"]),
     },
     costUsd: readNumber(flat["gen_ai.usage.cost"] ?? flat["cost_usd"]),
     durationMs: readInt(flat["duration_ms"]),
@@ -390,7 +390,7 @@ export function normalizeLogRecord(record, resourceAttributes = {}, authenticate
     status: isError ? "error" : "ok",
     errorType: readString(flat["error.type"], 120),
     context: {
-      tokens: readInt(flat["context.tokens"]),
+      tokens: readInt(flat["context.tokens"] ?? flat["context.used"]),
       limit: readInt(flat["context.limit"]),
       utilizationPct: readNumber(flat["context.utilization_pct"]),
     },

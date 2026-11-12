@@ -34,7 +34,8 @@
 // and it must stay independently testable.
 
 /**
- * The complete set of attribute keys that may leave the Mac for Sentry.
+ * Canonical attribute keys whose values may leave the Mac for Sentry.
+ * The fixed numeric wire aliases below preserve those same values on re-scrub.
  *
  * There is NO prompt, NO tool argument, NO tool result, NO file path, NO
  * project name, NO user identifier, NO session id, NO conversation id and NO
@@ -70,8 +71,6 @@ const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azu
 export function knownAiVendor(value) {
   return typeof value === "string" && AI_VENDORS.has(value.toLowerCase()) ? value.toLowerCase() : undefined;
 }
-
-const ALLOWLIST_SET = new Set(SENTRY_ATTRIBUTE_ALLOWLIST);
 
 /**
  * Sentry's own typed span columns.
@@ -111,6 +110,9 @@ const SENTRY_ATTRIBUTE_RENAMES = new Map([
   ["context.tokens", "context.used"],
   ["gen_ai.usage.reasoning_tokens", "gen_ai.usage.reasoning_count"],
 ]);
+// Re-scrubbing a Sentry envelope accepts only these deliberate numeric aliases.
+const SENTRY_RENAMED_NUMERIC_ATTRIBUTES = new Set(SENTRY_ATTRIBUTE_RENAMES.values());
+const ALLOWLIST_SET = new Set([...SENTRY_ATTRIBUTE_ALLOWLIST, ...SENTRY_RENAMED_NUMERIC_ATTRIBUTES]);
 
 /**
  * Producer free-text fields.  These are CONTENT: they belong to the UM path
@@ -197,6 +199,11 @@ export function otlpAttribute(key, value) {
  */
 function sentryAttribute(key, value) {
   const outKey = SENTRY_ATTRIBUTE_RENAMES.get(key) ?? key;
+  if (SENTRY_RENAMED_NUMERIC_ATTRIBUTES.has(outKey)) {
+    const number = typeof value === "number" ? value : typeof value === "string" && value.length <= 32 && value !== "" ? Number(value) : NaN;
+    const canonical = typeof value === "number" || String(number) === value;
+    return canonical && Number.isFinite(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? otlpAttribute(outKey, String(number)) : undefined;
+  }
   if (SENTRY_NUMERIC_ATTRIBUTES.has(outKey)) {
     if (typeof value === "number" && Number.isFinite(value)) {
       return otlpAttribute(outKey, value);

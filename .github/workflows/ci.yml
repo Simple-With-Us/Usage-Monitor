@@ -380,10 +380,15 @@ jobs:
       #    without jq, so a runner image change degrades rather than breaks).
       - name: Test session token collectors
         run: npm run test:session-token-collectors
-      - name: Test durable collector Sentry bridge
-        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs
+      - name: Test collector telemetry and durable delivery
+        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs scripts/telemetry-native-followup.node-test.mjs
       - name: Test detached collector runtime updates
         run: npm run test:collector-runtime
+
+      - name: Test Claude Duplicate Cleanup
+        env:
+          VITEST: "true"
+        run: node --test scripts/__tests__/claude-duplicate-cleanup.test.mjs scripts/__tests__/claude-duplicate-stored-plan.test.mjs scripts/__tests__/claude-duplicate-sqlite.test.mjs
 
       - name: Test CF token map
         run: npm run test:cf-token-map
