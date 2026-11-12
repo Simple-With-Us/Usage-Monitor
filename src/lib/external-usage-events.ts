@@ -32,6 +32,8 @@ import {
   isSubscriptionAnalyticsTelemetry,
   shouldDeriveAnalyticsTokenEstimate,
 } from "@/lib/subscription-analytics";
+import { logSlowScanTimingIfNeeded } from "@/lib/slow-scan-timing";
+import { oneSidedCorrelationKeys, withoutMetadataKeys } from "@/lib/telemetry-correlation";
 import {
   MTD_SCAN_MEMO_TTL_MS,
   clearMtdScanMemo,
@@ -40,6 +42,7 @@ import {
   setMtdScanMemo,
   setUsageEventsSummaryMemo,
 } from "@/lib/mtd-scan-memo";
+import { querySqliteUsageAggregate } from "@/lib/sqlite-usage-aggregates";
 
 export {
   isClaudeCodeAnalyticsTelemetry,
@@ -252,6 +255,12 @@ export async function persistExternalUsageEvents(
   // resurrect a row immediately after retention pruned it.
   return prisma.$transaction(
     async (tx) => {
+      // Prisma's SQLite adapter starts a deferred BEGIN. Reserve the writer
+      // before reading tombstones/replays: an external writer (including the
+      // replicator) can otherwise invalidate that read snapshot, and the later
+      // INSERT fails immediately with SQLITE_BUSY_SNAPSHOT/P1008 regardless of
+      // busy_timeout. WHERE 0 changes no rows and cannot scan the event table.
+      await reserveExternalUsageWriter(tx);
       const result = await persistExternalUsageEventsInTransaction(tx, events);
       await syncStatusToUsageSnapshot(result.newEvents, tx);
       return result;
@@ -260,6 +269,10 @@ export async function persistExternalUsageEvents(
       timeout: 30_000,
     }
   );
+}
+
+export async function reserveExternalUsageWriter(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`UPDATE "ExternalUsageEvent" SET "id" = "id" WHERE 0`;
 }
 
 type ExistingExternalUsageEvent = Awaited<
@@ -331,10 +344,15 @@ function withoutDerivedCostMetadata(value: unknown): unknown {
 // throw ExternalUsageIdempotencyCollisionError.
 function comparableEvent(
   event: ExternalUsageEventInput | ExistingExternalUsageEvent,
-  options: { ignoreCanonicalAi?: boolean } = {}
+  options: { ignoreCanonicalAi?: boolean; ignoreMetadataKeys?: readonly string[] } = {}
 ) {
   const value = event as ExternalUsageEventInput & ExistingExternalUsageEvent;
-  const serverComparable = withoutDerivedCostMetadata(value.metadata ?? null);
+  const serverComparable = withoutMetadataKeys(
+    withoutDerivedCostMetadata(value.metadata ?? null),
+    // Authentication is receiver-owned and may differ across a credential
+    // rollout; replay never upgrades or removes the stored receipt authority.
+    ["_botFleetReceiptCredential", "_botFleetReceiptSignature", ...(options.ignoreMetadataKeys ?? [])]
+  );
   const metadata = options.ignoreCanonicalAi
     ? withoutCanonicalAiMetadata(serverComparable)
     : serverComparable;
@@ -383,8 +401,12 @@ function sameEvent(
   // carries the projection.  When both sides have it, it is compared as usual.
   const ignoreCanonicalAi =
     hasCanonicalAiMetadata(left.metadata) !== hasCanonicalAiMetadata(right.metadata);
-  const leftComp = comparableEvent(left, { ignoreCanonicalAi });
-  const rightComp = comparableEvent(right, { ignoreCanonicalAi });
+  // Correlation keys (session id, launcher) a producer learned after it first
+  // sent the event: one-sided means "now known", not "changed".  See
+  // telemetry-correlation.ts.
+  const ignoreMetadataKeys = oneSidedCorrelationKeys(left.metadata, right.metadata);
+  const leftComp = comparableEvent(left, { ignoreCanonicalAi, ignoreMetadataKeys });
+  const rightComp = comparableEvent(right, { ignoreCanonicalAi, ignoreMetadataKeys });
   if (stableJson(leftComp) === stableJson(rightComp)) {
     return true;
   }
@@ -750,12 +772,11 @@ export interface ExternalUsageEventSummary {
 }
 
 /**
- * Sum server-stamped derived cost estimates over the RAW window. One bounded
- * aggregate query (json_extract over metadata), called only when the
- * derivation flag is enabled so default-off deployments pay zero query cost.
- * Derived stamps exist only on metricType="usage"/unit="token" rows, so
- * receipt-cash and status-metric shapes are excluded by construction — no
- * receipt-candidate where-clause replication needed here.
+ * Sum server-stamped derived cost estimates over the RAW window in a read-only
+ * child process.  Called only when the derivation flag is enabled, so
+ * default-off deployments pay zero query cost.  Derived stamps exist only on
+ * metricType="usage"/unit="token" rows, so receipt-cash and status-metric
+ * shapes are excluded by construction.
  */
 const TOKEN_TYPE_LABEL_PREFIX = "token:";
 
@@ -775,6 +796,60 @@ interface AnalyticsTokenRow {
   quantity: number;
 }
 
+// --- Raw event scans and isolated aggregates --------------------------------
+// Prisma 7 uses the synchronous better-sqlite3 adapter on the Node main
+// thread.  The raw token-detail scan below stays in bounded keyset pages; the
+// larger summary, daily, derived-metadata, and MTD aggregates run in a
+// short-lived read-only child so SQLite work does not block HTTP or scheduler
+// health checks.
+const RAW_EVENT_SCAN_CHUNK_ROWS = 2_000;
+
+function yieldEventLoopTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+interface RawEventScanCursor {
+  occurredAt: Date;
+  id: string;
+}
+
+function rawEventScanStartClause(since: Date, cursor: RawEventScanCursor | null): Prisma.Sql {
+  if (!cursor) return Prisma.sql`"occurredAt" >= ${since}`;
+  // The cursor already bounds the window after its first page.  Repeating
+  // the earlier date bound makes SQLite rescan that prefix on every page
+  // instead of seeking directly into the (occurredAt, id) covering index.
+  return Prisma.sql`("occurredAt", "id") > (${cursor.occurredAt}, ${cursor.id})`;
+}
+
+function rawEventScanCursorFromRow(row: {
+  occurredAt: Date | string;
+  id: string;
+}): RawEventScanCursor {
+  // Prisma stores DateTime in SQLite as ISO text with an explicit offset
+  // ("2026-10-15T12:00:00.000+00:00") and the adapter hands it back as a
+  // Date or that same string — both parse unambiguously. Normalize
+  // defensively anyway (review, PR #1820): a space-separated value would
+  // parse as LOCAL time via new Date(), silently shifting the keyset
+  // boundary, so rewrite it to the UTC ISO form; a value with no offset
+  // is read as UTC, matching how the column is written. An unparseable
+  // value fails the scan loudly instead of binding a NaN cursor.
+  let occurredAt: Date;
+  if (row.occurredAt instanceof Date) {
+    occurredAt = row.occurredAt;
+  } else {
+    const raw = String(row.occurredAt).trim();
+    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+    occurredAt = new Date(hasOffset ? iso : `${iso}Z`);
+  }
+  if (Number.isNaN(occurredAt.getTime())) {
+    throw new Error(
+      `raw event scan: unparseable occurredAt cursor value ${JSON.stringify(row.occurredAt)}`
+    );
+  }
+  return { occurredAt, id: String(row.id) };
+}
+
 /**
  * Catalog-priced API-equivalent for subscription seats that post tokens
  * without a vendor costUsd (Codex JSONL). Claude is excluded: its OTLP
@@ -787,53 +862,94 @@ async function loadAnalyticsTokenRows(
 ): Promise<AnalyticsTokenRow[]> {
   if (typeof prisma.$queryRaw !== "function") return [];
   try {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        sourceApp: string;
-        provider: string;
-        service: string | null;
-        keyRef: string | null;
-        label: string | null;
-        quantity: unknown;
-      }>
-    >(Prisma.sql`
-      SELECT
-        "sourceApp",
-        "provider",
-        "service",
-        "keyRef",
-        "label",
-        COALESCE(SUM("quantity"), 0) AS "quantity"
-      FROM "ExternalUsageEvent"
-      WHERE "occurredAt" >= ${since}
-        AND "occurredAt" <= ${until}
-        AND "metricType" = 'usage'
-        AND "unit" = 'token'
-        AND "sourceApp" IN (${Prisma.join(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS)})
-      GROUP BY "sourceApp", "provider", "service", "keyRef", "label"
-    `);
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .filter((row) => typeof row?.sourceApp === "string" && typeof row.provider === "string")
-      .map((row) => ({
-        sourceApp: row.sourceApp,
-        provider: row.provider,
-        service: row.service,
-        keyRef: row.keyRef,
-        label: row.label,
-        quantity: Number(row.quantity ?? 0),
-      }));
+    const totals = new Map<string, AnalyticsTokenRow>();
+    let cursor: RawEventScanCursor | null = null;
+    for (;;) {
+      const rows = await prisma.$queryRaw<
+        Array<{
+          id: string;
+          occurredAt: Date | string;
+          sourceApp: string;
+          provider: string;
+          service: string | null;
+          keyRef: string | null;
+          label: string | null;
+          quantity: unknown;
+        }>
+      >(Prisma.sql`
+        SELECT
+          "id",
+          "occurredAt",
+          "sourceApp",
+          "provider",
+          "service",
+          "keyRef",
+          "label",
+          "quantity"
+        FROM "ExternalUsageEvent"
+        WHERE ${rawEventScanStartClause(since, cursor)}
+          AND "occurredAt" <= ${until}
+          AND "metricType" = 'usage'
+          AND "unit" = 'token'
+          AND "sourceApp" IN (${Prisma.join(DERIVED_ANALYTICS_TOKEN_SOURCE_APPS)})
+        ORDER BY "occurredAt" ASC, "id" ASC
+        LIMIT ${RAW_EVENT_SCAN_CHUNK_ROWS}
+      `);
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      for (const row of rows) {
+        if (
+          typeof row?.sourceApp !== "string" ||
+          typeof row.provider !== "string"
+        ) {
+          continue;
+        }
+        const key = JSON.stringify([
+          row.sourceApp,
+          row.provider,
+          row.service,
+          row.keyRef,
+          row.label,
+        ]);
+        const existing = totals.get(key);
+        if (existing) {
+          existing.quantity += Number(row.quantity ?? 0);
+        } else {
+          totals.set(key, {
+            sourceApp: row.sourceApp,
+            provider: row.provider,
+            service: row.service,
+            keyRef: row.keyRef,
+            label: row.label,
+            quantity: Number(row.quantity ?? 0),
+          });
+        }
+      }
+      if (rows.length < RAW_EVENT_SCAN_CHUNK_ROWS) break;
+      cursor = rawEventScanCursorFromRow(rows[rows.length - 1]);
+      await yieldEventLoopTurn();
+    }
+    return Array.from(totals.values());
   } catch {
     return [];
   }
 }
 
-function deriveAnalyticsTokenUsdByProvider(
+function analyticsEstimateSourceKey(provider: string, sourceApp: string): string {
+  return JSON.stringify([
+    canonicalProviderKey(provider),
+    sourceApp.trim().toLowerCase(),
+  ]);
+}
+
+function deriveAnalyticsTokenUsdBySource(
   rows: AnalyticsTokenRow[]
-): Map<string, number> {
+): Map<string, { bucketKey: string; usd: number }> {
   const byModel = new Map<
     string,
     {
+      bucketKey: string;
+      sourceKey: string;
+      model: string;
       input: number;
       output: number;
       cacheRead: number;
@@ -846,10 +962,22 @@ function deriveAnalyticsTokenUsdByProvider(
     if (!shouldDeriveAnalyticsTokenEstimate(row)) continue;
     if (!Number.isFinite(row.quantity) || row.quantity <= 0) continue;
     const model = row.keyRef?.trim() || "";
-    const key = `${canonicalProviderKey(row.provider)}|${model}`;
+    const bucketKey = normalizedProviderName(row.provider);
+    const sourceKey = analyticsEstimateSourceKey(row.provider, row.sourceApp);
+    const key = JSON.stringify([sourceKey, model]);
     const bucket =
       byModel.get(key) ??
-      { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation1h: 0, unknown: 0 };
+      {
+        bucketKey,
+        sourceKey,
+        model,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheCreation: 0,
+        cacheCreation1h: 0,
+        unknown: 0,
+      };
     const tokenType = canonicalTokenType(tokenTypeFromUsageLabel(row.label));
     if (tokenType) {
       bucket[tokenType] += row.quantity;
@@ -859,10 +987,9 @@ function deriveAnalyticsTokenUsdByProvider(
     byModel.set(key, bucket);
   }
 
-  const byProvider = new Map<string, number>();
-  for (const [key, tokens] of byModel) {
-    const provider = key.slice(0, key.indexOf("|"));
-    const model = key.slice(key.indexOf("|") + 1);
+  const bySource = new Map<string, { bucketKey: string; usd: number }>();
+  for (const tokens of byModel.values()) {
+    const { bucketKey, sourceKey, model } = tokens;
     const resolved = model ? getModelPricing(model) : null;
     if (!resolved) continue;
     const derived = deriveTokenCostUsd(resolved.pricing, tokens);
@@ -870,33 +997,31 @@ function deriveAnalyticsTokenUsdByProvider(
     if (tokens.unknown > 0) {
       usd += deriveTokenCostUsd(resolved.pricing, { input: tokens.unknown }).costUsd;
     }
-    byProvider.set(provider, (byProvider.get(provider) ?? 0) + usd);
+    const existing = bySource.get(sourceKey);
+    bySource.set(sourceKey, {
+      bucketKey: existing?.bucketKey ?? bucketKey,
+      usd: (existing?.usd ?? 0) + usd,
+    });
   }
-  return byProvider;
+  return bySource;
 }
 
 async function sumDerivedCostEstimates(
   rawSince: Date
 ): Promise<{ totalUsd: number; eventCount: number }> {
-  const rows = await prisma.$queryRaw<Array<{ totalUsd: unknown; eventCount: unknown }>>`
-    SELECT
-      COALESCE(SUM(json_extract("metadata", '$._derivedCostUsd')), 0) AS "totalUsd",
-      COUNT(*) AS "eventCount"
-    FROM "ExternalUsageEvent"
-    WHERE "occurredAt" >= ${rawSince}
-      AND json_extract("metadata", '$._derivedCostUsd') IS NOT NULL
-  `;
-  const row = rows[0];
+  const rows = await querySqliteUsageAggregate<Array<{
+    totalUsd: number | null;
+    eventCount: number;
+  }>>("derived", rawSince, undefined);
   return {
-    totalUsd: Number(row?.totalUsd ?? 0),
-    eventCount: Number(row?.eventCount ?? 0),
+    totalUsd: Number(rows[0]?.totalUsd ?? 0),
+    eventCount: Number(rows[0]?.eventCount ?? 0),
   };
 }
 
-// The dashboard portfolio panel polls this every 60s. The SQL groupBy below
-// already collapsed ~336 cursor round trips to one aggregate query; this
-// short process-local memo additionally dedupes back-to-back polls, matching
-// the accepted staleness of the budget-status SWR cache (also 60s). Disabled
+// The dashboard portfolio panel polls this every 60s.  This short process-local
+// memo dedupes back-to-back bounded scans, matching the accepted staleness of
+// the budget-status SWR cache (also 60s).  Disabled
 // under vitest like the MTD scan memo; invalidated post-ingest through the
 // same clearMtdScanMemo() path budget-status already calls.
 const USAGE_EVENTS_SUMMARY_MEMO_DEFAULT_TTL_MS = 60_000;
@@ -936,11 +1061,10 @@ export async function summarizeExternalUsageEvents(
     }
   }
 
-  // Share the exclusive-aggregation lease with the MTD cost scans: the
-  // groupBy result set for a summary window can be as large as theirs, and
-  // on the 512 MB instance two concurrent in-flight aggregations are enough
-  // to kill the process.
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  // Serialize summaries with other summaries while allowing MTD budget scans
+  // to use the second bounded SQLite reader.  The process-global reader pool
+  // still caps native aggregate children across all aggregation families.
+  return withExclusiveExternalUsageSummaryAggregation(async () => {
     if (memoEnabled) {
       const again = getUsageEventsSummaryMemo<ExternalUsageEventSummary>();
       if (again && again.key === key && again.expiresAt > Date.now()) {
@@ -1025,19 +1149,9 @@ export async function buildDailySpendSeries(
   // $queryRaw degrades to rollup-only data rather than throwing.
   if (rawSince <= until && typeof prisma.$queryRaw === "function") {
     try {
-      const rawRows = await prisma.$queryRaw<Array<{ day: string; totalUsd: unknown }>>`
-        SELECT
-          date("occurredAt") AS "day",
-          COALESCE(SUM("costUsd"), 0) AS "totalUsd"
-        FROM "ExternalUsageEvent"
-        WHERE "occurredAt" >= ${rawSince}
-          AND "occurredAt" <= ${until}
-          AND "metricType" NOT IN ('quota_sync', 'credit_balance')
-        GROUP BY date("occurredAt")
-      `;
-      for (const row of rawRows) {
-        if (!row?.day) continue;
-        byDay.set(row.day, (byDay.get(row.day) ?? 0) + Number(row.totalUsd ?? 0));
+      const rawRowsByDay = await scanRawDailySpendByDay(rawSince, until);
+      for (const [day, totalUsd] of rawRowsByDay) {
+        byDay.set(day, (byDay.get(day) ?? 0) + totalUsd);
       }
     } catch {
       // Best-effort — the series degrades to whatever rollup data covers.
@@ -1049,18 +1163,98 @@ export async function buildDailySpendSeries(
     .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
 }
 
+async function scanRawDailySpendByDay(
+  rawSince: Date,
+  until: Date
+): Promise<Map<string, number>> {
+  const byDay = new Map<string, number>();
+  const rows = await querySqliteUsageAggregate<Array<{
+    day: string;
+    totalUsd: number | null;
+  }>>("daily", rawSince, until);
+  for (const row of rows) {
+    byDay.set(row.day, Number(row.totalUsd ?? 0));
+  }
+  return byDay;
+}
+
 /**
- * E1: SQL-groupBy rewrite of the old cursor-paginated JS fold. The raw side
- * is ONE aggregate query grouped by every summary dimension (plus limit /
- * limitWindow so their latest-non-null semantics survive pre-aggregation)
- * instead of ~336 findMany round trips folding 1,000-row pages in JS.
+ * The raw side uses native SQLite groups on the read-only child and folds the
+ * compact result into the same summary dimensions as the prior SQL groupBy.
+ * A packed timestamp/id cursor preserves latest-non-null limit provenance
+ * when timestamps tie.
  *
- * Receipt-cash rows keep their exact per-row identity validation: the
- * groupBy excludes the fixed-shape receipt candidate superset
- * (NON_RECEIPT_CANDIDATE_WHERE) and candidates are folded individually, so
- * validated receipts land in receiptCashPaidUsd and malformed receipt-shaped
- * rows fall back to ordinary cost - identical to the MTD cost aggregate and
- * to the old fold.
+ * Receipt-cash rows keep their exact per-row identity validation: the raw
+ * scan excludes the fixed-shape receipt candidate superset and candidates
+ * are folded individually, so validated receipts land in receiptCashPaidUsd
+ * and malformed receipt-shaped rows fall back to ordinary cost.
+ */
+async function scanRawUsageSummaryEvents(
+  rawSince: Date,
+  upperBound: Date,
+  groups: Map<string, SummaryAccumulator>
+): Promise<number> {
+  const rows = await querySqliteUsageAggregate<Array<{
+    packedLatest: string;
+    sourceApp: string;
+    environment: string | null;
+    provider: string;
+    service: string | null;
+    label: string | null;
+    projectId: string | null;
+    metricType: string;
+    unit: string | null;
+    limit: number | null;
+    limitWindow: string | null;
+    eventCount: number;
+    pricedEventCount: number;
+    totalCostUsd: number | null;
+    totalRequests: number | null;
+    totalQuantity: number | null;
+  }>>("summary", rawSince, upperBound);
+
+  let eventCount = 0;
+  for (const row of rows) {
+    const separatorIndex = row.packedLatest.indexOf("\u0001");
+    if (separatorIndex < 1) {
+      throw new Error("SQLite summary aggregate returned an invalid latest cursor");
+    }
+    const latestAt = rawEventScanCursorFromRow({
+      occurredAt: row.packedLatest.slice(0, separatorIndex),
+      id: row.packedLatest.slice(separatorIndex + 1),
+    }).occurredAt.toISOString();
+    const isAnalytics = isSubscriptionAnalyticsTelemetry(row);
+    const rowEventCount = Number(row.eventCount ?? 0);
+    const pricedEventCount = Number(row.pricedEventCount ?? 0);
+    eventCount += rowEventCount;
+    addSummaryContribution(groups, {
+      sourceApp: row.sourceApp,
+      environment: row.environment,
+      provider: row.provider,
+      service: row.service,
+      projectId: row.projectId,
+      metricType: row.metricType,
+      unit: row.unit,
+      eventCount: rowEventCount,
+      pricedEventCount: isAnalytics ? 0 : pricedEventCount,
+      unpricedEventCount: isAnalytics ? 0 : rowEventCount - pricedEventCount,
+      unclassifiedCostEventCount: 0,
+      totalCostUsd: isAnalytics ? 0 : Number(row.totalCostUsd ?? 0),
+      receiptCashPaidUsd: 0,
+      estimatedApiEquivalentUsd: isAnalytics ? Number(row.totalCostUsd ?? 0) : 0,
+      totalRequests: Number(row.totalRequests ?? 0),
+      totalQuantity: Number(row.totalQuantity ?? 0),
+      limit: row.limit,
+      limitWindow: row.limitWindow,
+      latestAt,
+    });
+  }
+  return eventCount;
+}
+
+/**
+ * Summarizes historical rollups plus native SQLite aggregates executed by a
+ * bounded, read-only child process.
  */
 async function summarizeExternalUsageEventsUnserialized(
   since: Date,
@@ -1075,213 +1269,163 @@ async function summarizeExternalUsageEventsUnserialized(
   const upperBound = until !== undefined && until < now ? until : now;
   const rawSince = since > rawCutoff ? since : rawCutoff;
 
-  const receiptCandidates = await rawReceiptCashCandidates(rawSince, upperBound);
   // For rollups: the day-lt bound is the lesser of rawCutoff and the day after
   // `upperBound`, so a calendar-range query doesn't include rollup days beyond
   // the requested `to` date.
   const rollupDayLt = upperBound < rawCutoff
     ? new Date(Date.UTC(upperBound.getUTCFullYear(), upperBound.getUTCMonth(), upperBound.getUTCDate() + 1))
     : rawCutoff;
-  const [rawGroups, rollups, derivedCostEstimates] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: [
-        "sourceApp",
-        "environment",
-        "provider",
-        "service",
-        "projectId",
-        "metricType",
-        "unit",
-        "limit",
-        "limitWindow",
-      ],
-      where: {
-        occurredAt: { gte: rawSince, lte: upperBound },
-        metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-        ...NON_RECEIPT_CANDIDATE_WHERE,
-      },
-      _sum: { costUsd: true, requests: true, quantity: true },
-      _count: { _all: true, costUsd: true },
-      _max: { occurredAt: true },
-    }),
-    since < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            day: {
-              gte: new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())),
-              lt: rollupDayLt,
-            },
-            metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-          },
-          select: {
-            sourceApp: true,
-            environment: true,
-            provider: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            projectId: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            eventCount: true,
-            pricedEventCount: true,
-            unpricedEventCount: true,
-            unclassifiedCostEventCount: true,
-            totalCostUsd: true,
-            totalRequests: true,
-            totalQuantity: true,
-            maxLimit: true,
-            limitWindow: true,
-            latestOccurredAt: true,
-          },
-        })
-      : Promise.resolve([]),
+  // Run bounded native aggregates before entering the shared legacy-result
+  // lease.  In particular, never hold the heap lease while waiting for a child
+  // reader, or an MTD request queued behind this summary could not progress.
+  const [scannedRawEventCount, derivedCostEstimates] = await Promise.all([
+    scanRawUsageSummaryEvents(rawSince, upperBound, groups),
     // Flag-gated: default-off deployments skip the json_extract scan entirely.
     ingestCostDerivationEnabled()
       ? sumDerivedCostEstimates(rawSince)
       : Promise.resolve({ totalUsd: 0, eventCount: 0 }),
   ]);
 
-  let rawEventCount = receiptCandidates.length;
+  const loadLegacyMaterial = async () => {
+    const [receiptCandidates, rollups] = await awaitAllSettledTuple([
+      () => rawReceiptCashCandidates(rawSince, upperBound),
+      () => since < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.findMany({
+            where: {
+              day: {
+                gte: new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())),
+                lt: rollupDayLt,
+              },
+              metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
+            },
+            select: {
+              sourceApp: true,
+              environment: true,
+              provider: true,
+              service: true,
+              label: true,
+              keyRef: true,
+              billingMode: true,
+              projectId: true,
+              metricType: true,
+              unit: true,
+              confidence: true,
+              eventCount: true,
+              pricedEventCount: true,
+              unpricedEventCount: true,
+              unclassifiedCostEventCount: true,
+              totalCostUsd: true,
+              totalRequests: true,
+              totalQuantity: true,
+              maxLimit: true,
+              limitWindow: true,
+              latestOccurredAt: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
-  for (const row of rawGroups) {
-    // occurredAt is a non-nullable column and every group has at least one
-    // row, so _max.occurredAt is always set; skip defensively if a future
-    // engine ever returns null.
-    if (!row._max.occurredAt) continue;
-    rawEventCount += row._count._all;
-    const isAnalytics = isSubscriptionAnalyticsTelemetry({
-      sourceApp: row.sourceApp,
-      service: row.service,
-    });
-    addSummaryContribution(groups, {
-      sourceApp: row.sourceApp,
-      environment: row.environment,
-      provider: row.provider,
-      service: row.service,
-      projectId: row.projectId,
-      metricType: row.metricType,
-      unit: row.unit,
-      eventCount: row._count._all,
-      pricedEventCount: isAnalytics ? 0 : row._count.costUsd,
-      unpricedEventCount: isAnalytics
-        ? 0
-        : row._count._all - row._count.costUsd,
-      unclassifiedCostEventCount: 0,
-      totalCostUsd: isAnalytics ? 0 : row._sum.costUsd ?? 0,
-      receiptCashPaidUsd: 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? row._sum.costUsd ?? 0
-        : 0,
-      totalRequests: row._sum.requests ?? 0,
-      totalQuantity: row._sum.quantity ?? 0,
-      limit: row.limit,
-      limitWindow: row.limitWindow,
-      latestAt: row._max.occurredAt.toISOString(),
-    });
-  }
+    // Preserve the legacy fold order: native raw groups were folded above,
+    // then validated receipt candidates, then historical rollups.
+    for (const candidate of receiptCandidates) {
+      const isAnalytics = isSubscriptionAnalyticsTelemetry(candidate);
+      const isReceiptCash = isReceiptCashEvent(candidate);
+      addSummaryContribution(groups, {
+        sourceApp: candidate.sourceApp,
+        environment: candidate.environment ?? null,
+        provider: candidate.provider,
+        service: candidate.service,
+        projectId: candidate.projectId,
+        metricType: candidate.metricType,
+        unit: candidate.unit,
+        eventCount: 1,
+        pricedEventCount:
+          isAnalytics || isReceiptCash || candidate.costUsd == null ? 0 : 1,
+        unpricedEventCount:
+          isAnalytics || isReceiptCash || candidate.costUsd != null ? 0 : 1,
+        unclassifiedCostEventCount: 0,
+        totalCostUsd:
+          isAnalytics || isReceiptCash ? 0 : candidate.costUsd ?? 0,
+        receiptCashPaidUsd: isReceiptCash ? candidate.costUsd ?? 0 : 0,
+        estimatedApiEquivalentUsd: isAnalytics ? candidate.costUsd ?? 0 : 0,
+        totalRequests: candidate.requests ?? 0,
+        totalQuantity: candidate.quantity ?? 0,
+        limit: candidate.limit,
+        limitWindow: candidate.limitWindow,
+        latestAt: candidate.occurredAt.toISOString(),
+      });
+    }
 
-  // Receipt candidates are rare (only exact receipt-shaped rows); folding
-  // them per-row preserves the old fold's validated-receipt semantics.
-  for (const candidate of receiptCandidates) {
-    const isAnalytics = isSubscriptionAnalyticsTelemetry(candidate);
-    const isReceiptCash = isReceiptCashEvent(candidate);
-    addSummaryContribution(groups, {
-      sourceApp: candidate.sourceApp,
-      environment: candidate.environment ?? null,
-      provider: candidate.provider,
-      service: candidate.service,
-      projectId: candidate.projectId,
-      metricType: candidate.metricType,
-      unit: candidate.unit,
-      eventCount: 1,
-      pricedEventCount:
-        isAnalytics || isReceiptCash || candidate.costUsd == null
-          ? 0
-          : 1,
-      unpricedEventCount:
-        isAnalytics || isReceiptCash || candidate.costUsd != null
-          ? 0
-          : 1,
-      unclassifiedCostEventCount: 0,
-      totalCostUsd:
-        isAnalytics || isReceiptCash ? 0 : candidate.costUsd ?? 0,
-      receiptCashPaidUsd: isReceiptCash ? candidate.costUsd ?? 0 : 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? candidate.costUsd ?? 0
-        : 0,
-      totalRequests: candidate.requests ?? 0,
-      totalQuantity: candidate.quantity ?? 0,
-      limit: candidate.limit,
-      limitWindow: candidate.limitWindow,
-      latestAt: candidate.occurredAt.toISOString(),
-    });
-  }
+    for (const rollup of rollups) {
+      const isAnalytics = isSubscriptionAnalyticsTelemetry(rollup);
+      const isReceiptCash = isReceiptCashEvent(rollup);
+      const hasCoverageCounts =
+        rollup.pricedEventCount != null ||
+        rollup.unpricedEventCount != null ||
+        rollup.unclassifiedCostEventCount != null;
+      const costCounts = isAnalytics || isReceiptCash
+        ? {
+            pricedEventCount: 0,
+            unpricedEventCount: 0,
+            unclassifiedCostEventCount: 0,
+          }
+        : {
+            pricedEventCount: rollup.pricedEventCount ?? 0,
+            unpricedEventCount: rollup.unpricedEventCount ?? 0,
+            unclassifiedCostEventCount: hasCoverageCounts
+              ? rollup.unclassifiedCostEventCount ?? 0
+              : rollup.eventCount,
+          };
+      addSummaryContribution(groups, {
+        sourceApp: rollup.sourceApp,
+        environment: rollup.environment,
+        provider: rollup.provider,
+        service: rollup.service,
+        projectId: rollup.projectId,
+        metricType: rollup.metricType,
+        unit: rollup.unit,
+        eventCount: rollup.eventCount,
+        ...costCounts,
+        totalCostUsd: isAnalytics || isReceiptCash ? 0 : rollup.totalCostUsd,
+        receiptCashPaidUsd: isReceiptCash ? rollup.totalCostUsd : 0,
+        estimatedApiEquivalentUsd: isAnalytics ? rollup.totalCostUsd : 0,
+        totalRequests: rollup.totalRequests,
+        totalQuantity: rollup.totalQuantity,
+        limit: rollup.maxLimit,
+        limitWindow: rollup.limitWindow,
+        latestAt: rollup.latestOccurredAt.toISOString(),
+      });
+    }
 
-  for (const rollup of rollups) {
-    const isAnalytics = isSubscriptionAnalyticsTelemetry(rollup);
-    const isReceiptCash = isReceiptCashEvent(rollup);
-    const hasCoverageCounts =
-      rollup.pricedEventCount != null ||
-      rollup.unpricedEventCount != null ||
-      rollup.unclassifiedCostEventCount != null;
-    const costCounts = isAnalytics || isReceiptCash
-      ? {
-          pricedEventCount: 0,
-          unpricedEventCount: 0,
-          unclassifiedCostEventCount: 0,
-        }
-      : {
-          pricedEventCount: rollup.pricedEventCount ?? 0,
-          unpricedEventCount: rollup.unpricedEventCount ?? 0,
-          unclassifiedCostEventCount: hasCoverageCounts
-            ? rollup.unclassifiedCostEventCount ?? 0
-            : rollup.eventCount,
-        };
-    addSummaryContribution(groups, {
-      sourceApp: rollup.sourceApp,
-      environment: rollup.environment,
-      provider: rollup.provider,
-      service: rollup.service,
-      projectId: rollup.projectId,
-      metricType: rollup.metricType,
-      unit: rollup.unit,
-      eventCount: rollup.eventCount,
-      ...costCounts,
-      totalCostUsd:
-        isAnalytics || isReceiptCash ? 0 : rollup.totalCostUsd,
-      receiptCashPaidUsd: isReceiptCash ? rollup.totalCostUsd : 0,
-      estimatedApiEquivalentUsd: isAnalytics
-        ? rollup.totalCostUsd
-        : 0,
-      totalRequests: rollup.totalRequests,
-      totalQuantity: rollup.totalQuantity,
-      limit: rollup.maxLimit,
-      limitWindow: rollup.limitWindow,
-      latestAt: rollup.latestOccurredAt.toISOString(),
-    });
-  }
+    return {
+      rawEventCount: scannedRawEventCount + receiptCandidates.length,
+      rollupEventCount: rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
+    };
+  };
+  const { rawEventCount, rollupEventCount } =
+    await withExclusiveExternalUsageLegacyMaterialization(loadLegacyMaterial);
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, upperBound);
-  const derivedByProvider = deriveAnalyticsTokenUsdByProvider(tokenRows);
-  const providersWithReportedEstimate = new Set<string>();
+  const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
+  const sourcesWithReportedEstimate = new Set<string>();
   for (const group of groups.values()) {
     if (group.estimatedApiEquivalentUsd > 0) {
-      providersWithReportedEstimate.add(canonicalProviderKey(group.provider));
+      sourcesWithReportedEstimate.add(
+        analyticsEstimateSourceKey(group.provider, group.sourceApp)
+      );
     }
   }
   const appliedDerived = new Set<string>();
   for (const group of groups.values()) {
+    if (group.metricType !== "usage" || group.unit !== "token") continue;
     if (!shouldDeriveAnalyticsTokenEstimate(group)) continue;
-    const providerKey = canonicalProviderKey(group.provider);
-    if (providersWithReportedEstimate.has(providerKey)) continue;
-    if (appliedDerived.has(providerKey)) continue;
-    const extra = derivedByProvider.get(providerKey);
+    const sourceKey = analyticsEstimateSourceKey(group.provider, group.sourceApp);
+    if (sourcesWithReportedEstimate.has(sourceKey)) continue;
+    if (appliedDerived.has(sourceKey)) continue;
+    const extra = derivedBySource.get(sourceKey)?.usd;
     if (extra && extra > 0) {
       group.estimatedApiEquivalentUsd += extra;
-      appliedDerived.add(providerKey);
+      appliedDerived.add(sourceKey);
     }
   }
 
@@ -1298,8 +1442,7 @@ async function summarizeExternalUsageEventsUnserialized(
     );
 
   return {
-    eventCount:
-      rawEventCount + rollups.reduce((sum, rollup) => sum + rollup.eventCount, 0),
+    eventCount: rawEventCount + rollupEventCount,
     groups: summaries,
     derivedCostEstimateUsd: derivedCostEstimates.totalUsd,
     derivedCostEstimateEventCount: derivedCostEstimates.eventCount,
@@ -1359,102 +1502,106 @@ export async function sumMonthToDateReceiptCashByProviderId(
     unit: "usd",
     confidence: "actual",
   } as const;
-  const [rawGroups, rollups] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: [
-        "sourceApp",
-        "service",
-        "label",
-        "keyRef",
-        "billingMode",
-        "metricType",
-        "unit",
-        "confidence",
-      ],
-      where: { ...exactReceiptWhere, occurredAt: { gte: rawSince, lte: now } },
-      _sum: { costUsd: true },
-      _count: { _all: true },
-    }),
-    monthStart < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            ...exactReceiptWhere,
-            day: { gte: monthStart, lt: rawCutoff },
-            latestOccurredAt: { lte: now },
-          },
-          select: {
-            sourceApp: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            totalCostUsd: true,
-            eventCount: true,
-          },
-        })
-      : Promise.resolve([]),
-  ]);
+  return withExclusiveExternalUsageLegacyMaterialization(async () => {
+    const [rawGroups, rollups] = await awaitAllSettledTuple([
+      () => prisma.externalUsageEvent.groupBy({
+        by: [
+          "sourceApp",
+          "service",
+          "label",
+          "keyRef",
+          "billingMode",
+          "metricType",
+          "unit",
+          "confidence",
+        ],
+        where: { ...exactReceiptWhere, occurredAt: { gte: rawSince, lte: now } },
+        _sum: { costUsd: true },
+        _count: { _all: true },
+      }),
+      () => monthStart < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.findMany({
+            where: {
+              ...exactReceiptWhere,
+              day: { gte: monthStart, lt: rawCutoff },
+              latestOccurredAt: { lte: now },
+            },
+            select: {
+              sourceApp: true,
+              service: true,
+              label: true,
+              keyRef: true,
+              billingMode: true,
+              metricType: true,
+              unit: true,
+              confidence: true,
+              totalCostUsd: true,
+              eventCount: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
-  const totals = new Map<string, ProviderReceiptCash>();
-  const add = (row: ReceiptCashEventLikeWithCost, costUsd: number, eventCount: number) => {
-    const providerId = receiptCashProviderId(row);
-    if (!providerId) return;
-    const current = totals.get(providerId) ?? { paidUsd: 0, eventCount: 0 };
-    current.paidUsd += costUsd;
-    current.eventCount += eventCount;
-    totals.set(providerId, current);
-  };
-  for (const row of rawGroups) {
-    add(row, row._sum.costUsd ?? 0, row._count._all);
-  }
-  for (const rollup of rollups) {
-    add(rollup, rollup.totalCostUsd, rollup.eventCount);
-  }
-  return totals;
+    const totals = new Map<string, ProviderReceiptCash>();
+    const add = (row: ReceiptCashEventLikeWithCost, costUsd: number, eventCount: number) => {
+      const providerId = receiptCashProviderId(row);
+      if (!providerId) return;
+      const current = totals.get(providerId) ?? { paidUsd: 0, eventCount: 0 };
+      current.paidUsd += costUsd;
+      current.eventCount += eventCount;
+      totals.set(providerId, current);
+    };
+    for (const row of rawGroups) {
+      add(row, row._sum.costUsd ?? 0, row._count._all);
+    }
+    for (const rollup of rollups) {
+      add(rollup, rollup.totalCostUsd, rollup.eventCount);
+    }
+    return totals;
+  });
 }
 
 type ReceiptCashEventLikeWithCost = Parameters<typeof receiptCashProviderId>[0];
 
-// One-time diagnostic: log how many raw ExternalUsageEvent rows the
-// current-month groupBy below actually scans. rawSince == monthStart for
-// every current-month call (the daily-rollup branch never applies to the
-// current month - only to days older than the raw-retention cutoff), so
-// this is effectively "how big is the current month's raw event volume,"
-// which is what determines whether the ~11.4s this query used to take
-// (see the SWR cache on computeBudgetStatus in budget-status.ts) is normal
-// telemetry volume or a sign retention isn't keeping up. Logged once per
-// process rather than per-call since the cache above means this now runs
-// rarely anyway, and the count barely changes call-to-call.
-let loggedExternalEventsRawSizeOnce = false;
+// MTD provider totals and project attribution share one raw+rollup scan and
+// memo.  Keep each expensive family serialized while allowing one summary and
+// one MTD compute to run concurrently.  The reader pool caps native children;
+// the legacy lease separately serializes parent-process Prisma arrays through
+// their fold.
+const EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL = Symbol.for(
+  "usage-monitor.external-usage-aggregation-leases.v1"
+);
 
-// Provider totals and project attribution both scan and materialize the
-// current month's raw ExternalUsageEvent rows. A stale provider-cache hit can
-// start its refresh in the background and return immediately; a stale project
-// cache refresh may then reach its separate attribution aggregate before that
-// provider refresh finishes. On the 512 MB production instance, retaining
-// both aggregate result sets at once is enough to kill the process.
-//
-// Serialize the complete aggregation bodies, not just their groupBy calls, so
-// the next aggregate cannot start while the prior query result is still being
-// classified into application maps. The lease lives below the SWR caches:
-// stale callers still receive their cached response immediately, while only
-// background/cold recomputation queues. Keeping it here also covers every
-// caller and avoids taking a higher-level lock before a nested budget compute.
-//
-// Wave H / E1: both provider and project MTD views share one raw+rollup scan
-// (attribution-shaped groupBy) with a short process-local memo so a cold
-// dashboard that loads provider then project status does not pay ~11s twice.
-let externalUsageCostAggregationTail: Promise<void> = Promise.resolve();
+type ExternalUsageAggregationFamily = "summary" | "mtd" | "legacy";
+type ExternalUsageAggregationLeaseRegistry = Record<
+  ExternalUsageAggregationFamily,
+  Promise<void>
+>;
 
-async function withExclusiveExternalUsageCostAggregation<T>(
+function externalUsageAggregationLeaseRegistry(): ExternalUsageAggregationLeaseRegistry {
+  const registry = globalThis as unknown as Record<symbol, unknown>;
+  const current = registry[
+    EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL
+  ] as ExternalUsageAggregationLeaseRegistry | undefined;
+  if (current) return current;
+
+  const leases: ExternalUsageAggregationLeaseRegistry = {
+    summary: Promise.resolve(),
+    mtd: Promise.resolve(),
+    legacy: Promise.resolve(),
+  };
+  registry[EXTERNAL_USAGE_AGGREGATION_LEASES_SYMBOL] = leases;
+  return leases;
+}
+
+async function withExclusiveExternalUsageAggregation<T>(
+  family: ExternalUsageAggregationFamily,
   work: () => Promise<T>
 ): Promise<T> {
-  const previous = externalUsageCostAggregationTail;
+  const leases = externalUsageAggregationLeaseRegistry();
+  const previous = leases[family];
   let release!: () => void;
-  externalUsageCostAggregationTail = new Promise<void>((resolve) => {
+  leases[family] = new Promise<void>((resolve) => {
     release = resolve;
   });
 
@@ -1464,6 +1611,57 @@ async function withExclusiveExternalUsageCostAggregation<T>(
   } finally {
     release();
   }
+}
+
+function withExclusiveExternalUsageSummaryAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("summary", work);
+}
+
+function withExclusiveExternalUsageMtdAggregation<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("mtd", work);
+}
+
+function withExclusiveExternalUsageLegacyMaterialization<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExclusiveExternalUsageAggregation("legacy", work);
+}
+
+async function awaitAllSettledTuple<T extends readonly unknown[]>(
+  operations: { [Index in keyof T]: () => PromiseLike<T[Index]> }
+): Promise<T> {
+  // Wait for all sibling fetches so an early rejection cannot release the
+  // legacy lease while another Prisma result is still materializing.  Preserve
+  // the first original rejection after every operation has settled.
+  let firstError: unknown;
+  let hasError = false;
+  const results = await Promise.all(
+    operations.map((operation) => {
+      const reject = (error: unknown) => {
+        if (!hasError) {
+          hasError = true;
+          firstError = error;
+        }
+        return { status: "rejected" as const };
+      };
+      try {
+        return Promise.resolve(operation()).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          reject
+        );
+      } catch (error) {
+        return Promise.resolve(reject(error));
+      }
+    })
+  );
+  if (hasError) throw firstError;
+  return results.map((result) =>
+    result.status === "fulfilled" ? result.value : undefined
+  ) as unknown as T;
 }
 
 function mtdScanKey(monthStart: Date, rawCutoff: Date): string {
@@ -1495,19 +1693,15 @@ export function __resetMonthToDateExternalCostScanMemoForTests(): void {
 }
 
 /**
- * Return a narrow superset of possible raw receipt-cash rows. Full identity
+ * Return a narrow superset of possible raw receipt-cash rows.  Full identity
  * validation still happens through isReceiptCashEvent so a malformed
  * receipt-like row remains ordinary cost.
  *
  * The main aggregate excludes this fixed-shape superset without an id list,
- * then the caller adds every invalid candidate back individually. That avoids
+ * then the caller adds every invalid candidate back individually.  That avoids
  * an unbounded SQLite `NOT IN (?, ...)` parameter list while excluding valid
  * receipts before SUM (so receipt subtraction cannot introduce float drift).
- * It also lets the main groupBy use only the dimensions that affect money
- * semantics. Previously label/keyRef/billingMode/unit/confidence were all
- * group dimensions solely so the loop could recognize receipts;
- * high-cardinality keyRef values therefore made the database return nearly
- * one group per event.
+ * Receipt identity metadata stays out of the general raw event scan.
  */
 async function rawReceiptCashCandidates(rawSince: Date, now: Date) {
   return prisma.externalUsageEvent.findMany({
@@ -1545,22 +1739,6 @@ async function rawReceiptCashCandidates(rawSince: Date, now: Date) {
   });
 }
 
-// Exact logical complement of rawReceiptCashCandidates' fixed-shape filter.
-// Nullable service/label columns need explicit null branches: relying on SQL
-// `NOT (a AND b ...)` would drop NULL rows under three-valued logic.
-const NON_RECEIPT_CANDIDATE_WHERE: Prisma.ExternalUsageEventWhereInput = {
-  OR: [
-    { sourceApp: { not: BILLING_RECEIPT_SOURCE_APP } },
-    { service: null },
-    { service: { not: API_PREPAID_FUNDING_SERVICE } },
-    { label: null },
-    { label: { not: RECEIPT_CASH_LABEL } },
-    { billingMode: { not: "actual" } },
-    { metricType: { not: "cost" } },
-    { confidence: { not: "actual" } },
-  ],
-};
-
 export async function sumMonthToDateExternalCostByProvider(
   monthStart: Date,
   rawCutoff: Date,
@@ -1591,7 +1769,7 @@ export async function sumMonthToDateExternalCostAttribution(
 /**
  * Wave H / E1: one exclusive scan feeds both provider totals and project
  * attribution. A short memo lets sequential cold computeBudgetStatus +
- * computeProjectBudgetStatus share the same ~11s groupBy within TTL.
+ * computeProjectBudgetStatus share the same ~11s scan within TTL.
  */
 async function loadMonthToDateExternalCostMaterial(
   monthStart: Date,
@@ -1601,7 +1779,7 @@ async function loadMonthToDateExternalCostMaterial(
   byProvider: Map<string, ProviderPushedCost>;
   attribution: ExternalCostAttributionRow[];
 }> {
-  // Under vitest, skip the process memo so mocked groupBy sequences and
+  // Under vitest, skip the process memo so mocked scan sequences and
   // per-test SQLite fixtures never observe cross-call contamination. Production
   // still memos so provider+project cold paths share one ~11s scan.
   const memoEnabled = process.env.VITEST !== "true";
@@ -1617,7 +1795,7 @@ async function loadMonthToDateExternalCostMaterial(
     }
   }
 
-  return withExclusiveExternalUsageCostAggregation(async () => {
+  return withExclusiveExternalUsageMtdAggregation(async () => {
     if (memoEnabled) {
       const again = getMtdScanMemo<
         Map<string, ProviderPushedCost>,
@@ -1645,6 +1823,52 @@ async function loadMonthToDateExternalCostMaterial(
   });
 }
 
+interface MonthToDateRawGroup {
+  provider: string;
+  sourceApp: string;
+  service: string | null;
+  label: string | null;
+  projectId: string | null;
+  metricType: string;
+  _sum: { costUsd: number | null };
+  _count: { _all: number; costUsd: number };
+}
+
+/**
+ * The raw half of the month-to-date external-cost aggregate: exactly the
+ * rows the old single groupBy folded (same window, same status-metric
+ * exclusion, same non-receipt-candidate complement), grouped by
+ * (provider, sourceApp, service, label, projectId, metricType) with
+ * SUM(costUsd) / COUNT(*) / COUNT(costUsd) — computed in a bounded-heap,
+ * read-only child so the aggregate cannot stall the event loop.
+ */
+async function scanMonthToDateRawGroups(
+  rawSince: Date,
+  now: Date
+): Promise<MonthToDateRawGroup[]> {
+  const rows = await querySqliteUsageAggregate<Array<{
+    provider: string;
+    sourceApp: string;
+    service: string | null;
+    label: string | null;
+    projectId: string | null;
+    metricType: string;
+    totalCostUsd: number | null;
+    eventCount: number;
+    pricedEventCount: number;
+  }>>("mtd", rawSince, now);
+  return rows.map((row) => ({
+    provider: row.provider,
+    sourceApp: row.sourceApp,
+    service: row.service,
+    label: row.label,
+    projectId: row.projectId,
+    metricType: row.metricType,
+    _sum: { costUsd: row.pricedEventCount > 0 ? Number(row.totalCostUsd ?? 0) : null },
+    _count: { _all: Number(row.eventCount), costUsd: Number(row.pricedEventCount) },
+  }));
+}
+
 async function loadMonthToDateExternalCostMaterialUnserialized(
   monthStart: Date,
   rawCutoff: Date,
@@ -1655,75 +1879,27 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
 }> {
   const rawSince = monthStart > rawCutoff ? monthStart : rawCutoff;
 
-  if (!loggedExternalEventsRawSizeOnce) {
-    loggedExternalEventsRawSizeOnce = true;
-    if (typeof prisma.externalUsageEvent?.count === "function") {
-      try {
-        prisma.externalUsageEvent
-          .count({ where: { occurredAt: { gte: rawSince, lte: now } } })
-          .then((rawSinceRows) => {
-            // eslint-disable-next-line no-console -- one-time diagnostic
-            console.info(
-              "[external-events-size]",
-              JSON.stringify({ rawSinceRows, monthStart, rawCutoff })
-            );
-          })
-          .catch((error) => {
-            console.warn("[external-events-size] row-count diagnostic failed", error);
-          });
-      } catch (error) {
-        console.warn("[external-events-size] row-count diagnostic failed", error);
-      }
+  const mtdScanStartedAt = performance.now();
+  const rawGroups = await (async () => {
+    try {
+      // Wait for the bounded native aggregate before taking the shared legacy
+      // result lease, so it cannot block a summary while holding that lease.
+      return await scanMonthToDateRawGroups(rawSince, now);
+    } catch (error) {
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt);
+      throw error;
     }
-  }
-
-  const receiptCandidates = await rawReceiptCashCandidates(rawSince, now);
-  const [rawGroups, rollups] = await Promise.all([
-    prisma.externalUsageEvent.groupBy({
-      by: ["provider", "sourceApp", "service", "projectId", "metricType"],
-      where: {
-        occurredAt: { gte: rawSince, lte: now },
-        metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-        ...NON_RECEIPT_CANDIDATE_WHERE,
-      },
-      _sum: { costUsd: true },
-      _count: { _all: true, costUsd: true },
-    }),
-    monthStart < rawCutoff
-      ? prisma.externalUsageEventDailyRollup.findMany({
-          where: {
-            day: { gte: monthStart, lt: rawCutoff },
-            metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
-            latestOccurredAt: { lte: now },
-          },
-          select: {
-            provider: true,
-            sourceApp: true,
-            service: true,
-            label: true,
-            keyRef: true,
-            billingMode: true,
-            projectId: true,
-            metricType: true,
-            unit: true,
-            confidence: true,
-            eventCount: true,
-            pricedEventCount: true,
-            unpricedEventCount: true,
-            unclassifiedCostEventCount: true,
-            totalCostUsd: true,
-          },
-        })
-      : Promise.resolve([]),
-  ]);
+  })();
 
   const byProvider = new Map<string, ProviderPushedCost>();
   const attributionMap = new Map<string, ExternalCostAttributionRow>();
+  const reportedEstimateBySource = new Map<string, number>();
 
   const addProvider = (
     provider: string,
     sourceApp: string,
     service: string | null,
+    label: string | null,
     metricType: string,
     cost: number,
     counts: {
@@ -1734,8 +1910,13 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   ) => {
     const key = normalizedProviderName(provider);
     const bucket = byProvider.get(key) ?? emptyProviderPushedCost();
-    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service })) {
+    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service, provider, metricType, label })) {
       bucket.estimatedApiEquivalentUsd += cost;
+      const sourceKey = analyticsEstimateSourceKey(provider, sourceApp);
+      reportedEstimateBySource.set(
+        sourceKey,
+        (reportedEstimateBySource.get(sourceKey) ?? 0) + cost
+      );
       byProvider.set(key, bucket);
       return;
     }
@@ -1757,6 +1938,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
     provider: string,
     sourceApp: string,
     service: string | null,
+    label: string | null,
     projectId: string | null,
     metricType: string,
     cost: number,
@@ -1768,7 +1950,7 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
   ) => {
     // Attribution deliberately excludes subscription analytics telemetry
     // (estimate only on provider view) and receipt-cash rows.
-    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service })) return;
+    if (isSubscriptionAnalyticsTelemetry({ sourceApp, service, provider, metricType, label })) return;
     const key = `${normalizedProviderName(provider)}|${sourceApp.toLowerCase()}|${projectId ?? ""}|${metricType}`;
     const existing = attributionMap.get(key);
     if (existing) {
@@ -1795,83 +1977,132 @@ async function loadMonthToDateExternalCostMaterialUnserialized(
       unclassifiedCostEventCount: 0,
     };
     const cost = row._sum.costUsd ?? 0;
-    addProvider(row.provider, row.sourceApp, row.service, row.metricType, cost, counts);
+    addProvider(row.provider, row.sourceApp, row.service, row.label, row.metricType, cost, counts);
     addAttribution(
       row.provider,
       row.sourceApp,
       row.service,
+      row.label,
       row.projectId,
       row.metricType,
       cost,
       counts
     );
   }
-  for (const candidate of receiptCandidates) {
-    if (isReceiptCashEvent(candidate)) continue;
-    const counts = {
-      pricedEventCount: candidate.costUsd == null ? 0 : 1,
-      unpricedEventCount: candidate.costUsd == null ? 1 : 0,
-      unclassifiedCostEventCount: 0,
-    };
-    const cost = candidate.costUsd ?? 0;
-    addProvider(
-      candidate.provider,
-      candidate.sourceApp,
-      candidate.service,
-      candidate.metricType,
-      cost,
-      counts
-    );
-    addAttribution(
-      candidate.provider,
-      candidate.sourceApp,
-      candidate.service,
-      candidate.projectId,
-      candidate.metricType,
-      cost,
-      counts
-    );
-  }
-  for (const rollup of rollups) {
-    if (isReceiptCashEvent(rollup)) continue;
-    const hasCoverageCounts =
-      rollup.pricedEventCount != null ||
-      rollup.unpricedEventCount != null ||
-      rollup.unclassifiedCostEventCount != null;
-    const counts = {
-      pricedEventCount: rollup.pricedEventCount ?? 0,
-      unpricedEventCount: rollup.unpricedEventCount ?? 0,
-      unclassifiedCostEventCount: hasCoverageCounts
-        ? rollup.unclassifiedCostEventCount ?? 0
-        : rollup.eventCount,
-    };
-    addProvider(
-      rollup.provider,
-      rollup.sourceApp,
-      rollup.service,
-      rollup.metricType,
-      rollup.totalCostUsd,
-      counts
-    );
-    addAttribution(
-      rollup.provider,
-      rollup.sourceApp,
-      rollup.service,
-      rollup.projectId,
-      rollup.metricType,
-      rollup.totalCostUsd,
-      counts
-    );
-  }
+  await withExclusiveExternalUsageLegacyMaterialization(async () => {
+    try {
+      const [receiptCandidates, rollups] = await awaitAllSettledTuple([
+        () => rawReceiptCashCandidates(rawSince, now),
+        () => monthStart < rawCutoff
+          ? prisma.externalUsageEventDailyRollup.findMany({
+              where: {
+                day: { gte: monthStart, lt: rawCutoff },
+                metricType: { notIn: Array.from(STATUS_METRIC_TYPES) },
+                latestOccurredAt: { lte: now },
+              },
+              select: {
+                provider: true,
+                sourceApp: true,
+                service: true,
+                label: true,
+                keyRef: true,
+                billingMode: true,
+                projectId: true,
+                metricType: true,
+                unit: true,
+                confidence: true,
+                eventCount: true,
+                pricedEventCount: true,
+                unpricedEventCount: true,
+                unclassifiedCostEventCount: true,
+                totalCostUsd: true,
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      // Preserve the old fold order: native raw groups, receipt candidates,
+      // then historical rollups.  Do not retain either Prisma result array
+      // beyond this shared heap-limited section.
+      for (const candidate of receiptCandidates) {
+        if (isReceiptCashEvent(candidate)) continue;
+        const counts = {
+          pricedEventCount: candidate.costUsd == null ? 0 : 1,
+          unpricedEventCount: candidate.costUsd == null ? 1 : 0,
+          unclassifiedCostEventCount: 0,
+        };
+        const cost = candidate.costUsd ?? 0;
+        addProvider(
+          candidate.provider,
+          candidate.sourceApp,
+          candidate.service,
+          candidate.label,
+          candidate.metricType,
+          cost,
+          counts
+        );
+        addAttribution(
+          candidate.provider,
+          candidate.sourceApp,
+          candidate.service,
+          candidate.label,
+          candidate.projectId,
+          candidate.metricType,
+          cost,
+          counts
+        );
+      }
+      for (const rollup of rollups) {
+        if (isReceiptCashEvent(rollup)) continue;
+        const hasCoverageCounts =
+          rollup.pricedEventCount != null ||
+          rollup.unpricedEventCount != null ||
+          rollup.unclassifiedCostEventCount != null;
+        const counts = {
+          pricedEventCount: rollup.pricedEventCount ?? 0,
+          unpricedEventCount: rollup.unpricedEventCount ?? 0,
+          unclassifiedCostEventCount: hasCoverageCounts
+            ? rollup.unclassifiedCostEventCount ?? 0
+            : rollup.eventCount,
+        };
+        addProvider(
+          rollup.provider,
+          rollup.sourceApp,
+          rollup.service,
+          rollup.label,
+          rollup.metricType,
+          rollup.totalCostUsd,
+          counts
+        );
+        addAttribution(
+          rollup.provider,
+          rollup.sourceApp,
+          rollup.service,
+          rollup.label,
+          rollup.projectId,
+          rollup.metricType,
+          rollup.totalCostUsd,
+          counts
+        );
+      }
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt, {
+        rawGroups: rawGroups.length,
+        rollupRows: rollups.length,
+      });
+    } catch (error) {
+      logSlowScanTimingIfNeeded("[external-events-mtd-scan]", mtdScanStartedAt);
+      throw error;
+    }
+  });
 
   const tokenRows = await loadAnalyticsTokenRows(rawSince, now);
-  const derivedByProvider = deriveAnalyticsTokenUsdByProvider(tokenRows);
-  for (const [providerKey, extra] of derivedByProvider) {
+  const derivedBySource = deriveAnalyticsTokenUsdBySource(tokenRows);
+  for (const [sourceKey, { bucketKey, usd: extra }] of derivedBySource) {
     if (!(extra > 0)) continue;
-    const bucket = byProvider.get(providerKey) ?? emptyProviderPushedCost();
-    if (bucket.estimatedApiEquivalentUsd > 0) continue;
+    if ((reportedEstimateBySource.get(sourceKey) ?? 0) > 0) continue;
+    const bucket = byProvider.get(bucketKey) ?? emptyProviderPushedCost();
     bucket.estimatedApiEquivalentUsd += extra;
-    byProvider.set(providerKey, bucket);
+    byProvider.set(bucketKey, bucket);
   }
 
   return {

@@ -93,6 +93,97 @@ export async function fanoutPollSnapshot(
   }
 }
 
+export interface FanoutAiRequest {
+  harness: string;
+  servedModel?: string | null;
+  requestedModel?: string | null;
+  durationMs?: number | null;
+  ttftMs?: number | null;
+  error?: string | null;
+}
+
+/**
+ * Emit aggregated per-request performance signals for one persisted
+ * AiRequest batch: an `ai.request` counter per (harness, model) group, plus
+ * mean duration / TTFT gauges where the harness reported them.
+ *
+ * This is the only per-request signal that reaches Sentry: Usage Monitor
+ * stays the ledger for tokens and cost, and Sentry gets counts, durations
+ * and model names — never prompts, responses, tool arguments, session ids
+ * or costs (UM-1637).  Before this, AiRequest rows (Codex, Claude Code,
+ * BotFleet and CI request performance) reached Sentry not at all; only
+ * ledger rows fanned out.  Never throws.
+ */
+export async function fanoutAiRequests(
+  requests: readonly FanoutAiRequest[],
+  route: "otlp/v1/logs" | "otlp/v1/traces" | "ingest/usage"
+): Promise<void> {
+  try {
+    if (requests.length === 0) return;
+    const byGroup = new Map<
+      string,
+      {
+        harness: string;
+        model: string;
+        count: number;
+        errors: number;
+        durationSum: number;
+        durationCount: number;
+        ttftSum: number;
+        ttftCount: number;
+      }
+    >();
+    for (const r of requests) {
+      const harness = r.harness?.trim().toLowerCase() || "unknown";
+      const model = (r.servedModel ?? r.requestedModel ?? "").trim() || "unknown";
+      const key = `${harness}\u0000${model.toLowerCase()}`;
+      const g =
+        byGroup.get(key) ??
+        { harness, model, count: 0, errors: 0, durationSum: 0, durationCount: 0, ttftSum: 0, ttftCount: 0 };
+      g.count += 1;
+      if (r.error) g.errors += 1;
+      if (typeof r.durationMs === "number" && Number.isFinite(r.durationMs)) {
+        g.durationSum += r.durationMs;
+        g.durationCount += 1;
+      }
+      if (typeof r.ttftMs === "number" && Number.isFinite(r.ttftMs)) {
+        g.ttftSum += r.ttftMs;
+        g.ttftCount += 1;
+      }
+      byGroup.set(key, g);
+    }
+    const groups = Array.from(byGroup.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, MAX_GROUPS_PER_CALL);
+    for (const g of groups) {
+      await recordFleetInfraMetric("ai.request", g.count, {
+        route,
+        harness: g.harness,
+        model: g.model,
+        errors: g.errors,
+      });
+      if (g.durationCount > 0) {
+        await recordFleetInfraMetric("ai.request.duration_ms", Math.round(g.durationSum / g.durationCount), {
+          route,
+          harness: g.harness,
+          model: g.model,
+        });
+      }
+      if (g.ttftCount > 0) {
+        await recordFleetInfraMetric("ai.request.ttft_ms", Math.round(g.ttftSum / g.ttftCount), {
+          route,
+          harness: g.harness,
+          model: g.model,
+        });
+      }
+    }
+    const total = Array.from(byGroup.values()).reduce((n, g) => n + g.count, 0);
+    await recordFleetInfraMetric("ai.request_total", total, { route });
+  } catch {
+    // best-effort only
+  }
+}
+
 /**
  * Emit one envelope per persisted agent turn batch (count + error count).
  * Turn content (prompts, tool args) never leaves this process. Never throws.

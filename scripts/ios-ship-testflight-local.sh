@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin wrapper: ship Usage Local Monitor to TestFlight (no Xcode UI).
+# Thin wrapper: ship Usage Monitor Local to TestFlight (no Xcode UI).
 # Canonical implementation: scripts/ios-fleet/ship-testflight.sh (in this repo).
 # The hosted macos-latest ios-ship.yml calls this as its second ship step, so a
 # merge to main that touches ios/ uploads Local as well as Client.

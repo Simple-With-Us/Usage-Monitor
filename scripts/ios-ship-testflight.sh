@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin wrapper: ship Usage Client Monitor to TestFlight (no Xcode UI).
+# Thin wrapper: ship Usage Monitor Client to TestFlight (no Xcode UI).
 # Canonical implementation: scripts/ios-fleet/ship-testflight.sh (in this repo).
 # Hosted macos-latest has no /Users/jay/apps/ios-fleet; that path is a local
 # fallback only. Do not restart a Mac runner or run xcodebuild locally to ship.
@@ -10,7 +10,10 @@
 # successful ships per app: DEFAULT_MIN_INTERVAL_SEC=3600 (3600s = 1 hour),
 # defined near the top of scripts/ios-fleet/ship-testflight.sh. Runs inside that
 # window log "ship-gate: skip" and exit 0. It also skips when git HEAD already
-# shipped. Neither kind of skip consumes a build number (fixed 2026-08-12).
+# shipped. Neither kind of skip resolves a version (fixed 2026-08-12; the
+# version scheme itself is the owner directive of 2026-10-24, AFC-517:  the
+# marketing version is the next patch on the app's train and the build number
+# is independent of it).
 # Override one run with IOS_TF_MIN_INTERVAL_SEC=<seconds> or --force-ship;
 # changing the standing limit means editing DEFAULT_MIN_INTERVAL_SEC.
 #

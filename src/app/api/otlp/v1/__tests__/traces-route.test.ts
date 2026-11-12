@@ -8,6 +8,8 @@ import { getNamedRateLimiter } from "@/lib/rate-limit";
 
 let dbPath: string;
 let POST: typeof import("../traces/route").POST;
+let USAGE_POST: typeof import("../../../ingest/usage/route").POST;
+let METRICS_POST: typeof import("../metrics/route").POST;
 let prisma: typeof import("@/lib/prisma").prisma;
 
 beforeAll(async () => {
@@ -17,6 +19,8 @@ beforeAll(async () => {
   process.env.USAGE_INGEST_TOKEN = "test-token-123";
   setupPrismaSqliteTestDb(dbPath);
   ({ POST } = await import("../traces/route"));
+  ({ POST: USAGE_POST } = await import("../../../ingest/usage/route"));
+  ({ POST: METRICS_POST } = await import("../metrics/route"));
   ({ prisma } = await import("@/lib/prisma"));
 }, 60_000);
 
@@ -95,10 +99,248 @@ describe("POST /api/otlp/v1/traces", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(0);
   });
 
+  it("retains distinct observations sharing a generation id and millisecond", async () => {
+    const common = {
+      platform: "botfleet",
+      generationId: "response-1",
+      occurredAt: "2026-10-11T12:00:00.000Z",
+    };
+    const observations = [
+      { ...common, conversationId: "session-a", inputTokens: 11 },
+      { ...common, conversationId: "session-b", inputTokens: 19 },
+      { ...common, conversationId: "session-a", inputTokens: 23 },
+    ];
+    const response = await POST(jsonRequest({ turns: observations }, { authorization: "Bearer test-token-123" }));
+    expect(await response.json()).toMatchObject({ ok: true, accepted: 3 });
+    const next = await POST(jsonRequest({ turns: [{ ...common, conversationId: "session-c", inputTokens: 29 }] },
+      { authorization: "Bearer test-token-123" }));
+    expect(await next.json()).toMatchObject({ ok: true, accepted: 1 });
+    expect((await prisma.agentTurn.findMany()).map((turn) => turn.inputTokens).sort((a, b) => a! - b!))
+      .toEqual([11, 19, 23, 29]);
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+  });
+
+  it("retains possible exporter retries when source identity is unproven", async () => {
+    const turn = (generationId: string | undefined) => ({
+      platform: "cursor-agent",
+      model: "gpt-5",
+      inputTokens: 11,
+      outputTokens: 7,
+      conversationId: "conv-retry",
+      ...(generationId ? { generationId } : {}),
+      occurredAt: "2026-10-11T12:00:00.000Z",
+    });
+    const body = { turns: [turn("gen-1"), turn("gen-1"), turn("gen-2"), turn(undefined)] };
+    const first = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+    expect(await first.json()).toMatchObject({ ok: true, accepted: 4 });
+    // The exporter did not see the response and sends the same request again.
+    const retry = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+    expect(retry.status).toBe(202);
+    // A generation id does not prove that two observations are one source event.
+    expect(await retry.json()).toMatchObject({ ok: true, accepted: 4 });
+    const turns = await prisma.agentTurn.findMany({ orderBy: { generationId: "asc" } });
+    expect(turns.map((t) => t.generationId)).toEqual([null, null, "gen-1", "gen-1", "gen-1", "gen-1", "gen-2", "gen-2"]);
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+  });
+
+  it("retains native BotFleet, Kimi and ZCode spans with colliding response ids", async () => {
+    const platforms = ["botfleet", "kimi-code", "zcode"];
+    const spans = platforms.flatMap((platform) => [11, 19].map((input, index) => ({
+      name: "chat",
+      traceId: "1".repeat(32),
+      spanId: String(index + 1).repeat(16),
+      startTimeUnixNano: "1760184000000000000",
+      endTimeUnixNano: "1760184001000000000",
+      attributes: [
+        { key: "agent.platform", value: { stringValue: platform } },
+        { key: "gen_ai.response.id", value: { stringValue: "shared-response" } },
+        { key: "gen_ai.conversation.id", value: { stringValue: "session-" + index } },
+        { key: "gen_ai.usage.input_tokens", value: { intValue: String(input) } },
+      ],
+    })));
+    const body = { resourceSpans: [{ scopeSpans: [{ spans }] }] };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await POST(jsonRequest(body, { authorization: "Bearer test-token-123" }));
+      expect(await response.json()).toMatchObject({ ok: true, accepted: 6 });
+    }
+    for (const platform of platforms) {
+      const rows = await prisma.agentTurn.findMany({ where: { platform } });
+      expect(rows.map((row) => row.inputTokens).sort((a, b) => a! - b!)).toEqual([11, 11, 19, 19]);
+    }
+    expect(await prisma.externalUsageEvent.count()).toBe(0);
+  });
+
   it("rejects a payload that is neither resourceSpans nor turns", async () => {
     const res = await POST(
       jsonRequest({ resourceLogs: [] }, { authorization: "Bearer test-token-123" })
     );
     expect(res.status).toBe(400);
+  });
+
+  it("lets a claude-code scoped credential write its own Claude Code trace batch", async () => {
+    // Regression (UM-1636): Claude Code's spans carry gen_ai.system =
+    // "anthropic", so the turn dimension resolved to the model vendor and a
+    // producer-scoped credential ("claude-code") was refused for the whole
+    // batch with 403 — the trace feed died while metrics and logs of the
+    // same sessions still landed.
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "claude-code:claude-scoped-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                resource: {
+                  attributes: [
+                    { key: "service.name", value: { stringValue: "claude-code" } },
+                    { key: "seat", value: { stringValue: "CLAUDE" } },
+                  ],
+                },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "claude_code.interaction",
+                        startTimeUnixNano: "1751500000000000000",
+                        endTimeUnixNano: "1751500002000000000",
+                        attributes: [
+                          { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                          { key: "session.id", value: { stringValue: "sess-77" } },
+                          { key: "model", value: { stringValue: "claude-opus-5-5" } },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer claude-scoped-token" }
+        )
+      );
+      expect(res.status).toBe(202);
+      const turns = await prisma.agentTurn.findMany();
+      expect(turns).toHaveLength(1);
+      expect(turns[0].platform).toBe("claude-code");
+      expect(turns[0].seat).toBe("CLAUDE");
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
+  });
+
+  it("lets an openrouter scoped credential write OpenRouter Broadcast traces", async () => {
+    process.env.OTLP_TRACES_PRODUCER_TOKENS = "openrouter:openrouter-trace-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "chat openai/gpt-5",
+                        attributes: [
+                          { key: "openrouter.trace.id", value: { stringValue: "or-trace-1" } },
+                          { key: "gen_ai.system", value: { stringValue: "openai" } },
+                          { key: "gen_ai.request.model", value: { stringValue: "openai/gpt-5" } },
+                          { key: "gen_ai.usage.input_tokens", value: { intValue: "10" } },
+                          { key: "gen_ai.usage.output_tokens", value: { intValue: "4" } },
+                        ],
+                      },
+                      {
+                        name: "chat anthropic/claude-sonnet",
+                        attributes: [
+                          { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+                          {
+                            key: "gen_ai.request.model",
+                            value: { stringValue: "anthropic/claude-sonnet" },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer openrouter-trace-token" }
+        )
+      );
+
+      expect(res.status).toBe(202);
+      const turns = await prisma.agentTurn.findMany();
+      expect(turns).toHaveLength(2);
+      expect(turns[0]).toMatchObject({
+        platform: "openrouter",
+        model: "openai/gpt-5",
+        inputTokens: 10,
+        outputTokens: 4,
+      });
+      expect(await prisma.externalUsageEvent.count()).toBe(0);
+
+      const authHeaders = {
+        "content-type": "application/json",
+        authorization: "Bearer openrouter-trace-token",
+      };
+      const usageResponse = await USAGE_POST(
+        new NextRequest("https://usage.jays.services/api/ingest/usage", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ events: [] }),
+        })
+      );
+      const metricsResponse = await METRICS_POST(
+        new NextRequest("https://usage.jays.services/api/otlp/v1/metrics", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ resourceMetrics: [] }),
+        })
+      );
+      expect(usageResponse.status).toBe(401);
+      expect(metricsResponse.status).toBe(401);
+    } finally {
+      delete process.env.OTLP_TRACES_PRODUCER_TOKENS;
+    }
+  });
+
+  it("still refuses a scoped credential for a turn dimension it does not own", async () => {
+    process.env.USAGE_INGEST_PRODUCER_TOKENS = "codex:codex-scoped-token";
+    try {
+      const res = await POST(
+        jsonRequest(
+          {
+            resourceSpans: [
+              {
+                resource: {
+                  attributes: [{ key: "agent.platform", value: { stringValue: "cursor-agent" } }],
+                },
+                scopeSpans: [
+                  {
+                    spans: [
+                      {
+                        name: "chat",
+                        startTimeUnixNano: "1751500000000000000",
+                        endTimeUnixNano: "1751500001000000000",
+                        attributes: [
+                          { key: "session.id", value: { stringValue: "sess-78" } },
+                          { key: "model", value: { stringValue: "gpt-5" } },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          { authorization: "Bearer codex-scoped-token" }
+        )
+      );
+      expect(res.status).toBe(403);
+      expect(await prisma.agentTurn.count()).toBe(0);
+    } finally {
+      delete process.env.USAGE_INGEST_PRODUCER_TOKENS;
+    }
   });
 });

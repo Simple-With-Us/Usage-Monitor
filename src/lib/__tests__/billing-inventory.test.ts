@@ -524,8 +524,8 @@ describe("buildBillingInventory", () => {
         provider({ id: "voyage", name: "voyage", displayName: "Voyage AI" }),
         provider({
           id: "relay",
-          name: "agent-sync-relay",
-          displayName: "Agent Sync Relay",
+          name: "simple-tools-relay",
+          displayName: "Simple Tools Relay",
           type: "builtin",
         }),
       ],

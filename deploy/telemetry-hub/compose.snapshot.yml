@@ -1,0 +1,10 @@
+services:
+  telemetry-hub:
+    environment:
+      INFISICAL_TOKEN: ""
+      TELEMETRY_HUB_CONFIG_FILE: /run/secrets/telemetry-hub.json
+    volumes:
+      - type: bind
+        source: ${TELEMETRY_HUB_CONFIG_SNAPSHOT_PATH:?Authorized private snapshot file is required}
+        target: /run/secrets/telemetry-hub.json
+        read_only: true

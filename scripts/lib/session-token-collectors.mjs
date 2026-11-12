@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { COLLECTOR_CALL_ID, collectorSentryConfig, enqueueCollectorSentry, drainCollectorSentry } from "./collector-sentry-bridge.mjs";
 
 export const GROK_COST_USD_TICKS = 1e10;
 export const MAX_EVENTS_PER_BATCH = 100;
@@ -83,7 +84,9 @@ function codexTotalSignature(usage) {
   return CODEX_TOTAL_KEYS.map((key) => String(finiteCount(usage[key]))).join("|");
 }
 
-function shaEventId(parts) {
+/** Stable event id for one measurement.  Exported so producer-specific
+ * modules derive ids exactly the way this file does. */
+export function shaEventId(parts) {
   return createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
@@ -110,12 +113,14 @@ export function tokenEventsFromBreakdown({
   breakdown,
   extraId,
   extraMetadata,
+  providerRequestId,
+  collectorCallId,
 }) {
   const events = [];
   for (const tokenType of TOKEN_TYPES) {
     const quantity = breakdown[tokenType];
     if (!quantity) continue;
-    events.push({
+    const event = {
       eventId: shaEventId([
         producerId,
         sessionKey,
@@ -134,12 +139,17 @@ export function tokenEventsFromBreakdown({
       billingMode: "estimated",
       confidence: "estimated",
       occurredAt: occurredAtIso,
+      // Not part of the eventId or the monitor's replay comparison, so a row
+      // the monitor already stored keeps its identity when this is added.
+      ...(providerRequestId ? { providerRequestId } : {}),
       metadata: {
         tokenType,
         ...(model ? { model } : {}),
         ...(extraMetadata ?? {}),
       },
-    });
+    };
+    if (collectorCallId) Object.defineProperty(event, COLLECTOR_CALL_ID, { value: JSON.stringify([sessionKey, collectorCallId]) });
+    events.push(event);
   }
   return events;
 }
@@ -354,7 +364,51 @@ function breakdownHasTokens(breakdown) {
 }
 
 
-export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt } = {}) {
+/** The metadata key a local collector names the harness's own session under.
+ *  The same key the OTLP mappers keep, so both feeds join on one name. */
+export const SESSION_ID_METADATA_KEY = "session.id";
+
+/** Anthropic reports `input_tokens` EXCLUSIVE of cache reads and cache writes
+ *  (total prompt = input + cache_read + cache_creation), unlike Codex, whose
+ *  input includes its cached reads.  Running Claude usage through
+ *  splitInclusiveCache dropped cache reads whenever they exceeded the uncached
+ *  input, which is nearly every call: 6,778 of 6,798 calls over three days on
+ *  the server, about 2.35 billion cache-read tokens reported as zero. */
+export function claudeUsageBreakdown(usage) {
+  return {
+    input: finiteCount(usage?.input_tokens),
+    output: finiteCount(usage?.output_tokens),
+    cacheRead: finiteCount(usage?.cache_read_input_tokens),
+    cacheCreation: finiteCount(usage?.cache_creation_input_tokens),
+  };
+}
+
+/**
+ * Claude Code writes one assistant line per content block (thinking, text,
+ * each tool_use), and every one of those lines repeats the same
+ * `message.usage`.  Counting each line counted one API call two to three times
+ * (2.18x over 6,523 lines on the server, Oct 29, 2026), so only the FIRST line
+ * of each `message.id` is counted.
+ *
+ * The first line is the one to keep, not the last: its line number is fixed
+ * once written, so its eventId (which hashes `L<line>`) is the eventId this
+ * collector already sent for it, and a replay over rows the monitor already
+ * stored stays byte-identical.  The last line moves as a streaming message
+ * gains blocks between passes, which would mint a new eventId.  A line with no
+ * `message.id` is counted as before.
+ *
+ * `seenMessageIds` may be shared across the files of one collector pass, so a
+ * call copied into a forked or resumed session's transcript is counted once;
+ * the caller walks the files oldest first, so the original keeps its id.
+ *
+ * An `agent.launcher` in `extraMetadata` is not stamped on a sidechain
+ * (subagent) line: BotFleet bills only its own main-thread turns, so a
+ * subagent call must never be offered to the monitor's BotFleet coverage drop.
+ */
+export function parseClaudeSessionJsonl(
+  text,
+  { sessionKey, fallbackOccurredAt, extraMetadata, seenMessageIds = new Set() } = {}
+) {
   const fallbackIso = fallbackOccurredAt ?? new Date(0).toISOString();
   const events = [];
   const lines = text.split("\n");
@@ -369,6 +423,17 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt }
     }
     const usage = obj?.message?.usage || obj?.usage;
     if (!usage || typeof usage !== "object") continue;
+    const messageId = typeof obj.message?.id === "string" ? obj.message.id : "";
+    if (messageId) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
+    const sessionId = typeof obj.sessionId === "string" && obj.sessionId ? obj.sessionId : undefined;
+    // The transcript's requestId is deliberately NOT sent as providerRequestId:
+    // compliance counts every providerRequestId-carrying event as verifiable and
+    // pending until the verification worker settles it, but only OpenRouter rows
+    // are ever verified — so stamping Anthropic rows would wedge the provider's
+    // badge in "pending" forever (src/lib/provider-compliance.ts).
     const rawModel = (typeof obj.message?.model === "string" && obj.message.model.trim()) || "claude-3-7-sonnet";
     const model = rawModel;
     const occurredAtIso = isoTimestamp(obj.timestamp, fallbackIso);
@@ -376,25 +441,49 @@ export function parseClaudeSessionJsonl(text, { sessionKey, fallbackOccurredAt }
     const speed = usage.speed || obj.speed || "standard";
     const effort = obj.effort || "standard";
 
-    const breakdown = splitInclusiveCache({
-      input: usage.input_tokens,
-      output: usage.output_tokens,
-      cacheRead: usage.cache_read_input_tokens,
-      cacheCreation: usage.cache_creation_input_tokens,
-    });
+    const breakdown = claudeUsageBreakdown(usage);
+    const sidechain = obj.isSidechain === true || (typeof obj.agentId === "string" && !!obj.agentId);
+    const { "agent.launcher": launcher, ...baseMetadata } = extraMetadata ?? {};
+    const metadata = {
+      ...baseMetadata,
+      ...(messageId ? { "call.id": messageId } : {}),
+      ...(launcher && !sidechain ? { "agent.launcher": launcher } : {}),
+      ...(sessionId ? { [SESSION_ID_METADATA_KEY]: sessionId } : {}),
+    };
+    const common = {
+      producerId: CLAUDE_PRODUCER_ID,
+      provider: "anthropic",
+      service: "claude-code",
+      sessionKey: sessionKey ?? "claude",
+      occurredAtIso,
+      model,
+      ...(messageId ? { collectorCallId: messageId } : {}),
+      ...(Object.keys(metadata).length > 0 ? { extraMetadata: metadata } : {}),
+    };
+    // The input row keeps the quantity the old inclusive split gave it, so a
+    // stored row replays byte-identical (the eventId hashes the quantity).
+    // The old split took cache reads off the input whenever they were no
+    // larger than it; that missing part is sent as its own row, so the call
+    // still totals Anthropic's full uncached input without a double count.
+    const legacy = splitInclusiveCache({ input: breakdown.input, cacheRead: breakdown.cacheRead });
+    const inputExclusiveDelta = breakdown.input - legacy.input;
 
     events.push(
       ...tokenEventsFromBreakdown({
-        producerId: CLAUDE_PRODUCER_ID,
-        provider: "anthropic",
-        service: "claude-code",
-        sessionKey: sessionKey ?? "claude",
-        occurredAtIso,
-        model,
-        breakdown,
+        ...common,
+        breakdown: { ...breakdown, input: legacy.input },
         extraId: `L${lineNo}:${model}`,
       })
     );
+    if (inputExclusiveDelta > 0) {
+      events.push(
+        ...tokenEventsFromBreakdown({
+          ...common,
+          breakdown: { input: inputExclusiveDelta, output: 0, cacheRead: 0, cacheCreation: 0 },
+          extraId: `L${lineNo}:${model}:input-exclusive`,
+        })
+      );
+    }
   }
   return events;
 }
@@ -776,6 +865,7 @@ export function parseOpencodeMessageRows(rows) {
       model: model || undefined,
       breakdown,
       extraId: messageId,
+      collectorCallId: messageId,
       extraMetadata: {
         harness: "opencode",
         billingMode: info.billingMode,
@@ -906,9 +996,20 @@ export async function postUsageBatches({
     log(`--dry-run; would send ${events.length} event(s) as ${chunkEvents(events).length} batch(es)`);
     return { received: 0, persisted: 0, rejected: 0, dryRun: true, events };
   }
-  if (!ingestToken) {
-    throw new Error("Missing ingest token");
+  let sentryRoot;
+  let sentryConfig;
+  let spoolError;
+  try {
+    sentryConfig = collectorSentryConfig(process.env, producerId);
+    if (sentryConfig) sentryRoot = await enqueueCollectorSentry(events, { producerId, producerInstanceId: bodyFor([]).producerInstanceId }, sentryConfig);
+  } catch {
+    spoolError = true;
+    log("WARNING: collector Sentry outbox unavailable; Usage Monitor delivery continues");
   }
+  const sentryDelivery = sentryRoot
+    ? drainCollectorSentry(sentryRoot, sentryConfig).catch(() => ({ pending: true }))
+    : Promise.resolve({ pending: false });
+  if (!ingestToken) { await sentryDelivery; throw new Error("Missing ingest token"); }
   let received = 0;
   let persisted = 0;
   let rejected = 0;
@@ -916,13 +1017,14 @@ export async function postUsageBatches({
   const batches = chunkEvents(events);
   for (let i = 0; i < batches.length; i += 1) {
     const batch = batches[i];
-    const parsed = await postBatchIsolatingConflicts({
+    let parsed;
+    try { parsed = await postBatchIsolatingConflicts({
       ingestUrl,
       ingestToken,
       bodyFor,
       events: batch,
       log,
-    });
+    }); } catch (error) { await sentryDelivery; throw error; }
     received += parsed.received;
     persisted += parsed.persisted;
     rejected += parsed.rejected;
@@ -936,6 +1038,14 @@ export async function postUsageBatches({
   if (conflicted > 0) {
     log(`WARNING: ${conflicted} event(s) skipped as idempotency conflicts (already stored with different content)`);
   }
+  if (sentryRoot) {
+    const result = await sentryDelivery;
+    if (result.pending) log("WARNING: collector Sentry delivery pending in durable outbox");
+    if (result.quarantined) log(`WARNING: ${result.quarantined} collector Sentry event(s) quarantined in durable outbox`);
+  }
+  // UM has already acknowledged these rows; retaining the source checkpoint
+  // only retries their idempotent replay until the Sentry spool is durable.
+  if (spoolError) throw new Error("Usage Monitor delivered; collector Sentry outbox failed, checkpoint must not advance");
   return { received, persisted, rejected, conflicted };
 }
 

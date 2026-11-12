@@ -5,6 +5,15 @@ export type B2AppId =
   | "fleet-infra"
   | "other";
 
+/** Human labels for every `B2AppId`.  Client-safe (no server imports). */
+export const B2_APP_LABELS: Record<B2AppId, string> = {
+  "usage-monitor": "Usage Monitor",
+  "socratic-trade": "Socratic.Trade",
+  "congress-trade": "Congress.Trade",
+  "fleet-infra": "Fleet Infra",
+  other: "Other",
+};
+
 export interface B2AppUsageSlice {
   id: B2AppId;
   label: string;

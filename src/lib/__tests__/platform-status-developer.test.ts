@@ -80,7 +80,7 @@ function workflowRunsBody(overrides: Record<string, unknown> = {}) {
         conclusion: "success",
         created_at: "2026-08-11T11:40:00.000Z",
         updated_at: "2026-08-11T11:46:00.000Z",
-        html_url: "https://github.com/jaywedgeworth22/Usage-Monitor/actions/runs/19284756301",
+        html_url: "https://github.com/Simple-With-Us/Usage-Monitor/actions/runs/19284756301",
         ...overrides,
       },
     ],
@@ -201,7 +201,7 @@ describe("developer platform probes", () => {
       const runsUrl = fetchJson.mock.calls[1]?.[0] as string;
       expect(rateLimitUrl).toBe("https://api.github.com/rate_limit");
       expect(runsUrl).toBe(
-        "https://api.github.com/repos/jaywedgeworth22/Usage-Monitor/actions/runs?per_page=1"
+        "https://api.github.com/repos/Simple-With-Us/Usage-Monitor/actions/runs?per_page=1"
       );
       expect(JSON.stringify(result)).not.toContain("ghp-test-token-never-rendered");
     });

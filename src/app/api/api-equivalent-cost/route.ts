@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildApiEquivalentCost } from "@/lib/claude-cost-check";
-import { SUBSCRIPTION_ANALYTICS_SOURCE_APPS } from "@/lib/subscription-analytics";
+import { getExternalEventRawCutoff, startOfUtcDay } from "@/lib/data-retention";
+import {
+  SUBSCRIPTION_ANALYTICS_SOURCE_APPS,
+  isSubscriptionAnalyticsTelemetry,
+} from "@/lib/subscription-analytics";
 
 export const dynamic = "force-dynamic";
 
@@ -22,47 +26,86 @@ export async function GET(request: NextRequest) {
     : Number.isFinite(requestedDays)
     ? Math.min(Math.max(Math.trunc(requestedDays), 1), 3650)
     : 30;
-  const since = days >= 3650 ? new Date(0) : new Date(Date.now() - days * 86_400_000);
+  const now = new Date();
+  const since = days >= 3650 ? new Date(0) : new Date(now.getTime() - days * 86_400_000);
+  const rawCutoff = getExternalEventRawCutoff(now);
+  const rawSince = since > rawCutoff ? since : rawCutoff;
+  const rollupDayGte = startOfUtcDay(since);
   const sourceApps = [...SUBSCRIPTION_ANALYTICS_SOURCE_APPS];
 
   try {
-    const [tokenGroups, costGroups] = await Promise.all([
+    const [tokenGroups, costGroups, rollupTokenGroups, rollupCostGroups] = await Promise.all([
       prisma.externalUsageEvent.groupBy({
         by: ["provider", "sourceApp", "keyRef", "label"],
         where: {
           sourceApp: { in: sourceApps },
           metricType: "usage",
           unit: "token",
-          occurredAt: { gte: since },
+          occurredAt: { gte: rawSince },
         },
         _sum: { quantity: true },
       }),
       prisma.externalUsageEvent.groupBy({
-        by: ["provider", "sourceApp", "keyRef"],
+        by: ["provider", "sourceApp", "service", "keyRef", "label"],
         where: {
           sourceApp: { in: sourceApps },
           metricType: "cost",
-          occurredAt: { gte: since },
+          occurredAt: { gte: rawSince },
         },
         _sum: { costUsd: true },
       }),
+      since < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.groupBy({
+            by: ["provider", "sourceApp", "keyRef", "label"],
+            where: {
+              sourceApp: { in: sourceApps },
+              metricType: "usage",
+              unit: "token",
+              day: { gte: rollupDayGte, lt: rawCutoff },
+            },
+            _sum: { totalQuantity: true },
+          })
+        : Promise.resolve([]),
+      since < rawCutoff
+        ? prisma.externalUsageEventDailyRollup.groupBy({
+            by: ["provider", "sourceApp", "service", "keyRef", "label"],
+            where: {
+              sourceApp: { in: sourceApps },
+              metricType: "cost",
+              day: { gte: rollupDayGte, lt: rawCutoff },
+            },
+            _sum: { totalCostUsd: true },
+          })
+        : Promise.resolve([]),
     ]);
 
     const report = buildApiEquivalentCost(
-      tokenGroups.map((group) => ({
+      [
+        ...tokenGroups.map((group) => ({ ...group, quantity: group._sum.quantity ?? 0 })),
+        ...rollupTokenGroups.map((group) => ({ ...group, quantity: group._sum.totalQuantity ?? 0 })),
+      ].map((group) => ({
         provider: group.provider,
         sourceApp: group.sourceApp,
         model: group.keyRef,
         tokenType: group.label?.startsWith("token:")
           ? group.label.slice("token:".length)
           : "unknown",
-        quantity: group._sum.quantity ?? 0,
+        quantity: group.quantity,
       })),
-      costGroups.map((group) => ({
+      [
+        ...costGroups.map((group) => ({ ...group, costUsd: group._sum.costUsd ?? 0 })),
+        ...rollupCostGroups.map((group) => ({ ...group, costUsd: group._sum.totalCostUsd ?? 0 })),
+      ].filter((group) => isSubscriptionAnalyticsTelemetry({
+        sourceApp: group.sourceApp,
+        service: group.service,
+        provider: group.provider,
+        metricType: "cost",
+        label: group.label,
+      })).map((group) => ({
         provider: group.provider,
         sourceApp: group.sourceApp,
         model: group.keyRef,
-        costUsd: group._sum.costUsd ?? 0,
+        costUsd: group.costUsd,
       }))
     );
 

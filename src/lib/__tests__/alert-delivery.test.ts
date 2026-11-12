@@ -727,8 +727,8 @@ describe("alert delivery", () => {
       maxAttempts: 1,
       retryBaseMs: 0,
     };
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     type AlertDb = NonNullable<
       NonNullable<Parameters<typeof deliverProviderAlerts>[0]>["db"]
     >;
@@ -832,8 +832,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     let observedResolvedReads = 0;
     let releaseBarrier: (() => void) | undefined;
     const bothObserved = new Promise<void>((resolve) => {
@@ -997,8 +997,8 @@ describe("alert delivery", () => {
         balance: 25,
       },
     });
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     const resolver = await deliverProviderAlerts({
       now: new Date("2026-07-20T13:00:02.000Z"),
       config,
@@ -1074,8 +1074,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     let signalResolverParent: (() => void) | undefined;
     let releaseResolverParent: (() => void) | undefined;
     const resolverParentReached = new Promise<void>((resolve) => {
@@ -1239,8 +1239,8 @@ describe("alert delivery", () => {
     });
     await staleChildReached;
 
-    const { PrismaClient } = await import("@prisma/client");
-    const freshPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const freshPrisma = createPrismaClient();
     try {
       await freshPrisma.usageSnapshot.create({
         data: {
@@ -1363,8 +1363,8 @@ describe("alert delivery", () => {
         balance: 25,
       },
     });
-    const { PrismaClient } = await import("@prisma/client");
-    const resolverPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const resolverPrisma = createPrismaClient();
     const resolved = await deliverProviderAlerts({
       now: new Date("2026-07-20T14:00:00.000Z"),
       config,
@@ -1739,8 +1739,8 @@ describe("alert delivery", () => {
     });
     await rev0ReadReached;
 
-    const { PrismaClient } = await import("@prisma/client");
-    const configClient = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const configClient = createPrismaClient();
     try {
       await configClient.provider.update({
         where: { id: provider.id },
@@ -3086,8 +3086,8 @@ describe("alert delivery", () => {
       },
     });
 
-    const { PrismaClient } = await import("@prisma/client");
-    const contenderPrisma = new PrismaClient();
+    const { createPrismaClient } = await import("@/lib/create-prisma-client");
+    const contenderPrisma = createPrismaClient();
     type AlertDb = NonNullable<
       NonNullable<Parameters<typeof deliverProviderAlerts>[0]>["db"]
     >;
