@@ -22,8 +22,8 @@ function transferError(code, status = null) {
 function normalizeConfig(env) {
   const baseUrl = env.INFISICAL_BASE_URL || "https://app.infisical.com";
   const projectId = env.INFISICAL_UM_PROJECT_ID || env.INFISICAL_PROJECT_ID || "";
-  const environment = env.INFISICAL_ENVIRONMENT || "";
-  const secretPath = env.INFISICAL_SECRET_PATH || "";
+  const environment = env.INFISICAL_ENVIRONMENT || env.INFISICAL_ENV || "prod";
+  const secretPath = env.INFISICAL_UM_SECRET_PATH || env.INFISICAL_SECRET_PATH || "/";
   const writeToken = env.INFISICAL_UM_WRITE_TOKEN || "";
   const readToken = env.INFISICAL_UM_READ_TOKEN || "";
 
@@ -130,27 +130,30 @@ async function readMuseAccessToken({ execFileImpl, platform }) {
 
 async function writeSecret(config, accessToken, fetchImpl) {
   const url = new URL(`/api/v4/secrets/${SECRET_NAME}`, config.base);
-  const request = {
-    headers: {
-      authorization: `Bearer ${config.writeToken}`,
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({
-      projectId: config.projectId,
-      environment: config.environment,
-      secretPath: config.secretPath,
-      secretValue: accessToken,
-      type: "shared",
-    }),
+  const headers = {
+    authorization: `Bearer ${config.writeToken}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  const body = JSON.stringify({
+    projectId: config.projectId,
+    environment: config.environment,
+    secretPath: config.secretPath,
+    secretValue: accessToken,
+    type: "shared",
+  });
+  const send = (method) => fetchImpl(url, {
+    method,
+    headers,
+    body,
     redirect: "error",
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
-  };
+  });
   let response;
   try {
-    response = await fetchImpl(url, { ...request, method: "PATCH" });
+    response = await send("PATCH");
     if (response.status === 404) {
-      response = await fetchImpl(url, { ...request, method: "POST" });
+      response = await send("POST");
     }
   } catch {
     throw transferError("secret-write-request-failed");

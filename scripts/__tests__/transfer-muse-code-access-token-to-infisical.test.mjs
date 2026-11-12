@@ -11,23 +11,23 @@ const WRITE_ENV = {
 };
 const ACCESS_TOKEN_FIXTURE = "oauth-access-fixture";
 
-function metadata(permissions) {
+function metadata(permissions, secretPath = "/") {
   return {
     workspace: "project-id-fixture",
     permissions: Array.isArray(permissions) ? permissions : [permissions],
-    scopes: [{ environment: "prod", secretPath: "/" }],
+    scopes: [{ environment: "prod", secretPath }],
     expiresAt: null,
   };
 }
 
-function fetchMock({ writeStatus = 200, readbackValue = ACCESS_TOKEN_FIXTURE, writePermissions = ["write"] } = {}) {
+function fetchMock({ writeStatus = 200, readbackValue = ACCESS_TOKEN_FIXTURE, writePermissions = ["write"], secretPath = "/" } = {}) {
   return vi.fn(async (url, init = {}) => {
     const parsed = new URL(url);
     if (parsed.pathname === "/api/v2/service-token") {
       const permissions = init.headers.authorization.endsWith("read.fixture")
         ? ["read"]
         : writePermissions;
-      return new Response(JSON.stringify(metadata(permissions)), { status: 200 });
+      return new Response(JSON.stringify(metadata(permissions, secretPath)), { status: 200 });
     }
     if (parsed.pathname === "/api/v4/secrets/MUSE_CODE_ACCESS_TOKEN" && init.method !== "GET") {
       return new Response("private response body", { status: writeStatus });
@@ -54,7 +54,7 @@ describe("transferMuseCodeAccessToken", () => {
     const fetchImpl = vi.fn();
     const execFileImpl = vi.fn();
     await expect(transferMuseCodeAccessToken({
-      env: { ...WRITE_ENV, INFISICAL_SECRET_PATH: "/../outside" }, fetchImpl, execFileImpl, platform: "darwin",
+      env: { ...WRITE_ENV, INFISICAL_UM_SECRET_PATH: "/../outside" }, fetchImpl, execFileImpl, platform: "darwin",
     })).rejects.toMatchObject({ code: "invalid-secret-path" });
     await expect(transferMuseCodeAccessToken({
       env: { ...WRITE_ENV, INFISICAL_UM_WRITE_TOKEN: "" }, fetchImpl, execFileImpl, platform: "darwin",
@@ -69,6 +69,48 @@ describe("transferMuseCodeAccessToken", () => {
     await expect(transferMuseCodeAccessToken({
       env: WRITE_ENV, fetchImpl, execFileImpl, platform: "linux",
     })).rejects.toMatchObject({ code: "interactive-transfer-requires-macos" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  it("defaults omitted environment and path to prod root", async () => {
+    const env = {
+      ...WRITE_ENV,
+      INFISICAL_ENVIRONMENT: "",
+      INFISICAL_ENV: "",
+      INFISICAL_SECRET_PATH: "",
+      INFISICAL_UM_SECRET_PATH: "",
+    };
+    const fetchImpl = fetchMock();
+    const result = await transferMuseCodeAccessToken({
+      env, fetchImpl, execFileImpl: keychainMock(), platform: "darwin",
+    });
+    const [, request] = secretRequests(fetchImpl)[0];
+    expect(JSON.parse(request.body)).toMatchObject({ environment: "prod", secretPath: "/" });
+    expect(result.writeStatus).toBe(200);
+  });
+
+  it("prefers the documented UM path and accepts the documented environment alias", async () => {
+    const env = {
+      ...WRITE_ENV,
+      INFISICAL_ENVIRONMENT: "",
+      INFISICAL_ENV: "prod",
+      INFISICAL_SECRET_PATH: "",
+      INFISICAL_UM_SECRET_PATH: "/muse-code",
+    };
+    const fetchImpl = fetchMock({ secretPath: "/muse-code" });
+    await transferMuseCodeAccessToken({ env, fetchImpl, execFileImpl: keychainMock(), platform: "darwin" });
+    const [, request] = secretRequests(fetchImpl)[0];
+    expect(JSON.parse(request.body)).toMatchObject({ environment: "prod", secretPath: "/muse-code" });
+  });
+
+  it("refuses non-prod aliases before contacting Infisical or Keychain", async () => {
+    const fetchImpl = vi.fn();
+    const execFileImpl = vi.fn();
+    await expect(transferMuseCodeAccessToken({
+      env: { ...WRITE_ENV, INFISICAL_ENVIRONMENT: "", INFISICAL_ENV: "dev" },
+      fetchImpl, execFileImpl, platform: "darwin",
+    })).rejects.toMatchObject({ code: "environment-must-be-prod" });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(execFileImpl).not.toHaveBeenCalled();
   });
@@ -111,7 +153,11 @@ describe("transferMuseCodeAccessToken", () => {
     const result = await transferMuseCodeAccessToken({
       env: WRITE_ENV, fetchImpl, execFileImpl: keychainMock(), platform: "darwin",
     });
-    expect(secretRequests(fetchImpl).map(([, request]) => request.method)).toEqual(["PATCH", "POST"]);
+    const requests = secretRequests(fetchImpl);
+    expect(requests.map(([, request]) => request.method)).toEqual(["PATCH", "POST"]);
+    expect(requests[0][1].signal).not.toBe(requests[1][1].signal);
+    expect(requests[0][1].signal.aborted).toBe(false);
+    expect(requests[1][1].signal.aborted).toBe(false);
     expect(result.writeStatus).toBe(201);
   });
 
