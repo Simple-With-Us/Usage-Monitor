@@ -204,6 +204,19 @@ jobs:
           node-version-file: .node-version
           cache: npm
 
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line.
+      #
+      # It runs BEFORE `npm ci`.  The script is plain Node with no
+      # dependencies, so a runner on the wrong runtime fails here, before it
+      # builds node_modules under the wrong ABI and leaves a poisoned install
+      # and npm cache behind for later steps to reuse.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
+
       - name: Install dependencies
         run: npm ci
 
@@ -312,6 +325,8 @@ jobs:
           bash -n scripts/test-ios-scheduled-ship-gate.sh
           bash -n scripts/ios-ship-testflight.sh
           bash -n scripts/ios-ship-testflight-local.sh
+          bash -n scripts/ios-recheck-tf-ready.sh
+          bash -n scripts/ios-fleet/tf-ready-rc.sh
           bash -n scripts/ios-appstore-gm-prepare.sh
           bash -n scripts/ios-stage-asc-key.sh
           bash -n scripts/test-ios-stage-asc-key.sh
@@ -321,6 +336,8 @@ jobs:
           bash scripts/test-ios-scheduled-ship-gate.sh
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
+          bash -n scripts/ios-fleet/publish-ios-versions.sh
+          bash -n scripts/ios-fleet/assign-external-beta.sh
 
       # The server's storage watch (deploy/server/vps-storage-watch):  a
       # database past its growth threshold posts one alert tagging both
@@ -343,6 +360,11 @@ jobs:
           node --test scripts/ios-fleet/test-asc-key.test.mjs
           bash scripts/ios-fleet/test-asc-credentials.sh
 
+      # Version-manifest publish and external beta assignment (UM-1640).
+      # Fully offline: a fake gh and a fake App Store Connect client, no secrets.
+      - name: Test the iOS version manifest and external beta assignment
+        run: node --test scripts/ios-fleet/publish-ios-versions.test.mjs scripts/ios-fleet/assign-external-beta.node-test.mjs
+
       # The fleet's version-numbering rules (AFC-517):  the marketing version
       # is the next patch on the app's train and the build number is
       # INDEPENDENT of it, so App Store Connect can no longer show "1.0.N (N)".
@@ -358,6 +380,9 @@ jobs:
       # this is its unit test.  Fully offline:  no network, no credentials.
       - name: Test the iOS fleet shared release build
         run: node --test scripts/ios-fleet/shared-build.test.mjs
+
+      - name: Test ensure-tf-ready exit-code labels
+        run: node --test scripts/ios-fleet/test-ensure-tf-ready-rc.node-test.mjs
 
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place

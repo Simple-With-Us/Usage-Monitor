@@ -67,7 +67,7 @@ import {
   recordCollectorSuccess,
   resolveCollectorArgs,
   resolveCollectorToken,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/opencode-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -438,7 +438,7 @@ async function main() {
     }
     return;
   }
-  const token = resolveCollectorToken(["OPENCODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["OPENCODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   try {
     const ack = await postUsageBatches({
       events,

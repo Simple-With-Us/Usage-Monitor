@@ -2,7 +2,7 @@ import { AgentsDashboard } from "@/components/AgentsDashboard";
 
 export const metadata = {
   title: "Coding Agents | Usage Monitor",
-  description: "Live process status, token telemetry, quota burn, and PAYG API-equivalent cost savings for AI coding agents.",
+  description: "Live status, token counts, quota use, and list-price savings for coding tools.",
 };
 
 export default function AgentsPage() {

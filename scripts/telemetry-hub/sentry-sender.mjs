@@ -93,6 +93,12 @@ export const MAX_BODY_CHARS = 512 * 1024;
 /** How many journal events one pass reads before it splits them by kind. */
 export const DEFAULT_READ_LIMIT = 200;
 
+/** How long one pass may keep draining batches after the first read. */
+export const DEFAULT_DRAIN_BUDGET_MS = 5_000;
+
+/** How many journal batches one pass may read while draining. */
+export const DEFAULT_DRAIN_MAX_BATCHES = 25;
+
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 1_000;
@@ -257,6 +263,8 @@ export function createSentrySender({
   endpoint = process.env.SENTRY_OTLP_ENDPOINT?.trim(),
   publicKey = process.env.SENTRY_PUBLIC_KEY?.trim(),
   readLimit = DEFAULT_READ_LIMIT,
+  drainBudgetMs = DEFAULT_DRAIN_BUDGET_MS,
+  drainMaxBatches = DEFAULT_DRAIN_MAX_BATCHES,
   dryRun = false,
   logger = NULL_LOGGER,
   fetchImpl = globalThis.fetch,
@@ -403,104 +411,142 @@ export function createSentrySender({
       warnHeld({ responseClass: request?.responseClass, heldEvents: request?.events.length, rejectedCount: request?.rejectedCount });
       return { ok: false, retry: false, held: true, delivered: 0, quarantined: 0, ...(request ? { heldEvents: request.events.length, responseClass: request.responseClass ?? "unresolved_intent", ...(request.rejectedCount === undefined ? {} : { rejectedCount: request.rejectedCount }) } : {}) };
     }
-    const batch = await journal.readBatch(destination, readLimit);
-    if (batch.events.length === 0) {
-      return { ok: true, delivered: 0, quarantined: 0, empty: true };
-    }
+    //  One batch of readLimit events every ten seconds cannot keep pace
+    //  when a collector drains a durable outbox into the receiver: the
+    //  backlog then grows faster than the pass drains it, which is the
+    //  same shape the collector-side drain fix (UM-1649) addressed.  Each
+    //  pass therefore keeps reading and delivering batches until a short
+    //  read says the journal is caught up, or the wall-clock or
+    //  request-count budget runs out, so a backlog drains promptly without
+    //  ever turning one pass into an unbounded run.  Delivery failure
+    //  semantics are unchanged: whatever a failed batch delivered before
+    //  failing stays delivered, the pass stops there, and the next tick
+    //  resumes.
+    const deadline = Date.now() + drainBudgetMs;
+    let batchesLeft = drainMaxBatches;
+    let deliveredTotal = 0;
+    let quarantinedTotal = 0;
+    let firstBatch = true;
 
-    // S1: the content fields are stripped before the scrubber runs, and the
-    // scrubber drops them as well.  Two independent barriers.
-    const scrubbed = batch.events
-      .map((event) => scrubInternalEvent(event))
-      .filter((event) => !!event);
+    for (;;) {
+      const batch = await journal.readBatch(destination, readLimit);
+      if (batch.events.length === 0) {
+        if (!firstBatch) break;
+        return { ok: true, delivered: 0, quarantined: 0, empty: true };
+      }
 
-    const spans = scrubbed.filter((event) => event.kind !== "log");
-    const logs = scrubbed.filter((event) => event.kind === "log");
+      // S1: the content fields are stripped before the scrubber runs, and the
+      // scrubber drops them as well.  Two independent barriers.
+      const scrubbed = batch.events
+        .map((event) => scrubInternalEvent(event))
+        .filter((event) => !!event);
 
-    if (dryRun) {
-      logger.info("sentry dry run", {
-        destination,
-        events: batch.events.length,
-        spans: spans.length,
-        logs: logs.length,
-        attributeKeys: [...new Set(scrubbed.flatMap((event) => event.attributes.map((a) => a.key)))].sort(),
+      const spans = scrubbed.filter((event) => event.kind !== "log");
+      const logs = scrubbed.filter((event) => event.kind === "log");
+
+      if (dryRun) {
+        logger.info("sentry dry run", {
+          destination,
+          events: batch.events.length,
+          spans: spans.length,
+          logs: logs.length,
+          attributeKeys: [...new Set(scrubbed.flatMap((event) => event.attributes.map((a) => a.key)))].sort(),
+        });
+        return { ok: true, delivered: 0, quarantined: 0, dryRun: true };
+      }
+
+      if (!root || !publicKey) {
+        logger.error("the sentry otlp endpoint or public key is not configured", { destination });
+        return { ok: false, retry: false, delivered: 0, quarantined: 0 };
+      }
+
+      const deliveredIds = [];
+      let quarantined = 0;
+
+      const spanChunks = chunkBySize(spans, buildTracesEnvelope, {
+        maxCount: MAX_SPANS_PER_REQUEST,
+        maxChars: MAX_BODY_CHARS,
       });
-      return { ok: true, delivered: 0, quarantined: 0, dryRun: true };
-    }
-
-    if (!root || !publicKey) {
-      logger.error("the sentry otlp endpoint or public key is not configured", { destination });
-      return { ok: false, retry: false, delivered: 0, quarantined: 0 };
-    }
-
-    const deliveredIds = [];
-    let quarantined = 0;
-
-    const spanChunks = chunkBySize(spans, buildTracesEnvelope, {
-      maxCount: MAX_SPANS_PER_REQUEST,
-      maxChars: MAX_BODY_CHARS,
-    });
-    for (const chunk of spanChunks) {
-      const outcome = await deliverGroup(chunk, SENTRY_TRACES_PATH, buildTracesEnvelope);
-      if (outcome.outcome !== "ok") {
-        //  Whatever was delivered before the failure stays delivered, so
-        //  the next pass does not send it again.  That includes the events
-        //  of the failed chunk that the isolation split delivered before
-        //  the failure: they reached Sentry, so they must be marked.
-        const partial = [...outcome.delivered, ...outcome.quarantined]
-          .map((event) => eventIdOf(event))
+      for (const chunk of spanChunks) {
+        const outcome = await deliverGroup(chunk, SENTRY_TRACES_PATH, buildTracesEnvelope);
+        if (outcome.outcome !== "ok") {
+          //  Whatever was delivered before the failure stays delivered, so
+          //  the next pass does not send it again.  That includes the events
+          //  of the failed chunk that the isolation split delivered before
+          //  the failure: they reached Sentry, so they must be marked.
+          const partial = [...outcome.delivered, ...outcome.quarantined]
+            .map((event) => eventIdOf(event))
+            .filter((id) => typeof id === "string" && id);
+          await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
+          logger.warn("sentry is not accepting the batch", {
+            destination,
+            path: SENTRY_TRACES_PATH,
+            status: outcome.status,
+            outcome: outcome.outcome,
+          });
+          return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredTotal + deliveredIds.length + outcome.delivered.length, quarantined: quarantinedTotal + quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        }
+        const ids = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event.eventId)
           .filter((id) => typeof id === "string" && id);
-        await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
-        logger.warn("sentry is not accepting the batch", {
-          destination,
-          path: SENTRY_TRACES_PATH,
-          status: outcome.status,
-          outcome: outcome.outcome,
-        });
-        return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredIds.length + outcome.delivered.length, quarantined: quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        quarantined += outcome.quarantined.length;
+        await journal.markSentBatch(destination, ids);
+        deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          //  Budget stop between chunks.  The offset stays where it was, so
+          //  the rest of this batch is re-read next pass and the sent set
+          //  keeps the delivered events from going out twice.
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
       }
-      const ids = [...outcome.delivered, ...outcome.quarantined]
-        .map((event) => event.eventId)
-        .filter((id) => typeof id === "string" && id);
-      quarantined += outcome.quarantined.length;
-      await journal.markSentBatch(destination, ids);
-      deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
-    }
 
-    const logChunks = chunkBySize(logs, buildLogsEnvelope, {
-      maxCount: MAX_LOGS_PER_REQUEST,
-      maxChars: MAX_BODY_CHARS,
-    });
-    for (const chunk of logChunks) {
-      const outcome = await deliverGroup(chunk, SENTRY_LOGS_PATH, buildLogsEnvelope);
-      if (outcome.outcome !== "ok") {
-        //  The same rule as the span chunks: the events of the failed
-        //  chunk that were delivered before the failure stay delivered.
-        const partial = [...outcome.delivered, ...outcome.quarantined]
-          .map((event) => eventIdOf(event))
+      const logChunks = chunkBySize(logs, buildLogsEnvelope, {
+        maxCount: MAX_LOGS_PER_REQUEST,
+        maxChars: MAX_BODY_CHARS,
+      });
+      for (const chunk of logChunks) {
+        const outcome = await deliverGroup(chunk, SENTRY_LOGS_PATH, buildLogsEnvelope);
+        if (outcome.outcome !== "ok") {
+          //  The same rule as the span chunks: the events of the failed
+          //  chunk that were delivered before the failure stay delivered.
+          const partial = [...outcome.delivered, ...outcome.quarantined]
+            .map((event) => eventIdOf(event))
+            .filter((id) => typeof id === "string" && id);
+          await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
+          logger.warn("sentry is not accepting the batch", {
+            destination,
+            path: SENTRY_LOGS_PATH,
+            status: outcome.status,
+            outcome: outcome.outcome,
+          });
+          return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredTotal + deliveredIds.length + outcome.delivered.length, quarantined: quarantinedTotal + quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        }
+        const ids = [...outcome.delivered, ...outcome.quarantined]
+          .map((event) => event.eventId)
           .filter((id) => typeof id === "string" && id);
-        await journal.markSentBatch(destination, [...deliveredIds, ...partial]);
-        logger.warn("sentry is not accepting the batch", {
-          destination,
-          path: SENTRY_LOGS_PATH,
-          status: outcome.status,
-          outcome: outcome.outcome,
-        });
-        return { ok: false, retry: outcome.outcome === "retry", delivered: deliveredIds.length + outcome.delivered.length, quarantined: quarantined + outcome.quarantined.length, ...(outcome.outcome === "held" ? { held: true, heldEvents: outcome.heldEvents, responseClass: outcome.responseClass, ...(outcome.rejectedCount === undefined ? {} : { rejectedCount: outcome.rejectedCount }) } : {}) };
+        quarantined += outcome.quarantined.length;
+        await journal.markSentBatch(destination, ids);
+        deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+        if (Date.now() >= deadline) {
+          return { ok: true, delivered: deliveredTotal + deliveredIds.length, quarantined: quarantinedTotal + quarantined, budgetStopped: true };
+        }
       }
-      const ids = [...outcome.delivered, ...outcome.quarantined]
-        .map((event) => event.eventId)
-        .filter((id) => typeof id === "string" && id);
-      quarantined += outcome.quarantined.length;
-      await journal.markSentBatch(destination, ids);
-      deliveredIds.push(...outcome.delivered.map((event) => event.eventId));
+
+      //  The offset advances per fully delivered batch, so progress is
+      //  durable even when a later batch fails and a backlog never wedges
+      //  compaction behind one pass.
+      await journal.setOffset(destination, batch.endOffset);
+      deliveredTotal += deliveredIds.length;
+      quarantinedTotal += quarantined;
+      firstBatch = false;
+      const drained = batch.events.length < readLimit;
+      if (drained || Date.now() >= deadline || (batchesLeft -= 1) <= 0) break;
     }
 
-    await journal.setOffset(destination, batch.endOffset);
     return {
       ok: true,
-      delivered: deliveredIds.length,
-      quarantined,
+      delivered: deliveredTotal,
+      quarantined: quarantinedTotal,
     };
   }
 

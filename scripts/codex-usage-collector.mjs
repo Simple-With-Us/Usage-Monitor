@@ -47,7 +47,7 @@ import {
   resolveCollectorToken,
   walkFiles,
   withCorrelationMetadata,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/codex-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -137,7 +137,7 @@ async function main() {
     }
     return;
   }
-  const token = resolveCollectorToken([
+  const token = await resolveCollectorToken([
     "CODEX_INGEST_TOKEN",
     "USAGE_INGEST_TOKEN",
   ]);

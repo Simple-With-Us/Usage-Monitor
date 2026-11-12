@@ -88,7 +88,15 @@ RUN apt-get update \
   # GitHub-CDN/HTTP2 flake with no retry to absorb it, which then stalled the
   # whole serialized build queue behind the failed deploy. HTTP/1.1 sidesteps
   # the framing bug class; --retry-all-errors covers the rest.
-  && curl -fsSL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/infisical.tgz \
+  #
+  # The retry BUDGET matters as much as the flags.  Measured on 2026-11-09,
+  # the release-asset CDN degrades in rotating windows of roughly 20 seconds
+  # to 2 minutes, and the window moves between assets: the same release's
+  # arm64 asset served 200 while its amd64 asset returned 504.  The previous
+  # 5x2s budget spans about 10 seconds, which cannot survive one of those
+  # windows, so the build failed on a CDN state it had no chance to wait out.
+  # 180 seconds is the bound; a genuinely missing asset still fails closed.
+  && curl -fsSL --http1.1 --retry 10 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o /tmp/infisical.tgz \
        "https://github.com/Infisical/cli/releases/download/v${INFISICAL_CLI_VERSION}/cli_${INFISICAL_CLI_VERSION}_linux_${cli_arch}.tar.gz" \
   && tar -xzf /tmp/infisical.tgz -C /tmp \
   && install -m 0755 /tmp/infisical /usr/local/bin/infisical \
