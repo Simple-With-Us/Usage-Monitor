@@ -109,17 +109,21 @@ export function resolveCollectorToken(
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
+    // Strict injected-secrets mode skips the runtime lookup entirely:
+    // only values already injected into the environment count.
     let fromLookup = null;
-    try {
-      fromLookup = env.COLLECTOR_STRICT_INJECTED_SECRETS === "1" ? null : effectiveLookup(name)?.trim();
-    } catch (err) {
-      // A remote read/auth failure is not a value and must never mask a
-      // usable input under a later name (the retired helper returned null
-      // on failure, so a later env token still won).  The first failure is
-      // rethrown only when no name yields a value at all: a failure with no
-      // usable token anywhere is not a silent miss (deliberate contract
-      // change from the retired helper's null-on-failure).
-      deferredFailure ??= err;
+    if (env.COLLECTOR_STRICT_INJECTED_SECRETS !== "1") {
+      try {
+        fromLookup = effectiveLookup(name)?.trim();
+      } catch (err) {
+        // A remote read/auth failure is not a value and must never mask a
+        // usable input under a later name (the retired helper returned null
+        // on failure, so a later env token still won).  The first failure is
+        // rethrown only when no name yields a value at all: a failure with no
+        // usable token anywhere is not a silent miss (deliberate contract
+        // change from the retired helper's null-on-failure).
+        deferredFailure ??= err;
+      }
     }
     if (fromLookup) return fromLookup;
   }
