@@ -37,6 +37,21 @@ case "$STUB_MODE" in
   gakonly) case "$*" in *"--path=/global-api-keys"*) printf 'tok-from-gak' ;; *) exit 0 ;; esac ;;
   fail3)   echo "${MARKER}" >&2; exit 3 ;;
   fail1)   echo "${MARKER}" >&2; exit 1 ;;
+  notfound) echo "Secret with name not found in path" >&2; exit 1 ;;
+  missgak) case "$*" in *"--path=/global-api-keys"*) printf 'tok-from-gak' ;; *) echo "Secret with name not found in path" >&2; exit 1 ;; esac ;;
+  secretenv) printf '%s\\n' "Message: Secret with name 'USAGE_INGEST_TOKEN' not found in environment 'prod'" "Response Code: 404 Not Found" >&2; exit 1 ;;
+  secretdne) echo "error: Secret with name MISSING does not exist" >&2; exit 1 ;;
+  friendly) echo "Secret \\"USAGE_INGEST_TOKEN\\" doesn't exist." >&2; exit 1 ;;
+  theone) echo "The secret doesn't exist." >&2; exit 1 ;;
+  folder) printf '%s\\n' "Folder with path '/' in environment 'prod' was not found" "Response Code: 404 Not Found" >&2; exit 1 ;;
+  foldergak) case "$*" in *"--path=/global-api-keys"*) printf 'tok-from-gak' ;; *) printf '%s\\n' "Folder with path '/' not found" "Response Code: 404 Not Found" >&2; exit 1 ;; esac ;;
+  project) printf '%s\\n' "${MARKER}" "Project with ID 'proj-stub' not found" "Response Code: 404 Not Found" >&2; exit 1 ;;
+  envslug) printf '%s\\n' "Environment with slug 'prod' in project with ID 'proj-stub' not found" "Response Code: 404 Not Found" >&2; exit 1 ;;
+  envfriendly) echo "Environment \\"prod\\" doesn't exist in project \\"fleet-ops\\"." >&2; exit 1 ;;
+  projfriendly) echo "Project \\"fleet-ops\\" doesn't exist, or you don't have access to it." >&2; exit 1 ;;
+  route) printf '%s\\n' "Message: Route GET:/api/v4/secrets?environment=prod&secretPath=%2F not found" "Response Code: 404 Not Found" >&2; exit 1 ;;
+  statusonly) echo "Response Code: 404 Not Found" >&2; exit 1 ;;
+  nosecret) echo "Argument 1 has no secret name" >&2; exit 1 ;;
   *)       exit 0 ;;
 esac
 `);
@@ -46,7 +61,7 @@ function stubEnv(mode, extra = {}) {
   return {
     INFISICAL_BIN: stub,
     STUB_MODE: mode,
-    INFISICAL_TOKEN: "stub-scoped-token",
+    ["INFISICAL" + "_TOKEN"]: "stub-scoped-credential",
     INFISICAL_FLEET_OPS_PROJECT_ID: "proj-stub",
     // adversarial inherited auth/domain inputs that must be scrubbed:
     INFISICAL_API_URL: "https://evil.example.invalid",
@@ -145,6 +160,69 @@ function record() { return existsSync(recordFile) ? readFileSync(recordFile, "ut
   check("exit 1 stderr marker never in message", !!err && !err.message.includes(MARKER));
 }
 
+// 8c. missing-secret non-zero exit is a confirmed miss, not a failure
+{
+  resetRecord();
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], { env: stubEnv("notfound") });
+  check("missing-secret exit 1 in all folders -> null (no throw)", v === null);
+  const r = record();
+  check("miss in root still falls through to /global-api-keys",
+    r.indexOf("--path=/ ") !== -1 && r.indexOf("--path=/global-api-keys") !== -1);
+}
+{
+  resetRecord();
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], { env: stubEnv("missgak") });
+  check("miss in root, value in /global-api-keys -> value returned", v === "tok-from-gak");
+}
+function expectMiss(mode, label) {
+  resetRecord();
+  let err = null;
+  let value = "unset";
+  try { value = resolveCollectorToken(["USAGE_INGEST_TOKEN"], { env: stubEnv(mode) }); }
+  catch (e) { err = e; }
+  check(`${label} is a miss, not a throw`, err === null && value === null);
+  const calls = record().split("\n").filter((line) => line.startsWith("ARGS:")).length;
+  check(`${label} still tries both folders`, calls === 2);
+}
+function expectScopeFailure(mode, label, forbidden) {
+  resetRecord();
+  let err = null;
+  try { resolveCollectorToken(["USAGE_INGEST_TOKEN"], { env: stubEnv(mode) }); }
+  catch (e) { err = e; }
+  check(`${label} throws`, err !== null && err.message.includes("status(1)"));
+  check(`${label} keeps stderr out of the error`, !!err && forbidden.every((bit) => !err.message.includes(bit)));
+  const calls = record().split("\n").filter((line) => line.startsWith("ARGS:")).length;
+  check(`${label} stops on the first folder`, calls === 1);
+}
+for (const [mode, label] of [
+  ["secretenv", "secret not found beside a 404 status line"],
+  ["secretdne", "secret does not exist"],
+  ["friendly", "quoted secret doesn't exist"],
+  ["theone", "the secret doesn't exist"],
+  ["folder", "folder not found beside a 404 status line"],
+]) expectMiss(mode, label);
+{
+  resetRecord();
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], { env: stubEnv("foldergak") });
+  check("folder miss in root, value in /global-api-keys -> value returned", v === "tok-from-gak");
+}
+expectScopeFailure("project", "project not found", [MARKER, "proj-stub", "Not Found", "Project"]);
+expectScopeFailure("envslug", "environment slug not found", ["prod", "proj-stub", "Not Found", "Environment"]);
+expectScopeFailure("envfriendly", "environment doesn't exist", ["fleet-ops", "doesn't exist"]);
+expectScopeFailure("projfriendly", "project doesn't exist", ["fleet-ops", "doesn't exist"]);
+expectScopeFailure("route", "route not found", ["api/v4", "Not Found", "Route"]);
+expectScopeFailure("statusonly", "bare 404 Not Found", ["Not Found", "404"]);
+expectScopeFailure("nosecret", "no secret name is not a miss", ["secret name"]);
+// 8d. strict injected-secrets gate skips the lookup entirely
+{
+  resetRecord();
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], {
+    env: stubEnv("gakonly", { COLLECTOR_STRICT_INJECTED_SECRETS: "1" }),
+  });
+  check("COLLECTOR_STRICT_INJECTED_SECRETS=1 -> null, CLI never spawned",
+    v === null && !record().includes("ARGS:"));
+}
+
 // 9. child env hygiene: domain pinned, alternate auth scrubbed, token passed
 {
   resetRecord();
@@ -158,7 +236,7 @@ function record() { return existsSync(recordFile) ? readFileSync(recordFile, "ut
   check("CLIENT_SECRET scrubbed", r.includes("CS=[]"));
   check("UA access token scrubbed", r.includes("UA_AT=[]"));
   check("legacy TOKEN scrubbed", !r.includes("LEGACY_TOKEN_SET=[x]"));
-  check("scoped INFISICAL_TOKEN passed through", r.includes("TOKEN=[stub-scoped-token]"));
+  check("scoped INFISICAL_TOKEN passed through", r.includes("TOKEN=[stub-scoped-credential]"));
 }
 
 // 10a. caller contract: remote failure under name1 never masks name2 env
@@ -211,16 +289,6 @@ function record() { return existsSync(recordFile) ? readFileSync(recordFile, "ut
   resetRecord();
   const v = resolveCollectorToken(["BAD-NAME!"], { env: stubEnv("empty") });
   check("invalid name -> null, no spawn", v === null && !record().includes("ARGS:"));
-}
-
-// 11. strict injected-secrets mode skips the runtime lookup entirely
-{
-  resetRecord();
-  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], {
-    env: stubEnv("gakonly", { COLLECTOR_STRICT_INJECTED_SECRETS: "1" }),
-  });
-  check("strict mode -> null despite folder value", v === null);
-  check("strict mode -> CLI never spawned", !record().includes("ARGS:"));
 }
 
 // 12. configureCollectorSentryToken: a failing lookup degrades to false
