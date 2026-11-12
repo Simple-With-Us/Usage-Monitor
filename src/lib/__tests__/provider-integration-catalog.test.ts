@@ -6,17 +6,27 @@ import {
 } from "@/lib/provider-integration-catalog";
 
 describe("provider integration catalog", () => {
-  it("covers every Add Provider built-in plus system/custom/manual adapters exactly once", () => {
+  it("covers every addable built-in plus system/custom/manual adapters exactly once", () => {
     const names = PROVIDER_INTEGRATION_PROFILES.map((profile) => profile.name);
     expect(new Set(names).size).toBe(names.length);
     expect(new Set(names)).toEqual(
       new Set([
-        ...BUILT_IN_PROVIDERS.map((provider) => provider.name),
-        "agent-sync-relay",
+        ...BUILT_IN_PROVIDERS.filter((provider) => provider.lifecycle == null).map((provider) => provider.name),
+        "simple-tools-relay",
         "custom",
         "generic",
       ])
     );
+  });
+
+  it("keeps retired profiles resolvable for historical records without listing them in the connection catalog", () => {
+    const listed = new Set<string>(
+      PROVIDER_INTEGRATION_PROFILES.map((profile) => profile.name)
+    );
+    for (const name of ["tradier", "intrinio", "alpaca", "robinhood", "vercel", "firecrawl", "deno"]) {
+      expect(listed.has(name), name).toBe(false);
+      expect(getProviderIntegrationProfile(name, "builtin").name).toBe(name);
+    }
   });
 
   it("keeps every profile complete, dated, and free of secret values", () => {
@@ -37,9 +47,21 @@ describe("provider integration catalog", () => {
 
   it("resolves aliases and uses provider type for arbitrary custom/manual names", () => {
     expect(getProviderIntegrationProfile("google_ai").name).toBe("google-ai");
-    expect(getProviderIntegrationProfile("agent_sync_relay").name).toBe("agent-sync-relay");
+    for (const alias of [
+      "gemini",
+      "gemini-api",
+      "gemini.api",
+      "generative-language",
+      "google-ai-studio",
+      "Google Gemini",
+      "googlegemini",
+    ]) {
+      expect(getProviderIntegrationProfile(alias, "builtin").name, alias).toBe("google-ai");
+    }
+    expect(getProviderIntegrationProfile("simple_tools_relay").name).toBe("simple-tools-relay");
     expect(getProviderIntegrationProfile("private-service", "custom").name).toBe("custom");
     expect(getProviderIntegrationProfile("manual-service", "generic").name).toBe("generic");
+    expect(getProviderIntegrationProfile("google-gemini", "push").name).toBe("generic");
     expect(getProviderIntegrationProfile("unknown").name).toBe("generic");
   });
 
@@ -51,6 +73,57 @@ describe("provider integration catalog", () => {
     expect(cloudflare.credentialInputs.join(" ")).toMatch(/scoped API token/i);
     expect(cloudflare.cannotAdd.join(" ")).toMatch(/error 10000/i);
     expect(cloudflare.limitations.join(" ")).toMatch(/Global API key/i);
+    expect(cloudflare.credentialInputs.join(" ")).toMatch(
+      /single-resource metadata\/readability probes only/i
+    );
+    expect(cloudflare.limitations.join(" ")).toMatch(
+      /do not affect billing, subscriptions, spend, usage, quotas, or PayGo eligibility/i
+    );
+  });
+
+  it("documents the Anthropic individual-account billing boundary and fallback", () => {
+    const anthropic = getProviderIntegrationProfile("anthropic");
+
+    expect(anthropic.mode).toBe("partial");
+    expect(anthropic.billing.visibility).toBe("partial");
+    expect(anthropic.summary).toMatch(/Individual accounts rely on.*pushed/i);
+    expect(anthropic.cannotAdd.join(" ")).toMatch(
+      /does not offer the Admin or Usage & Cost APIs to individual accounts/i
+    );
+    expect(anthropic.shares.join(" ")).toMatch(
+      /standard Messages API key is not sent/i
+    );
+  });
+
+  it("labels ChatGPT/Codex, SuperGrok, and Antigravity subscriptions as not fetchable", () => {
+    const openai = getProviderIntegrationProfile("openai");
+    const xai = getProviderIntegrationProfile("xai");
+    const google = getProviderIntegrationProfile("google-ai");
+    expect(openai.cannotAdd.join(" ")).toMatch(/MANUALLY ONLY/i);
+    expect(xai.cannotAdd.join(" ")).toMatch(/SuperGrok/i);
+    expect(google.cannotAdd.join(" ")).toMatch(/Antigravity/i);
+  });
+
+  it("says Deno Deploy is retired and Coolify is the Congress.Trade host", () => {
+    const deno = getProviderIntegrationProfile("deno", "builtin");
+
+    expect(deno.summary).toMatch(/retired/i);
+    expect(deno.summary).toMatch(/Coolify/i);
+    expect(deno.summary).toMatch(/Congress\.Trade/i);
+    expect(deno.billing.summary).toMatch(/not a live production host/i);
+    expect(deno.limitations.join(" ")).toMatch(/do not host on Deno Deploy/i);
+    expect(deno.canAdd.join(" ")).not.toMatch(/when Deno Deploy publishes/i);
+  });
+
+  it("documents Firecrawl history as private, non-money metadata", () => {
+    const firecrawl = getProviderIntegrationProfile("firecrawl");
+
+    expect(firecrawl.billing.visibility).toBe("metadata");
+    expect(firecrawl.reads.join(" ")).toMatch(/byApiKey explicitly disabled/i);
+    expect(firecrawl.stores.join(" ")).toMatch(/non-money metadata/i);
+    expect(firecrawl.stores.join(" ")).toMatch(/no .*API-key identifier/i);
+    expect(firecrawl.limitations.join(" ")).toMatch(/not pruned/i);
+    expect(firecrawl.cannotAdd.join(" ")).toMatch(/cannot be converted to USD/i);
   });
 
   it("exposes required adapter config and does not solicit unused blind-adapter keys", () => {
@@ -60,10 +133,7 @@ describe("provider integration catalog", () => {
       "secretKey",
       "host",
     ]);
-    expect(byName.get("alpaca")?.needsConfig?.fields.map((field) => field.key)).toEqual([
-      "apiSecret",
-      "environment",
-    ]);
+    expect(byName.get("alpaca")?.needsConfig).toBeUndefined();
     expect(byName.get("twilio")?.needsConfig?.fields.map((field) => field.key)).toContain("apiKeySid");
     expect(byName.get("llamaindex")?.needsConfig?.fields.map((field) => field.key)).toEqual([
       "projectId",
@@ -88,6 +158,7 @@ describe("provider integration catalog", () => {
       "tiingo",
       "massive",
       "fred",
+      "quiver-quant",
       "robinhood",
     ]) {
       expect(byName.get(name)?.usesApiKey, name).toBe(false);

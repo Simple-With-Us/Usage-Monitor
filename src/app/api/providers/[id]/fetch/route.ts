@@ -2,16 +2,46 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { recordProviderUsage } from "@/lib/usage-recorder";
 import { AdapterError } from "@/lib/adapters/helpers";
+import {
+  hasStPrimaryCredentialOwnership,
+  providerCredentialManagementForClient,
+} from "@/lib/managed-provider-credential";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
 
   const provider = await prisma.provider.findUnique({ where: { id } });
   if (!provider) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  const management = providerCredentialManagementForClient(
+    provider.config,
+    provider.secretConfig
+  );
+  const credentialManaged = hasStPrimaryCredentialOwnership(
+    provider.config,
+    provider.secretConfig,
+    provider.label
+  );
+  if (credentialManaged && !management) {
+    return NextResponse.json(
+      { error: "This provider's managed credential metadata is unreadable" },
+      { status: 409 }
+    );
+  }
+  if (management?.alias) {
+    return NextResponse.json(
+      { error: "This provider is an inactive alias of an identical managed credential" },
+      { status: 409 }
+    );
   }
 
   try {

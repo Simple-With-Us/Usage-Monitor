@@ -1,0 +1,27 @@
+[Unit]
+Description=Deploy verified Usage Monitor main revisions to Oracle production
+# Wants+After (not Requires): the deploy transaction re-runs the Infisical
+# sync itself and may legitimately continue from a <25h stale tmpfs env when
+# Infisical is unreachable, so a failed sync unit must not block deployments.
+After=docker.service network-online.target usage-monitor.service usage-monitor-env-sync.service
+Wants=network-online.target usage-monitor-env-sync.service
+Requires=docker.service
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usage-monitor-auto-deploy
+# A changed main revision whose required checks are still running is expected,
+# not a systemd failure. The timer will retry after the next interval.
+SuccessExitStatus=75
+# Every target-controlled operation has its own hard timeout. The service-level
+# ceiling catches any unexpected wedge, then leaves enough TERM grace for the
+# bounded rollback transaction to finish before systemd may send SIGKILL.
+TimeoutStartSec=240min
+TimeoutStopSec=45min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

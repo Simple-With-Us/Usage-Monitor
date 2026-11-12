@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import { useEffect, useState } from "react";
@@ -84,14 +84,14 @@ export default function AddProjectModal({
       maxWidthClass="max-w-md"
     >
           {error && (
-            <div role="alert" className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg">
+            <div role="alert" className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg dark:bg-red-950/60 dark:text-red-300">
               {error}
             </div>
           )}
 
           <div className="space-y-4">
             <div>
-              <label htmlFor="project-name" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="project-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                 Name
               </label>
               <input
@@ -101,12 +101,12 @@ export default function AddProjectModal({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g., Data Platform"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
 
             <div>
-              <label htmlFor="project-description" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="project-description" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                 Description (optional)
               </label>
               <input
@@ -115,12 +115,12 @@ export default function AddProjectModal({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="e.g., Core data engineering team tools"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
 
             <div>
-              <label htmlFor="project-budget" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="project-budget" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                 Monthly Budget (USD)
               </label>
               <input
@@ -131,17 +131,17 @@ export default function AddProjectModal({
                 value={monthlyBudgetUsd}
                 onChange={(e) => setMonthlyBudgetUsd(e.target.value)}
                 placeholder="e.g., 500"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               />
             </div>
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center justify-end gap-3 pt-6 border-t border-gray-100">
+          <div className="mt-6 flex flex-wrap items-center justify-end gap-3 pt-6 border-t border-gray-100 dark:border-gray-700">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600 dark:hover:bg-gray-700"
             >
               Cancel
             </button>

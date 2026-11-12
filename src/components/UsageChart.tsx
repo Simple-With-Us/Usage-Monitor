@@ -10,6 +10,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { formatCompactNumber, formatCurrency, formatNumber } from "@/lib/format";
 
 interface Snapshot {
   id: string;
@@ -96,7 +97,7 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
               tick={{ fontSize: 11, fill: "var(--chart-credits)" }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(value: number) => new Intl.NumberFormat("en-US", { notation: "compact" }).format(value)}
+              tickFormatter={(value: number) => formatCompactNumber(value)}
             />
           )}
           <Tooltip
@@ -114,9 +115,9 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
             formatter={(value, name) => {
               const numericValue = Number(value);
               const key = String(name).toLowerCase();
-              if (key === "balance") return [`$${numericValue.toFixed(2)}`, "Balance"];
-              if (key === "reported cost") return [`$${numericValue.toFixed(2)}`, "Reported cost"];
-              if (key === "credits") return [numericValue.toLocaleString(), "Credits"];
+              if (key === "balance") return [formatCurrency(numericValue), "Balance"];
+              if (key === "reported cost") return [formatCurrency(numericValue), "Reported cost"];
+              if (key === "credits") return [formatNumber(numericValue), "Credits"];
               return [numericValue, name];
             }}
           />

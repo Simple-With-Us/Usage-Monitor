@@ -1,10 +1,12 @@
 import {
   AdapterError,
+  blindProviderResult,
   errorResult,
   fetchJson,
   parseNumber,
   type UsageResult,
 } from "./helpers";
+import { isAnthropicAdminApiKey } from "@/lib/anthropic-credentials";
 
 const MAX_COST_REPORT_PAGES = 10_000;
 
@@ -45,11 +47,27 @@ export async function fetchUsage(
   apiKey: string,
   config?: Record<string, unknown>
 ): Promise<UsageResult> {
-  // The Usage & Cost API requires an Admin API key (sk-ant-admin01-*), not a
-  // standard Messages API key. Keep an optional secondary key in encrypted
-  // provider config so existing inference credentials need not be replaced.
+  // Anthropic does not make the Admin API available to individual accounts.
+  // Never send a standard Messages API key to the organization cost endpoint:
+  // it cannot authorize that endpoint and turns a documented account boundary
+  // into a misleading provider failure. Organization users can keep an Admin
+  // key in encrypted secondary config; retain primary-field support for legacy
+  // rows that stored an sk-ant-admin* key there.
+  const configuredAdminApiKey =
+    typeof config?.adminApiKey === "string"
+      ? config.adminApiKey.trim()
+      : "";
+  const primaryApiKey = apiKey.trim();
   const adminApiKey =
-    (config?.adminApiKey as string | undefined)?.trim() || apiKey;
+    [configuredAdminApiKey, primaryApiKey].find(isAnthropicAdminApiKey) ?? "";
+
+  if (!adminApiKey) {
+    return blindProviderResult(
+      "Anthropic",
+      "the Usage & Cost API is unavailable to individual accounts, and a standard Messages API key cannot read billing."
+    );
+  }
+
   const { startingAt, endingAt } = monthWindow(new Date());
   const headers = {
     "x-api-key": adminApiKey,

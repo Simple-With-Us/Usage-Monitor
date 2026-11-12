@@ -1,0 +1,32 @@
+{
+  "name": "usage-monitor-receipt-lifecycle-auditor",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-07-18",
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": {
+    "cpu_ms": 50,
+    "subrequests": 20
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AUDIT_STATE",
+        "class_name": "LifecycleAuditState"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LifecycleAuditState"]
+    }
+  ],
+  "triggers": {
+    "crons": ["17 */12 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

@@ -98,6 +98,53 @@ export function advancePeriod(
   return addUtcMonths(periodStart, monthsPerUnit(interval) * count);
 }
 
+/**
+ * Wave K / E13: true when [periodStart, periodEnd) is not an exact supported
+ * cadence duration. Managed rows with ambiguous windows must not be charged
+ * until reconcile rewrites exact bounds.
+ *
+ * The UTC-midnight calendar exception (provider end at 00:00Z on the expected
+ * calendar day while start carries a creation time) is opt-in and reserved for
+ * the exact Cloudflare legacy handoff row — never for general managed terms.
+ */
+export function isAmbiguousSubscriptionPeriodWindow(
+  periodStart: Date,
+  periodEnd: Date,
+  interval: SubscriptionInterval,
+  intervalCount: number,
+  options?: { allowUtcMidnightCalendarException?: boolean }
+): boolean {
+  const startMs = periodStart.getTime();
+  const endMs = periodEnd.getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return true;
+  }
+  const expectedEnd = advancePeriod(periodStart, interval, intervalCount);
+  if (endMs === expectedEnd.getTime()) return false;
+
+  if (!options?.allowUtcMidnightCalendarException) return true;
+
+  // Opt-in midnight calendar exception only (Cloudflare Workers Paid legacy).
+  const endIsUtcMidnight =
+    periodEnd.getUTCHours() === 0 &&
+    periodEnd.getUTCMinutes() === 0 &&
+    periodEnd.getUTCSeconds() === 0 &&
+    periodEnd.getUTCMilliseconds() === 0;
+  if (!endIsUtcMidnight) return true;
+
+  const expectedDay = Date.UTC(
+    expectedEnd.getUTCFullYear(),
+    expectedEnd.getUTCMonth(),
+    expectedEnd.getUTCDate()
+  );
+  const endDay = Date.UTC(
+    periodEnd.getUTCFullYear(),
+    periodEnd.getUTCMonth(),
+    periodEnd.getUTCDate()
+  );
+  return expectedDay !== endDay;
+}
+
 // Override the day-of-month of `date` to `anchorDay` (clamped to the month's
 // length), preserving the time-of-day. Used so a subscription renews on a fixed
 // calendar day regardless of its start date's day.

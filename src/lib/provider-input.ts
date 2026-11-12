@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import { SUBSCRIPTION_INTERVALS } from "@/lib/subscriptions";
 
 export interface ProviderInput {
@@ -8,6 +9,7 @@ export interface ProviderInput {
   config?: Record<string, unknown>;
   refreshIntervalMin: number;
   groupId?: string;
+  billingAccountId?: string;
   label?: string;
   plan?: ProviderPlanInput;
   allocations?: { projectId: string; percentage: number }[];
@@ -15,12 +17,13 @@ export interface ProviderInput {
 
 export interface ProviderUpdateInput {
   displayName?: string;
-  apiKey?: string;
+  apiKey?: string | null;
   config?: Record<string, unknown> | null;
   secretConfigOperations?: ProviderSecretConfigOperationInput[];
   isActive?: boolean;
   refreshIntervalMin?: number;
   groupId?: string | null;
+  billingAccountId?: string | null;
   label?: string | null;
   plan?: ProviderPlanInput;
   allocations?: { projectId: string; percentage: number }[];
@@ -48,6 +51,8 @@ const MAX_REFRESH_INTERVAL_MIN = 60 * 24 * 7;
 const BILLING_MODES = new Set(["actual", "estimated", "manual"]);
 const BILLING_INTERVALS = new Set(SUBSCRIPTION_INTERVALS);
 const GOOGLE_SERVICE_ACCOUNT_SECRET_PATH = "serviceAccountJson";
+const MAX_BILLING_ACCOUNT_ID_LENGTH = 256;
+const MAX_PROVIDER_ALLOCATIONS = 100;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -65,6 +70,28 @@ function cleanNullableString(value: unknown): string | null | undefined {
   return cleanOptionalString(value);
 }
 
+function isSafePathSegment(segment: unknown): segment is string {
+  if (typeof segment !== "string" || !segment) return false;
+  if (segment === "__proto__" || segment === "constructor" || segment === "prototype") return false;
+  return true;
+}
+
+function parseBillingAccountId(
+  value: unknown
+): string | null | undefined {
+  const cleaned = cleanNullableString(value);
+  if (cleaned == null) return cleaned;
+  if (cleaned.length > MAX_BILLING_ACCOUNT_ID_LENGTH) {
+    throw new Error(
+      `billingAccountId must be at most ${MAX_BILLING_ACCOUNT_ID_LENGTH} characters`
+    );
+  }
+  if (/\p{Cc}/u.test(cleaned)) {
+    throw new Error("billingAccountId cannot contain control characters");
+  }
+  return cleaned;
+}
+
 function parseSecretConfigOperations(
   value: unknown
 ): ProviderSecretConfigOperationInput[] | undefined {
@@ -79,15 +106,17 @@ function parseSecretConfigOperations(
     if (!operation) {
       throw new Error(`secretConfigOperations[${index}] must be an object`);
     }
-    if (
-      !Array.isArray(operation.path) ||
-      operation.path.length !== 1 ||
-      operation.path[0] !== GOOGLE_SERVICE_ACCOUNT_SECRET_PATH
-    ) {
-      throw new Error(
-        `secretConfigOperations[${index}].path only supports serviceAccountJson`
-      );
+    
+    if (!Array.isArray(operation.path) || operation.path.length === 0) {
+      throw new Error(`secretConfigOperations[${index}].path must be a non-empty array`);
     }
+    
+    for (const segment of operation.path) {
+      if (!isSafePathSegment(segment)) {
+        throw new Error(`secretConfigOperations[${index}] contains an unsafe or invalid path segment`);
+      }
+    }
+    
     if (operation.action !== "clear") {
       throw new Error(
         `secretConfigOperations[${index}].action only supports clear`
@@ -98,19 +127,43 @@ function parseSecretConfigOperations(
         `secretConfigOperations[${index}].value must be omitted for clear`
       );
     }
+    
     const pathKey = JSON.stringify(operation.path);
     if (seenPaths.has(pathKey)) {
       throw new Error("secretConfigOperations contains a duplicate path");
     }
     seenPaths.add(pathKey);
+    
     return {
-      path: [GOOGLE_SERVICE_ACCOUNT_SECRET_PATH],
+      path: operation.path as string[],
       action: "clear" as const,
     };
   });
 }
 
-function parseRefreshInterval(value: unknown, fallback = 60): number {
+/**
+ * Self-burning probe adapters (each poll costs quota). Floor refresh so a
+ * mis-set 1-minute interval cannot burn the daily allowance (Wave E / E20).
+ * Keys are provider `name` values (case-insensitive).
+ */
+export const SELF_BURNING_PROBE_MIN_REFRESH_MIN: Readonly<
+  Record<string, number>
+> = {
+  twelvedata: 60,
+  // Catalog name is `unusual-whales`; normalizeProbeKey strips separators.
+  unusualwhales: 60,
+};
+
+/** Collapse case/separator differences so catalog names match floor keys. */
+export function normalizeProbeProviderKey(providerName: string): string {
+  return providerName.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseRefreshInterval(
+  value: unknown,
+  fallback = 60,
+  providerName?: string
+): number {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(parsed)) {
@@ -119,6 +172,13 @@ function parseRefreshInterval(value: unknown, fallback = 60): number {
   if (parsed < 1 || parsed > MAX_REFRESH_INTERVAL_MIN) {
     throw new Error(
       `refreshIntervalMin must be between 1 and ${MAX_REFRESH_INTERVAL_MIN}`
+    );
+  }
+  const floorKey = providerName ? normalizeProbeProviderKey(providerName) : "";
+  const floor = SELF_BURNING_PROBE_MIN_REFRESH_MIN[floorKey];
+  if (floor != null && parsed < floor) {
+    throw new Error(
+      `refreshIntervalMin for ${floorKey} must be at least ${floor} minutes (each poll consumes provider quota)`
     );
   }
   return parsed;
@@ -244,14 +304,22 @@ function parseProviderPlanInput(value: unknown): ProviderPlanInput | undefined {
 function parseAllocationsInput(value: unknown): { projectId: string; percentage: number }[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) throw new Error("allocations must be an array");
+  if (value.length > MAX_PROVIDER_ALLOCATIONS) {
+    throw new Error(`allocations cannot contain more than ${MAX_PROVIDER_ALLOCATIONS} entries`);
+  }
 
   let totalPercentage = 0;
+  const seenProjectIds = new Set<string>();
   const allocations = value.map((a, index) => {
     if (!a || typeof a !== "object") throw new Error(`allocations[${index}] must be an object`);
-    
+
     const obj = a as Record<string, unknown>;
     const projectId = cleanOptionalString(obj.projectId);
     if (!projectId) throw new Error(`allocations[${index}].projectId must be a non-empty string`);
+    if (seenProjectIds.has(projectId)) {
+      throw new Error(`allocations[${index}].projectId is duplicated`);
+    }
+    seenProjectIds.add(projectId);
     
     const percentage = typeof obj.percentage === "number" ? obj.percentage : Number(obj.percentage);
     if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
@@ -271,7 +339,7 @@ function parseAllocationsInput(value: unknown): { projectId: string; percentage:
 
 export async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
   try {
-    const body = await request.json();
+    const body = await readBoundedJsonBody(request, { label: "Request body" });
     const record = asRecord(body);
     if (!record) throw new Error("Request body must be a JSON object");
     return record;
@@ -309,8 +377,13 @@ export function parseProviderCreateInput(body: Record<string, unknown>): Provide
     type,
     apiKey: cleanOptionalString(body.apiKey),
     config,
-    refreshIntervalMin: parseRefreshInterval(body.refreshIntervalMin),
+    refreshIntervalMin: parseRefreshInterval(
+      body.refreshIntervalMin,
+      60,
+      name
+    ),
     groupId: cleanOptionalString(body.groupId),
+    billingAccountId: parseBillingAccountId(body.billingAccountId) ?? undefined,
     label: cleanOptionalString(body.label),
     plan: parseProviderPlanInput(body.plan),
     allocations: parseAllocationsInput(body.allocations),
@@ -318,7 +391,9 @@ export function parseProviderCreateInput(body: Record<string, unknown>): Provide
 }
 
 export function parseProviderUpdateInput(
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  /** Existing provider name for self-burning probe floors (Wave E / E20). */
+  existingProviderName?: string
 ): ProviderUpdateInput {
   const update: ProviderUpdateInput = {};
 
@@ -329,7 +404,11 @@ export function parseProviderUpdateInput(
   }
 
   if (body.apiKey !== undefined) {
-    update.apiKey = cleanOptionalString(body.apiKey);
+    if (body.apiKey === null || body.apiKey === "") {
+      update.apiKey = null;
+    } else {
+      update.apiKey = cleanOptionalString(body.apiKey);
+    }
   }
 
   if (body.config !== undefined) {
@@ -359,11 +438,19 @@ export function parseProviderUpdateInput(
   }
 
   if (body.refreshIntervalMin !== undefined) {
-    update.refreshIntervalMin = parseRefreshInterval(body.refreshIntervalMin);
+    update.refreshIntervalMin = parseRefreshInterval(
+      body.refreshIntervalMin,
+      60,
+      existingProviderName
+    );
   }
 
   if (body.groupId !== undefined) {
     update.groupId = cleanNullableString(body.groupId) ?? null;
+  }
+
+  if (body.billingAccountId !== undefined) {
+    update.billingAccountId = parseBillingAccountId(body.billingAccountId) ?? null;
   }
 
   if (body.label !== undefined) {

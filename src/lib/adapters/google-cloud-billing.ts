@@ -1,4 +1,3 @@
-import { createSign } from "node:crypto";
 import {
   AdapterError,
   configurationError,
@@ -7,22 +6,16 @@ import {
   parseNumber,
   type AdapterExternalBillingSync,
 } from "./helpers";
+import {
+  fetchGoogleServiceAccountAccessToken,
+  GOOGLE_BIGQUERY_READONLY_SCOPE,
+  parseGoogleServiceAccountCredential,
+} from "./google-service-account";
 
-const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const BIGQUERY_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly";
 const BIGQUERY_API = "https://bigquery.googleapis.com/bigquery/v2";
 const MAXIMUM_BYTES_BILLED = "1073741824";
 const MAX_TABLE_PAGES = 10;
 const MAX_QUERY_PAGES = 20;
-
-interface ServiceAccountCredential {
-  type: "service_account";
-  project_id: string;
-  private_key_id?: string;
-  private_key: string;
-  client_email: string;
-  token_uri: typeof TOKEN_ENDPOINT;
-}
 
 interface DatasetRef {
   projectId: string;
@@ -72,108 +65,6 @@ function parseDataset(value: unknown): DatasetRef {
     );
   }
   return { projectId: match[1], datasetId: match[2] };
-}
-
-function parseCredential(value: unknown): ServiceAccountCredential {
-  if (typeof value !== "string" || !value.trim()) {
-    configurationError(
-      "Google Cloud billing requires an encrypted serviceAccountJson credential"
-    );
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    configurationError("Google Cloud serviceAccountJson is not valid JSON");
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    configurationError("Google Cloud serviceAccountJson must be a JSON object");
-  }
-  const credential = parsed as Record<string, unknown>;
-  const projectId = cleanString(credential.project_id);
-  const clientEmail = cleanString(credential.client_email);
-  const privateKey = cleanString(credential.private_key);
-  const tokenUri = cleanString(credential.token_uri);
-  const privateKeyId = cleanString(credential.private_key_id);
-
-  if (
-    credential.type !== "service_account" ||
-    !projectId ||
-    !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(projectId) ||
-    !clientEmail ||
-    !/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/.test(clientEmail) ||
-    !privateKey ||
-    !privateKey.startsWith("-----BEGIN PRIVATE KEY-----") ||
-    !privateKey.endsWith("-----END PRIVATE KEY-----") ||
-    tokenUri !== TOKEN_ENDPOINT
-  ) {
-    configurationError(
-      "Google Cloud serviceAccountJson is not a supported service-account credential"
-    );
-  }
-
-  return {
-    type: "service_account",
-    project_id: projectId,
-    client_email: clientEmail,
-    private_key: privateKey,
-    token_uri: TOKEN_ENDPOINT,
-    ...(privateKeyId ? { private_key_id: privateKeyId } : {}),
-  };
-}
-
-function base64Url(value: string | Buffer): string {
-  return Buffer.from(value).toString("base64url");
-}
-
-function createAssertion(credential: ServiceAccountCredential): string {
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  const header = {
-    alg: "RS256",
-    typ: "JWT",
-    ...(credential.private_key_id ? { kid: credential.private_key_id } : {}),
-  };
-  const claims = {
-    iss: credential.client_email,
-    scope: BIGQUERY_SCOPE,
-    aud: TOKEN_ENDPOINT,
-    iat: nowSeconds,
-    exp: nowSeconds + 3600,
-  };
-  const unsigned = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(claims))}`;
-
-  try {
-    const signer = createSign("RSA-SHA256");
-    signer.update(unsigned);
-    signer.end();
-    return `${unsigned}.${base64Url(signer.sign(credential.private_key))}`;
-  } catch {
-    configurationError("Google Cloud serviceAccountJson contains an unusable private key");
-  }
-}
-
-async function accessToken(credential: ServiceAccountCredential): Promise<string> {
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion: createAssertion(credential),
-  });
-  const response = await fetchJson(TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  if (!response.ok) {
-    errorResult(response.status, {
-      note: "Google service-account token exchange failed",
-    });
-  }
-  const token = cleanString(
-    (response.data as { access_token?: unknown } | null)?.access_token
-  );
-  if (!token) invalidResponse("Google token response omitted access_token");
-  return token;
 }
 
 function validateTableId(value: unknown): string | null {
@@ -459,16 +350,26 @@ function configuredProject(value: unknown): string | null {
 export function hasGoogleCloudBillingConfig(
   config: Record<string, unknown> | undefined
 ): boolean {
-  return Boolean(cleanString(config?.billingDataset) || cleanString(config?.serviceAccountJson));
+  // The shared service-account credential also powers Cloud Monitoring. Do
+  // not interpret that credential alone as intent to enable the independent
+  // BigQuery billing channel.
+  return Boolean(
+    cleanString(config?.billingDataset) || cleanString(config?.billingTable)
+  );
 }
 
 export async function fetchGoogleCloudBilling(
   config: Record<string, unknown>
 ): Promise<GoogleCloudBillingResult> {
   const dataset = parseDataset(config.billingDataset);
-  const credential = parseCredential(config.serviceAccountJson);
+  const credential = parseGoogleServiceAccountCredential(
+    config.serviceAccountJson
+  );
   const projectId = configuredProject(config.googleProjectId);
-  const token = await accessToken(credential);
+  const token = await fetchGoogleServiceAccountAccessToken(
+    credential,
+    GOOGLE_BIGQUERY_READONLY_SCOPE
+  );
   const tableId = await discoverTable(dataset, token, config.billingTable);
   const window = monthWindow();
   if (!tableId) {
@@ -484,7 +385,7 @@ export async function fetchGoogleCloudBilling(
       projectCount: 0,
       rows: [],
       externalBilling: {
-        source: "google-cloud-billing-export",
+        source: `google-cloud-billing-export:${projectId ?? "pending"}`,
         authoritative: false,
         records: [
           {
@@ -563,7 +464,7 @@ export async function fetchGoogleCloudBilling(
     projectCount: observedProjects.size,
     rows,
     externalBilling: {
-      source: "google-cloud-billing-export",
+      source: `google-cloud-billing-export:${scopeId}`,
       // A successfully completed query is a complete inventory even when the
       // export has not populated any rows yet. Keep the spend unknown/pending,
       // but allow reconciliation to prune stale project identities and

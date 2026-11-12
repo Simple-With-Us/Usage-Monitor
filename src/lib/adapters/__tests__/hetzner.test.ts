@@ -65,6 +65,7 @@ const completePricing = {
 
 function installHetznerMock(options?: {
   pricing?: Record<string, unknown>;
+  mockExchangeRate?: number;
   override?: (url: URL) => Response | undefined;
 }) {
   const rows: Record<string, unknown[]> = {
@@ -159,6 +160,15 @@ function installHetznerMock(options?: {
     const url = new URL(String(input));
     const override = options?.override?.(url);
     if (override) return override;
+    if (url.hostname === "open.er-api.com") {
+      return new Response(
+        JSON.stringify({
+          result: "success",
+          rates: { USD: options?.mockExchangeRate ?? 1.09 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
     if (url.pathname === "/v1/pricing") {
       return new Response(
         JSON.stringify({ pricing: options?.pricing ?? completePricing }),
@@ -174,14 +184,20 @@ function installHetznerMock(options?: {
 }
 
 describe("hetzner adapter", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
 
-  it("discovers all priced resource classes without treating run-rate as USD spend", async () => {
+  it("discovers priced resources and stamps pro-rated catalog estimate as MTD spend", async () => {
     const fetchMock = installHetznerMock();
 
     const result = await fetchUsage("fake-key");
 
-    expect(result.totalCost).toBeNull();
+    expect(result.totalCost).not.toBeNull();
+    expect(result.totalCost!).toBeGreaterThan(0);
+    expect(result.costScope).toBe("calendar_month_to_date");
+    expect(result.costCoverageCaveat?.code).toBe("hetzner_catalog_runrate_prorated");
     expect(result.totalRequests).toBeNull();
     expect(result.externalBilling).toMatchObject({
       source: "hetzner-cloud-server-plans",
@@ -204,25 +220,48 @@ describe("hetzner adapter", () => {
     expect(result.externalBilling?.records.map((record) => record.externalId)).not.toContain(
       "snapshot:8"
     );
-    expect(result.externalBilling?.records.every((record) => record.amountUsd == null)).toBe(true);
-    expect(result.externalBilling?.records.every((record) => record.currency === "EUR")).toBe(true);
+    expect(
+      result.externalBilling?.records.map((record) => ({
+        externalId: record.externalId,
+        amountUsd: record.amountUsd,
+        currency: record.currency,
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        { externalId: "1", amountUsd: 3.815, currency: "USD" },
+        { externalId: "server-backup:1", amountUsd: 0.763, currency: "USD" },
+        { externalId: "volume:2", amountUsd: 0.436, currency: "USD" },
+        { externalId: "floating-ip:3", amountUsd: 1.09, currency: "USD" },
+        { externalId: "primary-ip:4", amountUsd: 0.545, currency: "USD" },
+        { externalId: "load-balancer:6", amountUsd: 5.45, currency: "USD" },
+        { externalId: "snapshot:7", amountUsd: 0.0218, currency: "USD" },
+      ])
+    );
+
 
     const rawData = result.rawData as Record<string, unknown>;
     expect(rawData.totalBandwidthBytes).toBe(1500);
-    expect(rawData.monthlyRunRate).toEqual({
-      amount: 11.12,
-      currency: "EUR",
+    expect(rawData.monthlyRunRate).toMatchObject({
+      amount: 12.1208,
+      currency: "USD",
       basis: "current_resource_catalog_net_monthly_maximum",
       byResource: {
-        servers: 3.5,
-        serverBackups: 0.7,
-        volumes: 0.4,
-        floatingIps: 1,
-        primaryIps: 0.5,
-        loadBalancers: 5,
-        snapshots: 0.02,
+        servers: 3.815,
+        serverBackups: 0.763,
+        volumes: 0.436,
+        floatingIps: 1.09,
+        primaryIps: 0.545,
+        loadBalancers: 5.45,
+        snapshots: 0.0218,
       },
     });
+    const monthlyRunRate = rawData.monthlyRunRate as {
+      estimatedMtdUsd?: number;
+      monthFraction?: number;
+    };
+    expect(monthlyRunRate.estimatedMtdUsd).toBeCloseTo(result.totalCost ?? 0, 5);
+    expect(monthlyRunRate.monthFraction).toBeGreaterThan(0);
+    expect(monthlyRunRate.monthFraction).toBeLessThanOrEqual(1);
     expect(rawData.images).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -373,5 +412,71 @@ describe("hetzner adapter", () => {
     await expect(fetchUsage("key")).rejects.toMatchObject({
       code: "INVALID_RESPONSE",
     });
+  });
+
+  it("converts Euros to USD using a custom exchange rate when HETZNER_EUR_USD_RATE is configured", async () => {
+    vi.stubEnv("HETZNER_EUR_USD_RATE", "1.15");
+    installHetznerMock({ mockExchangeRate: 1.09 });
+
+    const result = await fetchUsage("fake-key");
+
+    expect(
+      result.externalBilling?.records.find((r) => r.externalId === "1")
+    ).toMatchObject({
+      amountUsd: 4.025, // 3.50 * 1.15
+      currency: "USD",
+    });
+  });
+
+  it("converts Euros to USD using the dynamic exchange rate returned by open.er-api.com", async () => {
+    installHetznerMock({ mockExchangeRate: 1.12 });
+
+    const result = await fetchUsage("fake-key");
+
+    expect(
+      result.externalBilling?.records.find((r) => r.externalId === "1")
+    ).toMatchObject({
+      amountUsd: 3.92, // 3.50 * 1.12
+      currency: "USD",
+    });
+  });
+
+  it("falls back to the default rate when the exchange rate API fails", async () => {
+    installHetznerMock({
+      override: (url) => {
+        if (url.hostname === "open.er-api.com") {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return undefined;
+      },
+    });
+
+    const result = await fetchUsage("fake-key");
+
+    expect(
+      result.externalBilling?.records.find((r) => r.externalId === "1")
+    ).toMatchObject({
+      amountUsd: 3.815, // 3.50 * 1.09
+      currency: "USD",
+    });
+  });
+
+  it("does not apply conversion when the API currency is USD", async () => {
+    installHetznerMock({
+      pricing: {
+        ...completePricing,
+        currency: "USD",
+      },
+    });
+
+    const result = await fetchUsage("fake-key");
+
+    expect(
+      result.externalBilling?.records.find((r) => r.externalId === "1")
+    ).toMatchObject({
+      amountUsd: 3.50,
+      currency: "USD",
+    });
+    expect((result.rawData as any).capabilities.currencyConversionApplied).toBe(false);
   });
 });

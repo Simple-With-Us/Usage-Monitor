@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd job for scripts/antigravity-usage-collector.mjs.
+
+  This MUST run on the Mac where the Antigravity CLI (`agy`) is installed
+  and authenticated — the whole point of this collector is reading real
+  local quota state, which does not exist anywhere else (see the script's
+  header comment for why this cannot be a GitHub Action).
+
+  Install:
+    1. Copy this file to ~/Library/LaunchAgents/com.jays.antigravity-usage-collector.plist
+    2. Replace every /ABSOLUTE/PATH/... placeholder below with real paths
+       (`which node`, `which infisical`, `which agy`, $HOME, and the path to
+       this repo checkout).
+    3. `infisical login` once interactively — the job invokes `infisical run`
+       with no token, so it needs a cached session. (A universal-auth machine
+       identity works too, but launchd gets no shell env, so it would have to
+       be wrapped in a script that loads the credentials.)
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jays.antigravity-usage-collector.plist
+    5. Check ~/Library/Logs/antigravity-usage-collector.log after the next
+       StartInterval tick (14400s = 4h, comfortably inside Antigravity's
+       ~5h Pro/Ultra quota refresh window).
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.jays.antigravity-usage-collector
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jays.antigravity-usage-collector</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/antigravity-usage-collector.mjs</string>
+  </array>
+
+  <!--
+    launchd gives a job a bare PATH, not your shell's, and the collector
+    resolves `agy` through PATH. The Antigravity CLI installs to
+    ~/.local/bin, which is on nobody's default PATH — leave it out and the
+    job dies with ENOENT every tick while a manual run from a terminal keeps
+    working. Confirm with `which agy` and put its directory here.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/ABSOLUTE/PATH/TO/HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>14400</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/antigravity-usage-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/antigravity-usage-collector.log</string>
+</dict>
+</plist>

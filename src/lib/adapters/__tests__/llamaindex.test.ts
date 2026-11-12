@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdapterError } from "../helpers";
 import { fetchUsage } from "../llamaindex";
 
@@ -28,14 +28,18 @@ function usageMetric(
   };
 }
 
-describe("llamaindex adapter", () => {
+describe("LlamaIndex Cloud adapter", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
+  });
+
   afterEach(() => {
-    vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("discovers organizations and strictly paginates current UTC-month credit usage", async () => {
-    vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-13T15:16:17.000Z"));
     const fetchMock = vi
       .fn()

@@ -1,9 +1,14 @@
-node_modules/
+# No trailing slash: agent worktrees symlink node_modules, and `node_modules/`
+# only matches real directories — `git add -A` would commit the symlink itself.
+node_modules
 .next/
 .env
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+# Bytecode from scripts/test_sync_effort_issues.py (congress-trading-shared
+# already ignores this; this repo's copy of the suite did not).
+__pycache__/
 
 # Local SQLite dev database (Prisma's `prisma db push`/`prisma migrate dev`
 # create these next to prisma/schema.prisma; SQLite also creates -journal
@@ -15,6 +20,24 @@ tsconfig.tsbuildinfo
 
 # Cursor IDE metadata (not source)
 .cursor/
+# Cursor cloud agent environment (must be committed so Builds pick it up).
+!.cursor/
+!.cursor/environment.json
+!.cursor/infisical.env
+!.cursor/hooks.json
+.wrangler/
 
 # Downloaded by scripts/fetch-litestream.sh at build time - never committed.
 /bin/
+coverage/
+
+# Apple private keys (App Store Connect API keys, APNs auth keys). These live in Infisical (fleet-secrets get),
+# never in the repo. A .p8 dropped in the repo root is untracked but NOT ignored without this rule, so a
+# single `git add -A` would stage a credential that signs pushes for every app in the team.
+# One APNs key is team-wide, so leaking it is not scoped to one app.
+*.p8
+
+# Playwright local run artifacts (baselines live in *-snapshots/, committed).
+test-results/
+playwright-report/
+playwright/.auth/

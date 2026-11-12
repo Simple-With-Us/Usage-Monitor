@@ -31,6 +31,28 @@ function runScript(script: string, url = databaseUrl) {
   });
 }
 
+function sanitizeScriptDiagnostic(value: unknown): string {
+  const text = value instanceof Error ? `${value.name}: ${value.message}` : String(value ?? "");
+  return text
+    .replaceAll(databaseUrl, "file:<test-db>")
+    .replaceAll(directory, "<test-dir>")
+    .replaceAll(process.cwd(), "<repo>")
+    .slice(0, 2_000);
+}
+
+function expectScriptSuccess(
+  label: string,
+  result: ReturnType<typeof runScript>
+): void {
+  const diagnostics = JSON.stringify({
+    error: sanitizeScriptDiagnostic(result.error),
+    signal: result.signal ?? "",
+    stdout: sanitizeScriptDiagnostic(result.stdout),
+    stderr: sanitizeScriptDiagnostic(result.stderr),
+  });
+  expect(result.status, `${label} failed: ${diagnostics}`).toBe(0);
+}
+
 describe("subscription billing link startup constraint", () => {
   it("allows an existing pre-Subscription database to reach the additive migration", () => {
     const legacyPath = path.join(directory, "legacy.db");
@@ -72,13 +94,20 @@ describe("subscription billing link startup constraint", () => {
       data: { ...subscriptionData, name: "Duplicate" },
     });
 
+    // These scripts run before the application opens its long-lived Prisma
+    // client in production. Close the fixture client before simulating each
+    // startup so its SQLite connection cannot intermittently block child DDL.
+    await prisma.$disconnect();
     const blocked = runScript("scripts/audit-subscription-links.mjs");
     expect(blocked.status).toBe(1);
     expect(blocked.stderr).toContain("duplicate provider billing identity");
 
     await prisma.subscription.delete({ where: { id: duplicate.id } });
-    expect(runScript("scripts/audit-subscription-links.mjs").status).toBe(0);
-    expect(runScript("scripts/ensure-subscription-link-unique-index.mjs").status).toBe(0);
+    await prisma.$disconnect();
+    const repairedAudit = runScript("scripts/audit-subscription-links.mjs");
+    expectScriptSuccess("subscription-link audit", repairedAudit);
+    const ensured = runScript("scripts/ensure-subscription-link-unique-index.mjs");
+    expectScriptSuccess("subscription-link index installer", ensured);
 
     await expect(
       prisma.subscription.create({

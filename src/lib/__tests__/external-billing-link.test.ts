@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canLinkSubscriptionToExternalBilling,
   formatExternalBillingAmount,
+  hasExactExternalBillingCadencePeriod,
   isExternalBillingLinkCandidate,
   type ExternalBillingLinkCandidateRecord,
 } from "@/lib/external-billing-link";
@@ -99,6 +100,45 @@ describe("external billing links", () => {
       currentPeriodStart: "2026-01-31T00:00:00.000Z",
       currentPeriodEnd: null,
     })).toBe(true);
+  });
+
+  it.each([
+    ["weekly", "2026-07-01T00:00:00.000Z", "2026-07-08T00:00:00.000Z"],
+    ["monthly", "2026-07-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z"],
+    ["quarterly", "2026-07-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z"],
+    ["annual", "2026-07-01T00:00:00.000Z", "2027-07-01T00:00:00.000Z"],
+  ])("requires one exact %s period", (billingInterval, start, end) => {
+    expect(
+      hasExactExternalBillingCadencePeriod({
+        billingInterval,
+        currentPeriodStart: start,
+        currentPeriodEnd: end,
+      })
+    ).toBe(true);
+    expect(
+      hasExactExternalBillingCadencePeriod({
+        billingInterval,
+        currentPeriodStart: start,
+        currentPeriodEnd: new Date(Date.parse(end) - 1).toISOString(),
+      })
+    ).toBe(false);
+  });
+
+  it("accepts UTC month-end cadence clamping without accepting a short month", () => {
+    expect(
+      hasExactExternalBillingCadencePeriod({
+        billingInterval: "monthly",
+        currentPeriodStart: "2026-01-31T08:30:00.000Z",
+        currentPeriodEnd: "2026-02-28T08:30:00.000Z",
+      })
+    ).toBe(true);
+    expect(
+      hasExactExternalBillingCadencePeriod({
+        billingInterval: "monthly",
+        currentPeriodStart: "2026-01-31T08:30:00.000Z",
+        currentPeriodEnd: "2026-02-27T08:30:00.000Z",
+      })
+    ).toBe(false);
   });
 
   it("uses one exact compatibility predicate for display and money-path dedupe", () => {

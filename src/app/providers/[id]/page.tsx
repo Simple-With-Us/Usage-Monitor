@@ -5,11 +5,54 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import UsageChart from "@/components/UsageChart";
 import BalanceBadge from "@/components/BalanceBadge";
-import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import ExternalBillingDetails, {
+  type ExternalBillingRecord,
+} from "@/components/ExternalBillingDetails";
+import { SentryUsageTable } from "@/components/SentryUsageCard";
+import type { SentryCategoryTotal } from "@/lib/sentry-usage-categories";
 import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 import PaidServicesPanel from "@/components/PaidServicesPanel";
 import type { SubscriptionRow } from "@/components/SubscriptionsPanel";
-import type { ProviderCostCoverage } from "@/components/ProviderCard";
+import type {
+  ProviderCostCoverage,
+  ProviderCostCoverageCaveat,
+} from "@/components/ProviderCard";
+import { usageUnitLabelForProvider } from "@/lib/provider-definitions";
+import { useDisplayDensity } from "@/lib/display-density";
+import { costCoverageHelpText } from "@/lib/cost-coverage-help";
+import {
+  formatBudgetRunout,
+  formatCurrency,
+  formatNumber,
+  projectedStatusLabel,
+  type ProviderBudgetIntel,
+} from "@/lib/format";
+import { CostCoverageCaveatBanner, spendCoverageNoteText } from "./cost-coverage-caveat";
+import ProviderConnectionChecklist, {
+  buildProviderConnectionChecklist,
+} from "@/components/ProviderConnectionChecklist";
+
+/** Short display label for the raw pushed-cost-coverage enum, paired with
+ * `costCoverageHelpText` as a title tooltip - same "Complete"/"Partial"/
+ * "Unknown" convention used elsewhere on this page and in
+ * DashboardProviderWorkspace, so a bare enum value never reaches the UI. */
+function pushedCostCoverageLabel(coverage: ProviderCostCoverage | null | undefined): string {
+  switch (coverage) {
+    case "complete":
+      return "Complete";
+    case "partial":
+      return "Partial";
+    case "legacy_unknown":
+      return "Unknown (legacy)";
+    case "unknown":
+    default:
+      return "Unknown";
+  }
+}
+import {
+  ComplianceSummaryPanel,
+  type ProviderComplianceSummaryView,
+} from "./compliance-summary";
 
 interface Provider {
   id: string;
@@ -18,6 +61,28 @@ interface Provider {
   type: string;
   config?: Record<string, unknown>;
   keyPreview?: string | null;
+  anthropicAdminApiConfigured?: boolean;
+  geminiKeyStatus?: {
+    state: "valid" | "invalid" | "unreadable" | "unavailable" | "unchecked" | "not_configured";
+    httpStatus: number | null;
+    availableModelCount: number | null;
+    checkedAt: string | null;
+  } | null;
+  geminiBillingStatus?: {
+    state: "ready" | "pending" | "error" | "configuration_changed" | "unchecked" | "not_configured";
+    errorCode: string | null;
+    httpStatus: number | null;
+    retryable: boolean;
+    checkedAt: string | null;
+  } | null;
+  geminiMonitoringStatus?: {
+    state: "ready" | "empty" | "partial" | "permission_denied" | "error" | "configuration_changed" | "project_required" | "credential_required" | "unchecked" | "not_configured";
+    projectId: string | null;
+    errorCode: string | null;
+    httpStatus: number | null;
+    retryable: boolean;
+    checkedAt: string | null;
+  } | null;
   secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
   refreshIntervalMin: number;
   isActive: boolean;
@@ -27,17 +92,28 @@ interface Provider {
   spentUsd?: number;
   projectedEomUsd?: number;
   snapshotCostUsd?: number | null;
+  snapshotCostFetchedAt?: string | null;
   pushedMonthToDateUsd?: number;
+  receiptCashPaidUsd?: number;
+  receiptCashEventCount?: number;
+  observedVariableUsageUsd?: number;
+  estimatedApiEquivalentUsd?: number;
   pushedCostCoverage: ProviderCostCoverage;
   pushedPricedEventCount: number;
   pushedUnpricedEventCount: number;
   pushedUnclassifiedCostEventCount: number;
   spendCoverage: ProviderCostCoverage;
+  costCoverageCaveat?: ProviderCostCoverageCaveat | null;
+  compliance?: ProviderComplianceSummaryView | null;
   subscriptionMonthToDateUsd?: number;
   fixedAccruedUsd?: number;
   linkedFixedDedupeUsd?: number;
   fixedCostConflict?: boolean;
   externalBilling?: ExternalBillingRecord[];
+  sentryUsage?: {
+    byCategory: SentryCategoryTotal[];
+    billingCost: false;
+  } | null;
   latestSnapshot?: {
     balance: number | null;
     totalCost: number | null;
@@ -87,6 +163,9 @@ export default function ProviderDetailPage() {
   const [provider, setProvider] = useState<Provider | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
+  // S9/S10: projection intelligence (pace + budget runout) from the
+  // budget-status DTO; best-effort, the page renders fine without it.
+  const [budgetIntel, setBudgetIntel] = useState<ProviderBudgetIntel | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -95,6 +174,7 @@ export default function ProviderDetailPage() {
   const [snapshotPage, setSnapshotPage] = useState(1);
   const loadedOnce = useRef(false);
   const hasProviderData = useRef(false);
+  const density = useDisplayDensity();
 
   const fetchData = useCallback(async () => {
     if (loadedOnce.current && hasProviderData.current) setRefreshing(true);
@@ -102,10 +182,14 @@ export default function ProviderDetailPage() {
     setError("");
     setSnapshotWarning("");
     try {
-      const [providerResult, snapshotsResult, subscriptionsResult] = await Promise.allSettled([
+      const [providerResult, snapshotsResult, subscriptionsResult, budgetStatusResult] = await Promise.allSettled([
         fetchJson<Provider>(`/api/providers/${id}`, "provider"),
         fetchJson<Snapshot[]>(`/api/snapshots?providerId=${id}&days=${rangeDays}`, "snapshots"),
         fetchJson<SubscriptionRow[]>("/api/subscriptions", "paid services"),
+        fetchJson<{ providers?: Array<{ id?: string } & ProviderBudgetIntel> }>(
+          "/api/budget-status",
+          "budget status"
+        ),
       ]);
 
       if (providerResult.status === "fulfilled") {
@@ -134,6 +218,22 @@ export default function ProviderDetailPage() {
           [current, "Tracked subscriptions are temporarily unavailable."].filter(Boolean).join(" ")
         );
       }
+
+      // Projection intelligence is additive — never warn when it is missing.
+      if (budgetStatusResult.status === "fulfilled") {
+        const row = (budgetStatusResult.value.providers ?? []).find(
+          (entry) => entry.id === id
+        );
+        setBudgetIntel(
+          row
+            ? {
+                projectedStatus: row.projectedStatus ?? null,
+                projectedRunoutDate: row.projectedRunoutDate ?? null,
+                daysUntilBudgetExhausted: row.daysUntilBudgetExhausted ?? null,
+              }
+            : null
+        );
+      }
     } finally {
       loadedOnce.current = true;
       setLoading(false);
@@ -142,7 +242,7 @@ export default function ProviderDetailPage() {
   }, [id, rangeDays]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- data fetching on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- data fetching on mount
     fetchData();
   }, [fetchData]);
 
@@ -153,13 +253,11 @@ export default function ProviderDetailPage() {
     return severityRank[left.severity] - severityRank[right.severity] || left.message.localeCompare(right.message);
   });
 
-  const formatUsd = (amount: number | null | undefined) => {
-    if (amount == null) return "--";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(amount);
-  };
+  const formatUsd = (amount: number | null | undefined) => formatCurrency(amount);
+
+  // S9/S10 display strings (null when the budget-status DTO has no signal).
+  const paceLabel = projectedStatusLabel(budgetIntel?.projectedStatus ?? null);
+  const runoutLabel = budgetIntel ? formatBudgetRunout(budgetIntel) : null;
 
   if (loading) {
     return (
@@ -182,19 +280,29 @@ export default function ProviderDetailPage() {
   if (error || !provider) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <p role="alert" className="text-red-600">{error || "Not found"}</p>
-        <Link
-          href="/"
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
-        >
-          Back to Dashboard
-        </Link>
+        <p role="alert" className="text-red-600 dark:text-red-300">{error || "Not found"}</p>
+        <div className="flex flex-wrap justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => void fetchData()}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
+          >
+            Retry
+          </button>
+          <Link
+            href="/"
+            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+          >
+            Back to dashboard
+          </Link>
+        </div>
       </div>
     );
   }
 
   const latest = snapshots[snapshots.length - 1];
   const latestReading = latest ?? provider.latestSnapshot ?? null;
+  const usageUnitLabel = usageUnitLabelForProvider(provider.name, provider.type);
   const newestSnapshots = [...snapshots].reverse();
   const totalSnapshotPages = Math.max(1, Math.ceil(newestSnapshots.length / SNAPSHOT_PAGE_SIZE));
   const currentSnapshotPage = Math.min(snapshotPage, totalSnapshotPages);
@@ -221,7 +329,7 @@ export default function ProviderDetailPage() {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="provider-details space-y-6">
       <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
         <Link href="/" className="hover:text-gray-900 dark:hover:text-gray-100">
           Dashboard
@@ -243,14 +351,22 @@ export default function ProviderDetailPage() {
             className="mt-2"
             instanceState={{
               isActive: provider.isActive,
-              primaryCredentialConfigured: Boolean(provider.keyPreview),
+              primaryCredentialConfigured:
+                Boolean(provider.keyPreview) ||
+                (provider.geminiKeyStatus != null &&
+                  provider.geminiKeyStatus.state !== "not_configured"),
               keyPreview: provider.keyPreview,
+              anthropicAdminApiConfigured:
+                provider.anthropicAdminApiConfigured,
               publicConfigFields: publicConfigFieldNames(provider.config),
               protectedConfigFields: provider.secretConfigMeta?.fields ?? [],
               protectedConfigReadable: provider.secretConfigMeta?.readable,
               lastSnapshotAt: provider.latestSnapshot?.fetchedAt ?? latest?.fetchedAt ?? null,
               externalBillingRecordCount: provider.externalBilling?.length ?? 0,
               externalBillingSources: [...new Set((provider.externalBilling ?? []).map((record) => record.source))].sort(),
+              geminiKeyStatus: provider.geminiKeyStatus,
+              geminiBillingStatus: provider.geminiBillingStatus,
+              geminiMonitoringStatus: provider.geminiMonitoringStatus,
             }}
           />
         </div>
@@ -258,6 +374,22 @@ export default function ProviderDetailPage() {
           {provider.type}
         </span>
       </div>
+
+      <CostCoverageCaveatBanner caveat={provider.costCoverageCaveat} />
+
+      <ProviderConnectionChecklist
+        items={buildProviderConnectionChecklist({
+          providerId: provider.id,
+          hasSnapshot: Boolean(latestReading),
+          hasBudget:
+            provider.plan?.monthlyBudgetUsd != null &&
+            provider.plan.monthlyBudgetUsd > 0,
+          spendCoverage,
+          isBlindOrPushOnly: /anthropic|voyage|robinhood/i.test(provider.name),
+          lastFetchedAt: latestReading?.fetchedAt ?? null,
+        })}
+        pushOnlyHint={/anthropic|voyage|robinhood/i.test(provider.name)}
+      />
 
       {snapshotWarning && (
         <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
@@ -295,6 +427,27 @@ export default function ProviderDetailPage() {
         variant="provider"
       />
 
+      {provider.sentryUsage && (
+        <section className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+          <div className="border-b border-gray-100 px-4 py-3 sm:px-6 dark:border-gray-700">
+            <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+              Sentry Usage
+            </h2>
+            <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Month-to-date accepted and rate-limited counts.&nbsp; Not invoice spend or prepaid credits.
+            </p>
+          </div>
+          <SentryUsageTable rows={provider.sentryUsage.byCategory} />
+        </section>
+      )}
+
+      {provider.externalBilling && provider.externalBilling.length > 0 && (
+        <ExternalBillingDetails
+          records={provider.externalBilling}
+          refreshIntervalMin={provider.refreshIntervalMin}
+        />
+      )}
+
       {/* Summary stats */}
       <div
         className={`grid grid-cols-1 sm:grid-cols-2 ${
@@ -308,8 +461,33 @@ export default function ProviderDetailPage() {
             className="text-lg font-semibold"
           />
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-          <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">
+        <div
+          className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"
+          title={
+            density === "compact"
+              ? [
+                  provider.snapshotCostFetchedAt
+                    ? `Cost snapshot fetched ${new Date(provider.snapshotCostFetchedAt).toLocaleString()}`
+                    : null,
+                  spendCoverage === "partial" && unpricedEventCount > 0
+                    ? `${unpricedEventCount} unpriced event${unpricedEventCount === 1 ? "" : "s"}`
+                    : !hasKnownSpend && unpricedEventCount > 0
+                      ? `${unpricedEventCount} usage event${unpricedEventCount === 1 ? "" : "s"} without cost`
+                      : spendCoverageNoteText(spendCoverage, provider.costCoverageCaveat),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : undefined
+          }
+        >
+          <p
+            className="mb-1 text-xs text-gray-500 dark:text-gray-400"
+            title={
+              spendCoverage === "complete"
+                ? undefined
+                : costCoverageHelpText(spendCoverage)
+            }
+          >
             {spendCoverage === "partial"
               ? "Known spend this month"
               : "Tracked spend this month"}
@@ -317,23 +495,45 @@ export default function ProviderDetailPage() {
           <p className="text-lg font-semibold text-amber-600 dark:text-amber-300">
             {hasKnownSpend ? formatUsd(canonicalSpendUsd) : "Cost not reported"}
           </p>
-          {spendCoverage === "partial" && unpricedEventCount > 0 ? (
-            <p className="text-[10px] text-amber-600 dark:text-amber-300">
-              {unpricedEventCount} unpriced event{unpricedEventCount === 1 ? "" : "s"}
-            </p>
-          ) : !hasKnownSpend && unpricedEventCount > 0 ? (
-            <p className="text-[10px] text-amber-600 dark:text-amber-300">
-              {unpricedEventCount} usage event{unpricedEventCount === 1 ? "" : "s"} without cost
-            </p>
-          ) : (
-            <p className="text-[10px] text-gray-500 dark:text-gray-400">
-              {spendCoverage === "complete"
-                ? "complete cost coverage"
-                : "cost coverage unknown"}
-            </p>
+          {density === "comfortable" && (
+            <>
+              {provider.snapshotCostFetchedAt && (
+                <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                  Cost snapshot fetched {new Date(provider.snapshotCostFetchedAt).toLocaleString()}
+                </p>
+              )}
+              {spendCoverage === "partial" && unpricedEventCount > 0 ? (
+                <p className="text-[10px] text-amber-600 dark:text-amber-300">
+                  {unpricedEventCount} unpriced event{unpricedEventCount === 1 ? "" : "s"}
+                </p>
+              ) : !hasKnownSpend && unpricedEventCount > 0 ? (
+                <p className="text-[10px] text-amber-600 dark:text-amber-300">
+                  {unpricedEventCount} usage event{unpricedEventCount === 1 ? "" : "s"} without cost
+                </p>
+              ) : (
+                <p
+                  className={`text-[10px] ${
+                    provider.costCoverageCaveat
+                      ? "text-orange-600 dark:text-orange-300"
+                      : "text-gray-500 dark:text-gray-400"
+                  }`}
+                >
+                  {spendCoverageNoteText(spendCoverage, provider.costCoverageCaveat)}
+                </p>
+              )}
+            </>
           )}
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+        <div
+          className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"
+          title={
+            density === "compact"
+              ? spendCoverage === "partial"
+                ? "excludes unpriced usage"
+                : provider.billingMode
+              : undefined
+          }
+        >
           <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">
             {spendCoverage === "partial"
               ? "Known-cost projection"
@@ -344,26 +544,38 @@ export default function ProviderDetailPage() {
               ? formatUsd(provider.projectedEomUsd ?? provider.estimatedMonthlyCostUsd)
               : "Unavailable"}
           </p>
-          <p className="text-[10px] uppercase text-gray-400 dark:text-gray-500">
-            {spendCoverage === "partial" ? "excludes unpriced usage" : provider.billingMode}
-          </p>
+          {paceLabel && (
+            <p
+              className={`mt-1 text-[10px] font-medium ${
+                budgetIntel?.projectedStatus === "exceeded"
+                  ? "text-red-600 dark:text-red-300"
+                  : "text-amber-600 dark:text-amber-300"
+              }`}
+            >
+              {paceLabel}
+            </p>
+          )}
+          {runoutLabel && (
+            <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">{runoutLabel}</p>
+          )}
+          {density === "comfortable" && (
+            <p className="text-[10px] uppercase text-gray-500 dark:text-gray-400">
+              {spendCoverage === "partial" ? "excludes unpriced usage" : provider.billingMode}
+            </p>
+          )}
         </div>
         {hasCredits && (
           <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Credits</p>
             <p className="text-lg font-semibold text-purple-600 dark:text-purple-300">
-              {latestReading?.credits != null
-                ? new Intl.NumberFormat("en-US").format(latestReading.credits)
-                : "--"}
+              {formatNumber(latestReading?.credits ?? null)}
             </p>
           </div>
         )}
         <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-          <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Latest reported requests</p>
+          <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Latest reported {usageUnitLabel}</p>
           <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {latestReading?.totalRequests != null
-              ? new Intl.NumberFormat("en-US").format(latestReading.totalRequests)
-              : "--"}
+            {formatNumber(latestReading?.totalRequests ?? null)}
           </p>
         </div>
       </div>
@@ -371,10 +583,10 @@ export default function ProviderDetailPage() {
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & alert policy</h2>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Budget & Alert Policy</h2>
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Owner-defined guardrails; these are not provider-reported plan terms.</p>
           </div>
-          <Link href="/settings?tab=connections" className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+          <Link href={`/settings?tab=connections&edit=${encodeURIComponent(provider.id)}`} className="text-xs font-semibold text-accent hover:opacity-90">
             Edit connection
           </Link>
         </div>
@@ -388,11 +600,7 @@ export default function ProviderDetailPage() {
           <div>
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Request alert</p>
             <p className="font-medium text-gray-900 dark:text-gray-100">
-              {provider.plan?.monthlyRequestLimit != null
-                ? new Intl.NumberFormat("en-US").format(
-                    provider.plan.monthlyRequestLimit
-                  )
-                : "--"}
+              {formatNumber(provider.plan?.monthlyRequestLimit ?? null)}
             </p>
           </div>
           <div>
@@ -402,9 +610,7 @@ export default function ProviderDetailPage() {
           <div>
             <p className="mb-1 text-xs text-gray-500 dark:text-gray-400">Low credits alert</p>
             <p className="font-medium text-gray-900 dark:text-gray-100">
-              {provider.plan?.lowCredits != null
-                ? new Intl.NumberFormat("en-US").format(provider.plan.lowCredits)
-                : "--"}
+              {formatNumber(provider.plan?.lowCredits ?? null)}
             </p>
           </div>
         </div>
@@ -413,11 +619,13 @@ export default function ProviderDetailPage() {
         )}
       </div>
 
+      <ComplianceSummaryPanel compliance={provider.compliance ?? null} />
+
       <details className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
         <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700/40">
           Spend reconciliation
         </summary>
-        <dl className="grid grid-cols-2 gap-4 border-t border-gray-100 px-4 py-4 text-sm dark:border-gray-700 sm:grid-cols-3 lg:grid-cols-6">
+        <dl className="grid grid-cols-2 gap-4 border-t border-gray-100 px-4 py-4 text-sm dark:border-gray-700 sm:grid-cols-3 lg:grid-cols-5">
           <div>
             <dt className="text-xs text-gray-500 dark:text-gray-400">
               {spendCoverage === "partial" ? "Canonical known MTD" : "Canonical tracked MTD"}
@@ -430,6 +638,33 @@ export default function ProviderDetailPage() {
             <dt className="text-xs text-gray-500 dark:text-gray-400">Metered after max-dedupe</dt>
             <dd className="mt-1 font-medium text-gray-900 dark:text-gray-100">
               {hasKnownSpend ? formatUsd(reconciledMeteredUsd) : "Unknown"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500 dark:text-gray-400">Observed variable usage</dt>
+            <dd className="mt-1 font-medium text-gray-900 dark:text-gray-100">
+              {formatUsd(provider.observedVariableUsageUsd ?? 0)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500 dark:text-gray-400">Receipt cash paid</dt>
+            <dd className="mt-1 font-medium text-emerald-700 dark:text-emerald-300">
+              {formatUsd(provider.receiptCashPaidUsd ?? 0)}
+            </dd>
+            <dd className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+              {provider.receiptCashEventCount ?? 0} exact receipt
+              {provider.receiptCashEventCount === 1 ? "" : "s"}
+              {" · "}
+              matches existing cash are evidence-only (no double-count)
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500 dark:text-gray-400">Claude API-equivalent</dt>
+            <dd className="mt-1 font-medium text-amber-700 dark:text-amber-300">
+              {formatUsd(provider.estimatedApiEquivalentUsd ?? 0)}
+            </dd>
+            <dd className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+              Estimate only · excluded from cash spend
             </dd>
           </div>
           <div>
@@ -450,8 +685,11 @@ export default function ProviderDetailPage() {
           </div>
           <div>
             <dt className="text-xs text-gray-500 dark:text-gray-400">Pushed cost coverage</dt>
-            <dd className="mt-1 font-medium capitalize text-gray-900 dark:text-gray-100">
-              {(provider.pushedCostCoverage ?? "unknown").replace("_", " ")}
+            <dd
+              className="mt-1 font-medium text-gray-900 dark:text-gray-100"
+              title={costCoverageHelpText(provider.pushedCostCoverage ?? "unknown")}
+            >
+              {pushedCostCoverageLabel(provider.pushedCostCoverage)}
             </dd>
             <dd className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
               {provider.pushedPricedEventCount ?? 0} priced · {provider.pushedUnpricedEventCount ?? 0} unpriced · {provider.pushedUnclassifiedCostEventCount ?? 0} unclassified
@@ -460,7 +698,7 @@ export default function ProviderDetailPage() {
         </dl>
         <p className="border-t border-gray-100 px-4 py-3 text-xs text-gray-500 dark:border-gray-700 dark:text-gray-400">
           {hasKnownSpend
-            ? "Canonical spend equals reconciled metered usage plus deduplicated fixed charges. The raw provider report is an overlapping input, not another amount to add."
+            ? "Canonical spend equals max(receipt cash, observed variable usage) plus deduplicated fixed charges. Claude API-equivalent estimates and the overlapping raw provider report are not added again."
             : "Usage is present without authoritative cost, so no zero-dollar spend or projection is asserted."}
           {provider.fixedCostConflict ? " Review the active fixed-cost conflict alert." : ""}
         </p>
@@ -499,7 +737,7 @@ export default function ProviderDetailPage() {
           </div>
         </div>
         {snapshots.length === 0 ? (
-          <div className="px-6 py-8 text-center text-sm text-gray-400 dark:text-gray-500">
+          <div className="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
             No snapshots recorded yet
           </div>
         ) : (
@@ -523,7 +761,7 @@ export default function ProviderDetailPage() {
                     </th>
                   )}
                   <th className="px-6 py-3 text-right font-medium text-gray-500 dark:text-gray-400">
-                    Reported Requests
+                    Reported {usageUnitLabel}
                   </th>
                 </tr>
               </thead>
@@ -540,24 +778,15 @@ export default function ProviderDetailPage() {
                       <BalanceBadge amount={s.balance} />
                     </td>
                     <td data-label="Reported cost" className="px-6 py-3 text-right text-amber-600 dark:text-amber-300">
-                      {s.totalCost != null
-                        ? new Intl.NumberFormat("en-US", {
-                            style: "currency",
-                            currency: "USD",
-                          }).format(s.totalCost)
-                        : "--"}
+                      {formatCurrency(s.totalCost)}
                     </td>
                     {hasCredits && (
                       <td data-label="Credits" className="px-6 py-3 text-right text-purple-600 dark:text-purple-300">
-                        {s.credits != null
-                          ? new Intl.NumberFormat("en-US").format(s.credits)
-                          : "--"}
+                        {formatNumber(s.credits)}
                       </td>
                     )}
-                    <td data-label="Reported requests" className="px-6 py-3 text-right text-gray-600 dark:text-gray-300">
-                      {s.totalRequests != null
-                        ? new Intl.NumberFormat("en-US").format(s.totalRequests)
-                        : "--"}
+                    <td data-label={`Reported ${usageUnitLabel}`} className="px-6 py-3 text-right text-gray-600 dark:text-gray-300">
+                      {formatNumber(s.totalRequests)}
                     </td>
                   </tr>
                 ))}

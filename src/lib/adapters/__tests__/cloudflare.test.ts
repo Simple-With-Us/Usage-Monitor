@@ -9,7 +9,10 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe("cloudflare adapter", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("reads billing subscriptions and uses global-key auth correctly", async () => {
     const now = new Date();
@@ -87,6 +90,7 @@ describe("cloudflare adapter", () => {
       planName: "Workers Paid",
       status: "paid",
       amountUsd: 5,
+      paidRecurringAuthoritative: true,
     });
     expect(JSON.stringify(result.rawData)).not.toContain("must-not-persist.example");
     const requestHeaders = fetchMock.mock.calls[2][1].headers;
@@ -104,6 +108,351 @@ describe("cloudflare adapter", () => {
     expect(paygoSync?.records[0]).toMatchObject({
       amountUsd: 2,
       currentPeriodStart,
+    });
+  });
+
+  it("uses a current paid billing term when Cloudflare reports an inconsistent Expired state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T12:00:00.000Z"));
+    const currentPeriodStart = "2026-07-16T19:02:36.000Z";
+    const currentPeriodEnd = "2026-08-16T00:00:00.000Z";
+    const priorPeriodStart = "2026-06-16T19:02:36.000Z";
+    const priorPeriodEnd = "2026-07-16T00:00:00.000Z";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: [
+              {
+                id: "paid-current",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: {
+                  id: "workers-secondary",
+                  public_name: "Workers Paid Secondary",
+                },
+                state: "Paid",
+              },
+              {
+                id: "expired-current",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { id: "workers", public_name: "Workers Paid" },
+                state: "Expired",
+              },
+              {
+                id: "expired-prior",
+                currency: "USD",
+                current_period_start: priorPeriodStart,
+                current_period_end: priorPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { public_name: "Workers Paid" },
+                state: "Expired",
+              },
+              {
+                id: "cancelled-current",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { public_name: "Workers Paid" },
+                state: "Cancelled",
+              },
+            ],
+            result_info: { count: 4, page: 1, per_page: 50, total_count: 4 },
+          })
+        )
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", {
+      accountId: "account-id",
+      authMode: "api_token",
+    });
+    const records = result.externalBillingSyncs?.find(
+      (sync) => sync.source === "cloudflare-subscriptions"
+    )?.records;
+
+    expect(result.totalCost).toBe(10);
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ externalId: "paid-current", status: "paid", rollupRole: "canonical" }),
+        expect.objectContaining({ externalId: "expired-current", status: "paid", rollupRole: "canonical" }),
+        expect.objectContaining({ externalId: "expired-prior", status: "expired", rollupRole: "metadata" }),
+        expect.objectContaining({ externalId: "cancelled-current", status: "cancelled", rollupRole: "metadata" }),
+      ])
+    );
+  });
+
+  it("preserves equivalent Paid and Expired identities while charging their exact term once", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T12:00:00.000Z"));
+    const currentPeriodStart = "2026-07-16T19:02:36.000Z";
+    const currentPeriodEnd = "2026-08-16T00:00:00.000Z";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: [
+              {
+                id: "real-paid-term",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { id: "workers", public_name: "Workers Paid" },
+                state: "Paid",
+              },
+              {
+                id: "duplicate-expired-term",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { id: "workers", public_name: "Workers Paid" },
+                state: "Expired",
+              },
+            ],
+            result_info: { count: 2, page: 1, per_page: 50, total_count: 2 },
+          })
+        )
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", {
+      accountId: "account-id",
+      authMode: "api_token",
+    });
+    const records = result.externalBillingSyncs?.find(
+      (sync) => sync.source === "cloudflare-subscriptions"
+    )?.records;
+
+    expect(result.totalCost).toBe(5);
+    expect(result.fixedCostIncludedUsd).toBe(5);
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          externalId: "real-paid-term",
+          status: "paid",
+          paidRecurringAuthoritative: true,
+          rollupRole: "canonical",
+        }),
+        expect.objectContaining({
+          externalId: "duplicate-expired-term",
+          status: "paid",
+          paidRecurringAuthoritative: true,
+          rollupRole: "canonical",
+          nextRenewalAt: currentPeriodEnd,
+        }),
+      ])
+    );
+  });
+
+  it("keeps distinct raw Paid identities additive even when their term shapes match", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T12:00:00.000Z"));
+    const currentPeriodStart = "2026-07-16T19:02:36.000Z";
+    const currentPeriodEnd = "2026-08-16T00:00:00.000Z";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: ["paid-a", "paid-b"].map((id) => ({
+              id,
+              currency: "USD",
+              current_period_start: currentPeriodStart,
+              current_period_end: currentPeriodEnd,
+              frequency: "monthly",
+              price: 5,
+              rate_plan: { id: "workers", public_name: "Workers Paid" },
+              state: "Paid",
+            })),
+            result_info: { count: 2, page: 1, per_page: 50, total_count: 2 },
+          })
+        )
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", {
+      accountId: "account-id",
+      authMode: "api_token",
+    });
+
+    expect(result.totalCost).toBe(10);
+    expect(result.fixedCostIncludedUsd).toBe(10);
+    expect(
+      result.externalBillingSyncs?.find(
+        (sync) => sync.source === "cloudflare-subscriptions"
+      )?.records
+    ).toEqual([
+      expect.objectContaining({
+        externalId: "paid-a",
+        paidRecurringAuthoritative: true,
+        rollupRole: "canonical",
+      }),
+      expect.objectContaining({
+        externalId: "paid-b",
+        paidRecurringAuthoritative: true,
+        rollupRole: "canonical",
+      }),
+    ]);
+  });
+
+  it("keeps an Expired term terminal when subscription fetching crosses current_period_end", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T11:59:59.999Z"));
+    const currentPeriodStart = "2026-06-17T12:00:00.000Z";
+    const currentPeriodEnd = "2026-07-17T12:00:00.000Z";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(new Date(currentPeriodEnd));
+          return json({
+            result: [
+              {
+                id: "expired-at-boundary",
+                currency: "USD",
+                current_period_start: currentPeriodStart,
+                current_period_end: currentPeriodEnd,
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { public_name: "Workers Paid" },
+                state: "Expired",
+              },
+            ],
+            result_info: { count: 1, page: 1, per_page: 50, total_count: 1 },
+          });
+        })
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", {
+      accountId: "account-id",
+      authMode: "api_token",
+    });
+    const record = result.externalBillingSyncs?.find(
+      (sync) => sync.source === "cloudflare-subscriptions"
+    )?.records[0];
+
+    expect(result.totalCost).toBeNull();
+    expect(result.fixedCostIncludedUsd).toBeNull();
+    expect(record).toMatchObject({
+      externalId: "expired-at-boundary",
+      status: "expired",
+      paidRecurringAuthoritative: false,
+      rollupRole: "metadata",
+      nextRenewalAt: null,
+    });
+  });
+
+  it("uses one new-month accounting window when subscription fetching crosses UTC month end", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-31T23:59:59.999Z"));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+      .mockResolvedValueOnce(json({}, 403))
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date("2026-08-01T00:00:00.000Z"));
+        return json({
+          result: [
+            {
+              id: "august-workers-paid",
+              currency: "USD",
+              current_period_start: "2026-08-01T00:00:00.000Z",
+              current_period_end: "2026-09-01T00:00:00.000Z",
+              frequency: "monthly",
+              price: 5,
+              rate_plan: { public_name: "Workers Paid" },
+              state: "Expired",
+            },
+          ],
+          result_info: { count: 1, page: 1, per_page: 50, total_count: 1 },
+        });
+      })
+      .mockResolvedValueOnce(
+        json({
+          success: true,
+          result: [
+            {
+              BillingCurrency: "USD",
+              ChargePeriodStart: "2026-07-31T23:00:00.000Z",
+              ChargePeriodEnd: "2026-08-01T00:00:00.000Z",
+              ContractedCost: 100,
+              ConsumedQuantity: 100,
+              ServiceName: "Prior-month usage",
+            },
+            {
+              BillingCurrency: "USD",
+              ChargePeriodStart: "2026-08-01T00:00:00.000Z",
+              ChargePeriodEnd: "2026-08-01T01:00:00.000Z",
+              ContractedCost: 2,
+              ConsumedQuantity: 2,
+              ServiceName: "Current-month usage",
+            },
+          ],
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchUsage("token", {
+      accountId: "account-id",
+      authMode: "api_token",
+    });
+
+    const paygoUrl = new URL(String(fetchMock.mock.calls[3][0]));
+    expect(paygoUrl.searchParams.get("from")).toBe("2026-08-01");
+    expect(paygoUrl.searchParams.get("to")).toBe("2026-08-01");
+    expect(result.totalCost).toBe(7);
+    expect(result.fixedCostIncludedUsd).toBe(5);
+    expect(new Date(result.costWindowStart!).toISOString()).toBe(
+      "2026-08-01T00:00:00.000Z"
+    );
+    expect(new Date(result.costWindowEnd!).toISOString()).toBe(
+      "2026-08-01T00:00:00.000Z"
+    );
+    expect(result.rawData).toMatchObject({
+      billing: { fixedSubscriptionBilledThisMonthUsd: 5 },
+      paygoBilling: {
+        currentPeriodCostUsd: 2,
+        recordCount: 1,
+        excludedOutOfPeriodRecords: 1,
+      },
+    });
+    expect(JSON.stringify(result.externalBillingSyncs)).not.toContain(
+      "Prior-month usage"
+    );
+    expect(
+      result.externalBillingSyncs
+        ?.find((sync) => sync.source === "cloudflare-subscriptions")
+        ?.records[0]
+    ).toMatchObject({
+      externalId: "august-workers-paid",
+      status: "paid",
+      paidRecurringAuthoritative: true,
+      rollupRole: "canonical",
     });
   });
 
@@ -595,6 +944,103 @@ describe("cloudflare adapter", () => {
     await expect(
       fetchUsage("token", { accountId: "account-id" })
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("flags a cost coverage caveat when PayGo is unavailable but a subscription cost is known", async () => {
+    const now = new Date();
+    const periodStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+    ).toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: [
+              {
+                id: "sub_1",
+                currency: "USD",
+                current_period_start: periodStart,
+                current_period_end: new Date(now.getTime() + 86_400_000).toISOString(),
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { public_name: "Workers Paid" },
+                state: "Paid",
+              },
+            ],
+            result_info: { count: 1, page: 1, per_page: 50, total_count: 1 },
+          })
+        )
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", { accountId: "account-id" });
+
+    expect(result.totalCost).toBe(5);
+    expect(result.costCoverageCaveat).toEqual({
+      code: "cloudflare_paygo_usage_unavailable",
+      message:
+        "Usage-based costs (D1, R2, Workers, Queues overage) are not visible for this account — only the fixed subscription fee is shown. Cost may be understated.",
+    });
+  });
+
+  it("does not flag a cost coverage caveat when PayGo succeeds, even with zero usage", async () => {
+    const now = new Date();
+    const periodStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+    ).toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: [
+              {
+                id: "sub_1",
+                currency: "USD",
+                current_period_start: periodStart,
+                current_period_end: new Date(now.getTime() + 86_400_000).toISOString(),
+                frequency: "monthly",
+                price: 5,
+                rate_plan: { public_name: "Workers Paid" },
+                state: "Paid",
+              },
+            ],
+            result_info: { count: 1, page: 1, per_page: 50, total_count: 1 },
+          })
+        )
+        .mockResolvedValueOnce(json({ result: [] }))
+    );
+
+    const result = await fetchUsage("token", { accountId: "account-id" });
+
+    expect(result.totalCost).toBe(5);
+    expect(result.costCoverageCaveat).toBeNull();
+  });
+
+  it("does not flag a cost coverage caveat when there is no subscription cost either", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ result: { totals: { requests: 10 } } }))
+        .mockResolvedValueOnce(json({}, 403))
+        .mockResolvedValueOnce(
+          json({
+            result: [],
+            result_info: { count: 0, page: 1, per_page: 50, total_count: 0 },
+          })
+        )
+        .mockResolvedValueOnce(json({}, 403))
+    );
+
+    const result = await fetchUsage("token", { accountId: "account-id" });
+
+    expect(result.totalCost).toBeNull();
+    expect(result.costCoverageCaveat).toBeNull();
   });
 
   it("rejects a successful response that omits the subscription result", async () => {

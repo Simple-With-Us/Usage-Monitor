@@ -1,3 +1,18 @@
+# =============================================================================
+# RETIRED — ROLLBACK HOST ONLY.
+#
+# Production runs on the Oracle A1 VM (Docker + Caddy) and deploys via the
+# host's auto-deploy timer; see DEPLOY.md and deploy/oracle/README.md. This
+# Blueprint is kept functional solely so the suspended Render service
+# `api-usage-monitor` can be revived in a deliberate, owner-directed rollback.
+# The Oracle deploy gate verifies on every deploy that the live service stays
+# user-suspended, auto-deploy stays disabled, and USAGE_SCHEDULER_ENABLED
+# stays "false" — do not resume the service or re-enable auto-deploy outside
+# a rollback, and never point DNS back at its stale database without
+# restoring the latest verified Garage lineage first. Historical runbook:
+# deploy/render/RETIRED-rollback.md.
+# =============================================================================
+#
 # Custom domain: usage.jays.services
 # DNS is managed by Cloudflare (CNAME to api-usage-monitor.onrender.com, proxied)
 # SSL: Cloudflare "Full (strict)" mode + Render's own cert
@@ -16,7 +31,9 @@ services:
     # Render uses this as a liveness/restart signal. Keep it independent of
     # SQLite readiness: restarting during an exclusive maintenance operation
     # restarts that same operation and can livelock the only instance.
-    # Operators and dependency monitors still use strict /api/ready.
+    # /api/ready keeps strict dependency diagnostics in its JSON body but is
+    # temporarily HTTP-liveness-safe because Render's existing service config
+    # can lag this Blueprint field and continue probing that endpoint.
     healthCheckPath: /api/health
     buildFilter:
       ignoredPaths:
@@ -58,19 +75,32 @@ services:
       # This value has higher precedence than .node-version on Render.
       - key: NODE_VERSION
         value: 24.14.1
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=350
       - key: DATABASE_URL
         value: file:/data/prod.db
       # Keep the newest verified transaction-consistent snapshots beside the
       # SQLite DB. Startup creates one before every migrate-safe run and fails
       # closed for an existing DB if backup or integrity verification fails.
       - key: SQLITE_PRE_MIGRATION_BACKUP_RETENTION
-        value: "3"
+        value: "1"
       - key: ENCRYPTION_KEY
         generateValue: true
       - key: CRON_SECRET
         generateValue: true
       - key: USAGE_INGEST_TOKEN
         generateValue: true
+      - key: BILLING_RECEIPT_INGEST_TOKEN
+        sync: false
+      - key: BILLING_RECEIPT_IDENTITY_KEY
+        sync: false
+      - key: BILLING_RECEIPT_HMAC_KEY
+        sync: false
+      # Optional read-only view of the separate Cloudflare Email Routing/R2
+      # receipt quarantine. The Worker never receives the billing receipt
+      # ingest/signing credentials and cannot create money events.
+      - key: RECEIPT_INBOX_READ_TOKEN
+        sync: false
       # GET /api/budget-status authenticates with USAGE_READ_TOKEN, falling back
       # to USAGE_INGEST_TOKEN when unset (see src/app/api/budget-status/route.ts).
       # We intentionally do NOT provision a distinct USAGE_READ_TOKEN here: prod
@@ -79,6 +109,38 @@ services:
       # rights, add a distinct USAGE_READ_TOKEN in the Render dashboard.
       - key: DASHBOARD_PASSWORD
         generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+      # Optional Infisical provider-credential rotation. Project/path defaults
+      # are verified in code, so production only needs the three Universal Auth
+      # ID/secret pairs. Render never generates or copies these values.
+      - key: INFISICAL_PROVIDER_SYNC_ENABLED
+        value: "true"
+      # Default-off one-time create-only bootstrap for the exact current ST
+      # Gemini provider. Enable only for the reviewed migration run, then set
+      # it back to false immediately; this is not a reverse-sync switch.
+      - key: INFISICAL_ST_GEMINI_BOOTSTRAP_ENABLED
+        value: "false"
+      # Optional exact UUID for the reviewed legacy Cloudflare Subscription.
+      # Unset is disabled; Render never generates or discovers this identity.
+      - key: CLOUDFLARE_LEGACY_HANDOFF_SUBSCRIPTION_ID
+        sync: false
+      - key: INFISICAL_BASE_URL
+        value: https://app.infisical.com
+      - key: INFISICAL_ENV
+        value: prod
+      - key: INFISICAL_ST_CLIENT_ID
+        sync: false
+      - key: INFISICAL_ST_CLIENT_SECRET
+        sync: false
+      - key: INFISICAL_CT_CLIENT_ID
+        sync: false
+      - key: INFISICAL_CT_CLIENT_SECRET
+        sync: false
+      - key: INFISICAL_SHARED_CLIENT_ID
+        sync: false
+      - key: INFISICAL_SHARED_CLIENT_SECRET
+        sync: false
       # Optional: enables the read-only Sentry Health dashboard card
       # (GET /api/sentry-health). `sync: false` means Render won't generate
       # or sync a value - set these manually in the dashboard's Environment

@@ -66,6 +66,8 @@ export async function reconcileProviderExternalBilling(
     seenIds.add(externalId);
 
     const data = {
+      paidRecurringAuthoritative:
+        record.paidRecurringAuthoritative === true,
       kind: cleanRequired(record.kind, "kind"),
       serviceName: cleanOptional(record.serviceName),
       planName: cleanOptional(record.planName),

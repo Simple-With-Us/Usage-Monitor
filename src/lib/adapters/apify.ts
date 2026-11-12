@@ -138,6 +138,11 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
           records: [
             {
               externalId: plan.id ?? "account-plan",
+              paidRecurringAuthoritative:
+                userData.data?.isPaying === true &&
+                plan.isEnabled !== false &&
+                monthlyBasePrice != null &&
+                monthlyBasePrice > 0,
               kind: "plan",
               serviceName: "Apify platform",
               planName: plan.description ?? plan.tier ?? plan.id ?? null,

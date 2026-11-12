@@ -524,8 +524,8 @@ describe("buildBillingInventory", () => {
         provider({ id: "voyage", name: "voyage", displayName: "Voyage AI" }),
         provider({
           id: "relay",
-          name: "agent-sync-relay",
-          displayName: "Agent Sync Relay",
+          name: "simple-tools-relay",
+          displayName: "Simple Tools Relay",
           type: "builtin",
         }),
       ],
@@ -536,6 +536,38 @@ describe("buildBillingInventory", () => {
     expect(inventory.coverage.find((entry) => entry.providerId === "openai")?.status).toBe("available");
     expect(inventory.coverage.find((entry) => entry.providerId === "voyage")?.status).toBe("manual");
     expect(inventory.coverage.find((entry) => entry.providerId === "relay")?.status).toBe("not-applicable");
+  });
+
+  it("does not present unavailable Anthropic individual-account billing as setup-ready", () => {
+    const inventory = buildBillingInventory(
+      [
+        provider({
+          id: "anthropic-individual",
+          name: "anthropic",
+          displayName: "Anthropic individual",
+        }),
+        provider({
+          id: "anthropic-org",
+          name: "anthropic",
+          displayName: "Anthropic organization",
+          anthropicAdminApiConfigured: true,
+        }),
+      ],
+      [],
+      NOW
+    );
+
+    expect(
+      inventory.coverage.find(
+        (entry) => entry.providerId === "anthropic-individual"
+      )
+    ).toMatchObject({
+      status: "manual",
+      summary: expect.stringMatching(/no organization Admin API key is configured/i),
+    });
+    expect(
+      inventory.coverage.find((entry) => entry.providerId === "anthropic-org")
+    ).toMatchObject({ status: "available" });
   });
 
   it("reports a stale linked provider confirmation instead of claiming no confirmation exists", () => {
@@ -569,8 +601,74 @@ describe("buildBillingInventory", () => {
     );
 
     expect(inventory.coverage[0]).toMatchObject({
+      status: "tracked",
+      summary: expect.stringMatching(/taking a new snapshot/i),
+    });
+  });
+
+  it("only labels coverage stale when the usage snapshot itself is old", () => {
+    const external = {
+      source: "cloudflare-subscriptions",
+      externalId: "workers",
+      kind: "subscription",
+      planName: "Workers Paid",
+      status: "active",
+      amountUsd: 5,
+      currency: "USD",
+      billingInterval: "monthly",
+      currentPeriodStart: "2026-07-01T00:00:00.000Z",
+      currentPeriodEnd: "2026-08-01T00:00:00.000Z",
+      nextRenewalAt: "2026-08-01T00:00:00.000Z",
+      requestLimit: null,
+      requestLimitWindow: null,
+      spendLimitUsd: null,
+      spendLimitWindow: null,
+      syncedAt: "2026-07-10T00:00:00.000Z",
+    };
+    const inventory = buildBillingInventory(
+      [
+        provider({
+          externalBilling: [external],
+          latestSnapshot: {
+            totalRequests: 10,
+            credits: null,
+            fetchedAt: "2026-07-10T00:00:00.000Z",
+          },
+        }),
+      ],
+      [
+        subscription({
+          externalBillingSource: external.source,
+          externalBillingId: external.externalId,
+        }),
+      ],
+      NOW
+    );
+
+    expect(inventory.coverage[0]).toMatchObject({
       status: "stale",
-      summary: expect.stringContaining("confirmation is stale"),
+      summary: expect.stringMatching(/last usage snapshot is old/i),
+    });
+  });
+
+  it("never presents a no-poll provider as fetchable or waiting for setup", () => {
+    const inventory = buildBillingInventory(
+      [
+        provider({
+          id: "fmp",
+          name: "fmp",
+          displayName: "FMP",
+          type: "builtin",
+          latestSnapshot: null,
+          externalBilling: [],
+        }),
+      ],
+      [],
+      NOW
+    );
+    expect(inventory.coverage[0]).toMatchObject({
+      status: "manual",
+      summary: expect.stringMatching(/MANUALLY ONLY/i),
     });
   });
 });

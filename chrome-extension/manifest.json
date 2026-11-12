@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Usage Monitor Launcher",
+  "version": "2.0.0",
+  "description": "Opens your self-hosted Usage Monitor dashboard in a new tab. Reads no page content, cookies, or storage from any site.",
+  "permissions": [
+    "storage"
+  ],
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "Usage Monitor Client"
+  }
+}

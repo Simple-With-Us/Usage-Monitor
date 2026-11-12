@@ -16,6 +16,10 @@ export interface ProviderSecretConfigMeta {
 // future adapters so they do not silently become browser-visible plaintext.
 const ALWAYS_SECRET_KEYS = new Set([
   "adminapikey",
+  // Wave G / E18: bare apiKey (normalized "apikey") was missing — only
+  // "adminapikey" / "apikeysid" matched exact forms, so config.apiKey could
+  // leak into publicConfig for custom adapters.
+  "apikey",
   "apikeysid",
   "apitoken",
   "apisecret",
@@ -122,12 +126,48 @@ export function decryptProviderSecretConfig(
   return encrypted ? decryptJson(encrypted) : {};
 }
 
+/** Full server-only adapter configuration, including decrypted secrets. */
+export function providerConfigForServer(
+  config: unknown,
+  encryptedSecretConfig: string | null | undefined
+): Record<string, unknown> {
+  const split = splitProviderConfig(config);
+  return mergeProviderConfig(
+    split.publicConfig,
+    mergeProviderConfig(
+      split.secretConfig,
+      decryptProviderSecretConfig(encryptedSecretConfig)
+    )
+  );
+}
+
+/**
+ * Fail-closed variant of providerConfigForServer for read paths that must not
+ * take down a response when stored config cannot be decrypted: returns null
+ * instead of throwing. Hoisted here from the three former per-call-site
+ * `serverConfig` copies (api/providers, api/providers/[id], budget-status).
+ */
+export function providerConfigForServerOrNull(
+  config: unknown,
+  encryptedSecretConfig: string | null
+): Record<string, unknown> | null {
+  try {
+    return providerConfigForServer(config, encryptedSecretConfig);
+  } catch {
+    return null;
+  }
+}
+
 function collectFieldPaths(
   value: Record<string, unknown>,
   prefix = ""
 ): string[] {
   const fields: string[] = [];
   for (const [key, nested] of Object.entries(value)) {
+    // Infisical ownership metadata is server-only. Even its nested field names
+    // (sequence/fingerprint/secret name) provide no editing affordance and
+    // must not be exposed through secretConfigMeta.
+    if (normalizedKey(key) === "infisicalcredential") continue;
     const path = prefix ? `${prefix}.${key}` : key;
     if (isRecord(nested) && !isOpaqueSecretContainerKey(key)) {
       fields.push(...collectFieldPaths(nested, path));

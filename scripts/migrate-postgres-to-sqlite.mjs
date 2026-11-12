@@ -19,6 +19,16 @@
  * and it is always safe to just re-run the script. There is no partial-
  * migration state to clean up by hand.
  *
+ * POST-MIGRATION DEPENDENCY NOTE (2026-07-29, review finding E7/O11): the
+ * `pg` (and `@types/pg`) packages were removed from package.json after the
+ * Postgres -> SQLite cutover completed, since this script is the ONLY pg
+ * consumer and the migration is finished. If this script ever needs to run
+ * again, reinstall them ephemerally first, e.g.:
+ *
+ *   npm install --no-save pg@^8.22.0 @types/pg@^8.20.0
+ *
+ * (the lockfile entry was dropped too; any pg 8.x works with this script).
+ *
  * HOW TO RUN THIS (read carefully - this touches real production data):
  *
  *   This script must be run from Render's Shell tab for the deployed
@@ -46,7 +56,7 @@
  */
 
 import { Client } from "pg";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
 async function main() {
   const sourceUrl = process.env.SOURCE_DATABASE_URL;
@@ -59,7 +69,7 @@ async function main() {
   }
 
   const pg = new Client({ connectionString: sourceUrl });
-  const prisma = new PrismaClient();
+  const prisma = createPrismaClient();
 
   try {
     await pg.connect();

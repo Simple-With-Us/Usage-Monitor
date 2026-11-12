@@ -147,6 +147,25 @@ export async function persistOtlpUsageEvents(
         ignoredOutOfOrder += 1;
         continue;
       }
+      // Wave F / E9: zero cumulative deltas (no change since last checkpoint)
+      // still advance the durable checkpoint but do not create a zero-value
+      // ExternalUsageEvent that would thrash budget/rollup scans.
+      if (delta === 0 && !reset) {
+        const nextStateZero = {
+          seriesKey: point.seriesKey,
+          metricName: point.metricName,
+          startTimeUnixNano:
+            point.startTimeUnixNano ?? state?.startTimeUnixNano ?? null,
+          lastTimeUnixNano: point.timeUnixNano,
+          lastValue: point.rawValue,
+          lastPointKey: event.idempotencyKey,
+          createdAt: state?.createdAt ?? new Date(),
+          updatedAt: new Date(),
+        };
+        stateBySeries.set(point.seriesKey, nextStateZero);
+        ignoredOutOfOrder += 1;
+        continue;
+      }
 
       normalizedByKey.set(
         event.idempotencyKey,

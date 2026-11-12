@@ -32,7 +32,10 @@ function provider(overrides: Partial<Provider>): Provider {
   };
 }
 
-function renderTable(providers: Provider[]) {
+function renderTable(
+  providers: Provider[],
+  extraProps: { loadError?: string | null; onRetryLoad?: () => void } = {}
+) {
   const noop = vi.fn();
   return renderToStaticMarkup(
     createElement(ProviderTable, {
@@ -46,6 +49,7 @@ function renderTable(providers: Provider[]) {
       onAddProvider: noop,
       onToggleActive: noop,
       onFetchNow: noop,
+      ...extraProps,
     })
   );
 }
@@ -84,5 +88,214 @@ describe("ProviderTable cost coverage", () => {
 
     expect(html).toContain("$0.00 MTD");
     expect(html).not.toContain("Cost not reported");
+  });
+
+  it("hides Fetch when Anthropic has no organization Admin key", () => {
+    const individualHtml = renderTable([
+      provider({ name: "anthropic", displayName: "Anthropic individual" }),
+    ]);
+    const organizationHtml = renderTable([
+      provider({
+        name: "anthropic",
+        displayName: "Anthropic organization",
+        anthropicAdminApiConfigured: true,
+        secretConfigMeta: {
+          configured: true,
+          fields: ["adminApiKey"],
+          readable: true,
+        },
+      }),
+    ]);
+
+    expect(individualHtml).not.toContain("Fetch");
+    expect(individualHtml).toContain("Manually only");
+    expect(organizationHtml).toContain("Fetch");
+    expect(organizationHtml).toContain("Active");
+  });
+
+  it("hides Fetch for generic and push-only providers", () => {
+    const manualHtml = renderTable([
+      provider({
+        id: "manual",
+        name: "manual-service",
+        displayName: "Manual service",
+        type: "generic",
+      }),
+    ]);
+    const pushHtml = renderTable([
+      provider({
+        id: "push",
+        name: "voyage",
+        displayName: "Voyage push",
+        type: "push",
+      }),
+    ]);
+    const customHtml = renderTable([
+      provider({
+        id: "custom",
+        name: "custom",
+        displayName: "Custom endpoint",
+        type: "custom",
+      }),
+    ]);
+    const manualProviderHtml = renderTable([
+      provider({
+        id: "manual_provider",
+        name: "openai",
+        displayName: "OpenAI",
+        type: "manual_provider",
+      }),
+    ]);
+
+    expect(manualHtml).not.toContain("Fetch");
+    expect(manualHtml).toContain("Manually only");
+    expect(pushHtml).not.toContain("Fetch");
+    expect(pushHtml).toContain("Manually only");
+    expect(customHtml).toContain("Fetch");
+    expect(customHtml).toContain(">Active<");
+    expect(manualProviderHtml).not.toContain("Fetch");
+    expect(manualProviderHtml).toContain("Manually only");
+  });
+
+  it("shows Gemini key health separately from billing availability", () => {
+    const rejectedHtml = renderTable([
+      provider({
+        name: "google-ai",
+        displayName: "Google AI",
+        geminiKeyStatus: {
+          state: "invalid",
+          httpStatus: 403,
+          availableModelCount: null,
+          checkedAt: "2026-07-14T23:00:00.000Z",
+        },
+        geminiBillingStatus: {
+          state: "pending",
+          errorCode: null,
+          httpStatus: null,
+          retryable: false,
+          checkedAt: "2026-07-14T23:00:00.000Z",
+        },
+        geminiMonitoringStatus: {
+          state: "permission_denied",
+          projectId: "gemini-production",
+          errorCode: "HTTP_ERROR",
+          httpStatus: 403,
+          retryable: false,
+          checkedAt: "2026-07-14T23:00:00.000Z",
+        },
+        snapshotCostFetchedAt: "2026-07-10T20:00:00.000Z",
+      }),
+    ]);
+
+    expect(rejectedHtml).toContain("Key rejected");
+    expect(rejectedHtml).toContain("Verify");
+    expect(rejectedHtml).toContain("Billing pending");
+    expect(rejectedHtml).toContain("Usage permission denied");
+    expect(rejectedHtml).toContain("Cost snapshot fetched");
+    expect(rejectedHtml).toContain(">Active<");
+  });
+
+  it("shows a transient Gemini check as unavailable instead of rejected", () => {
+    const unavailableHtml = renderTable([
+      provider({
+        name: "google-ai",
+        displayName: "Google AI",
+        geminiKeyStatus: {
+          state: "unavailable",
+          httpStatus: 503,
+          availableModelCount: null,
+          checkedAt: "2026-07-14T23:00:00.000Z",
+        },
+      }),
+    ]);
+
+    expect(unavailableHtml).toContain("Check unavailable");
+    expect(unavailableHtml).toContain("Verify");
+    expect(unavailableHtml).not.toContain("Key rejected");
+    expect(unavailableHtml).toContain(">Active<");
+  });
+
+  it("requires a fresh Monitoring check after the Google project identity changes", () => {
+    const html = renderTable([
+      provider({
+        name: "google-ai",
+        displayName: "Google AI",
+        geminiMonitoringStatus: {
+          state: "configuration_changed",
+          projectId: "gemini-production",
+          errorCode: null,
+          httpStatus: null,
+          retryable: false,
+          checkedAt: null,
+        },
+      }),
+    ]);
+
+    expect(html).toContain("Usage configuration changed");
+  });
+
+  it("shows a cost coverage gap warning when the adapter flags one", () => {
+    const html = renderTable([
+      provider({
+        id: "cloudflare",
+        name: "cloudflare",
+        displayName: "Cloudflare",
+        spentUsd: 5,
+        spendCoverage: "complete",
+        costCoverageCaveat: {
+          code: "cloudflare_paygo_usage_unavailable",
+          message: "Usage-based costs (D1, R2, Workers, Queues overage) are not visible for this account — only the fixed subscription fee is shown. Cost may be understated.",
+        },
+      }),
+    ]);
+
+    // Coverage caveat is nested under Billing detail disclosure (compact spend cell).
+    expect(html).toContain("Billing detail");
+    expect(html).toContain("<details");
+    expect(html).toContain("Coverage:");
+    expect(html).toContain(
+      "Usage-based costs (D1, R2, Workers, Queues overage) are not visible"
+    );
+  });
+
+  it("omits the cost coverage gap warning when the adapter did not flag one", () => {
+    const html = renderTable([
+      provider({
+        id: "cloudflare",
+        name: "cloudflare",
+        displayName: "Cloudflare",
+        spentUsd: 5,
+        spendCoverage: "complete",
+      }),
+    ]);
+
+    expect(html).not.toContain("Coverage:");
+    expect(html).not.toContain("Cost coverage gap");
+  });
+});
+
+describe("ProviderTable load error vs genuine empty", () => {
+  it("renders the explicit failure panel with a Retry button when the load failed", () => {
+    const html = renderTable([], {
+      loadError: "Failed to fetch providers",
+      onRetryLoad: vi.fn(),
+    });
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Providers couldn&#x27;t be loaded.");
+    expect(html).toContain("Failed to fetch providers");
+    expect(html).toContain("Retry");
+    // An outage must never masquerade as an empty account — no CTA to add a
+    // (potentially duplicate) provider.
+    expect(html).not.toContain("No providers configured yet.");
+    expect(html).not.toContain("Add your first provider");
+  });
+
+  it("renders the empty-state CTA only when the load succeeded with zero providers", () => {
+    const html = renderTable([]);
+
+    expect(html).toContain("No providers configured yet.");
+    expect(html).toContain("Add your first provider");
+    expect(html).not.toContain('role="alert"');
   });
 });

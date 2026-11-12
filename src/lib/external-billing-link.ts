@@ -64,7 +64,9 @@ export function externalBillingFreshnessWindowMs(
   );
 }
 
-export function normalizeExternalBillingCadence(value: string | null): string | null {
+export function normalizeExternalBillingCadence(
+  value: string | null
+): SubscriptionInterval | null {
   const cadence = value?.trim().toLowerCase();
   if (!cadence) return null;
   if (["week", "weekly"].includes(cadence)) return "weekly";
@@ -72,6 +74,20 @@ export function normalizeExternalBillingCadence(value: string | null): string | 
   if (["quarter", "quarterly"].includes(cadence)) return "quarterly";
   if (["year", "yearly", "annual", "annually"].includes(cadence)) return "annual";
   return null;
+}
+
+/** True only when the provider supplied one complete, exact cadence period. */
+export function hasExactExternalBillingCadencePeriod(
+  record: Pick<
+    ExternalBillingLinkCandidateRecord,
+    "billingInterval" | "currentPeriodStart" | "currentPeriodEnd"
+  >
+): boolean {
+  const cadence = normalizeExternalBillingCadence(record.billingInterval);
+  const start = timestamp(record.currentPeriodStart);
+  const end = timestamp(record.currentPeriodEnd);
+  if (!cadence || start == null || end == null || end <= start) return false;
+  return advancePeriod(new Date(start), cadence, 1).getTime() === end;
 }
 
 function normalizedCurrency(value: string | null): string | null {
@@ -217,3 +233,7 @@ export function formatExternalBillingAmount(
     return `${amount.toFixed(2)} ${normalizedCurrency}`;
   }
 }
+import {
+  advancePeriod,
+  type SubscriptionInterval,
+} from "@/lib/subscriptions";

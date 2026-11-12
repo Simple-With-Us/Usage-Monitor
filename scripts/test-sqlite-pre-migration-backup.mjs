@@ -12,11 +12,14 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -33,11 +36,11 @@ assert.notEqual(
   "backup directory must be fsynced after atomic promotion"
 );
 
-function run(databaseUrl, overrides = {}, cwd = repoRoot) {
+function run(databaseUrl, overrides = {}, cwd = repoRoot, args = []) {
   const env = { ...process.env, DATABASE_URL: databaseUrl };
   delete env.SQLITE_PRE_MIGRATION_BACKUP_RETENTION;
   Object.assign(env, overrides);
-  return spawnSync(process.execPath, [script], {
+  return spawnSync(process.execPath, [script, ...args], {
     cwd,
     env,
     encoding: "utf8",
@@ -99,10 +102,14 @@ try {
   // Keep the WAL-mode source connection open while the child backs it up.
   // This proves the online backup API captures committed WAL-backed rows and
   // does not depend on unsafe filesystem copying.
-  const first = run(`file:${databasePath}`, {
-    SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2",
-  });
+  const first = run(
+    `file:${databasePath}`,
+    { SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
   expectStatus("WAL backup", first, 0);
+  assert.match(first.stdout, /schema change detected/);
   assert.match(first.stdout, /verified .*\.backup\.db/);
   let backups = backupFiles(databasePath);
   assert.equal(backups.length, 1);
@@ -112,6 +119,19 @@ try {
     statSync(join(temp, ".pre-migration-backups")).mode & 0o777,
     0o700
   );
+
+  // Native SQLite memory bounds (shared with src/lib/prisma.ts) and the
+  // backup step rate must be tunable without breaking the backup itself -
+  // a custom cache/mmap/rate combination should still produce a verified,
+  // byte-correct backup.
+  const tunedMemory = run(`file:${databasePath}`, {
+    SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2",
+    SQLITE_CACHE_SIZE_KIB: "512",
+    SQLITE_MMAP_SIZE_BYTES: "1048576",
+    SQLITE_BACKUP_RATE_PAGES: "1",
+  });
+  expectStatus("tuned native-memory backup", tunedMemory, 0);
+  assertBackup(backupFiles(databasePath).at(-1), ["alpha", "beta"]);
 
   source.prepare("INSERT INTO sample (value) VALUES (?)").run("gamma");
   for (let index = 0; index < 3; index += 1) {
@@ -127,6 +147,69 @@ try {
   assert.equal(backups.length, 2, "retention must keep exactly the newest two backups");
   for (const path of backups) assertBackup(path, ["alpha", "beta", "gamma"]);
   source.close();
+
+  const inSyncPath = join(temp, "in-sync.db");
+  const inSyncPush = spawnSync(
+    "npx",
+    ["--no-install", "prisma", "db", "push"],
+    {
+      cwd: repoRoot,
+      env: { ...process.env, DATABASE_URL: `file:${inSyncPath}` },
+      encoding: "utf8",
+    }
+  );
+  expectStatus("in-sync database setup", inSyncPush, 0);
+  const inSyncBackupDirectory = join(temp, ".pre-migration-backups");
+  mkdirSync(inSyncBackupDirectory, { recursive: true });
+  for (let index = 0; index < 3; index += 1) {
+    const retainedPath = join(
+      inSyncBackupDirectory,
+      `in-sync.db.pre-migration-2026010${index + 1}T000000000Z-${index}.backup.db`
+    );
+    writeFileSync(retainedPath, `old backup ${index}`);
+    const timestamp = new Date(Date.UTC(2026, 0, index + 1));
+    utimesSync(retainedPath, timestamp, timestamp);
+  }
+  const stalePartial = join(
+    inSyncBackupDirectory,
+    "in-sync.db.pre-migration-20260104T000000000Z-4.partial"
+  );
+  writeFileSync(stalePartial, "incomplete backup");
+  const staleTimestamp = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  utimesSync(stalePartial, staleTimestamp, staleTimestamp);
+
+  const inSyncBackup = run(
+    `file:${inSyncPath}`,
+    { SQLITE_PRE_MIGRATION_BACKUP_RETENTION: "2" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
+  expectStatus("in-sync schema backup skip", inSyncBackup, 0);
+  assert.match(inSyncBackup.stdout, /schema is already in sync; pre-migration backup not required/);
+  assert.equal(
+    backupFiles(inSyncPath).length,
+    2,
+    "in-sync startup must still repair retention overflow"
+  );
+  assert.equal(
+    existsSync(stalePartial),
+    false,
+    "in-sync startup must still remove stale partial backups"
+  );
+
+  const fallbackPath = join(temp, "diff-probe-fallback.db");
+  const fallbackDb = new DatabaseSync(fallbackPath);
+  fallbackDb.exec("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO sample (value) VALUES ('fallback');");
+  fallbackDb.close();
+  const fallbackBackup = run(
+    `file:${fallbackPath}`,
+    { PATH: "" },
+    repoRoot,
+    ["--if-schema-changed"]
+  );
+  expectStatus("schema-diff probe failure backup", fallbackBackup, 0);
+  assert.match(fallbackBackup.stdout, /verified backup remains required/);
+  assertBackup(backupFiles(fallbackPath)[0], ["fallback"]);
 
   const relativeDirectory = join(temp, "relative");
   mkdirSync(relativeDirectory);
@@ -188,6 +271,138 @@ try {
   const directoryResult = run(`file:${directoryPath}`);
   expectStatus("non-file database path", directoryResult, 1);
   assert.match(directoryResult.stderr, /is not a regular file/);
+
+  // VACUUM INTO must work from the same read-only source connection used by
+  // the production backup and keep making progress while another connection
+  // commits.  The worker and both database files are confined to this temp
+  // directory; production data is never opened by this test.
+  const vacuumSourcePath = join(temp, "vacuum-source.db");
+  const vacuumSnapshotPath = join(temp, "vacuum-snapshot.db");
+  const vacuumSeed = new DatabaseSync(vacuumSourcePath);
+  vacuumSeed.exec("PRAGMA journal_mode = WAL; CREATE TABLE ballast (value TEXT NOT NULL); CREATE TABLE writes (value TEXT NOT NULL);");
+  const insertBallast = vacuumSeed.prepare("INSERT INTO ballast (value) VALUES (?)");
+  vacuumSeed.exec("BEGIN");
+  for (let index = 0; index < 60_000; index += 1) {
+    insertBallast.run("x".repeat(1024));
+  }
+  vacuumSeed.exec("COMMIT");
+  vacuumSeed.close();
+
+  const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const stats = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const writer = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { DatabaseSync } = require("node:sqlite");
+    const control = new Int32Array(workerData.control);
+    const stats = new Int32Array(workerData.stats);
+    const database = new DatabaseSync(workerData.databasePath);
+    const insert = database.prepare("INSERT INTO writes (value) VALUES (?)");
+    let index = 0;
+    parentPort.postMessage("ready");
+    while (Atomics.load(control, 0) === 0) {
+      database.exec("BEGIN IMMEDIATE");
+      for (let batch = 0; batch < 100; batch += 1) insert.run(String(index++));
+      database.exec("COMMIT");
+      Atomics.add(stats, 0, 1);
+      Atomics.wait(control, 1, 0, 1);
+    }
+    database.close();
+  `, {
+    eval: true,
+    workerData: { databasePath: vacuumSourcePath, control, stats },
+  });
+  try {
+    await once(writer, "message");
+    const writeStats = new Int32Array(stats);
+    const deadline = Date.now() + 5_000;
+    while (Atomics.load(writeStats, 0) < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(Atomics.load(writeStats, 0) >= 3, "independent writer must commit before snapshot starts");
+    const commitsBeforeSnapshot = Atomics.load(writeStats, 0);
+
+    const readOnlySource = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+    try {
+      readOnlySource.exec(`VACUUM INTO '${vacuumSnapshotPath}'`);
+    } finally {
+      readOnlySource.close();
+    }
+
+    assert.ok(
+      Atomics.load(writeStats, 0) > commitsBeforeSnapshot,
+      "independent writer must continue committing during VACUUM INTO"
+    );
+    const vacuumSnapshot = new DatabaseSync(vacuumSnapshotPath, { readOnly: true });
+    try {
+      assert.deepEqual(
+        vacuumSnapshot.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]),
+        ["ok"]
+      );
+      const copiedWrites = vacuumSnapshot.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+      const sourceWrites = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+      try {
+        const latestWrites = sourceWrites.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+        assert.ok(copiedWrites <= latestWrites, "snapshot must not contain uncommitted future rows");
+        assert.equal(copiedWrites % 100, 0, "snapshot must include only whole writer transactions");
+      } finally {
+        sourceWrites.close();
+      }
+    } finally {
+      vacuumSnapshot.close();
+    }
+
+    const commitsBeforeBackupScript = Atomics.load(writeStats, 0);
+    const concurrentBackup = run(`file:${vacuumSourcePath}`, {
+      SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS: "300000",
+    });
+    expectStatus("pre-migration backup with concurrent writer", concurrentBackup, 0);
+    assert.ok(
+      Atomics.load(writeStats, 0) > commitsBeforeBackupScript,
+      "production backup script must allow independent commits to progress"
+    );
+    const managedSnapshots = backupFiles(vacuumSourcePath);
+    assert.equal(managedSnapshots.length, 1);
+    const managedSnapshot = new DatabaseSync(managedSnapshots[0], { readOnly: true });
+    try {
+      assert.deepEqual(
+        managedSnapshot.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]),
+        ["ok"]
+      );
+      const copiedWrites = managedSnapshot.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+      const latestWritesDb = new DatabaseSync(vacuumSourcePath, { readOnly: true });
+      try {
+        const latestWrites = latestWritesDb.prepare("SELECT COUNT(*) AS count FROM writes").get().count;
+        assert.ok(copiedWrites <= latestWrites, "managed snapshot must not include uncommitted future rows");
+        assert.equal(copiedWrites % 100, 0, "managed snapshot must contain complete writer transactions");
+      } finally {
+        latestWritesDb.close();
+      }
+    } finally {
+      managedSnapshot.close();
+    }
+  } finally {
+    Atomics.store(new Int32Array(control), 0, 1);
+    Atomics.notify(new Int32Array(control), 1);
+    await writer.terminate();
+  }
+
+  // An exclusive rollback-journal lock forces the snapshot child to wait on
+  // SQLite.  Its configured overall deadline must kill the child, fail closed,
+  // and remove the partial artifact without waiting for SQLite's lock timeout.
+  const blockedPath = join(temp, "blocked-source.db");
+  const blocker = new DatabaseSync(blockedPath);
+  blocker.exec("CREATE TABLE sample (value TEXT NOT NULL); BEGIN EXCLUSIVE; INSERT INTO sample VALUES ('held');");
+  const blockedStart = Date.now();
+  const blocked = run(`file:${blockedPath}`, {
+    SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS: "1000",
+  });
+  const blockedDuration = Date.now() - blockedStart;
+  blocker.exec("ROLLBACK");
+  blocker.close();
+  expectStatus("bounded snapshot timeout", blocked, 1);
+  assert.match(blocked.stderr, /exceeded 1000 ms/);
+  assert.ok(blockedDuration < 5_000, `timeout must be bounded, took ${blockedDuration} ms`);
+  assert.equal(backupFiles(blockedPath).length, 0, "a timed-out partial snapshot must not be retained");
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

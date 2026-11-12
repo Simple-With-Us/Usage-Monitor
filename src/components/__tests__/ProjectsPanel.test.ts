@@ -76,4 +76,40 @@ describe("ProjectsPanel cost coverage", () => {
     expect(html).toContain("1 allocated provider cost incomplete");
     expect(html).toContain("Congress.Trade known monthly budget used");
   });
+
+  it("clamps a negative percentUsed (e.g. a manual subscription refund) to a valid ARIA/CSS range", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectsPanel, {
+        projects: [
+          project({
+            spentUsd: -3.5,
+            spendCoverage: "partial",
+            percentUsed: -0.035,
+          }),
+        ],
+      })
+    );
+
+    expect(html).toContain('aria-valuenow="0"');
+    expect(html).not.toContain('aria-valuenow="-3.5"');
+    expect(html).toMatch(/width:\s*0%/);
+    expect(html).not.toContain("width:-3.5%");
+  });
+
+  it("clamps a percentUsed above 100 to 100 for ARIA/CSS", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectsPanel, {
+        projects: [
+          project({
+            spentUsd: 150,
+            spendCoverage: "complete",
+            percentUsed: 1.5,
+          }),
+        ],
+      })
+    );
+
+    expect(html).toContain('aria-valuenow="100"');
+    expect(html).toMatch(/width:\s*100%/);
+  });
 });

@@ -1,0 +1,10 @@
+{
+  "serviceId": "srv-d9181tpo3t8c73crf310",
+  "hostname": "api-usage-monitor.onrender.com",
+  "state": "suspended",
+  "suspenders": ["user"],
+  "autoDeploy": "off",
+  "schedulerEnabled": false,
+  "writerAuthority": "oracle",
+  "verifiedAt": "2026-07-19T00:28:44Z"
+}

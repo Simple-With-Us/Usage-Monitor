@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { costCoverageHelpText } from "@/lib/cost-coverage-help";
+import { formatCurrency, formatNumber } from "@/lib/format";
 
 export type ExternalCostCoverage = "complete" | "partial" | "unknown" | "legacy_unknown";
 
@@ -25,6 +27,8 @@ export interface ExternalUsageGroup {
   unclassifiedCostEventCount: number;
   costCoverage: ExternalCostCoverage;
   totalCostUsd: number;
+  receiptCashPaidUsd?: number;
+  estimatedApiEquivalentUsd: number;
   totalRequests: number;
   totalQuantity: number;
   limit: number | null;
@@ -32,9 +36,21 @@ export interface ExternalUsageGroup {
   latestAt: string;
 }
 
+export interface DailySpendSeriesPoint {
+  /** UTC calendar day, YYYY-MM-DD. */
+  day: string;
+  totalCostUsd: number;
+}
+
 export interface ExternalUsageSummary {
   days: number;
   totalCostUsd: number;
+  receiptCashPaidUsd?: number;
+  estimatedApiEquivalentUsd: number;
+  /** Monitor-computed token x LiteLLM estimates (metadata-only stamps). Never
+   * cash, never counted as priced — visibility into unpriced coverage gaps. */
+  derivedCostEstimateUsd?: number;
+  derivedCostEstimateEventCount?: number;
   pricedEventCount: number;
   unpricedEventCount: number;
   unclassifiedCostEventCount: number;
@@ -42,16 +58,16 @@ export interface ExternalUsageSummary {
   totalRequests: number;
   eventCount: number;
   groups: ExternalUsageGroup[];
+  /** Per-day cost series over the same requested window — powers the
+   * chart-range burn chart. Optional: absent on older cached responses. */
+  dailySeries?: DailySpendSeriesPoint[];
 }
 
 interface ExternalTelemetryPanelProps {
   usageSummary: ExternalUsageSummary;
 }
 
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-});
+const usd = (amount: number) => formatCurrency(amount);
 
 function costLabel(
   totalCostUsd: number,
@@ -59,14 +75,14 @@ function costLabel(
   unpricedEventCount: number,
   unclassifiedCostEventCount: number
 ): string {
-  if (coverage === "complete") return usd.format(totalCostUsd);
+  if (coverage === "complete") return usd(totalCostUsd);
   if (coverage === "partial") {
     const unknownEvents = unpricedEventCount + unclassifiedCostEventCount;
-    return `${usd.format(totalCostUsd)} known · ${unknownEvents} unpriced`;
+    return `${usd(totalCostUsd)} known · ${unknownEvents} unpriced`;
   }
   if (coverage === "legacy_unknown") {
     return totalCostUsd !== 0
-      ? `${usd.format(totalCostUsd)} recorded · historical coverage unknown`
+      ? `${usd(totalCostUsd)} recorded · historical coverage unknown`
       : "Historical cost unknown";
   }
   return "Cost not reported";
@@ -79,22 +95,36 @@ function identityToken(value: string): string {
 export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemetryPanelProps) {
   const [showAll, setShowAll] = useState(false);
   const externalCost = usageSummary.totalCostUsd;
+  const receiptCashPaid = usageSummary.receiptCashPaidUsd ?? 0;
+  const estimatedApiEquivalent = usageSummary.estimatedApiEquivalentUsd;
   const externalRequests = usageSummary.totalRequests;
   const visibleGroups = showAll ? usageSummary.groups : usageSummary.groups.slice(0, 8);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+    <div data-testid="external-telemetry-panel" className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
             External App Telemetry
           </h2>
           <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-            Last {usageSummary.days} days from sibling app reports
+            {usageSummary.days >= 3650
+              ? "All time from sibling app reports"
+              : `Last ${usageSummary.days} ${usageSummary.days === 1 ? "day" : "days"} from sibling app reports`}
           </p>
         </div>
         <div className="text-right shrink-0">
-          <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            Tracked cash spend
+          </p>
+          <p
+            className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+            title={
+              usageSummary.costCoverage === "complete"
+                ? undefined
+                : costCoverageHelpText(usageSummary.costCoverage)
+            }
+          >
             {costLabel(
               externalCost,
               usageSummary.costCoverage,
@@ -103,8 +133,35 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
             )}
           </p>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            {new Intl.NumberFormat("en-US").format(externalRequests)} requests
+            {formatNumber(externalRequests)} requests
           </p>
+          {estimatedApiEquivalent > 0 && (
+            <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+              API-equivalent estimate: {usd(estimatedApiEquivalent)}
+              <span className="block text-[10px] font-normal">
+                Excluded from cash spend · verify provider billing
+              </span>
+            </p>
+          )}
+          {receiptCashPaid > 0 && (
+            <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              Receipt cash paid: {usd(receiptCashPaid)}
+              <span className="block text-[10px] font-normal">
+                Reconciled with observed usage by max, not added twice
+              </span>
+            </p>
+          )}
+          {(usageSummary.derivedCostEstimateUsd ?? 0) > 0 && (
+            <p className="mt-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+              Monitor-estimated: {usd(usageSummary.derivedCostEstimateUsd ?? 0)}
+              {usageSummary.derivedCostEstimateEventCount
+                ? ` · ${formatNumber(usageSummary.derivedCostEstimateEventCount)} events`
+                : ""}
+              <span className="block text-[10px] font-normal">
+                Token × LiteLLM pricing · not cash, not counted as priced
+              </span>
+            </p>
+          )}
         </div>
       </div>
       {usageSummary.groups.length === 0 ? (
@@ -143,6 +200,14 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                     : group.totalQuantity;
                 const displayedUnit =
                   group.unit || (requestBased ? "requests" : group.metricType);
+                const hasEstimatedApiEquivalent =
+                  group.estimatedApiEquivalentUsd > 0;
+                const tokenUsageWithEstimate =
+                  hasEstimatedApiEquivalent &&
+                  group.metricType === "usage" &&
+                  normalizedUnit === "token";
+                const groupReceiptCash = group.receiptCashPaidUsd ?? 0;
+                const hasReceiptCash = groupReceiptCash > 0;
                 const usagePercent =
                   group.limit != null && group.limit > 0
                     ? Math.min((displayedUsage / group.limit) * 100, 999)
@@ -180,15 +245,32 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                     </td>
                     <td className="px-6 py-4 text-right" data-label="Usage">
                       <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                        {new Intl.NumberFormat("en-US").format(displayedUsage)}
+                        {hasReceiptCash
+                          ? usd(groupReceiptCash)
+                          : hasEstimatedApiEquivalent && !tokenUsageWithEstimate
+                          ? usd(group.estimatedApiEquivalentUsd)
+                          : formatNumber(displayedUsage)}
                       </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        {costLabel(
-                          group.totalCostUsd,
-                          group.costCoverage,
-                          group.unpricedEventCount,
-                          group.unclassifiedCostEventCount
-                        )}
+                      <p
+                        className="text-xs text-gray-500 dark:text-gray-400"
+                        title={
+                          !hasReceiptCash && !hasEstimatedApiEquivalent && group.costCoverage !== "complete"
+                            ? costCoverageHelpText(group.costCoverage)
+                            : undefined
+                        }
+                      >
+                        {hasReceiptCash
+                          ? "Receipt cash paid · max-reconciled with observed usage"
+                          : tokenUsageWithEstimate
+                          ? `API-equivalent estimate: ${usd(group.estimatedApiEquivalentUsd)} · excluded from cash spend`
+                          : hasEstimatedApiEquivalent
+                          ? "API-equivalent estimate · excluded from cash spend"
+                          : costLabel(
+                              group.totalCostUsd,
+                              group.costCoverage,
+                              group.unpricedEventCount,
+                              group.unclassifiedCostEventCount
+                            )}
                       </p>
                     </td>
                     <td className="px-6 py-4" data-label="Quota">
@@ -215,12 +297,12 @@ export default function ExternalTelemetryPanel({ usageSummary }: ExternalTelemet
                           </div>
                           <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
                             {usagePercent.toFixed(1)}% of{" "}
-                            {new Intl.NumberFormat("en-US").format(group.limit ?? 0)}
+                            {formatNumber(group.limit ?? 0)}
                             {group.limitWindow ? `/${group.limitWindow}` : ""}
                           </p>
                         </div>
                       ) : (
-                        <span className="text-xs text-gray-400 dark:text-gray-500">-</span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">-</span>
                       )}
                     </td>
                   </tr>

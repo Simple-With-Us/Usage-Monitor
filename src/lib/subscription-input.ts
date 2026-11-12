@@ -53,6 +53,7 @@ export interface SubscriptionUpdateInput {
   intervalCount?: number;
   anchorDay?: number | null;
   startDate?: Date;
+  canceledAt?: Date | null;
   knobEnv?: Record<string, string> | null;
 }
 
@@ -82,6 +83,16 @@ function requireNonNegativeNumber(value: unknown, field: string): number {
     throw new Error(`${field} must be a non-negative number`);
   }
   return parsed;
+}
+
+// Strict boolean validation: reject truthy-but-not-boolean values (e.g. the
+// string "false", 1, {}, non-empty arrays) that `Boolean(value)` would
+// silently coerce to `true`.
+function parseBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
 }
 
 function parseInterval(value: unknown): SubscriptionInterval {
@@ -164,17 +175,43 @@ function parseExternalBillingLink(record: Record<string, unknown>): {
 // A flat map of env-var knob name -> string value (e.g.
 // {"PROVIDER_QUOTA_TIINGO_PER_HOUR": "10000"}). Every value must be a string
 // so it round-trips directly into an env var — no numbers/booleans/nesting.
+//
+// CodeQL js/remote-property-injection: never use user-controlled strings as
+// object property writes on a plain `{}`. Build via Map, then freeze a
+// null-prototype object so prototype pollution cannot land.
+const KNOB_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 function parseKnobEnv(value: unknown, field: string): Record<string, string> | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${field} must be a JSON object mapping knob names to string values`);
   }
-  const result: Record<string, string> = {};
+  const entries = new Map<string, string>();
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      key === "__proto__" ||
+      key === "constructor" ||
+      key === "prototype" ||
+      !KNOB_ENV_KEY.test(key)
+    ) {
+      throw new Error(
+        `${field} key must be a safe env-var name (A-Z, 0-9, underscore); got ${JSON.stringify(key)}`
+      );
+    }
     if (typeof entry !== "string") {
       throw new Error(`${field}.${key} must be a string value`);
     }
-    result[key] = entry;
+    entries.set(key, entry);
+  }
+  // Null-prototype object avoids inherited setters; assign via Map only.
+  const result = Object.create(null) as Record<string, string>;
+  for (const [safeKey, safeValue] of entries) {
+    Object.defineProperty(result, safeKey, {
+      value: safeValue,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
   return result;
 }
@@ -220,7 +257,7 @@ export function parseSubscriptionCreateInput(
     startDate,
     currentPeriodStart,
     nextRenewalAt,
-    autoRenew: record.autoRenew === undefined ? true : Boolean(record.autoRenew),
+    autoRenew: record.autoRenew === undefined ? true : parseBoolean(record.autoRenew, "autoRenew"),
     status: parseStatus(record.status),
     notes: cleanNullableString(record.notes, "notes"),
     knobEnv: parseKnobEnv(record.knobEnv, "knobEnv"),
@@ -259,7 +296,7 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   if (record.currency !== undefined) {
     update.currency = parseCurrency(record.currency);
   }
-  if (record.autoRenew !== undefined) update.autoRenew = Boolean(record.autoRenew);
+  if (record.autoRenew !== undefined) update.autoRenew = parseBoolean(record.autoRenew, "autoRenew");
   if (record.status !== undefined) update.status = parseStatus(record.status);
   if (record.notes !== undefined) update.notes = cleanNullableString(record.notes, "notes");
   if (record.interval !== undefined) update.interval = parseInterval(record.interval);
@@ -267,6 +304,12 @@ export function parseSubscriptionUpdateInput(body: unknown): SubscriptionUpdateI
   if (record.anchorDay !== undefined) update.anchorDay = parseAnchorDay(record.anchorDay);
   if (record.startDate !== undefined) {
     update.startDate = parseDate(record.startDate, "startDate", () => new Date());
+  }
+  if (record.canceledAt !== undefined) {
+    update.canceledAt =
+      record.canceledAt === null || record.canceledAt === ""
+        ? null
+        : parseDate(record.canceledAt, "canceledAt", () => new Date());
   }
   if (record.knobEnv !== undefined) update.knobEnv = parseKnobEnv(record.knobEnv, "knobEnv");
 

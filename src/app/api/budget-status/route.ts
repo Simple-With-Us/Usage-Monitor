@@ -1,27 +1,54 @@
 import { NextRequest, NextResponse } from "next/server";
 import { computeProjectBudgetStatus } from "@/lib/budget-status";
-import { tokenFromRequest, safeEqual } from "@/lib/ingest-auth";
+import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
+import { isUsageReadAuthorized, resolveUsageReadToken } from "@/lib/ingest-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Read token: a dedicated USAGE_READ_TOKEN if configured, otherwise the ingest token is reused
-// (a consuming app that can push already holds it). Keeping a separate read token optional lets an
-// operator hand out read-only access without granting ingest.
-function expectedToken(): string | undefined {
-  return process.env.USAGE_READ_TOKEN?.trim() || process.env.USAGE_INGEST_TOKEN?.trim() || undefined;
-}
-
+// Read token: dedicated USAGE_READ_TOKEN preferred; ingest fallback only outside
+// production (or when USAGE_READ_TOKEN_ALLOW_INGEST_FALLBACK=true). See C10.
 export async function GET(request: NextRequest) {
-  const expected = expectedToken();
-  if (!expected) {
-    return NextResponse.json({ error: "Budget status is not configured" }, { status: 503 });
-  }
-  const actual = tokenFromRequest(request, "x-usage-ingest-token");
-  if (!actual || !safeEqual(actual, expected)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const hasDashboardSession = verifySessionToken(
+    request.cookies.get(SESSION_COOKIE_NAME)?.value
+  );
+
+  // Native clients can authenticate once with the dashboard password and use
+  // the same HttpOnly session as the web UI. Headless/read-only clients retain
+  // the dedicated bearer-token path. The endpoint stays public in middleware
+  // so it can continue self-authenticating both credential types here.
+  if (!hasDashboardSession) {
+    if (!resolveUsageReadToken()) {
+      return NextResponse.json(
+        {
+          error:
+            "Budget status is not configured (set USAGE_READ_TOKEN in production)",
+        },
+        { status: 503 }
+      );
+    }
+    if (!isUsageReadAuthorized(request)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
   }
 
   const status = await computeProjectBudgetStatus();
-  return NextResponse.json(status, { headers: { "cache-control": "no-store" } });
+  const generatedAt = status.generatedAt;
+  const generatedMs = Date.parse(generatedAt);
+  const ageSeconds =
+    Number.isFinite(generatedMs) && generatedMs > 0
+      ? Math.max(0, Math.floor((Date.now() - generatedMs) / 1000))
+      : null;
+  return NextResponse.json(status, {
+    headers: {
+      "cache-control": "no-store",
+      // Read-surface version marker (X4; see docs/api-contract.md). Additive
+      // changes keep "1"; a breaking change bumps it.
+      "x-api-version": "1",
+      // Wave F / E7: throttle consumers can prefer fresh snapshots without
+      // parsing the full body, and can back off when Age is high.
+      "x-budget-generated-at": generatedAt,
+      ...(ageSeconds != null ? { age: String(ageSeconds) } : {}),
+    },
+  });
 }

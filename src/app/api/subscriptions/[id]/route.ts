@@ -1,7 +1,22 @@
 import { NextResponse } from "next/server";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
+
+/** Accept NextRequest in prod and plain Request in unit tests. */
+function sessionRequest(request: Request): {
+  cookies: { get: (name: string) => { value: string } | undefined };
+} {
+  const candidate = request as Request & {
+    cookies?: { get: (name: string) => { value: string } | undefined };
+  };
+  if (candidate.cookies?.get) {
+    return { cookies: candidate.cookies };
+  }
+  return { cookies: { get: () => undefined } };
+}
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { parseSubscriptionUpdateInput } from "@/lib/subscription-input";
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import {
   canLinkSubscriptionToExternalBilling,
   externalBillingFreshnessWindowMs,
@@ -16,17 +31,28 @@ import {
   isSubscriptionInterval,
   type SubscriptionInterval,
 } from "@/lib/subscriptions";
+import { findExternalAdoptionGuardKeyForCharge } from "@/lib/external-billing-subscription-adoption";
+import { retractSubscriptionChargesInTransaction } from "@/lib/subscription-materializer";
 
 function sameCalendarDay(a: Date, b: Date): boolean {
   return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
 }
 
-export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function PUT(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(sessionRequest(request))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
 
   let update;
   try {
-    update = parseSubscriptionUpdateInput(await request.json());
+    update = parseSubscriptionUpdateInput(
+      await readBoundedJsonBody(request, { label: "Subscription body" })
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Invalid request" },
@@ -66,6 +92,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   const isRawActivating =
     update.status === "active" && existing.status !== "active";
   const isActivating = isRawActivating || isExpiredRepurchase;
+  const isLeavingActive =
+    existing.status === "active" &&
+    update.status !== undefined &&
+    update.status !== "active";
   const isResume = isActivating && update.activationMode === "resume";
   const isRepurchase = isActivating && update.activationMode !== "resume";
   const externalBillingLinkSupplied =
@@ -271,6 +301,19 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   }
 
   const data: Prisma.SubscriptionUpdateInput = {};
+  // Any owner edit converts an auto-managed row into an owner-managed row.
+  // Maintenance must never overwrite explicit dashboard decisions.
+  data.externalBillingManaged = false;
+  const guardProvider = await prisma.provider.findUnique({
+    where: { id: effectiveProviderId },
+    select: { refreshIntervalMin: true },
+  });
+  if (!guardProvider) {
+    return NextResponse.json(
+      { error: "providerId does not match a known provider" },
+      { status: 400 }
+    );
+  }
   if (update.providerId !== undefined) {
     data.provider = { connect: { id: update.providerId } };
     if (!externalBillingLinkSupplied && update.providerId !== existing.providerId) {
@@ -295,8 +338,15 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   }
   if (update.status !== undefined) {
     data.status = update.status;
-    // Stamp/clear the cancellation time so the UI and any future reporting can
-    // tell when a subscription stopped generating charges.
+  }
+  if (isLeavingActive) {
+    // Modeled current-period charges must not stay in MTD after the owner
+    // says the row is not an active paid term.
+    data.lastChargedPeriodStart = null;
+  }
+  if (update.canceledAt !== undefined) {
+    data.canceledAt = update.canceledAt;
+  } else if (update.status !== undefined) {
     data.canceledAt = update.status === "canceled" ? new Date() : null;
   }
   if (update.knobEnv !== undefined) {
@@ -424,7 +474,39 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   }
 
   try {
-    const subscription = await prisma.subscription.update({ where: { id }, data });
+    const subscription = await prisma.$transaction(async (tx) => {
+      // Lock before the final identity reread and row update. A concurrent
+      // adapter refresh can only land before or after this transaction, never
+      // between guard authorization and persistence.
+      await tx.$executeRaw`
+        UPDATE "Subscription"
+        SET "costUsd" = "costUsd"
+        WHERE "id" = ${id}
+      `;
+      // A guard is valid only for the final exact linked external identity and
+      // provider/cadence/amount shape. Unlinking clears it; price equivalence
+      // alone never restores it.
+      data.externalAdoptionGuardKey =
+        await findExternalAdoptionGuardKeyForCharge(
+          {
+            providerId: effectiveProviderId,
+            refreshIntervalMin: guardProvider.refreshIntervalMin,
+            externalBillingSource: effectiveExternalSource,
+            externalBillingId: effectiveExternalId,
+            costUsd: update.costUsd ?? existing.costUsd,
+            currency: update.currency ?? existing.currency,
+            interval: update.interval ?? existing.interval,
+            intervalCount: update.intervalCount ?? existing.intervalCount,
+            now: validationNow,
+          },
+          tx
+        );
+      const subscription = await tx.subscription.update({ where: { id }, data });
+      if (isLeavingActive) {
+        await retractSubscriptionChargesInTransaction(tx, id);
+      }
+      return subscription;
+    });
     return NextResponse.json(subscription);
   } catch (error) {
     if (
@@ -432,7 +514,11 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       error.code === "P2002"
     ) {
       return NextResponse.json(
-        { error: "External billing record is already linked to another subscription" },
+        {
+          error: data.externalAdoptionGuardKey
+            ? "An equivalent authoritative external charge is already represented by another subscription"
+            : "External billing record is already linked to another subscription",
+        },
         { status: 409 }
       );
     }
@@ -441,10 +527,20 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   }
 }
 
-export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  if (shouldEnforceDashboardSession() && !hasValidDashboardSession(sessionRequest(request))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
   try {
-    await prisma.subscription.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      await retractSubscriptionChargesInTransaction(tx, id);
+      await tx.subscription.delete({ where: { id } });
+    });
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error("Failed to delete subscription:", error);

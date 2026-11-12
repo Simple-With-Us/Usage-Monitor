@@ -1,0 +1,150 @@
+name: Production Deploy Verification
+
+on:
+  # Coolify on Hetzner (fleet-hetzner-nbg1) performs the deploy. This workflow
+  # never mutates production — it is the GitHub-visible receipt: it starts only
+  # after exact-main CI succeeds and fails unless production reaches that exact
+  # revision. Oracle was the previous host; deploy/oracle/README.md keeps that
+  # retired runbook for emergency reference only.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Current main SHA to verify (defaults to the dispatch SHA)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # Lets a superseded observer cancel its own run. Supersession is routine at
+  # this merge rate (Coolify deploys take longer than the gap between merges),
+  # so it must conclude as "cancelled", not "failure" — otherwise every fast
+  # merge fires a false Run-failed notification. A genuinely stuck deploy is
+  # still alarmed: the newest SHA's observer keeps running (its target cannot
+  # be superseded until the next merge) and uptime-monitor.yml independently
+  # flags sustained release drift past its grace window.
+  actions: write
+
+# A newer main revision supersedes an older observer. Host-side mutation is
+# independently serialized by flock and never uses cancellation semantics.
+concurrency:
+  group: production-deploy-verify
+  cancel-in-progress: true
+
+jobs:
+  verify-production:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    environment:
+      name: hetzner-production
+      url: https://usage.jays.services
+    env:
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha || inputs.revision || github.sha }}
+      GH_TOKEN: ${{ github.token }}
+      # Cloudflare's automated-traffic protection returns 403 to GitHub-hosted
+      # runners. The host transaction separately verifies the public proxied
+      # URL; this independent observer pins the Hetzner Coolify origin (fleet-hetzner-nbg1) while
+      # retaining the production hostname for SNI and certificate validation.
+      PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
+    steps:
+      - name: Validate exact main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid target SHA."
+            exit 1
+          fi
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$main_sha" != "$TARGET_SHA" ]]; then
+            echo "Revision $TARGET_SHA was superseded by $main_sha before observation began."
+            # Supersession is neither success (that masks a stuck deploy —
+            # Wave C / C3) nor failure (that pages on every fast merge). The
+            # superseded observer cancels itself; the newer SHA's observer
+            # carries the verification, and uptime-monitor.yml release-drift
+            # detection alarms sustained staleness independently.
+            echo "superseded=true" >> "$GITHUB_ENV"
+            echo "deploy_observer_outcome=superseded" >> "$GITHUB_ENV"
+          else
+            echo "superseded=false" >> "$GITHUB_ENV"
+            echo "deploy_observer_outcome=pending" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cancel this observer when its target was already superseded
+        if: env.superseded == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::Target superseded by a newer main SHA; the newer observer carries verification. Cancelling this run."
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+          # Cancellation lands asynchronously; hold here until it kills the
+          # job. If it never lands, fail loudly rather than report false-green.
+          sleep 120
+          echo "::error::Self-cancellation did not take effect within 120s."
+          exit 1
+
+      - name: Wait for exact production revision
+        if: env.superseded != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url='https://usage.jays.services/api/ready?strict=1'
+          for attempt in $(seq 1 1440); do
+            if (( attempt % 6 == 0 )); then
+              main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+              if [[ "$main_sha" != "$TARGET_SHA" ]]; then
+                echo "Revision $TARGET_SHA was superseded by $main_sha while waiting."
+                echo "deploy_observer_outcome=superseded" >> "$GITHUB_ENV"
+                # Neither success (false-green masks a stuck deploy) nor
+                # failure (pages on every fast merge): cancel this run. The
+                # newer SHA's own observer picks up verification, and
+                # uptime-monitor.yml alarms sustained release drift.
+                gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+                sleep 120
+                echo "::error::Self-cancellation did not take effect within 120s."
+                exit 1
+              fi
+            fi
+
+            if body=$(curl -fsS --max-time 15 \
+              --resolve "usage.jays.services:443:${PRODUCTION_ORIGIN_IPV4}" \
+              "$ready_url" 2>/dev/null) &&
+              # Backup is observability-only (env_active_unverified is normal when
+              # external replica verification is not configured). Gate on app ok +
+              # exact revision + sole writer/scheduler/startup, matching /api/ready.
+              jq -e --arg revision "$TARGET_SHA" '
+                .status == "ready" and
+                .ok == true and
+                .revision == $revision and
+                .checks.database.ok == true and
+                .checks.startup.active == true and
+                .checks.scheduler.ok == true and
+                .checks.scheduler.required == true and
+                .checks.scheduler.lastTickSucceeded == true and
+                .checks.scheduler.lastTickCompletedAt != null
+              ' >/dev/null <<<"$body"; then
+              echo "Hetzner production is ready at exact revision $TARGET_SHA."
+              {
+                echo '### Hetzner production deployment'
+                echo
+                printf '%s\n' "- Revision: \`$TARGET_SHA\`"
+                echo '- Database: healthy'
+                echo '- Backup: observability only (not a deploy gate)'
+                echo '- Scheduler: required with a successful tick'
+                echo '- Hetzner origin TLS/readiness: healthy'
+                echo '- Public proxied readiness: verified separately by the host transaction and UptimeRobot'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Hetzner production did not reach exact revision $TARGET_SHA within 240 minutes."
+          exit 1

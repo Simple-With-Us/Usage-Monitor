@@ -1,0 +1,20 @@
+[Unit]
+Description=Write the Litestream replica heartbeat consumed by /api/ready
+# Produces /data/.litestream-replica-status.json (atomic temp+rename) so a
+# required backup is proved by a live Garage LTX listing instead of the
+# startup-only LITESTREAM_ACTIVE env claim. If this unit stops running, the
+# file's checkedAt ages past LITESTREAM_REPLICA_MAX_AGE_SECONDS and strict
+# readiness fails closed with replica_status_stale - that is the design.
+After=docker.service usage-monitor.service
+Wants=usage-monitor.service
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usage-monitor-replica-status
+# Worst case is six 60-second per-level LTX listings plus overhead; stay
+# comfortably under the 10-minute timer cadence.
+TimeoutStartSec=480
+
+[Install]
+WantedBy=multi-user.target

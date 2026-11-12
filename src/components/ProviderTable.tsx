@@ -1,8 +1,19 @@
 import { useState, Fragment } from "react";
 import { type Provider } from "@/app/settings/page";
 import { isExternalBillingStale } from "@/components/ExternalBillingDetails";
+import ListLoadErrorPanel from "@/components/ListLoadErrorPanel";
 import ProviderIntegrationInfo, { publicConfigFieldNames } from "@/components/ProviderIntegrationInfo";
 import { getProviderIntegrationProfile } from "@/lib/provider-integration-catalog";
+import SortHeader, { type SortDirection } from "@/components/table/SortHeader";
+import { useDisplayDensity } from "@/lib/display-density";
+import { costCoverageHelpText } from "@/lib/cost-coverage-help";
+import {
+  formatBudgetRunout,
+  formatCurrency,
+  formatNumber,
+  projectedStatusLabel,
+  type ProviderBudgetIntel,
+} from "@/lib/format";
 
 interface ProviderTableProps {
   providers: Provider[];
@@ -15,52 +26,173 @@ interface ProviderTableProps {
   onAddProvider: () => void;
   onToggleActive: (provider: Provider) => void;
   onFetchNow: (id: string) => void;
+  /**
+   * S9/S10: server projection intelligence (projectedStatus / budget runout)
+   * keyed by provider id, from GET /api/budget-status. Optional — when absent
+   * the table renders exactly as before.
+   */
+  budgetIntelByProviderId?: Record<string, ProviderBudgetIntel>;
+  /**
+   * Message from a failed provider load. When set and nothing loaded, the
+   * table renders an explicit failure panel instead of the "no providers
+   * configured yet" CTA — an outage is not an empty account.
+   */
+  loadError?: string | null;
+  onRetryLoad?: () => void;
 }
 
 type SortField = "name" | "type" | "status" | "spend" | "alerts" | "credits" | "lastFetched";
-type SortDirection = "asc" | "desc";
-
-function SortHeader({
-  field,
-  label,
-  className = "",
-  align = "left",
-  activeField,
-  direction,
-  onSort,
-}: {
-  field: SortField;
-  label: string;
-  className?: string;
-  align?: "left" | "right";
-  activeField: SortField;
-  direction: SortDirection;
-  onSort: (field: SortField) => void;
-}) {
-  const isActive = activeField === field;
-  return (
-    <th
-      aria-sort={isActive ? (direction === "asc" ? "ascending" : "descending") : "none"}
-      className={`px-6 py-3 font-medium text-gray-500 dark:text-gray-400 ${className}`}
-    >
-      <button
-        type="button"
-        onClick={() => onSort(field)}
-        className={`group flex w-full items-center hover:text-gray-800 dark:hover:text-gray-100 ${
-          align === "right" ? "justify-end text-right" : "justify-start text-left"
-        }`}
-      >
-        {label}
-        <span className={`ml-1 ${isActive ? "text-gray-500 dark:text-gray-300" : "text-gray-300 opacity-0 group-hover:opacity-100 group-focus:opacity-100 dark:text-gray-600"}`}>
-          {isActive ? (direction === "asc" ? "↑" : "↓") : "↕"}
-        </span>
-      </button>
-    </th>
-  );
-}
 
 function providerProfile(provider: Provider) {
   return getProviderIntegrationProfile(provider.name, provider.type);
+}
+
+function supportsManualFetch(provider: Provider): boolean {
+  if (provider.credentialManagement?.alias) return false;
+  if (provider.type === "manual_provider" || provider.type === "generic") return false;
+  const profile = providerProfile(provider);
+  if (profile.mode === "manual" || profile.mode === "push-only") {
+    return false;
+  }
+  if (profile.name !== "anthropic") return true;
+  return provider.anthropicAdminApiConfigured ?? false;
+}
+
+function providerStatusLabel(provider: Provider): string {
+  if (!provider.isActive) return "Inactive";
+  return supportsManualFetch(provider) ? "Active" : "Manually only";
+}
+
+function providerStatusStyle(provider: Provider): {
+  badge: string;
+  dot: string;
+} {
+  if (!provider.isActive) {
+    return {
+      badge: "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300",
+      dot: "bg-gray-300",
+    };
+  }
+  if (supportsManualFetch(provider)) {
+    return {
+      badge: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
+      dot: "bg-emerald-500",
+    };
+  }
+  return {
+    badge: "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300",
+    dot: "bg-blue-500",
+  };
+}
+
+function geminiKeyStatusPresentation(provider: Provider): {
+  label: string;
+  className: string;
+} | null {
+  switch (provider.geminiKeyStatus?.state) {
+    case "valid":
+      return {
+        label: "Key verified",
+        className: "text-emerald-700 dark:text-emerald-300",
+      };
+    case "invalid":
+      return {
+        label: "Key rejected",
+        className: "text-red-700 dark:text-red-300",
+      };
+    case "unreadable":
+      return {
+        label: "Key unreadable",
+        className: "text-red-700 dark:text-red-300",
+      };
+    case "unavailable":
+      return {
+        label: "Check unavailable",
+        className: "text-amber-700 dark:text-amber-300",
+      };
+    case "unchecked":
+      return {
+        label: "Key unchecked",
+        className: "text-amber-700 dark:text-amber-300",
+      };
+    case "not_configured":
+      return {
+        label: "Key missing",
+        className: "text-red-700 dark:text-red-300",
+      };
+    default:
+      return null;
+  }
+}
+
+function geminiBillingStatusPresentation(provider: Provider): {
+  label: string;
+  className: string;
+} | null {
+  switch (provider.geminiBillingStatus?.state) {
+    case "ready":
+      return {
+        label: "Billing ready",
+        className: "text-emerald-700 dark:text-emerald-300",
+      };
+    case "pending":
+      return {
+        label: "Billing pending",
+        className: "text-amber-700 dark:text-amber-300",
+      };
+    case "error":
+      return {
+        label: "Billing failed",
+        className: "text-red-700 dark:text-red-300",
+      };
+    case "configuration_changed":
+      return {
+        label: "Billing config changed",
+        className: "text-amber-700 dark:text-amber-300",
+      };
+    case "unchecked":
+      return {
+        label: "Billing unchecked",
+        className: "text-amber-700 dark:text-amber-300",
+      };
+    case "not_configured":
+      return {
+        label: "Billing not configured",
+        className: "text-gray-500 dark:text-gray-400",
+      };
+    default:
+      return null;
+  }
+}
+
+function geminiMonitoringStatusPresentation(provider: Provider): {
+  label: string;
+  className: string;
+} | null {
+  switch (provider.geminiMonitoringStatus?.state) {
+    case "ready":
+      return { label: "Usage ready", className: "text-emerald-700 dark:text-emerald-300" };
+    case "empty":
+      return { label: "Usage connected · empty", className: "text-gray-500 dark:text-gray-400" };
+    case "partial":
+      return { label: "Usage partial", className: "text-amber-700 dark:text-amber-300" };
+    case "permission_denied":
+      return { label: "Usage permission denied", className: "text-red-700 dark:text-red-300" };
+    case "error":
+      return { label: "Usage failed", className: "text-red-700 dark:text-red-300" };
+    case "configuration_changed":
+      return { label: "Usage configuration changed", className: "text-amber-700 dark:text-amber-300" };
+    case "project_required":
+      return { label: "Usage project required", className: "text-red-700 dark:text-red-300" };
+    case "credential_required":
+      return { label: "Usage credential required", className: "text-red-700 dark:text-red-300" };
+    case "unchecked":
+      return { label: "Usage unchecked", className: "text-amber-700 dark:text-amber-300" };
+    case "not_configured":
+      return { label: "Usage not configured", className: "text-gray-500 dark:text-gray-400" };
+    default:
+      return null;
+  }
 }
 
 function resolvedSpendCoverage(provider: Provider) {
@@ -98,10 +230,14 @@ export default function ProviderTable({
   onAddProvider,
   onToggleActive,
   onFetchNow,
+  budgetIntelByProviderId,
+  loadError,
+  onRetryLoad,
 }: ProviderTableProps) {
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const density = useDisplayDensity();
 
   const toggleGroup = (type: string) => {
     setCollapsedGroups(prev => ({ ...prev, [type]: !prev[type] }));
@@ -127,14 +263,7 @@ export default function ProviderTable({
     return new Date(dateStr);
   };
 
-  const formatUsd = (amount: number | null | undefined) => {
-    if (amount == null) return "--";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 2,
-    }).format(amount);
-  };
+  const formatUsd = (amount: number | null | undefined) => formatCurrency(amount);
 
   const hasAnyCredits = providers.some(
     (p) => p.latestSnapshot?.credits != null
@@ -183,6 +312,15 @@ export default function ProviderTable({
   });
 
   if (providers.length === 0) {
+    if (loadError) {
+      return (
+        <ListLoadErrorPanel
+          message="Providers couldn't be loaded."
+          detail={loadError}
+          onRetry={onRetryLoad}
+        />
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-gray-200 bg-white py-16 text-center dark:border-gray-700 dark:bg-gray-800">
         <p className="text-gray-500 dark:text-gray-400">No providers configured yet.</p>
@@ -197,22 +335,63 @@ export default function ProviderTable({
     );
   }
 
+  // Horizontal scroll on mid widths keeps action buttons one row; sticky thead
+  // still works because sticky is relative to the nearest scrollport (page).
+  // Under 640px the responsive-table CSS stacks rows into cards.
   return (
-    <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
-      <table className="responsive-table w-full text-sm">
+    <div className="provider-table overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+      <table className="responsive-table w-full min-w-[56rem] text-sm">
         <caption className="sr-only">Configured API providers</caption>
         <thead>
-          <tr className="border-b border-gray-100 bg-gray-50 dark:border-gray-700 dark:bg-gray-900/60">
-            <SortHeader {...sortHeaderProps} field="name" label="Name" />
-            <SortHeader {...sortHeaderProps} field="type" label="Tracking" className="hidden sm:table-cell" />
-            <SortHeader {...sortHeaderProps} field="status" label="Status" className="hidden sm:table-cell" />
-            <SortHeader {...sortHeaderProps} field="spend" label="Spend / Budget" />
-            <SortHeader {...sortHeaderProps} field="alerts" label="Alerts" />
+          {/* Keep column headings visible while scrolling the list. Each <th>
+              gets its own opaque bg + sticky top-28 so rows scroll underneath. */}
+          <tr className="border-b border-gray-100 bg-gray-50 dark:border-gray-700 dark:bg-gray-900/60 [&>th]:sticky [&>th]:top-28 [&>th]:z-20 [&>th]:bg-gray-50 dark:[&>th]:bg-gray-900">
+            <SortHeader
+              {...sortHeaderProps}
+              field="name"
+              label="Name"
+              className="min-w-[9rem] whitespace-nowrap"
+            />
+            <SortHeader
+              {...sortHeaderProps}
+              field="type"
+              label="Tracking"
+              className="hidden min-w-[5.5rem] whitespace-nowrap sm:table-cell"
+            />
+            <SortHeader
+              {...sortHeaderProps}
+              field="status"
+              label="Status"
+              className="hidden min-w-[5.5rem] whitespace-nowrap sm:table-cell"
+            />
+            <SortHeader
+              {...sortHeaderProps}
+              field="spend"
+              label="Spend / Budget"
+              className="min-w-[8.5rem]"
+            />
+            <SortHeader
+              {...sortHeaderProps}
+              field="alerts"
+              label="Alerts"
+              className="min-w-[5rem] whitespace-nowrap"
+            />
             {hasAnyCredits && (
-              <SortHeader {...sortHeaderProps} field="credits" label="Credits" align="right" />
+              <SortHeader
+                {...sortHeaderProps}
+                field="credits"
+                label="Credits"
+                align="right"
+                className="min-w-[4.5rem] whitespace-nowrap"
+              />
             )}
-            <SortHeader {...sortHeaderProps} field="lastFetched" label="Last fetched" className="hidden xl:table-cell" />
-            <th className="px-6 py-3 text-right font-medium text-gray-500 dark:text-gray-400">
+            <SortHeader
+              {...sortHeaderProps}
+              field="lastFetched"
+              label="Last fetched"
+              className="min-w-[6.5rem] whitespace-nowrap"
+            />
+            <th className="min-w-[11.5rem] whitespace-nowrap px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400 sm:px-6">
               Actions
             </th>
           </tr>
@@ -266,7 +445,14 @@ export default function ProviderTable({
                             {category} <span className="font-normal normal-case opacity-75">({groupProviders.length})</span>
                           </span>
                         </div>
-                        <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                        <span
+                          className="text-xs font-medium text-gray-500 dark:text-gray-400"
+                          title={
+                            incompleteGroupCount > 0
+                              ? costCoverageHelpText("partial")
+                              : undefined
+                          }
+                        >
                           {incompleteGroupCount > 0 ? "Known group spend" : "Group spend"}: {formatUsd(groupSpend)} {groupBudget > 0 && ` / ${formatUsd(groupBudget)}`}
                           {incompleteGroupCount > 0
                             ? ` · ${incompleteGroupCount} incomplete`
@@ -288,6 +474,12 @@ export default function ProviderTable({
                     const fetchedDate = formatDateObject(provider.latestSnapshot?.fetchedAt ?? null);
                     const spendCoverage = resolvedSpendCoverage(provider);
                     const unpricedCount = unpricedEventCount(provider);
+                    const statusStyle = providerStatusStyle(provider);
+                    const geminiStatus = geminiKeyStatusPresentation(provider);
+                    const geminiBillingStatus =
+                      geminiBillingStatusPresentation(provider);
+                    const geminiMonitoringStatus =
+                      geminiMonitoringStatusPresentation(provider);
 
                     return (
                       <tr
@@ -295,7 +487,13 @@ export default function ProviderTable({
                         className="border-b border-gray-50 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
                       >
                 <td data-label="Name" className="px-6 py-4">
-                  <div>
+                  <div
+                    title={
+                      density === "compact"
+                        ? [provider.name, provider.label].filter(Boolean).join(" · ")
+                        : undefined
+                    }
+                  >
                     <ProviderIntegrationInfo
                       providerName={provider.name}
                       providerType={provider.type}
@@ -303,19 +501,39 @@ export default function ProviderTable({
                       variant="name"
                       instanceState={{
                         isActive: provider.isActive,
-                        primaryCredentialConfigured: Boolean(provider.keyPreview),
+                        primaryCredentialConfigured:
+                          Boolean(provider.keyPreview) ||
+                          provider.credentialManagement?.status === "active" ||
+                          (provider.geminiKeyStatus != null &&
+                            provider.geminiKeyStatus.state !== "not_configured"),
                         keyPreview: provider.keyPreview,
+                        anthropicAdminApiConfigured:
+                          provider.anthropicAdminApiConfigured,
                         publicConfigFields: publicConfigFieldNames(provider.config),
                         protectedConfigFields: provider.secretConfigMeta?.fields ?? [],
                         protectedConfigReadable: provider.secretConfigMeta?.readable,
                         lastSnapshotAt: provider.latestSnapshot?.fetchedAt ?? null,
                         externalBillingRecordCount: provider.externalBilling?.length ?? 0,
                         externalBillingSources: [...new Set((provider.externalBilling ?? []).map((record) => record.source))].sort(),
+                        geminiKeyStatus: provider.geminiKeyStatus,
+                        geminiBillingStatus: provider.geminiBillingStatus,
+                        geminiMonitoringStatus: provider.geminiMonitoringStatus,
                       }}
                     />
-                    <p className="text-xs text-gray-400 dark:text-gray-500">{provider.name}</p>
-                    {provider.label && (
-                      <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{provider.label}</p>
+                    {density === "comfortable" && (
+                      <>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{provider.name}</p>
+                        {provider.label && (
+                          <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{provider.label}</p>
+                        )}
+                      </>
+                    )}
+                    {provider.credentialManagement && (
+                      <span className="mt-1 inline-flex rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-900 dark:bg-blue-950/60 dark:text-blue-300">
+                        {provider.credentialManagement.alias
+                          ? "Infisical managed alias"
+                          : "Infisical managed"}
+                      </span>
                     )}
                     {provider.groupId && (
                       <span className="mt-1 inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-300">
@@ -333,68 +551,106 @@ export default function ProviderTable({
                   </span>
                 </td>
                 <td data-label="Status" className="px-6 py-4 hidden sm:table-cell">
-                  <button
-                    type="button"
-                    aria-label={`${provider.isActive ? "Deactivate" : "Activate"} ${provider.displayName}`}
-                    onClick={() => onToggleActive(provider)}
-                    disabled={actionLoading === provider.id}
-                    className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors ${
-                      provider.isActive
-                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
-                        : "bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-400"
-                    }`}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        provider.isActive ? "bg-emerald-500" : "bg-gray-300"
-                      }`}
-                    />
-                    {provider.isActive ? "Active" : "Inactive"}
-                  </button>
-                </td>
-                <td data-label="Spend / Budget" className="px-6 py-4">
-                  <div className="text-xs">
-                    <p className="font-medium text-gray-900 dark:text-gray-100">
-                      {spendCoverage === "unknown" || spendCoverage === "legacy_unknown"
-                        ? "Cost not reported"
-                        : `${formatUsd(knownSpendUsd(provider))}${spendCoverage === "partial" ? " known" : ""} MTD`}
-                    </p>
-                    {spendCoverage === "complete" && provider.projectedEomUsd != null ? (
-                      <p className="text-gray-600 dark:text-gray-300">Projected {formatUsd(provider.projectedEomUsd)}</p>
-                    ) : spendCoverage === "partial" && provider.projectedEomUsd != null ? (
-                      <p className="text-gray-600 dark:text-gray-300">
-                        Known-cost projection {formatUsd(provider.projectedEomUsd)}
-                      </p>
-                    ) : (
-                      <p className="text-gray-500 dark:text-gray-400">Projection unavailable</p>
+                  <div className="flex flex-col items-start gap-1">
+                    <button
+                      type="button"
+                      aria-label={`${provider.isActive ? "Deactivate" : "Activate"} ${provider.displayName}`}
+                      onClick={() => onToggleActive(provider)}
+                      disabled={actionLoading === provider.id || Boolean(provider.credentialManagement)}
+                      title={provider.credentialManagement ? "Managed by Infisical" : undefined}
+                      className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors disabled:cursor-not-allowed ${statusStyle.badge}`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${statusStyle.dot}`} />
+                      {providerStatusLabel(provider)}
+                    </button>
+                    {geminiStatus && (
+                      <span className={`text-[10px] font-medium ${geminiStatus.className}`}>
+                        {geminiStatus.label}
+                      </span>
                     )}
-                    {spendCoverage === "partial" && unpricedCount > 0 && (
-                      <p className="text-amber-600 dark:text-amber-300">
-                        {unpricedCount} unpriced event{unpricedCount === 1 ? "" : "s"}
-                      </p>
+                    {geminiBillingStatus && (
+                      <span className={`text-[10px] font-medium ${geminiBillingStatus.className}`}>
+                        {geminiBillingStatus.label}
+                      </span>
                     )}
-                    {(spendCoverage === "unknown" || spendCoverage === "legacy_unknown") &&
-                      unpricedCount > 0 && (
-                        <p className="text-amber-600 dark:text-amber-300">
-                          {unpricedCount} usage event{unpricedCount === 1 ? "" : "s"} without cost
-                        </p>
-                      )}
-                    <p className="text-gray-600 dark:text-gray-300">
-                      Budget {formatUsd(provider.plan?.monthlyBudgetUsd)}
-                    </p>
-                    <span className="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-gray-500 dark:bg-gray-700 dark:text-gray-300">
-                      {provider.billingMode}
-                    </span>
-                    {connectedBilling && (
-                      <p className="mt-1 text-[10px] font-medium text-blue-700 dark:text-blue-300">
-                        Provider billing: {billingRecordCount} record{billingRecordCount === 1 ? "" : "s"} · {connectedBilling.serviceName || connectedBilling.planName || connectedBilling.kind}
-                        {connectedBilling.status ? ` · ${connectedBilling.status}` : ""}
-                        {staleBillingCount > 0 ? ` · ${staleBillingCount} stale` : ""}
-                      </p>
+                    {geminiMonitoringStatus && (
+                      <span className={`text-[10px] font-medium ${geminiMonitoringStatus.className}`}>
+                        {geminiMonitoringStatus.label}
+                      </span>
                     )}
                   </div>
                 </td>
-                <td data-label="Alerts" className="px-6 py-4">
+                <td data-label="Spend / Budget" className="min-w-[8.5rem] px-4 py-3 sm:px-6 sm:py-4">
+                  {(() => {
+                    // Keep this column to ~2 lines + one disclosure so mid-width
+                    // tables don't push Actions into a multi-line button stack.
+                    const projectionText =
+                      spendCoverage === "complete" && provider.projectedEomUsd != null
+                        ? `Projected ${formatUsd(provider.projectedEomUsd)}`
+                        : spendCoverage === "partial" && provider.projectedEomUsd != null
+                          ? `Known-cost projection ${formatUsd(provider.projectedEomUsd)}`
+                          : "Projection unavailable";
+                    const detailParts = [projectionText];
+                    if (provider.snapshotCostFetchedAt) {
+                      detailParts.push(
+                        `Cost snapshot fetched ${new Date(provider.snapshotCostFetchedAt).toLocaleString()}`
+                      );
+                    }
+                    if (spendCoverage === "partial" && unpricedCount > 0) {
+                      detailParts.push(`${unpricedCount} unpriced event${unpricedCount === 1 ? "" : "s"}`);
+                    } else if (
+                      (spendCoverage === "unknown" || spendCoverage === "legacy_unknown") &&
+                      unpricedCount > 0
+                    ) {
+                      detailParts.push(`${unpricedCount} usage event${unpricedCount === 1 ? "" : "s"} without cost`);
+                    }
+                    detailParts.push(`Billing mode: ${provider.billingMode}`);
+                    if (connectedBilling) {
+                      detailParts.push(
+                        `Provider billing: ${billingRecordCount} record${billingRecordCount === 1 ? "" : "s"} · ${connectedBilling.serviceName || connectedBilling.planName || connectedBilling.kind}${connectedBilling.status ? ` · ${connectedBilling.status}` : ""}${staleBillingCount > 0 ? ` · ${staleBillingCount} stale` : ""}`
+                      );
+                    }
+                    if (provider.costCoverageCaveat?.message) {
+                      detailParts.push(`Coverage: ${provider.costCoverageCaveat.message}`);
+                    }
+                    const intel = budgetIntelByProviderId?.[provider.id];
+                    const paceLabel = intel ? projectedStatusLabel(intel.projectedStatus) : null;
+                    const runoutLabel = intel ? formatBudgetRunout(intel) : null;
+                    if (paceLabel) detailParts.push(paceLabel);
+                    if (runoutLabel) detailParts.push(runoutLabel);
+                    const compactDetailText = detailParts.join(" · ");
+                    const budgetUsd = provider.plan?.monthlyBudgetUsd;
+                    const hasBudget = budgetUsd != null && budgetUsd > 0;
+
+                    return (
+                      <div className="max-w-[12rem] text-xs leading-snug">
+                        <p
+                          className="truncate font-medium text-gray-900 dark:text-gray-100"
+                          title={
+                            spendCoverage === "complete"
+                              ? undefined
+                              : costCoverageHelpText(spendCoverage)
+                          }
+                        >
+                          {spendCoverage === "unknown" || spendCoverage === "legacy_unknown"
+                            ? "Cost not reported"
+                            : `${formatUsd(knownSpendUsd(provider))}${spendCoverage === "partial" ? " known" : ""} MTD`}
+                        </p>
+                        <p className="truncate text-gray-600 dark:text-gray-300">
+                          {hasBudget ? `Budget ${formatUsd(budgetUsd)}` : "Budget —"}
+                          {paceLabel ? ` · ${paceLabel}` : ""}
+                        </p>
+                        <details className="mt-0.5 text-gray-500 dark:text-gray-400">
+                          <summary className="cursor-pointer whitespace-nowrap font-medium text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300">
+                            Billing detail
+                          </summary>
+                          <p className="mt-1 max-w-sm leading-relaxed">{compactDetailText}</p>
+                        </details>
+                      </div>
+                    );
+                  })()}
+                </td>
+                <td data-label="Alerts" className="whitespace-nowrap px-4 py-3 sm:px-6 sm:py-4">
                   {alertCounts.open > 0 ? (
                     <span
                       className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${
@@ -417,77 +673,94 @@ export default function ProviderTable({
                   )}
                 </td>
                 {hasAnyCredits && (
-                  <td data-label="Credits" className="px-6 py-4 text-right text-xs text-purple-600 dark:text-purple-300">
+                  <td
+                    data-label="Credits"
+                    className="whitespace-nowrap px-4 py-3 text-right text-xs tabular-nums text-purple-600 dark:text-purple-300 sm:px-6 sm:py-4"
+                  >
                     {provider.latestSnapshot?.credits != null
-                      ? new Intl.NumberFormat("en-US").format(
-                          provider.latestSnapshot.credits
-                        )
+                      ? formatNumber(provider.latestSnapshot.credits)
                       : "--"}
                   </td>
                 )}
-                <td data-label="Last fetched" className="px-6 py-4 hidden xl:table-cell">
+                <td
+                  data-label="Last fetched"
+                  className="whitespace-nowrap px-4 py-3 sm:px-6 sm:py-4"
+                >
                   {fetchedDate ? (
-                    <div className="flex flex-col">
+                    <div className="flex flex-col leading-tight">
                       <span className="text-sm text-gray-900 dark:text-gray-100">
                         {fetchedDate.toLocaleDateString()}
                       </span>
                       <span className="text-xs text-gray-500 dark:text-gray-400">
-                        {fetchedDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                        {fetchedDate.toLocaleTimeString([], {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
                       </span>
                     </div>
                   ) : (
                     <span className="text-xs text-gray-500 dark:text-gray-400">Never</span>
                   )}
                 </td>
-                <td data-label="Actions" className="px-6 py-4">
-                  <div className="table-actions flex flex-wrap items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      aria-label={`Fetch ${provider.displayName} now`}
-                      onClick={() => onFetchNow(provider.id)}
-                      disabled={actionLoading === provider.id}
-                      className="rounded-md bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-600 transition-colors hover:bg-blue-100 disabled:opacity-50 dark:bg-blue-950/60 dark:text-blue-300 dark:hover:bg-blue-900/60"
-                    >
-                      {actionLoading === provider.id ? "..." : "Fetch Now"}
-                    </button>
+                <td
+                  data-label="Actions"
+                  className="whitespace-nowrap px-4 py-3 text-right sm:px-6 sm:py-4"
+                >
+                  <div className="table-actions inline-flex flex-nowrap items-center justify-end gap-1.5">
+                    {supportsManualFetch(provider) ? (
+                      <button
+                        type="button"
+                        aria-label={`Fetch ${provider.displayName} now`}
+                        onClick={() => onFetchNow(provider.id)}
+                        disabled={actionLoading === provider.id}
+                        className="inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-md bg-blue-50 px-2.5 text-xs font-medium text-blue-600 transition-colors hover:bg-blue-100 disabled:opacity-50 dark:bg-blue-950/60 dark:text-blue-300 dark:hover:bg-blue-900/60"
+                      >
+                        {actionLoading === provider.id
+                          ? "…"
+                          : providerProfile(provider).name === "google-ai"
+                            ? "Verify"
+                            : "Fetch"}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       aria-label={`Edit ${provider.displayName}`}
                       onClick={() => onEdit(provider)}
-                      className="rounded-md bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                      className="inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-md bg-gray-50 px-2.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
                     >
                       Edit
                     </button>
-                    {deleteConfirm === provider.id ? (
-                      <div className="flex items-center gap-1">
+                    {!provider.credentialManagement &&
+                      (deleteConfirm === provider.id ? (
+                        <div className="inline-flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Confirm deletion of ${provider.displayName}`}
+                            onClick={() => onDelete(provider.id)}
+                            disabled={actionLoading === provider.id}
+                            className="inline-flex h-9 items-center whitespace-nowrap rounded-md bg-red-600 px-2.5 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Cancel deletion of ${provider.displayName}`}
+                            onClick={() => onDeleteConfirmCancel()}
+                            className="inline-flex h-9 items-center px-1.5 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
                         <button
                           type="button"
-                          aria-label={`Confirm deletion of ${provider.displayName}`}
-                          onClick={() => onDelete(provider.id)}
-                          disabled={actionLoading === provider.id}
-                          className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50"
+                          aria-label={`Delete ${provider.displayName}`}
+                          onClick={() => onDeleteConfirmStart(provider.id)}
+                          className="inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-md bg-red-50 px-2.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60"
                         >
-                          Confirm
+                          Delete
                         </button>
-                        <button
-                          type="button"
-                          aria-label={`Cancel deletion of ${provider.displayName}`}
-                          onClick={() => onDeleteConfirmCancel()}
-                          className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        aria-label={`Delete ${provider.displayName}`}
-                        onClick={() => onDeleteConfirmStart(provider.id)}
-                        className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60"
-                      >
-                        Delete
-                      </button>
-                    )}
+                      ))}
                   </div>
                 </td>
               </tr>

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
+import { hasValidDashboardSession, shouldEnforceDashboardSession } from "@/lib/auth";
+import { readBoundedJsonBody } from "@/lib/bounded-request-body";
 import { isUsageReadAuthorized } from "@/lib/ingest-auth";
+import {
+  PlanSubscriptionExclusivityError,
+  planFixedCostConflicts,
+} from "@/lib/provider-plan";
 import { parseSubscriptionCreateInput } from "@/lib/subscription-input";
 import {
   canLinkSubscriptionToExternalBilling,
@@ -11,15 +16,14 @@ import {
   resolveExternalBillingPeriod,
 } from "@/lib/external-billing-link";
 import {
+  findExternalAdoptionGuardKeyForCharge,
+} from "@/lib/external-billing-subscription-adoption";
+import {
   normalizeMonthlyUsd,
   effectiveSubscriptionStatus,
   isSubscriptionInterval,
   type SubscriptionInterval,
 } from "@/lib/subscriptions";
-
-function hasSessionCookie(request: NextRequest): boolean {
-  return verifySessionToken(request.cookies.get(SESSION_COOKIE_NAME)?.value);
-}
 
 // GET /api/subscriptions — list every subscription with provider/project labels
 // and a monthly-equivalent cost (so mixed cadences are comparable).
@@ -27,12 +31,13 @@ function hasSessionCookie(request: NextRequest): boolean {
 // This is the ONE collection route the dashboard-session middleware excludes
 // (see src/middleware.ts's `api/subscriptions/?$` — collection path only, the
 // [id] sub-route stays session-gated there), so GET self-authenticates here:
-// the dashboard session cookie OR a bearer/x-usage-ingest-token
-// (USAGE_READ_TOKEN falling back to USAGE_INGEST_TOKEN, same as
-// GET /api/budget-status) so a headless sibling app can read the
+// the dashboard session cookie OR a bearer/x-usage-read-token
+// (x-usage-ingest-token accepted as a legacy header-name alias;
+// USAGE_READ_TOKEN falling back to USAGE_INGEST_TOKEN per resolveUsageReadToken,
+// same as GET /api/budget-status) so a headless sibling app can read the
 // subscription/knobEnv list without a browser session.
 export async function GET(request: NextRequest) {
-  if (!hasSessionCookie(request) && !isUsageReadAuthorized(request)) {
+  if (!hasValidDashboardSession(request) && !isUsageReadAuthorized(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -88,6 +93,7 @@ export async function GET(request: NextRequest) {
         notes: sub.notes,
         externalBillingSource: sub.externalBillingSource,
         externalBillingId: sub.externalBillingId,
+        externalBillingManaged: sub.externalBillingManaged,
         // Effective knobEnv: this subscription's own override if set, else the
         // provider's free-tier ProviderPlan.knobEnv. freeTierKnobEnv is always
         // the provider's free-tier map (may be null), regardless of override,
@@ -100,25 +106,39 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    return NextResponse.json(result);
+    return NextResponse.json(result, {
+      headers: {
+        // Read-surface version marker (X4; see docs/api-contract.md). Additive
+        // changes keep "1"; a breaking change bumps it.
+        "x-api-version": "1",
+      },
+    });
   } catch (error) {
     console.error("Failed to fetch subscriptions:", error);
     return NextResponse.json({ error: "Failed to fetch subscriptions" }, { status: 500 });
   }
 }
 
+const PLAN_EXCLUSIVITY_ERROR =
+  "This provider already has a Plan price / mo (fixedMonthlyCostUsd). Clear that field before adding a Subscription for the same recurring fee, or the two would double-count in spend.";
+
 // POST /api/subscriptions — dashboard-session-only (deliberately NOT covered
 // by the token auth above): the middleware exclusion is collection-path-wide
 // (it can't distinguish GET from POST), so this handler enforces the session
 // cookie itself now that middleware no longer gates this path.
 export async function POST(request: NextRequest) {
-  if (!hasSessionCookie(request)) {
+  // Always enforce session here: middleware excludes the collection path so
+  // GET can accept read tokens, but POST must remain dashboard-session-only
+  // (including under vitest — tests assert 401 without a cookie).
+  if (!hasValidDashboardSession(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   let input;
   try {
-    input = parseSubscriptionCreateInput(await request.json());
+    input = parseSubscriptionCreateInput(
+      await readBoundedJsonBody(request, { label: "Subscription body" })
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Invalid request" },
@@ -126,9 +146,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const provider = await prisma.provider.findUnique({ where: { id: input.providerId } });
+  const provider = await prisma.provider.findUnique({
+    where: { id: input.providerId },
+    include: { plan: { select: { fixedMonthlyCostUsd: true } } },
+  });
   if (!provider) {
     return NextResponse.json({ error: "providerId does not match a known provider" }, { status: 400 });
+  }
+  // Double-count guard: recurring fee is EITHER plan fixed OR a Subscription.
+  // Cheap fast-fail only — the authoritative recheck runs inside the write
+  // transaction below, under the same writer lock.
+  if (planFixedCostConflicts(provider.plan?.fixedMonthlyCostUsd)) {
+    return NextResponse.json({ error: PLAN_EXCLUSIVITY_ERROR }, { status: 400 });
   }
   if (input.projectId) {
     const project = await prisma.project.findUnique({ where: { id: input.projectId } });
@@ -143,6 +172,7 @@ export async function POST(request: NextRequest) {
     nextRenewalAt: Date;
     anchorDay: null;
   } | null = null;
+  let externalAdoptionGuardKey: string | null = null;
   if (input.externalBillingSource && input.externalBillingId) {
     const externalBilling = await prisma.providerExternalBilling.findUnique({
       where: {
@@ -212,37 +242,81 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const subscription = await prisma.subscription.create({
-      data: {
-        providerId: input.providerId,
-        projectId: input.projectId,
-        externalBillingSource: input.externalBillingSource,
-        externalBillingId: input.externalBillingId,
-        name: input.name,
-        description: input.description,
-        costUsd: input.costUsd,
-        currency: input.currency,
-        interval: input.interval,
-        intervalCount: input.intervalCount,
-        anchorDay: linkedCycle ? linkedCycle.anchorDay : input.anchorDay,
-        startDate: linkedCycle?.startDate ?? input.startDate,
-        currentPeriodStart:
-          linkedCycle?.currentPeriodStart ?? input.currentPeriodStart,
-        nextRenewalAt: linkedCycle?.nextRenewalAt ?? input.nextRenewalAt,
-        autoRenew: input.autoRenew,
-        status: input.status,
-        notes: input.notes,
-        knobEnv: input.knobEnv === null ? Prisma.JsonNull : (input.knobEnv as Prisma.InputJsonObject),
-      },
+    const subscription = await prisma.$transaction(async (tx) => {
+      // Take SQLite's writer lock before the final exact-identity reread so an
+      // adapter refresh cannot invalidate guard authority between read/create.
+      await tx.$executeRaw`
+        UPDATE "Provider"
+        SET "name" = "name"
+        WHERE "id" = ${input.providerId}
+      `;
+      // Re-read the plan under that lock: the preflight above ran two awaits
+      // earlier, so PUT /api/providers/:id could have committed a plan price in
+      // between and left the provider holding both models of the same fee.
+      const lockedPlan = await tx.providerPlan.findUnique({
+        where: { providerId: input.providerId },
+        select: { fixedMonthlyCostUsd: true },
+      });
+      if (planFixedCostConflicts(lockedPlan?.fixedMonthlyCostUsd)) {
+        throw new PlanSubscriptionExclusivityError();
+      }
+      externalAdoptionGuardKey = await findExternalAdoptionGuardKeyForCharge(
+        {
+          providerId: input.providerId,
+          refreshIntervalMin: provider.refreshIntervalMin,
+          externalBillingSource: input.externalBillingSource,
+          externalBillingId: input.externalBillingId,
+          costUsd: input.costUsd,
+          currency: input.currency,
+          interval: input.interval,
+          intervalCount: input.intervalCount,
+          now: validationNow,
+        },
+        tx
+      );
+      return tx.subscription.create({
+        data: {
+          providerId: input.providerId,
+          projectId: input.projectId,
+          externalBillingSource: input.externalBillingSource,
+          externalBillingId: input.externalBillingId,
+          externalAdoptionGuardKey,
+          name: input.name,
+          description: input.description,
+          costUsd: input.costUsd,
+          currency: input.currency,
+          interval: input.interval,
+          intervalCount: input.intervalCount,
+          anchorDay: linkedCycle ? linkedCycle.anchorDay : input.anchorDay,
+          startDate: linkedCycle?.startDate ?? input.startDate,
+          currentPeriodStart:
+            linkedCycle?.currentPeriodStart ?? input.currentPeriodStart,
+          nextRenewalAt: linkedCycle?.nextRenewalAt ?? input.nextRenewalAt,
+          autoRenew: input.autoRenew,
+          status: input.status,
+          notes: input.notes,
+          knobEnv:
+            input.knobEnv === null
+              ? Prisma.JsonNull
+              : (input.knobEnv as Prisma.InputJsonObject),
+        },
+      });
     });
     return NextResponse.json(subscription, { status: 201 });
   } catch (error) {
+    if (error instanceof PlanSubscriptionExclusivityError) {
+      return NextResponse.json({ error: PLAN_EXCLUSIVITY_ERROR }, { status: 400 });
+    }
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
       return NextResponse.json(
-        { error: "External billing record is already linked to another subscription" },
+        {
+          error: externalAdoptionGuardKey
+            ? "An equivalent authoritative external charge is already represented by another subscription"
+            : "External billing record is already linked to another subscription",
+        },
         { status: 409 }
       );
     }

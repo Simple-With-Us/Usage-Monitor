@@ -4,35 +4,102 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 model Provider {
-  id                 String                      @id @default(uuid())
-  name               String
-  displayName        String
-  type               String                      @default("builtin")
-  category           String?
-  apiKey             String?
-  config             Json?
+  id                    String                      @id @default(uuid())
+  name                  String
+  displayName           String
+  type                  String                      @default("builtin")
+  category              String?
+  apiKey                String?
+  config                Json?
   // Credential-bearing provider configuration (secondary secrets such as
   // Alpaca's API secret, Langfuse's secret key, xAI management keys, and
   // custom auth headers). Stored as a versioned AES-256-GCM JSON envelope and
   // never selected into client-facing DTOs.
-  secretConfig       String?
-  isActive           Boolean                     @default(true)
-  credits            Float                       @default(0)
-  refreshIntervalMin Int                         @default(60)
-  groupId            String?
-  label              String?
-  createdAt          DateTime                    @default(now())
-  plan               ProviderPlan?
-  snapshots          UsageSnapshot[]
-  snapshotRollups    UsageSnapshotDailyRollup[]
-  alertNotifications ProviderAlertNotification[]
-  allocations        ProviderProjectAllocation[]
-  subscriptions      Subscription[]
-  externalBilling    ProviderExternalBilling[]
+  secretConfig          String?
+  isActive              Boolean                     @default(true)
+  // Monotonic revision for configuration that can change the evaluated alert
+  // set without producing a newer UsageSnapshot (for example disable/re-enable
+  // or threshold edits). Alert evidence is ordered by this value first.
+  alertConfigGeneration Int                         @default(0)
+  credits               Float                       @default(0)
+  refreshIntervalMin    Int                         @default(60)
+  groupId               String?
+  // Keyed digest of an operator-confirmed provider account/org identifier.
+  // The raw identifier is never stored or returned. When absent, the read
+  // path can still prove same-account rows that use the exact same decrypted
+  // credential; different credentials are not treated as different accounts.
+  billingAccountIdentity String?
+  label                 String?
+  // ---------------------------------------------------------------------------
+  // Budget-breach automated control state (additive; see src/lib/budget-controls.ts).
+  // Every field below is default-off / nullable so behavior is byte-identical to
+  // today's notify-only path UNLESS BUDGET_AUTO_CONTROLS_ENABLED=true AND this
+  // provider has budgetControlsEnabled=true. Pausing is reversible and audited;
+  // key-disable is a RECOMMENDATION only and never mutates a credential.
+  // ---------------------------------------------------------------------------
+  // Per-provider opt-in. The master env flag alone never acts on a provider.
+  budgetControlsEnabled Boolean                     @default(false)
+  // Spend-cap / breach state the dashboard shows and that gates the pause:
+  // "ok" | "breached" | "paused". Existing rows migrate as "ok".
+  budgetBreachState     String                      @default("ok")
+  // Consecutive sustained-breach observations in the current period (hysteresis
+  // counter; mirrors the scheduler provider_fetch_degraded consecutive-tick latch).
+  budgetBreachStreak    Int                         @default(0)
+  // UTC month-start the streak/pause is anchored to. A period roll resets both.
+  budgetControlPeriodStart DateTime?
+  // Durable, reversible pause. Null = polling is NOT paused by budget controls.
+  budgetPausedAt        DateTime?
+  budgetPauseReason     String?
+  budgetPauseThresholdUsd Float?
+  budgetPauseObservedSpendUsd Float?
+  // Cooldown anchor: timestamp of the last automated pause/resume (anti-flap).
+  budgetControlLastActionAt DateTime?
+  // Advisory only — a recommendation to disable/rotate the key. NEVER a
+  // credential mutation (key revocation is owner-only per the safety rules).
+  keyDisableRecommended Boolean                     @default(false)
+  createdAt             DateTime                    @default(now())
+  plan                  ProviderPlan?
+  snapshots             UsageSnapshot[]
+  snapshotRollups       UsageSnapshotDailyRollup[]
+  alertNotifications    ProviderAlertNotification[]
+  allocations           ProviderProjectAllocation[]
+  subscriptions         Subscription[]
+  externalBilling       ProviderExternalBilling[]
+  externalBillingChargeCorrections ExternalBillingChargeCorrection[]
+  usageReconciliations  ProviderUsageReconciliation[]
+  budgetControlEvents   BudgetControlEvent[]
+  keyIdentities         ProviderKeyIdentity[]
+}
+
+// Append-only audit trail for every automated budget-control action (pause,
+// resume, key-disable recommendation, and observed/cleared breach transitions).
+// The control layer only ever INSERTs here — rows are never mutated or deleted —
+// so this is the durable evidence for the reversible/audited guarantee. It is
+// deliberately separate from ProviderAlertNotification: those track alert
+// delivery incidents; these record control-action provenance.
+model BudgetControlEvent {
+  id               String    @id @default(uuid())
+  providerId       String
+  provider         Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  // pause | resume_breach_resolved | resume_period_roll | resume_controls_disabled |
+  // recommend_key_disable | clear_key_disable_recommendation |
+  // breach_observed | breach_cleared
+  action           String
+  reason           String
+  // Resulting breach state after this action ("ok" | "breached" | "paused").
+  breachState      String
+  thresholdUsd     Float?
+  observedSpendUsd Float?
+  breachStreak     Int?
+  // UTC month-start this action was evaluated against.
+  periodStart      DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([providerId, createdAt])
+  @@index([action, createdAt])
 }
 
 model ProviderPlan {
@@ -64,15 +131,19 @@ model ProviderPlan {
 
 // Authoritative, read-only billing/account state synchronized from a
 // provider's official API. These rows are deliberately separate from
-// Subscription: Subscription materializes charges, while this model only
-// mirrors external plan/status/period data and can therefore never create a
-// second charge for spend already reported by an adapter.
+// Subscription: this model only mirrors external plan/status/period data.
+// Maintenance may conservatively adopt an exact authoritative recurring row
+// into Subscription; the external identity then drives fixed-cost dedupe.
 model ProviderExternalBilling {
   id                 String    @id @default(uuid())
   providerId         String
   provider           Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
   source             String
   externalId         String
+  // Explicit per-record authority to create/reconcile a paid recurring local
+  // charge. Collection-level sync.authoritative only controls source pruning
+  // and is deliberately never copied into this field.
+  paidRecurringAuthoritative Boolean @default(false)
   kind               String
   // Human-readable paid product/service distinct from a tier or plan name.
   serviceName        String?
@@ -131,6 +202,26 @@ model UsageSnapshot {
   credits                  Float?
   rawData                  Json?
   createdAt                DateTime  @default(now())
+
+  // Every latest-snapshot lookup filters on providerId then orders/bounds by
+  // fetchedAt (see data-retention.ts's latestSnapshotIdsByProvider and the
+  // findFirst/groupBy calls in budget-status.ts, usage-recorder.ts, and the
+  // providers/snapshots API routes) — column order matches that shape.
+  @@index([providerId, fetchedAt])
+  // Standalone fetchedAt index for queries that range-filter/order across ALL
+  // providers with no providerId equality term - e.g. computeBudgetStatus's
+  // usageSnapshot.groupBy(by: ["providerId"], where: { fetchedAt: {...} })
+  // (GET /api/providers's dominant cost) and /api/snapshots's global chart
+  // query. The composite (providerId, fetchedAt) index above CAN serve these
+  // via a "skip scan" across each distinct providerId, but only once
+  // SQLite's query planner has cost statistics (ANALYZE) to justify it; this
+  // app never runs ANALYZE, so absent this index the planner falls back to a
+  // full index/table scan of every retained snapshot (45-day retention x
+  // 15-min polling x every provider - verified via EXPLAIN QUERY PLAN
+  // against a freshly `db push`-ed, un-ANALYZEd SQLite file, matching
+  // production's real startup state). This index turns that into a direct
+  // indexed range search regardless of statistics.
+  @@index([fetchedAt])
 }
 
 model UsageSnapshotDailyRollup {
@@ -188,6 +279,31 @@ model ExternalUsageEvent {
   occurredAt     DateTime
   metadata       Json?
   createdAt      DateTime  @default(now())
+  // Provider-side call/generation identifier supplied by the producer at
+  // ingest (e.g. an OpenRouter completion response's `id`). Optional — only
+  // adapter-verifiable providers/call sites populate it. Deliberately NOT
+  // part of the idempotency-key basis (see usage-telemetry.ts's
+  // deriveIdempotencyKey CONTRACT comment): adding it would rekey every
+  // existing event and diverge from the byte-for-byte
+  // congress-trading-shared contract. A replay under the same idempotencyKey
+  // with a different providerRequestId is treated as the same event (see
+  // external-usage-events.ts's comparableEvent), not a collision.
+  providerRequestId String?
+  // Verification fields below are written ONLY by the monitor-side
+  // verification worker (a later wave — see
+  // /Users/jay/apps/DESIGN-usage-compliance-classifier.md §3c), never by
+  // ingest. Ingest always leaves them null.
+  // verificationStatus: null = not applicable/not attempted; "pending" =
+  // queued for a verification check; "match"/"discrepancy" = checked against
+  // the provider's authoritative record; "error" = the check itself failed
+  // (transient, retryable); "unverifiable" = this provider/event has no
+  // verifiable source.
+  verifiedCostUsd    Float?
+  verifiedAt         DateTime?
+  verificationStatus String?
+  // e.g. "openrouter-generation" — identifies which verification source/
+  // adapter produced verifiedCostUsd.
+  verifiedSource     String?
   // First-class per-project attribution. Resolved at ingest from a
   // producer-supplied project name (OTEL_RESOURCE_ATTRIBUTES `project` for
   // Claude Code, or the top-level `project` field on the generic ingest
@@ -202,6 +318,32 @@ model ExternalUsageEvent {
   @@index([provider, occurredAt])
   @@index([keyRef, occurredAt])
   @@index([projectId, occurredAt])
+  // Verification worker's scan for events due a check (see
+  // /Users/jay/apps/DESIGN-usage-compliance-classifier.md §3c: select
+  // `provider='openrouter' AND providerRequestId IS NOT NULL AND
+  // (verificationStatus IS NULL OR verificationStatus IN ('pending','error'))`).
+  // NOTE the explicit IS NULL: SQL `IN (NULL, ...)` never matches NULL, so a
+  // freshly-ingested (unverified) event would otherwise never be picked up.
+  @@index([provider, verificationStatus])
+  // Verification worker's lookup of a specific provider call by its
+  // provider-side request/generation id.
+  @@index([provider, providerRequestId])
+  // Standalone occurredAt index for month-to-date aggregations that filter
+  // ONLY by occurredAt with no sourceApp/provider/keyRef/projectId equality
+  // term - e.g. external-usage-events.ts's
+  // sumMonthToDateExternalCostByProvider and
+  // sumMonthToDateExternalCostAttribution groupBy calls, both on
+  // computeBudgetStatus's hot path for GET /api/providers. None of the
+  // composite indexes above have occurredAt as the leading column, so
+  // without this index (and without ANALYZE statistics, which this app never
+  // runs) those queries fall back to a full table scan of every retained
+  // event (90-day retention, potentially hundreds of thousands of rows) -
+  // verified via EXPLAIN QUERY PLAN against a freshly `db push`-ed,
+  // un-ANALYZEd SQLite file. This index turns that into a direct indexed
+  // range search.
+  @@index([occurredAt])
+  @@index([metricType, occurredAt])
+  @@index([occurredAt, id, provider, sourceApp, service, label, projectId, metricType, costUsd, billingMode, confidence], map: "ExternalUsageEvent_mtd_scan_cover_idx")
 }
 
 model ExternalUsageEventDailyRollup {
@@ -254,6 +396,54 @@ model ExternalUsageEventTombstone {
   @@index([prunedAt])
 }
 
+// Period-level compliance/reconciliation record for adapter-verifiable
+// providers (see /Users/jay/apps/DESIGN-usage-compliance-classifier.md §3d):
+// compares reported cost (summed from pushed ExternalUsageEvent rows for the
+// period) against a provider's authoritative UsageSnapshot total for the
+// same window. This is a separate audit layer alongside the existing
+// max()-based budget-spend logic in budget-status.ts — it must never be read
+// by that computation. Verifiability is per-provider from
+// provider-integration-catalog.ts's billing.visibility taxonomy; providers
+// without a verifiable authoritative source get an explicit "unverifiable"
+// status rather than a silent "ok". Rows are produced by a later wave (the
+// scheduler-side reconciliation worker); this model is additive schema only.
+model ProviderUsageReconciliation {
+  id                 String    @id @default(uuid())
+  providerId         String
+  provider           Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  periodStart        DateTime
+  periodEnd          DateTime
+  // Optional key scope (e.g. a specific API key) when reconciliation is
+  // computed per-key rather than provider-wide. Provider-wide rows use the
+  // "" (empty string) sentinel, NOT null: SQLite treats each NULL as
+  // distinct in a unique index and Prisma's upsert/findUnique cannot target
+  // a NULL member of a compound unique, so a nullable column here would
+  // make the Wave-3 period upsert unenforceable — two provider-wide rows
+  // for the same period would both insert. The non-null sentinel keeps
+  // exactly one row per (providerId, periodStart, periodEnd, keyRef)
+  // addressable by upsert — same pattern as the non-null correctedGuardKey
+  // upsert in external-billing-subscription-adoption.ts.
+  keyRef             String    @default("")
+  reportedCostUsd    Float
+  reportedEventCount Int
+  // Authoritative cost for the same period, when a verifiable source exists.
+  verifiedCostUsd    Float?
+  // e.g. "usage-snapshot" — identifies which authoritative source produced
+  // verifiedCostUsd.
+  verifiedSource     String?
+  deltaUsd           Float?
+  deltaRatio         Float?
+  // "ok" | "discrepancy" | "unverifiable" | "pending" | "error" — mirrors the
+  // per-event verificationStatus vocabulary on ExternalUsageEvent, but
+  // period-scoped.
+  status             String
+  checkedAt          DateTime
+  createdAt          DateTime  @default(now())
+
+  @@unique([providerId, periodStart, periodEnd, keyRef])
+  @@index([providerId, status])
+}
+
 // Durable checkpoint for converting OTLP cumulative Sum points into deltas.
 // `seriesKey` hashes the metric name plus all resource/data-point attributes;
 // raw high-cardinality attributes never need to be stored here. Checkpoint and
@@ -272,24 +462,134 @@ model OtlpMetricState {
   @@index([updatedAt])
 }
 
+// Per-agent-turn record from OTLP traces (POST /api/otlp/v1/traces).
+// Diagnostic + per-turn analytics only: this table NEVER feeds cash budget
+// math (that stays on ExternalUsageEvent via /api/otlp/v1/metrics and the
+// v2 ingest), so a relay that sends both metrics and spans for one turn
+// cannot double count. Prompt/response text is truncated at ingest and
+// cleared by retention; see contentExpiresAt + data-retention.ts.
+model AgentTurn {
+  id             String   @id @default(uuid())
+  platform       String
+  seat           String?
+  repo           String?
+  conversationId String?
+  generationId   String?
+  model          String?
+  inputTokens    Int?
+  outputTokens   Int?
+  cacheTokens    Int?
+  costUsd        Float?
+  durationMs     Int?
+  toolCount      Int?     @default(0)
+  toolNames      Json?
+  error          String?
+  promptText     String?
+  responseText   String?
+  occurredAt     DateTime
+  contentExpiresAt DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([platform, occurredAt])
+  @@index([conversationId, occurredAt])
+  @@index([model, occurredAt])
+}
+
+// One row per model API call (UM-1590).  Fed by /api/otlp/v1/logs
+// (claude_code.api_request, codex.api_request + codex.sse_event
+// response.completed) and by /api/otlp/v1/traces (claude_code.llm_request
+// spans); both upsert on dedupeKey and fill only columns still null, so a
+// request reported by logs AND traces stays one row.  Diagnostic and
+// performance analytics only, like AgentTurn: it never feeds cash budget math
+// (that stays on ExternalUsageEvent).  No prompt or response bodies, ever.
+// Field names follow the UM-1592 canonical `ai` block.
+// Token semantics: inputTokens excludes cache reads and writes (Anthropic
+// convention; OpenAI cached input is subtracted at ingest), outputTokens
+// includes reasoningTokens when the provider counts them inside output.
+// Rows expire after AI_REQUEST_RETENTION_DAYS (default 180).
+model AiRequest {
+  id                 String   @id @default(uuid())
+  dedupeKey          String   @unique
+  harness            String
+  seat               String?
+  project            String?
+  billingMode        String?
+  sessionId          String?
+  requestedModel     String?
+  servedModel        String?
+  durationMs         Int?
+  ttftMs             Int?
+  inputTokens        Int?
+  outputTokens       Int?
+  cacheReadTokens    Int?
+  cacheWriteTokens   Int?
+  cacheWrite5mTokens Int?
+  cacheWrite1hTokens Int?
+  reasoningTokens    Int?
+  costUsd            Float?
+  costSource         String?
+  speed              String?
+  effort             String?
+  querySource        String?
+  statusCode         Int?
+  error              String?
+  sources            String
+  occurredAt         DateTime
+  createdAt          DateTime @default(now())
+
+  @@index([occurredAt])
+  @@index([harness, occurredAt])
+  @@index([sessionId, occurredAt])
+}
+
 model ProviderAlertNotification {
-  id                  String                         @id @default(uuid())
-  providerId          String
-  provider            Provider                       @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  stateKey            String                         @unique
-  alertCode           String
-  severity            String
-  providerName        String
-  providerDisplayName String
-  message             String
-  firstDetectedAt     DateTime
-  lastDetectedAt      DateTime
-  lastSentAt          DateTime?
-  sendCount           Int                            @default(0)
-  resolvedAt          DateTime?
-  createdAt           DateTime                       @default(now())
-  updatedAt           DateTime                       @updatedAt
-  channelDeliveries   ProviderAlertChannelDelivery[]
+  id                               String                         @id @default(uuid())
+  providerId                       String
+  provider                         Provider                       @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  stateKey                         String                         @unique
+  alertCode                        String
+  severity                         String
+  providerName                     String
+  providerDisplayName              String
+  message                          String
+  firstDetectedAt                  DateTime
+  lastDetectedAt                   DateTime
+  // Monotonic incident identity. Existing rows migrate as generation 1 and
+  // new reopen events advance through an atomic compare-and-swap.
+  incidentGeneration               Int                            @default(1)
+  // Monotonic evidence guard. "clear" wins ties so a stale alert evaluator
+  // cannot reopen an incident already resolved from equal/newer evidence.
+  evidenceWatermarkAt              DateTime?
+  // Source observation identity is ordered before the transition watermark.
+  // For stale_snapshot this lets a newer snapshot outrank an older snapshot's
+  // later stale deadline, while the unchanged snapshot can still transition
+  // from fresh at fetchedAt to stale at its deterministic deadline.
+  evidenceSourceAt                 DateTime?
+  evidenceWatermarkState           String                         @default("legacy")
+  // Provider alert-config revision that produced the durable evidence above.
+  // Compared before source/transition time so a deliberate config transition
+  // can supersede an unchanged snapshot or no-snapshot epoch sentinel.
+  evidenceConfigGeneration         Int                            @default(0)
+  // Existing rows predate generation-scoped PagerDuty dedup keys and must be
+  // conservatively audited/resolved with the legacy key before local closure.
+  pagerDutyAuditState              String                         @default("legacy_unknown")
+  // Serializes activation/delivery against resolution for this incident. The
+  // external channel calls remain outside SQLite transactions, so this durable
+  // lease is the ordering boundary shared by competing workers.
+  operationClaimToken              String?
+  operationClaimGeneration         Int                            @default(0)
+  operationClaimExpiresAt          DateTime?
+  operationClaimIncidentGeneration Int?
+  operationClaimConfigGeneration   Int?
+  operationClaimEvidenceSourceAt   DateTime?
+  operationClaimEvidenceAt         DateTime?
+  operationClaimEvidenceState      String?
+  lastSentAt                       DateTime?
+  sendCount                        Int                            @default(0)
+  resolvedAt                       DateTime?
+  createdAt                        DateTime                       @default(now())
+  updatedAt                        DateTime                       @updatedAt
+  channelDeliveries                ProviderAlertChannelDelivery[]
 
   @@index([providerId, resolvedAt])
   @@index([lastSentAt])
@@ -301,21 +601,37 @@ model ProviderAlertNotification {
 // channelKey is a one-way fingerprint of kind + destination, never a URL,
 // routing key, or API key.
 model ProviderAlertChannelDelivery {
-  id                   String                    @id @default(uuid())
-  notificationId       String
-  notification         ProviderAlertNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
-  channelKey           String
-  channelKind          String
-  lastAttemptAt        DateTime?
-  lastSucceededAt      DateTime?
-  attemptCount         Int                       @default(0)
-  successCount         Int                       @default(0)
-  lastResolveAttemptAt DateTime?
-  lastResolvedAt       DateTime?
-  resolveAttemptCount  Int                       @default(0)
-  lastError            String?
-  createdAt            DateTime                  @default(now())
-  updatedAt            DateTime                  @updatedAt
+  id                              String                    @id @default(uuid())
+  notificationId                  String
+  notification                    ProviderAlertNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  channelKey                      String
+  channelKind                     String
+  lastAttemptAt                   DateTime?
+  lastSucceededAt                 DateTime?
+  // Durable per-send lease/generation. The claim is acquired with an atomic
+  // conditional update before crossing the external trigger boundary.
+  triggerClaimToken               String?
+  triggerClaimGeneration          Int                       @default(0)
+  triggerClaimExpiresAt           DateTime?
+  triggerIncidentGeneration       Int?
+  triggerOperationClaimGeneration Int?
+  lastSucceededIncidentGeneration Int?
+  pagerDutyDedupKey               String?
+  attemptCount                    Int                       @default(0)
+  successCount                    Int                       @default(0)
+  resolveClaimToken               String?
+  resolveClaimGeneration          Int                       @default(0)
+  resolveClaimExpiresAt           DateTime?
+  resolveIncidentGeneration       Int?
+  resolveOperationClaimGeneration Int?
+  lastResolveAttemptAt            DateTime?
+  lastResolvedAt                  DateTime?
+  lastResolvedIncidentGeneration  Int?
+  resolveAttemptCount             Int                       @default(0)
+  lastResolveError                String?
+  lastError                       String?
+  createdAt                       DateTime                  @default(now())
+  updatedAt                       DateTime                  @updatedAt
 
   @@unique([notificationId, channelKey])
   @@index([notificationId, channelKind])
@@ -340,6 +656,58 @@ model Project {
   allocations    ProviderProjectAllocation[]
   externalEvents ExternalUsageEvent[]
   subscriptions  Subscription[]
+  keyBindings    ProviderKeyBinding[]
+}
+
+// A provider-side API-key identity without the credential itself. The optional
+// fingerprint is an HMAC-SHA256 digest of a provider-reported stable opaque key
+// ID. This identity layer never persists or returns the raw submitted value.
+model ProviderKeyIdentity {
+  id                               String    @id @default(uuid())
+  providerId                       String
+  provider                         Provider  @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  alias                            String
+  description                      String?
+  providerReportedKeyIdFingerprint String?
+  status                           String    @default("active")
+  retiredAt                        DateTime?
+  createdAt                        DateTime  @default(now())
+  updatedAt                        DateTime  @updatedAt
+  bindings                         ProviderKeyBinding[]
+
+  @@unique([providerId, providerReportedKeyIdFingerprint])
+  @@index([providerId, status])
+}
+
+// Administrator-confirmed, effective-dated mapping from a producer's local
+// non-secret key reference to one provider key identity. A reassignment closes
+// the old row and creates a new row; it never rewrites prior event attribution.
+// providerConnectionRef and billingAccountRef are contextual constraints, not
+// identities by themselves, so producerId + producerKeyRef are always required.
+model ProviderKeyBinding {
+  id                    String               @id @default(uuid())
+  identityId            String
+  identity              ProviderKeyIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  projectId             String?
+  project               Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // Immutable display snapshot so a later project rename/deletion cannot erase
+  // which project the administrator selected for this effective period.
+  projectName           String?
+  producerId            String
+  producerKeyRef        String
+  providerConnectionRef String?
+  billingAccountRef     String?
+  effectiveFrom         DateTime
+  effectiveTo           DateTime?
+  createdAt             DateTime             @default(now())
+
+  // Context refs are part of uniqueness so two exact-constrained mappings can
+  // share identity/producer/key/effectiveFrom when connection/account differ.
+  // Application overlap still treats null context as a wildcard.
+  @@unique([identityId, producerId, producerKeyRef, providerConnectionRef, billingAccountRef, effectiveFrom], map: "ProviderKeyBinding_identity_context_from_key")
+  @@index([producerId, producerKeyRef, effectiveFrom, effectiveTo])
+  @@index([identityId, effectiveFrom])
+  @@index([projectId, effectiveFrom])
 }
 
 // Recurring, fixed-fee cost (a SaaS plan, seat, add-on, etc.) attached to a
@@ -366,6 +734,14 @@ model Subscription {
   // provider-reported fixed fee when this exact identity is present and live.
   externalBillingSource  String?
   externalBillingId      String?
+  // True only for subscriptions created by authoritative external-billing
+  // maintenance. These are single-term schedules reconciled from fresh rows;
+  // owner-created/linked rows remain false and are never overwritten.
+  externalBillingManaged Boolean   @default(false)
+  // Durable charge-shape guard used by auto-managed rows and by owner rows
+  // explicitly linked to one exact eligible external source + ID. Never
+  // inferred for an unlinked same-price row: price/cadence are not identity.
+  externalAdoptionGuardKey String? @unique
   name                   String
   description            String?
   costUsd                Float
@@ -406,6 +782,35 @@ model Subscription {
   @@index([status, nextRenewalAt])
 }
 
+// Immutable-period proof that a fresh authoritative provider observation
+// corrected one exact already-materialized local subscription charge. Each
+// corrected charge shape remains available for budget reconciliation and can
+// settle a matching explicitly linked owner collision even after provider
+// rollover, source staleness, or deletion of the managed Subscription row.
+// Stale observations never create or update these rows.
+model ExternalBillingChargeCorrection {
+  id                    String       @id @default(uuid())
+  providerId            String
+  provider              Provider     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  managedSubscriptionId String
+  source                String
+  externalId            String
+  originalPeriodStart   DateTime
+  originalPeriodEnd     DateTime
+  originalAmountUsd     Float
+  correctedPeriodStart  DateTime
+  correctedPeriodEnd    DateTime
+  correctedAmountUsd    Float
+  correctedGuardKey     String
+  observedAt            DateTime
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  @@unique([managedSubscriptionId, originalPeriodStart, correctedGuardKey])
+  @@index([providerId, originalPeriodStart])
+  @@index([providerId, correctedGuardKey])
+}
+
 model ProviderProjectAllocation {
   id         String   @id @default(uuid())
   providerId String
@@ -418,4 +823,197 @@ model ProviderProjectAllocation {
   project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([providerId, projectId])
+}
+
+model ApnsDeviceToken {
+  id          String   @id @default(uuid())
+  deviceToken String   @unique
+  deviceModel String?
+  osVersion   String?
+  environment String   @default("production")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// CodeCaps has a separate APNs topic and preference contract from Usage Monitor.  Never mix these
+// tokens into ApnsDeviceToken: that table feeds the generic Usage Monitor alert channel and uses a
+// different bundle ID.
+model CodeCapsPushDevice {
+  id             String   @id @default(uuid())
+  installationId String   @unique
+  generation     BigInt   @default(0)
+  deviceToken    String?  @unique
+  environment    String?
+  preferences    Json?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deliveries     CodeCapsPushAlertDelivery[]
+
+  @@index([isActive, updatedAt])
+}
+
+// The Mac supplies stable occurrence IDs.  A retained receipt prevents a rewritten local snapshot
+// or an HTTP retry from re-alerting the same event.
+model CodeCapsPushAlert {
+  id           String   @id
+  kind         String
+  providerKey  String
+  providerTitle String
+  windowLabel  String
+  summary      String
+  occurredAt   DateTime
+  receivedAt   DateTime @default(now())
+  deliveries   CodeCapsPushAlertDelivery[]
+
+  @@index([receivedAt])
+  @@index([occurredAt])
+}
+
+// One receipt per alert and registered installation.  APNs result state is durable so delivery
+// evidence is separate from event deduplication.
+model CodeCapsPushAlertDelivery {
+  id          String            @id @default(uuid())
+  alertId     String
+  alert       CodeCapsPushAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  deviceId    String
+  device      CodeCapsPushDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  outcome     String
+  attemptCount Int               @default(0)
+  attemptedAt DateTime           @default(now())
+  deliveredAt DateTime?
+
+  @@unique([alertId, deviceId])
+  @@index([deviceId, attemptedAt])
+}
+
+// Singleton portfolio / "Global Budget" cap for Overview hero meter.
+// Null override means use suggested sum of project budgets (or none).
+// Freeform — may disagree with Σ project or provider budgets.
+model AppBudgetSettings {
+  id                     String   @id @default("default")
+  globalMonthlyBudgetUsd Float?
+  updatedAt              DateTime @updatedAt
+}
+
+// Generic durable key-value store for one-time boot markers and similar
+// small settings that do not warrant a dedicated model. First consumer:
+// provider-funding-policy.ts's "llm_must_keep_funded_cleared_v1" marker,
+// which records that the one-time LLM mustKeepFunded cleanup has already
+// run so it never re-runs and silently undoes an owner's later re-enable.
+model AppSetting {
+  key       String   @id
+  value     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Fleet policy accounting is separate from monthly cash/usage analytics.
+// Integer micro-USD values avoid floating-point admission races.  No provider
+// credential, source text, prompt, or response body belongs in these tables.
+model FleetBudgetDay {
+  id                    String @id
+  policyDigest          String
+  softLimitMicros        BigInt
+  hardLimitMicros        BigInt
+  settledPolicyMicros   BigInt @default(0)
+  reservedPolicyMicros  BigInt @default(0)
+  estimatedDeepSeekMicros BigInt @default(0)
+  estimatedMiniMaxMicros BigInt @default(0)
+  blocked               Boolean @default(false)
+  revision              Int @default(0)
+  reservations          FleetBudgetReservation[]
+}
+
+model FleetBudgetReservation {
+  id                    String @id
+  clientId              String
+  requestId             String
+  requestDigest         String
+  dayId                 String
+  day                   FleetBudgetDay @relation(fields: [dayId], references: [id], onDelete: Restrict)
+  provider              String
+  model                 String
+  routingReason         String
+  pricingJson           String
+  maxInputTokens        Int
+  maxOutputTokens       Int
+  reservedPolicyMicros  BigInt
+  maximumCostMicros     BigInt
+  estimatedCostMicros   BigInt?
+  providerReportedCostMicros BigInt?
+  status                String @default("reserved")
+  settlementDigest      String?
+  createdAt             DateTime
+  dispatchBefore        DateTime
+  dispatchedAt          DateTime?
+  settledAt             DateTime?
+
+  @@unique([clientId, requestId])
+  @@index([dayId, status])
+}
+
+// A broken DeepSeek cost bound is not healed by a new calendar day.  This
+// durable latch has no API reset; rearming requires operator investigation.
+model FleetBudgetGuard {
+  id        String @id
+  blocked   Boolean @default(false)
+  blockedAt DateTime?
+  revision  Int @default(0)
+}
+
+// Owner-expense duplicate quarantine.  When POST /api/owner-expenses receives
+// an entry that exactly matches an already-posted ledger row (same vendor +
+// same amount + same charge date, or same receipt inbox id), the entry is
+// HELD here for owner review instead of posting — it never auto-posts and
+// never deletes or alters the posted rows.  Review happens in the dashboard
+// Receipt Inbox card ("Held Duplicates"); resolving as "post" force-records
+// the original input, resolving as "discard" drops it permanently.
+model QuarantinedOwnerExpense {
+  id                   String    @id @default(uuid())
+  quarantinedAt        DateTime  @default(now())
+  status               String    @default("held") // held | posted | discarded
+  resolvedAt           DateTime?
+  provider             String
+  amountUsd            Float
+  occurredAt           DateTime
+  kind                 String
+  label                String
+  notes                String?
+  confidence           String    @default("actual")
+  receiptInboxId       String?
+  dueDate              String?
+  nextDueDate          String?
+  calendarSort         String?
+  cancelledNoRenew     Boolean   @default(false)
+  // JSON array of { idempotencyKey, provider, amountUsd, occurredAt, label }
+  // describing the posted rows this entry matched.
+  matchedEntries       String    @default("[]")
+  // Human-readable why-held reason shown in the review list.
+  matchReason          String    @default("")
+}
+
+// Owner-expense management audit trail (UM-1659).  Every dashboard delete or
+// edit of a posted owner expense writes one row here BEFORE the mutation is
+// applied, in the same transaction, so a removal or change is never silent:
+// `before` is the full pre-change snapshot (same shape the GET
+// /api/owner-expenses route returns, plus cancelledNoRenew), `after` is the
+// post-edit snapshot for edits (null for deletes), and `resultingKey` is the
+// idempotency key the row carries after an edit that rekeyed it (null when
+// the key did not change or the row was deleted).  Deletes additionally
+// upsert an ExternalUsageEventTombstone for the removed key, which is what
+// blocks the receipts intake / ingest from ever resurrecting the entry on a
+// replay or re-forward (persistExternalUsageEvents skips tombstoned keys).
+model OwnerExpenseAudit {
+  id             String   @id @default(uuid())
+  idempotencyKey String
+  action         String // "delete" | "edit"
+  before         Json
+  after          Json?
+  resultingKey   String?
+  createdAt      DateTime @default(now())
+
+  @@index([idempotencyKey])
+  @@index([createdAt])
 }
