@@ -394,13 +394,14 @@ describe("auto-merge hold guards", () => {
         reviewPullRequests: metadata,
       });
       expect(rejected.status, JSON.stringify(metadata)).toBe(0);
-      expect(rejected.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+      expect(rejected.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
       expect(rejected.calls).toBe("");
       expect(rejected.stdout).toContain("exiting without arming or disarming");
     }
     for (const reviewPullRequestsJson of ["", "{", "[invalid]"]) {
       const rejected = await runBlock(initial, [], { eventPrNumber: "", reviewPullRequestsJson });
       expect(rejected.status).toBe(0);
+      expect(rejected.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
       expect(rejected.calls).toBe("");
       expect(rejected.stdout).toContain("exiting without arming or disarming");
     }
@@ -409,6 +410,7 @@ describe("auto-merge hold guards", () => {
         eventPrNumber: "", repoId, reviewPullRequests: [workflowRunPullRequest()],
       });
       expect(rejected.status).toBe(0);
+      expect(rejected.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
       expect(rejected.calls).toBe("");
       expect(rejected.stdout).toContain("exiting without arming or disarming");
     }

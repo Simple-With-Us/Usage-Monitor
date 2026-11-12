@@ -84,12 +84,12 @@ export function resolveTelemetryAccuracy(
       label: "reported",
       note:
         tokenTelemetryKind === "otlp"
-          ? `${name} token counts come from the live OTLP stream.`
+          ? `${name} token counts come from the live metrics feed.`
           : tokenTelemetryKind === "billing_api"
-            ? `${name} token counts and billed cost come from the vendor Admin API.`
+            ? `${name} token counts and billed cost come from the team account.`
             : tokenTelemetryKind === "local_database"
-              ? `${name} exact token counts come from a local usage database.  They are not a vendor invoice.`
-              : `${name} token counts come from local session logs.  They are source-reported analytics, not a vendor invoice.`,
+              ? `${name} exact token counts come from a local usage database.  They are not a bill.`
+              : `${name} token counts come from local session logs.  They are not a bill.`,
     };
   }
 
@@ -107,7 +107,7 @@ export function resolveTelemetryAccuracy(
       accuracy: "none_in_window",
       usageIsReliable: true,
       label: "no events in this window",
-      note: `No OTLP usage events for ${name} in this window.`,
+      note: `No usage events for ${name} in this window.`,
     };
   }
 

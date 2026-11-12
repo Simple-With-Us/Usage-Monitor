@@ -97,6 +97,8 @@ jobs:
             fi
             if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! review_metadata_valid "$METADATA"; then
               echo "::notice::Review signal PR metadata was missing or invalid; exiting without arming or disarming."
+              # Override the fail-safe default so Disarm does not run without a PR number.
+              echo "disarm=0" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             PR_NUMBER=$(jq -r '.[0].number' <<< "$METADATA")

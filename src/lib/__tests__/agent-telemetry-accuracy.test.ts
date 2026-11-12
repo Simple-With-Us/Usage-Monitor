@@ -82,7 +82,7 @@ describe("agent-telemetry-accuracy", () => {
       isRunningOnMac: false,
     });
     expect(cursor.usageIsReliable).toBe(true);
-    expect(cursor.note).toContain("Admin API");
+    expect(cursor.note).toContain("team account");
   });
 
   it("marks idle session-jsonl zero as not a confirmed zero", () => {
