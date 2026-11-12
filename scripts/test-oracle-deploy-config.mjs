@@ -17,6 +17,7 @@ const read = (relativePath) =>
   readFileSync(path.join(repoRoot, relativePath), "utf8");
 
 const workflow = read(".github/workflows/production-deploy-verify.yml");
+const sentryDeployWorkflow = read(".github/workflows/sentry-deploy.yml");
 const uptimeWorkflow = read(".github/workflows/uptime-monitor.yml");
 const compose = read("deploy/retired/oracle/compose.production.yaml");
 const composeDev = read("deploy/retired/oracle/compose.yaml");
@@ -56,6 +57,9 @@ requireText(workflow, /timeout-minutes:\s*250/, "observer job must outlast the h
 requireText(workflow, /seq 1 1440/, "observer must cover the 240-minute host transaction ceiling");
 requireText(workflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "observer must pin the Hetzner Coolify origin");
 requireText(workflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGIN_IPV4\}"/, "observer must bypass Cloudflare bot challenges without weakening TLS");
+requireText(sentryDeployWorkflow, /cancel-in-progress:\s*true/, "stale Sentry deploy reporters should be cancelled");
+requireText(sentryDeployWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "Sentry deploy reporter must pin the Hetzner Coolify origin");
+requireText(read("scripts/sentry-report-deploy.mjs"), /PRODUCTION_ORIGIN_IPV4/, "Sentry deploy reporter must read production health through the pinned origin when configured");
 forbidText(workflow, /secrets\./, "the observer workflow must not hold a production secret");
 forbidText(workflow, /ssh-keyscan|StrictHostKeyChecking=no/, "unsafe SSH bootstrap is forbidden");
 requireText(uptimeWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "GitHub uptime must pin the Hetzner Coolify origin");

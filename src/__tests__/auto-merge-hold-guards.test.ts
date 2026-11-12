@@ -56,6 +56,11 @@ if [ "\${GH_TOKEN:-}" = "repo-token" ]; then token_kind=repo; fi
 if [ "\${GH_TOKEN:-}" = "merge-token" ]; then token_kind=merge; fi
 printf 'token=%s %s\n' "$token_kind" "$*" >> "$STUB_CALLS"
 if [ "\${1:-}" = "api" ]; then
+  if [[ "$*" == *"/actions/runs/"* ]]; then
+    if [ -f "$STUB_SIGNAL_RUN_RESPONSES" ]; then cat "$STUB_SIGNAL_RUN_RESPONSES"; exit 0; fi
+    printf '[]\n'
+    exit 0
+  fi
   if [[ "$*" == *"/reviews?per_page=100"* ]]; then
     count=0
     if [ -f "$STUB_REVIEW_COUNT" ]; then count=$(cat "$STUB_REVIEW_COUNT"); fi
@@ -169,6 +174,8 @@ async function runBlock(
     reviewHeadSha?: string;
     reviewPullRequests?: unknown;
     reviewPullRequestsJson?: string;
+    signalRunId?: string;
+    signalRunPullRequests?: unknown;
     reviewResponses?: Array<unknown | "__FAIL__">;
     repoId?: string;
   } = {},
@@ -185,6 +192,7 @@ async function runBlock(
   const mergeCount = join(root, "merge-count");
   const responseFile = join(root, "responses");
   const reviewResponseFile = join(root, "review-responses");
+  const signalRunResponseFile = join(root, "signal-run-responses");
   const reviewResponses = options.reviewResponses ?? [[review("APPROVED")], [review("APPROVED")]];
   await mkdir(bin);
   await Promise.all([
@@ -194,6 +202,10 @@ async function runBlock(
     writeFile(calls, ""),
     writeFile(responseFile, `${responses.map((value) => value === "__FAIL__" ? value : JSON.stringify(value)).join("\n")}\n`),
     writeFile(reviewResponseFile, `${reviewResponses.map((value) => value === "__FAIL__" ? value : JSON.stringify(value)).join("\n")}\n`),
+    writeFile(
+      signalRunResponseFile,
+      JSON.stringify(options.signalRunPullRequests ?? options.reviewPullRequests ?? []),
+    ),
   ]);
   await chmod(gh, 0o755);
   const result = spawnSync("bash", ["-c", script], {
@@ -224,6 +236,8 @@ async function runBlock(
       STUB_REVIEW_RESPONSES: reviewResponseFile,
       STUB_DISABLE_FAIL: options.disableFails ? "1" : "0",
       STUB_MERGE_FAILURES: String(options.mergeFailures ?? 0),
+      SIGNAL_RUN_ID: options.signalRunId ?? "",
+      STUB_SIGNAL_RUN_RESPONSES: signalRunResponseFile,
     },
   });
   const outputEntries = Object.fromEntries(
@@ -275,6 +289,8 @@ describe("auto-merge hold guards", () => {
     expect(source).not.toContain("github.event.workflow_run.head_sha");
     expect(liveStep?.run).not.toContain('repos/$REPO/pulls?state=open&per_page=100');
     expect(liveStep?.run).toContain('REVIEW_PULL_REQUESTS');
+    expect(liveStep?.run).toContain('SIGNAL_RUN_ID');
+    expect(liveStep?.run).toContain('actions/runs/$SIGNAL_RUN_ID');
     expect(liveStep?.run).toContain('echo "pr_number=$PR_NUMBER"');
     expect(identityStep?.if).toBe("steps.live.outputs.armable == '1'");
     expect(approvalStep?.if).toBe("steps.live.outputs.armable == '1'");
@@ -356,7 +372,7 @@ describe("auto-merge hold guards", () => {
     expect(resolved.calls.trim()).toBe(`token=repo api repos/${REPO}/pulls/1876`);
   });
 
-  it.each(WORKFLOWS)("rejects missing, malformed, ambiguous, or foreign review metadata in %s", async (workflow) => {
+  it.each(WORKFLOWS)("no-ops when review metadata cannot identify a single same-repo PR in %s", async (workflow) => {
     const source = await readFile(workflow, "utf8");
     const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
     const invalidMetadata = [
@@ -377,25 +393,39 @@ describe("auto-merge hold guards", () => {
         reviewHeadSha: REVIEW_MERGE_SHA,
         reviewPullRequests: metadata,
       });
-      expect(rejected.status, JSON.stringify(metadata)).not.toBe(0);
+      expect(rejected.status, JSON.stringify(metadata)).toBe(0);
       expect(rejected.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
       expect(rejected.calls).toBe("");
-      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
+      expect(rejected.stdout).toContain("exiting without arming or disarming");
     }
     for (const reviewPullRequestsJson of ["", "{", "[invalid]"]) {
       const rejected = await runBlock(initial, [], { eventPrNumber: "", reviewPullRequestsJson });
-      expect(rejected.status).not.toBe(0);
+      expect(rejected.status).toBe(0);
       expect(rejected.calls).toBe("");
-      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
+      expect(rejected.stdout).toContain("exiting without arming or disarming");
     }
     for (const repoId of ["", "0", "invalid", "42"]) {
       const rejected = await runBlock(initial, [], {
         eventPrNumber: "", repoId, reviewPullRequests: [workflowRunPullRequest()],
       });
-      expect(rejected.status).not.toBe(0);
+      expect(rejected.status).toBe(0);
       expect(rejected.calls).toBe("");
-      expect(rejected.stdout).toContain("no PR could be identified safely and cancellation was not attempted");
+      expect(rejected.stdout).toContain("exiting without arming or disarming");
     }
+  });
+
+  it.each(WORKFLOWS)("falls back to the review-signal workflow run API when the webhook omits pull_requests in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const resolved = await runBlock(initial, [pullRequest()], {
+      eventPrNumber: "",
+      reviewPullRequests: [],
+      signalRunId: "42948105904",
+      signalRunPullRequests: [workflowRunPullRequest()],
+    });
+    expect(resolved.status).toBe(0);
+    expect(resolved.output).toMatchObject({ armable: "1", disarm: "0", head_sha: HEAD_SHA, pr_number: "1876" });
+    expect(resolved.calls.trim()).toBe(`token=repo api repos/${REPO}/actions/runs/42948105904 --jq .pull_requests\ntoken=repo api repos/${REPO}/pulls/1876`);
   });
 
   it.each(WORKFLOWS)("disarms a review signal when its metadata head is stale in %s", async (workflow) => {
