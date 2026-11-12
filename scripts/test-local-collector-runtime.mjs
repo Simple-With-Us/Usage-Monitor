@@ -57,6 +57,7 @@ try {
   const source = join(root, "source");
   const runtime = join(root, "runtime");
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  execFileSync(process.execPath, ["--test", join(repoRoot, "scripts/check-collector-install.node-test.mjs")]);
   const updaterText = readFileSync(join(repoRoot, "scripts/update-local-collector-runtime.mjs"), "utf8");
   const definition = (start, end) => {
     const begin = updaterText.indexOf(start);
