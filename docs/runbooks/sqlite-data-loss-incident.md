@@ -37,7 +37,7 @@ Disable all of it before touching the data:
 ```bash
 sudo touch /etc/usage-monitor/auto-deploy.paused
 sudo systemctl stop usage-monitor-auto-deploy.timer
-# Tell the other operators/agents an incident is active (Slack #agent-sync).
+# Tell the other operators/agents an incident is active (Zulip #Work-In-Progress).
 ```
 
 Do NOT stop `usage-monitor.service` — it would stop the paused container.

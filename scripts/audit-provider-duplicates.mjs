@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** Read-only duplicate-provider audit. Never reads or prints credentials. */
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 try {
   const providers = await prisma.provider.findMany({
     select: { id: true, name: true },

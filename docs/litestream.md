@@ -5,8 +5,23 @@ writes to `/data/prod.db` as LTX files. **Production** (Hetzner + Coolify +
 GitHub Actions, since the 2026-08-07 cutover) replicates to **Backblaze B2**
 (bucket `jays-usage-monitor-eu`, S3 endpoint
 `https://s3.eu-central-003.backblazeb2.com`, object prefix
-`api-usage-monitor/prod.db` in `litestream.yml`).  The retired Oracle
+`api-usage-monitor/prod-recovery-v1.db` in `litestream.yml`).  The retired Oracle
 container path lives under `deploy/retired/oracle/`; do not redeploy it.
+
+The previous `api-usage-monitor/prod.db` chain failed an independent restore
+integrity check on 2026-10-29 while the live database passed its quick check.  It
+is retained for incident inspection and is not the active restore source.  The
+replacement prefix starts from a full snapshot of the checked live database;
+the old local Litestream metadata was preserved separately before initializing
+the new chain.  The explicit `meta-path` keeps this generation separate across
+deployments.  Never reuse the old metadata against an empty replica prefix.
+
+Coolify must use **Consistent name (no rolling updates)** for this application,
+with a 60-second stop grace period.  Two overlapping containers would otherwise
+run two Litestream processes against the same SQLite file and local metadata.  The
+Infisical wrapper forwards shutdown signals so Litestream can stop its child and
+close before Docker's kill deadline.  A recent-object heartbeat proves freshness;
+only an independent restore and SQLite integrity check prove recoverability.
 
 **Cloudflare R2 is weekly archive only** (bucket `usage-monitor-prod-v3`
 prefix `weekly/`).  Frequent replica is Backblaze B2.  Historic Litestream LTX
@@ -67,7 +82,7 @@ Local pre-migration snapshots on `/data` still exist.
   to run even when replication is never enabled — the binary just sits unused.
 - `litestream.yml` — the replica config: `/data/prod.db`, single S3-type replica
   populated entirely from `LITESTREAM_S3_*` env vars. **Disaster recovery only**
-  for this app: `snapshot.interval: 24h`, `snapshot.retention: 24h`,
+  for this app: `snapshot.interval: 24h`, `snapshot.retention: 72h` (3 days, Jay 2026-10-29),
   `sync-interval: 1h`, `part-size: 10MB`, `concurrency: 2` (see `litestream.yml`).
   Product compaction is **L1-only**: a single top-level `levels:` entry
   (`interval: 30s`) so `Config.Levels` `MaxLevel() == 1` and L2/L3 monitors
@@ -82,8 +97,11 @@ Local pre-migration snapshots on `/data` still exist.
 - `scripts/start-with-litestream.sh` — the container entrypoint. If all four
   required `LITESTREAM_S3_*` vars are set and `bin/litestream` exists: restores
   first if `/data/prod.db` doesn't exist yet (fresh disk or disaster recovery).
-  In both enabled and disabled modes it then runs
-  `backup-sqlite-before-migrate.mjs` and `migrate-safe.mjs` in that order.
+  In both enabled and disabled modes it then runs the schema-aware
+  `backup-sqlite-before-migrate.mjs` gate and `migrate-safe.mjs` in that order.
+  A read-only Prisma diff skips the snapshot only when the live database is
+  already in sync.  Schema drift or a failed diff still requires a verified
+  snapshot before any schema synchronization.
   **R2 endpoints:** litestream runs as a sibling of `npm start` so the free-tier
   kill switch can stop replication without taking down the app. **Non-R2 S3:**
   `exec litestream replicate -exec "npm start"` (litestream is PID 1).
@@ -92,9 +110,13 @@ Local pre-migration snapshots on `/data` still exist.
   preserve their exact schema and state; `migrate-safe.mjs` never retries with
   Prisma's broad `--accept-data-loss` flag.
 - `scripts/backup-sqlite-before-migrate.mjs` — transaction-consistent SQLite
-  Online Backup API snapshot plus `PRAGMA integrity_check`, private file modes,
-  atomic promotion, and bounded same-disk retention. It is the immediate schema
-  rollback layer; Litestream/B2 remains the off-disk disaster-recovery replica.
+  `VACUUM INTO` snapshot plus `PRAGMA integrity_check` inside a child process
+  with a bounded deadline, private file modes, atomic promotion, and bounded
+  same-disk retention when the read-only Prisma diff finds schema drift or
+  cannot prove the database is in sync.  `SQLITE_PRE_MIGRATION_BACKUP_TIMEOUT_MS` is an Infisical
+  env-sync startup knob (default 300000 ms, maximum 900000 ms); timeout fails
+  startup closed.  It is the immediate schema rollback layer; Litestream/B2
+  remains the off-disk disaster-recovery replica.
 - `scripts/litestream-restore.sh` — manual disaster-recovery restore to a
   scratch path, run inside the production app container (see below).
 - `scripts/replica-status-heartbeat.sh` + `run-app-with-replica-heartbeat.sh` —
@@ -240,7 +262,7 @@ live overlay currently holds them off.
 
 There is also **no compaction-backoff yaml key**.  Removing L2/L3 is the
 backoff: remaining L1 retries every 30s against a small L0 window.  Snapshot
-stays `24h` / `24h`.  Replica `sync-interval: 1h`, `part-size: 10MB`, and
+stays `24h` interval / `72h` retention.  Replica `sync-interval: 1h`, `part-size: 10MB`, and
 `concurrency: 2` are unchanged.  Backup health-check wiring is unchanged
 (probes still list 0–3 + 9; leftover L2/L3 objects do not mean those
 monitors are running).  Do **not** add `verify-compaction: true`.
@@ -256,6 +278,8 @@ tip-prune at 50% absolute storage (keep newest tip per level).  Manual
 tip-prune (ops): delete non-tip `.ltx` under
 `api-usage-monitor/prod.db/{0000..0009}/`.  Multi-day retention is what filled
 15+ GiB in August 2026 — do not raise retention without measuring.
+2026-10-29: Jay set retention to 72h (fleet 3-day short-term policy) on paid B2
+with L1-only compaction; watch the active B2 prefix in `litestream.yml` after rollout.
 
 
 ## Rollback host only (Render)

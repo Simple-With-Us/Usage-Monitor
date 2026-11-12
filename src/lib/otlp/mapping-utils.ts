@@ -40,6 +40,13 @@ const METADATA_ALLOWLIST = new Set([
   "deployment.environment",
   "project",
   "project.name",
+  // Claude Code repository identity (OTEL_METRICS_INCLUDE_REPOSITORY=1, v2.1.269+),
+  // derived from the origin remote.  Public repo coordinates only: credentials,
+  // query strings and fragments are stripped by Claude Code.  UM-1599.
+  "vcs.repository.name",
+  "vcs.repository.url.full",
+  "vcs.owner.name",
+  "vcs.provider.name",
   "session.id",
   "host.name",
   "model",
@@ -53,6 +60,22 @@ const METADATA_ALLOWLIST = new Set([
   "tool_name",
   "decision",
   "source",
+  // Generic gen_ai mapper (gen-ai-mapper.ts): OTel gen_ai semconv + relay
+  // resource attrs. Same rule as above — attribution dimensions only, never
+  // prompt/response/tool-argument content (those ride AgentTurn, not events).
+  "agent.platform",
+  "agent.launcher",
+  "agent.launcher.session",
+  "seat",
+  "lane",
+  "repo",
+  "gen_ai.system",
+  "gen_ai.agent.name",
+  "gen_ai.request.model",
+  "gen_ai.token.type",
+  "gen_ai.operation.name",
+  "gen_ai.conversation.id",
+  "gen_ai.tool.name",
 ]);
 
 export function cleanOtlpMetadata(

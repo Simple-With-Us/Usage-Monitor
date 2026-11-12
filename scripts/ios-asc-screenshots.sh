@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture App Store screenshots for Usage Client Monitor + Usage Local Monitor
+# Capture App Store screenshots for Usage Monitor Client + Usage Monitor Local
 # using simulator demo launch args (-ScreenshotDemo).
 set -euo pipefail
 
@@ -114,8 +114,8 @@ boot "$IPHONE_UDID"
 build_app UsageMonitor
 build_app LocalUsageMonitor
 
-capture_app UsageMonitor UsageMonitor com.simplewithus.usage.client client "dashboard,providers,projects,alerts,settings"
-capture_app LocalUsageMonitor LocalUsageMonitor com.simplewithus.usage.local local "overview,providers,projects,alerts,settings"
+capture_app UsageMonitor UsageMonitor com.simplewithus.usage.client.ios client "dashboard,providers,projects,alerts,settings"
+capture_app LocalUsageMonitor LocalUsageMonitor com.simplewithus.usage.local.ios local "overview,providers,projects,alerts,settings"
 
 echo "Screenshots under $OUT_ROOT"
 find "$OUT_ROOT" -name '*.png' | sort

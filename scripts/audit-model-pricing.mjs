@@ -5,7 +5,7 @@
  * Double-checks the bundled LiteLLM snapshot against upstream and major provider list prices:
  * - Google Gemini (gemini-3.7-flash, gemini-3.6-flash, gemini-2.5-pro)
  * - Anthropic (claude-3-7-sonnet, claude-3-5-haiku, claude-opus-5)
- * - OpenAI (gpt-4o, gpt-4o-mini, o3-mini)
+ * - OpenAI (gpt-4o, gpt-4o-mini, gpt-5.6-sol)
  * - xAI (grok-4.6, grok-3)
  * - DeepSeek (deepseek-v4-pro, deepseek-chat)
  *
@@ -18,6 +18,20 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
+// Bundled snapshot is { meta, pricing }, not the flat LiteLLM catalog.
+const ModelPricingSchema = z
+  .object({
+    input_cost_per_token: z.number().finite().optional(),
+    output_cost_per_token: z.number().finite().optional(),
+  })
+  .passthrough();
+
+const SnapshotSchema = z.object({
+  meta: z.record(z.string(), z.unknown()).optional(),
+  pricing: z.record(z.string(), ModelPricingSchema),
+});
 
 const SNAPSHOT_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -41,7 +55,8 @@ const PROVIDER_BASELINES = {
   "claude-opus-5": { inputPerM: 15.00, outputPerM: 75.00, provider: "anthropic" },
   "gpt-4o": { inputPerM: 2.50, outputPerM: 10.00, provider: "openai" },
   "gpt-4o-mini": { inputPerM: 0.15, outputPerM: 0.60, provider: "openai" },
-  "o3-mini": { inputPerM: 1.10, outputPerM: 4.40, provider: "openai" },
+  // Matches GPT_56_SOL and the bundled snapshot (4e-6 / 20e-6 per token).
+  "gpt-5.6-sol": { inputPerM: 4.00, outputPerM: 20.00, provider: "openai" },
   "grok-4.6": { inputPerM: 2.00, outputPerM: 10.00, provider: "xai" },
   "deepseek-chat": { inputPerM: 0.14, outputPerM: 0.28, provider: "deepseek" },
 };
@@ -52,8 +67,15 @@ async function runAudit() {
 
   let currentSnapshot = {};
   try {
-    currentSnapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
+    const parsed = SnapshotSchema.parse(JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")));
+    currentSnapshot = parsed.pricing;
   } catch (err) {
+    const name = err && typeof err === "object" && "name" in err ? err.name : "";
+    // A readable but malformed snapshot must fail the audit.  A missing file
+    // still starts empty so a fresh checkout can print the report.
+    if (name === "ZodError" || err instanceof SyntaxError) {
+      throw new Error(`Pricing snapshot failed validation: ${err.message}`);
+    }
     console.warn("Could not read current snapshot, starting fresh:", err.message);
   }
 

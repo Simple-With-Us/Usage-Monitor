@@ -108,7 +108,7 @@ export default function ProjectedCostBreakdownModal({
         </ul>
 
         <h3 className="mt-5 text-sm font-semibold text-gray-900 dark:text-gray-100">
-          Scheduled charges this month
+          Scheduled Charges This Month
         </h3>
         {sorted.length === 0 ? (
           <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">

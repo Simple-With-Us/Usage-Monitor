@@ -67,7 +67,7 @@ describe("OperationsOverview cards", () => {
         adminUrl: "https://admin.socratictrade.com/admin/server",
       },
     }));
-    expect(html).toContain("Socratic Trade infrastructure");
+    expect(html).toContain("Socratic Trade Infrastructure");
     expect(html).toContain("Unreachable");
     expect(html).toContain("scheduler unavailable");
     expect(html).toContain("uptime unknown");
@@ -378,7 +378,7 @@ describe("OperationsOverview cards", () => {
         ],
       },
     }));
-    expect(html).toContain("R2 free tier (fleet)");
+    expect(html).toContain("R2 Free Tier (Fleet)");
     expect(html).toContain("Usage Monitor");
     expect(html).toContain("Socratic Trade");
     expect(html).toContain("Congress.Trade");

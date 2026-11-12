@@ -10,6 +10,8 @@ import * as Sentry from "@sentry/nextjs";
 import { nonEmptyEnv, parseTracesSampleRate } from "@/lib/sentry-options";
 import {
   sentryBeforeSend,
+  sentryBeforeSendSpan,
+  sentryPrivacyIntegration,
   sentryBeforeSendLog,
   sentryBeforeSendMetric,
   sentryBeforeSendTransaction,
@@ -42,10 +44,8 @@ if (dsn) {
       databaseQueryData: false,
       graphQL: { document: false, variables: false },
     },
-    profileSessionSampleRate: parseTracesSampleRate(
-      process.env.SENTRY_PROFILE_SESSION_SAMPLE_RATE ?? "1"
-    ),
-    profileLifecycle: "trace",
+    // Profiles are outside the permitted final-envelope policy.
+    profileSessionSampleRate: 0,
     // Audit 2026-09-20: any object key whose name contains a sensitive
     // substring (token/secret/key/password/passwd/auth) is replaced with
     // "[REDACTED]" before the event is sent. Defensive guard against
@@ -64,6 +64,7 @@ if (dsn) {
     // re-bundles its own copy of @sentry/core whose event types are
     // structurally identical but nominally distinct from the ones
     // imported inside the scrubber.
+    beforeSendSpan: sentryBeforeSendSpan,
     beforeSend: sentryBeforeSend as unknown as Parameters<typeof Sentry.init>[0]["beforeSend"],
     beforeSendTransaction:
       sentryBeforeSendTransaction as unknown as Parameters<typeof Sentry.init>[0]["beforeSendTransaction"],
@@ -71,6 +72,6 @@ if (dsn) {
       sentryBeforeSendLog as unknown as Parameters<typeof Sentry.init>[0]["beforeSendLog"],
     beforeSendMetric:
       sentryBeforeSendMetric as unknown as Parameters<typeof Sentry.init>[0]["beforeSendMetric"],
-    integrations: [Sentry.nodeRuntimeMetricsIntegration()],
+    integrations: [sentryPrivacyIntegration(), Sentry.nodeRuntimeMetricsIntegration()],
   });
 }

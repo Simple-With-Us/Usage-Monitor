@@ -4,13 +4,17 @@
 import * as Sentry from "@sentry/nextjs";
 
 import { nonEmptyEnv, parseTracesSampleRate } from "@/lib/sentry-options";
-import { sentryBeforeSend, sentryBeforeSendTransaction } from "@/lib/sentry-scrubber";
+import { sentryPrivacyIntegration, sentryBeforeSendSpan, sentryBeforeSendLog, sentryBeforeSendMetric, sentryBeforeSend, sentryBeforeSendTransaction } from "@/lib/sentry-scrubber";
 
 const dsn = nonEmptyEnv(process.env.SENTRY_DSN);
 
 if (dsn) {
   Sentry.init({
     dsn,
+    integrations: [sentryPrivacyIntegration()],
+    beforeSendSpan: sentryBeforeSendSpan,
+    beforeSendLog: sentryBeforeSendLog,
+    beforeSendMetric: sentryBeforeSendMetric,
     environment: nonEmptyEnv(process.env.SENTRY_ENVIRONMENT),
     tracesSampleRate: parseTracesSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE),
     // v11: `enableLogs` was removed (logs flow via Sentry.logger.* and logging

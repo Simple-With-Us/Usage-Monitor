@@ -38,7 +38,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -52,7 +52,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install pinned gitleaks
-        timeout-minutes: 3
+        # The retry budget below can spend up to 180 seconds waiting out a
+        # degraded release-asset CDN, so the step timeout has to leave room
+        # for that on top of the transfer itself.
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
@@ -67,7 +70,21 @@ jobs:
           esac
 
           tarball="$tmp_root/gitleaks.tar.gz"
-          curl -fsSL --retry 3 --retry-delay 2 --max-time 120 \
+          # --http1.1 + --retry-all-errors match the pattern the other two
+          # pinned-asset downloads in this repo already use (the Dockerfile's
+          # Infisical CLI fetch and scripts/fetch-litestream.sh); both were
+          # hardened after the same GitHub-CDN flake killed production
+          # deploys.  This step was the one that still lacked it.
+          #
+          # The retry BUDGET matters as much as the flags.  Measured on
+          # 2026-11-09, the release-asset CDN degrades in rotating windows of
+          # roughly 20 seconds to 2 minutes, and the window moves between
+          # assets.  The previous 3x2s budget spans about 6 seconds and
+          # cannot survive one of those windows, so this required check
+          # failed on every PR that happened to run inside one.  180 seconds
+          # is the bound.  The pinned checksum below still rejects a wrong
+          # or tampered tarball, and a genuinely missing asset still fails.
+          curl -fsSL --http1.1 --retry 10 --retry-delay 10 --retry-max-time 180 --retry-all-errors --max-time 300 \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${arch}.tar.gz" \
             -o "$tarball"
 

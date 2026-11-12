@@ -80,7 +80,7 @@ export default function CostBySessionPanel() {
       setReport(body as Report);
     } catch (caught) {
       setReport(null);
-      setError(caught instanceof Error ? caught.message : "Failed to load cost-by-session");
+      setError(caught instanceof Error ? caught.message : "Could not load session cost.");
     } finally {
       setLoading(false);
     }
@@ -103,7 +103,7 @@ export default function CostBySessionPanel() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Cost by session</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Cost by Session</h1>
         <p className="mt-2 max-w-3xl text-sm text-gray-600 dark:text-gray-300">
           Sums tokens and API-equivalent cost across one or more Claude Code session ids -- the
           same ids THE BOARD records on a finding via <code>board claim/status/comment --session</code>.
@@ -139,7 +139,7 @@ export default function CostBySessionPanel() {
       {report ? (
         <>
           <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
-            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Totals across {report.matchedSessionIds.length} matched session(s)</h2>
+            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Totals Across {report.matchedSessionIds.length} Matched Session(s)</h2>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <Metric label="Estimated API-equivalent cost" value={money(report.totals.costUsd)} />
               <Metric label="Total tokens" value={tokens(report.totals.tokens.total)} />
@@ -152,8 +152,8 @@ export default function CostBySessionPanel() {
               </p>
             ) : report.unmatchedSessionIds.length > 0 ? (
               <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
-                No claude-code usage found in this window for: {report.unmatchedSessionIds.join(", ")}. That session may not have exported OTLP
-                metrics yet (the exporter only runs while the seat has restarted since it was configured), or it falls outside {report.window.since}
+                No Claude Code usage found in this window for: {report.unmatchedSessionIds.join(", ")}. That session may not have sent
+                usage yet (sending starts after the tool is restarted with it turned on), or it falls outside {report.window.since}
                 {" "}to {report.window.until}
                 {report.window.clampedToRawRetention
                   ? ` (the requested window started ${report.window.requestedSince}, but raw event data only survives back to ${report.window.since} -- older sessions can no longer be matched even though they existed)`
