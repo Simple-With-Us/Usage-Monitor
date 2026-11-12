@@ -25,6 +25,7 @@ import {
 const REFRESH_INTERVAL_MS = 60_000;
 
 import B2AppUsageBreakdownCard from "@/components/B2AppUsageBreakdownCard";
+import PostedExpensesCard from "@/components/PostedExpensesCard";
 import { MacHealthCard } from "@/components/MacHealthCard";
 import SentryHealthCard from "@/components/SentryHealthCard";
 import FleetAlertsCard from "@/components/FleetAlertsCard";
@@ -177,6 +178,10 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
       if (!parsed.success) throw new Error("Could not read the resolve response");
       if (parsed.data.status === "discarded") {
         setFormNotice("Held expense discarded — nothing was posted.");
+      } else if (parsed.data.record?.tombstoned) {
+        // UM-1659: the owner deleted this expense and its key is
+        // tombstoned, so post-anyway cannot resurrect it.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — it cannot be re-posted.");
       } else if (parsed.data.record?.persisted === 0) {
         // Idempotency replay (or a retention tombstone): this exact entry was
         // recorded before, so post-anyway added nothing new to the ledger.
@@ -254,6 +259,13 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         );
         formEl.reset();
         await fetchQuarantine();
+        return;
+      }
+      if (parsed.data.tombstoned) {
+        // UM-1659: a deleted expense's key is tombstoned; a re-forward of
+        // the same receipt records nothing.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — nothing was posted.");
+        formEl.reset();
         return;
       }
       setFormNotice(
@@ -1397,6 +1409,11 @@ export default function OperationsOverview() {
           <FleetBackupsCard data={data.fleetBackups} />
           <B2AppUsageBreakdownCard />
           <ReceiptInboxCard data={data.receiptInbox} />
+          {/* Posted Expenses spans the full row: its table needs the width.
+              It self-fetches, like the quarantine list inside ReceiptInboxCard. */}
+          <div className="lg:col-span-2">
+            <PostedExpensesCard />
+          </div>
           <SocraticInfrastructureCard data={data.socraticInfrastructure} />
           <CongressInfrastructureCard data={data.congressInfrastructure} />
           <CoolifyFleetCard data={data.coolifyFleet} />

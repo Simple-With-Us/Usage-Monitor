@@ -1,6 +1,6 @@
 # Deployment Guide
 
-**Production (2026-08-07+):** Production fleet box running Coolify (see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`).
+**Production (2026-08-07+):** Production fleet box running Coolify (see private `Simple-With-Us/fleet-ops:ATTACK-MAP.md`).
 SSH: `ssh coolify` (see `~/.ssh/config` Host `coolify` / `host.jays.services`).
 Public edge: Cloudflare → `usage.jays.services`.
 

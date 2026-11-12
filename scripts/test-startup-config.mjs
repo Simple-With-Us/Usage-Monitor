@@ -108,6 +108,12 @@ try {
       "start-with-infisical.sh must keep the UM Infisical project UUID fallback"
     );
   }
+  if (!/INFISICAL_UM_READ_TOKEN/.test(infisicalStart)) {
+    throw new Error("start-with-infisical.sh must accept the UM read-only service token");
+  }
+  if (/INFISICAL_AUTOMATION_/.test(infisicalStart)) {
+    throw new Error("start-with-infisical.sh must not use the shared Automation identity");
+  }
   if (!/DD_SERVICE is missing/.test(startupSource)) {
     throw new Error(
       "start-with-litestream.sh must fail closed when DD_REQUIRE=1 or partial Datadog config is missing DD_SERVICE"
