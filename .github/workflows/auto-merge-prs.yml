@@ -73,6 +73,11 @@ jobs:
           REVIEW_METADATA_HEAD=""
           if [ -z "$PR_NUMBER" ]; then
             # Review workflows run on the merge ref; only associated PR metadata identifies its head.
+            # workflow_run.pull_requests is often empty when GitHub omits PR linkage; that is not an error.
+            if jq -e 'type == "array" and length == 0' <<< "$REVIEW_PULL_REQUESTS" >/dev/null 2>&1; then
+              echo "::notice::Review signal carried no associated pull requests; nothing to arm or disarm."
+              exit 0
+            fi
             if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! jq -e --argjson repo_id "$REPO_ID" '
               type == "array" and length == 1 and (.[0] |
                 type == "object" and

@@ -275,6 +275,7 @@ describe("auto-merge hold guards", () => {
     expect(source).not.toContain("github.event.workflow_run.head_sha");
     expect(liveStep?.run).not.toContain('repos/$REPO/pulls?state=open&per_page=100');
     expect(liveStep?.run).toContain('REVIEW_PULL_REQUESTS');
+    expect(liveStep?.run).toContain('length == 0');
     expect(liveStep?.run).toContain('echo "pr_number=$PR_NUMBER"');
     expect(identityStep?.if).toBe("steps.live.outputs.armable == '1'");
     expect(approvalStep?.if).toBe("steps.live.outputs.armable == '1'");
@@ -356,11 +357,24 @@ describe("auto-merge hold guards", () => {
     expect(resolved.calls.trim()).toBe(`token=repo api repos/${REPO}/pulls/1876`);
   });
 
+  it.each(WORKFLOWS)("no-ops when review signal pull_requests is empty in %s", async (workflow) => {
+    const source = await readFile(workflow, "utf8");
+    const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
+    const noop = await runBlock(initial, [], {
+      eventPrNumber: "",
+      reviewPullRequests: [],
+    });
+    expect(noop.status).toBe(0);
+    expect(noop.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+    expect(noop.calls).toBe("");
+    expect(noop.stdout).toContain("no associated pull requests");
+  });
+
   it.each(WORKFLOWS)("rejects missing, malformed, ambiguous, or foreign review metadata in %s", async (workflow) => {
     const source = await readFile(workflow, "utf8");
     const initial = extractRunBlock(source, workflow.includes("shared") ? "Read live shared-PR merge eligibility" : "Read live PR merge eligibility");
     const invalidMetadata = [
-      [], null, {}, "not-an-array", [null], ["not-a-PR"], [{}],
+      null, {}, "not-an-array", [null], ["not-a-PR"], [{}],
       [workflowRunPullRequest(), workflowRunPullRequest({ number: 1877 })],
       [workflowRunPullRequest(), {}],
       ...[undefined, null, "1876", 0, -1, 1876.5, 9007199254740992].map((number) => [workflowRunPullRequest({ number })]),
