@@ -365,7 +365,7 @@ describe("auto-merge hold guards", () => {
       reviewPullRequests: [],
     });
     expect(noop.status).toBe(0);
-    expect(noop.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+    expect(noop.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
     expect(noop.calls).toBe("");
     expect(noop.stdout).toContain("no associated pull requests");
   });

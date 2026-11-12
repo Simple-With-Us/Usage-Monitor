@@ -53,6 +53,8 @@ jobs:
             # workflow_run.pull_requests is often empty when GitHub omits PR linkage; that is not an error.
             if jq -e 'type == "array" and length == 0' <<< "$REVIEW_PULL_REQUESTS" >/dev/null 2>&1; then
               echo "::notice::Review signal carried no associated pull requests; nothing to arm or disarm."
+              # Override the fail-safe default so the Disarm step does not run without a PR number.
+              echo "disarm=0" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! jq -e --argjson repo_id "$REPO_ID" '
