@@ -90,6 +90,46 @@ test("a concurrent startup's cleanup preserves an in-flight partial", async () =
   );
 });
 
+test("a backup promoted by a concurrent startup during this run survives the retention prune", async () => {
+  const dir = makeDataDir();
+  const backupDir = join(dir, ".pre-migration-backups");
+
+  const child = spawn(process.execPath, [SCRIPT], {
+    env: { ...process.env, DATABASE_URL: `file:${join(dir, "prod.db")}` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let childErr = "";
+  child.stderr.on("data", (c) => (childErr += c));
+
+  // Wait until the running script has created its own snapshot partial, so
+  // the file written below is guaranteed to be newer than the script's start.
+  const deadline = Date.now() + 30_000;
+  while (partials(dir).length === 0) {
+    if (Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error("the running backup script never created a partial");
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+
+  // A concurrent startup promotes its own snapshot into place while this run
+  // is still copying.  Its file is older than this run's own backup once that
+  // one lands, so a naive oldest-first prune would delete the file the other
+  // process is about to verify.
+  const concurrent = join(
+    backupDir,
+    "prod.db.pre-migration-20260101T000000000Z-424242.backup.db"
+  );
+  writeFileSync(concurrent, "promoted by a concurrent startup");
+
+  const exit = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(exit, 0, `the backup run should succeed; stderr: ${childErr}`);
+  assert.ok(
+    existsSync(concurrent),
+    "a concurrent startup's promoted backup must never be pruned"
+  );
+});
+
 test("a partial orphaned well past twice the deadline is collected", () => {
   const dir = makeDataDir();
   const backupDir = join(dir, ".pre-migration-backups");

@@ -20,7 +20,7 @@ public enum AntigravityQuotaGroups {
                     return ($0.boundedRemainingPercent ?? 101) < ($1.boundedRemainingPercent ?? 101)
                 }.first
                 guard selected != nil || includeMissing else { continue }
-                let title = family == "gemini" ? "Gemini Models" : "Third-Party Models"
+                let title = family == "gemini" ? "Gemini" : "Third-Party"
                 var value = selected ?? QuotaWindow(id: "", provider: "Antigravity", label: "", remainingUnknown: true, occurredAt: "")
                 value.id = "antigravity:\(family):\(period)"
                 value.provider = "Antigravity"
@@ -29,7 +29,7 @@ public enum AntigravityQuotaGroups {
                 value.via = "antigravity"
                 value.modelId = nil
                 value.modelType = nil
-                value.label = "\(title) · \(period == "5h" ? "5-hour" : "Weekly")"
+                value.label = "\(title) · \(period == "5h" ? "5-Hour" : "Weekly")"
                 value.window = period
                 // Model-specific units cannot establish a shared absolute cap.
                 value.absoluteRemaining = nil
