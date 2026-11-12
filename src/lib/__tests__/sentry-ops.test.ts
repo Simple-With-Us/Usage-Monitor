@@ -211,6 +211,55 @@ describe("Sentry ops mirror to fleet-infra when SENTRY_FLEET_DSN is set", () => 
       "https://abcd1234567890abcd@o0.ingest.sentry.io/123456";
   });
 
+  it("does not page fleet-infra when the only due provider fails", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { logSchedulerDegraded } = await import("@/lib/sentry-ops");
+    await logSchedulerDegraded({
+      total: 28,
+      successes: 0,
+      failures: 1,
+      skipped: 27,
+      tickBudgetExceeded: false,
+      failingProviders: "unusual-whales:HTTP_ERROR",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("pages fleet-infra when every attempted poll failed and more than one was tried", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { logSchedulerDegraded } = await import("@/lib/sentry-ops");
+    await logSchedulerDegraded({
+      total: 28,
+      successes: 0,
+      failures: 2,
+      skipped: 26,
+      tickBudgetExceeded: false,
+      failingProviders: "alpha:HTTP_ERROR,beta:TIMEOUT",
+    });
+    expect(fetchSpy).toHaveBeenCalled();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
+    const event = JSON.parse(String(init?.body ?? "").split("\n")[2]);
+    expect(event.tags["metric.name"]).toBe("scheduler.provider_fetch_zero_success");
+    expect(event.level).toBe("warning");
+  });
+
+  it("mirrors admission rejection as a trace metric", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    const { recordIngestAdmissionRejected } = await import("@/lib/sentry-ops");
+    await recordIngestAdmissionRejected({ route: "otlp/v1/traces" });
+    expect(fetchSpy).toHaveBeenCalled();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit | undefined];
+    expect(JSON.parse(String(init?.body ?? "").split("\n")[1]).type).toBe(
+      "trace_metric"
+    );
+  });
+
   it("logIngestFailed mirrors to fleet-infra with the route tag", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")

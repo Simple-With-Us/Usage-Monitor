@@ -2,7 +2,7 @@
 
 > **Note:** The macOS application has been extracted into its own repository and renamed to **AgentBar**.
 >
-> Please visit [jaywedgeworth22/agent-bar](https://github.com/jaywedgeworth22/agent-bar) for the current application source code, build scripts, and documentation.
+> Please visit [Simple-With-Us/agent-bar](https://github.com/Simple-With-Us/agent-bar) for the current application source code, build scripts, and documentation.
 
 The `macos` directory in this repository is kept for historical reference.  The Keychain-prompt fix below still applies to this copy and should be mirrored into AgentBar.
 

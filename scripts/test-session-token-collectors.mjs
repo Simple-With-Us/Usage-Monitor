@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
-import { fleetIngestJobs } from "./fleet-usage-collector.mjs";
+import { fleetIngestJobs, postFleetJobs } from "./fleet-usage-collector.mjs";
 import { quotaEventsFromMiniMax } from "./minimax-usage-collector.mjs";
 import {
   ANTIGRAVITY_PRODUCER_ID,
@@ -1537,6 +1537,79 @@ assert(
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+// AFC-667: the claude-code quota batch must present its ingest bearer, and a
+// route 401 must surface as the collector's "Unauthorized" failure line.
+{
+  const realFetch = globalThis.fetch;
+  let authorization = "";
+  let producerId = "";
+  globalThis.fetch = async (_url, init) => {
+    authorization = init.headers.authorization;
+    producerId = JSON.parse(init.body).producerId;
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        schemaVersion: 2,
+        error: { code: "unauthorized", message: "Unauthorized", retryable: false },
+      }),
+      { status: 401 }
+    );
+  };
+  try {
+    let message = "";
+    try {
+      await postUsageBatches({
+        events: [{ eventId: "subq-five-hour", occurredAt: "2026-11-12T01:00:00.000Z" }],
+        ingestUrl: "https://usage.example/api/ingest/usage",
+        ingestToken: "scoped-ingest-token",
+        producerId: "claude-code",
+        log: () => {},
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    assert(authorization === "Bearer scoped-ingest-token", `ingest bearer: ${authorization}`);
+    assert(producerId === "claude-code", `producer id: ${producerId}`);
+    assert(
+      message === "Ingest rejected the batch (HTTP 401): Unauthorized",
+      `401 line: ${message}`
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// A failing seat must not abort the remaining seats: earlier persisted seats
+// stay counted, later seats still get their first attempt, and the failure is
+// surfaced in failedSeats so the caller can fail the pass loudly afterwards.
+{
+  const attempted = [];
+  const ack = { received: 2, persisted: 2, rejected: 0, dryRun: false };
+  const post = async ({ producerId }) => {
+    attempted.push(producerId);
+    if (producerId === "bad-seat") throw new Error("HTTP 500 boom");
+    return ack;
+  };
+  const jobs = [
+    { producerId: "seat-a", events: [{}] },
+    { producerId: "bad-seat", events: [{}] },
+    { producerId: "seat-c", events: [{}] },
+  ];
+  const result = await postFleetJobs(jobs, { ingestUrl: "http://localhost/ingest", post, log: () => {} });
+  assert(
+    attempted.join(",") === "seat-a,bad-seat,seat-c",
+    `later seats still attempted after a failure: ${attempted.join(",")}`
+  );
+  assert(result.received === 4 && result.persisted === 4 && result.rejected === 0,
+    `only successful seats are tallied: ${JSON.stringify(result)}`);
+  assert(result.failedSeats.length === 1 &&
+    result.failedSeats[0].producerId === "bad-seat" &&
+    result.failedSeats[0].error.includes("HTTP 500 boom"),
+    `failedSeats surfaces the failing seat: ${JSON.stringify(result.failedSeats)}`);
+  const clean = await postFleetJobs(jobs.slice(0, 1), { ingestUrl: "http://localhost/ingest", post, log: () => {} });
+  assert(clean.failedSeats.length === 0 && clean.received === 2, "clean pass has no failedSeats");
 }
 
 console.log("ok session-token-collectors");

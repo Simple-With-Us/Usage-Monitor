@@ -28,7 +28,7 @@ export default function WorkspaceCopyCard() {
       a.click();
       URL.revokeObjectURL(url);
       setMessage(
-        `Saved a secret-free package (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers).  In Usage Monitor Local: Settings → Import Package.  No bundle key.`
+        `Saved a package with no secrets (${payload.projects?.length ?? 0} projects, ${payload.providers?.length ?? 0} providers).${SENTENCE_GAP}In Usage Monitor Local, open Settings, then Import Package.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Export failed");
@@ -76,7 +76,7 @@ export default function WorkspaceCopyCard() {
         throw new Error(body.error || "Import failed");
       }
       setMessage(
-        `Imported ${body.projects ?? 0} projects and ${body.providers ?? 0} providers (${body.skipped ?? 0} already present). Keys were not copied. Re-enter them or run Infisical sync.`
+        `Imported ${body.projects ?? 0} projects and ${body.providers ?? 0} providers (${body.skipped ?? 0} already present).${SENTENCE_GAP}Keys were not copied.${SENTENCE_GAP}Add them again on this copy.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed");
@@ -91,13 +91,12 @@ export default function WorkspaceCopyCard() {
         Copy Workspace For Local Testing
       </h2>
       <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
-        This JSON is the Usage Monitor Local package (projects, provider shells, plans,
-        subscriptions, recent snapshots).{SENTENCE_GAP}
-        There is no bundle key or passphrase.{SENTENCE_GAP}
-        In Usage Monitor Local: Settings → Import Package, then pick this file.{SENTENCE_GAP}
-        API keys are not included — re-enter them on the phone, or use Import Keys with a
-        separate Mac .umkeys file.{SENTENCE_GAP}
-        You can also import the same file here on a local Usage Monitor instance.
+        This file copies projects, providers, plans, paid services, and recent usage for Usage Monitor Local.{SENTENCE_GAP}
+        It has no password.{SENTENCE_GAP}
+        In Usage Monitor Local, open Settings, then Import Package, and pick this file.{SENTENCE_GAP}
+        API keys are not included.{SENTENCE_GAP}
+        Add them again on the phone, or import a separate keys file on the Mac.{SENTENCE_GAP}
+        You can also import the same file on a local Usage Monitor.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button

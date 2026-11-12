@@ -41,7 +41,20 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
     { headers: { Authorization: `Bearer ${apiKey}` } }
   );
 
-  if (!res.ok) return errorResult(res.status);
+  if (!res.ok) {
+    // Unusual Whales 401 bodies name a stable reason (`malformed_token`,
+    // `unrecognized_token`) and set retryable=false. Keep that reason, and
+    // nothing else, so a standing auth rejection is visible on the provider
+    // without copying the token or the free-form message.
+    const reason =
+      res.data &&
+      typeof res.data === "object" &&
+      typeof (res.data as { reason?: unknown }).reason === "string"
+        ? (res.data as { reason: string }).reason.trim()
+        : "";
+    const safeReason = /^[a-z0-9_]{1,40}$/.test(reason) ? reason : "";
+    return errorResult(res.status, safeReason ? { note: safeReason } : {});
+  }
 
   const dailyRequestCount = plausibleDailyRequestCount(
     headerNumber(res.headers, [DAILY_REQUEST_COUNT_HEADER])

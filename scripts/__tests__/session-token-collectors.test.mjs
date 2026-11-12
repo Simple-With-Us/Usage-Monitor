@@ -894,6 +894,31 @@ describe("postUsageBatches", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("sends the ingest bearer and reports the route's HTTP 401 Unauthorized", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 401,
+      ok: false,
+      text: async () => JSON.stringify({
+        ok: false,
+        schemaVersion: 2,
+        error: { code: "unauthorized", message: "Unauthorized", retryable: false },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(postUsageBatches({
+      events: [{ eventId: "subq-five-hour", occurredAt: "2026-11-12T01:00:00.000Z" }],
+      ingestUrl: "https://example.test/api/ingest/usage",
+      ingestToken: "scoped-ingest-token",
+      producerId: "claude-code",
+      dryRun: false,
+      log: noopLog,
+    })).rejects.toThrow("Ingest rejected the batch (HTTP 401): Unauthorized");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.authorization).toBe("Bearer scoped-ingest-token");
+    expect(JSON.parse(init.body).producerId).toBe("claude-code");
+  });
+
   it("throws when ingestToken is missing and dryRun is false", async () => {
     await expect(
       postUsageBatches({
