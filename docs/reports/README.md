@@ -23,6 +23,10 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-08-04-mobile-parity-and-phone-self-host](../designs/2026-08-04-mobile-parity-and-phone-self-host.md)
 - [2026-08-05-ux-timeframe-professional-polish](../designs/2026-08-05-ux-timeframe-professional-polish.md)
 
+## Reports
+
+- [2026-11-03-telemetry-and-hub-lessons-learned](2026-11-03-telemetry-and-hub-lessons-learned.md)
+
 ## Research
 
 - [2026-08-05-billing-api-coverage](../research/2026-08-05-billing-api-coverage.md)
@@ -35,8 +39,6 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-07-28-full-app-review](../reviews/2026-07-28-full-app-review.md)
 
 ## Rollouts
-
-- [Repository Report Library — October 30, 2026](../rollouts/2026-10-30-repository-report-library.md)
 
 - [2026-07-04-data-retention-alert-delivery](../rollouts/2026-07-04-data-retention-alert-delivery.md)
 - [2026-07-10-migrate-safe-dry-run-fix](../rollouts/2026-07-10-migrate-safe-dry-run-fix.md)
@@ -185,3 +187,9 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-10-29-telemetry-dedupe](../rollouts/2026-10-29-telemetry-dedupe.md)
 - [2026-10-29-telemetry-parity-audit](../rollouts/2026-10-29-telemetry-parity-audit.md)
 - [2026-10-30-backup-storage-inventory](../rollouts/2026-10-30-backup-storage-inventory.md)
+- [2026-10-30-botfleet-receipt-authority](../rollouts/2026-10-30-botfleet-receipt-authority.md)
+- [2026-10-30-repository-report-library](../rollouts/2026-10-30-repository-report-library.md)
+- [2026-10-30-retain-unproven-native-overlap](../rollouts/2026-10-30-retain-unproven-native-overlap.md)
+- [2026-10-30-telemetry-handoff](../rollouts/2026-10-30-telemetry-handoff.md)
+- [2026-11-03-sentry-partial-acks](../rollouts/2026-11-03-sentry-partial-acks.md)
+- [2026-11-03-unmeasured-collector-calls](../rollouts/2026-11-03-unmeasured-collector-calls.md)

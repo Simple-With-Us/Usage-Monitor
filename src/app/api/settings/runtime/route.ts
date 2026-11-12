@@ -46,6 +46,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     ok: true,
     mode: appSettings.isInfisicalMode ? "infisical" : "env",
+    writesBlocked: appSettings.areInfisicalWritesBlocked,
     environment: resolveInfisicalEnvironment(),
     settings,
   });

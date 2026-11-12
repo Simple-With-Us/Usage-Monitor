@@ -2,12 +2,12 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UsageTelemetryV2BatchSchema } from "@jaywedgeworth22/congress-trading-shared";
-import { fleetIngestJobs } from "./fleet-usage-collector.mjs";
+import { fleetIngestJobs, postFleetJobs } from "./fleet-usage-collector.mjs";
 import { quotaEventsFromMiniMax } from "./minimax-usage-collector.mjs";
 import {
   ANTIGRAVITY_PRODUCER_ID,
@@ -34,6 +34,7 @@ import {
   splitInclusiveCache,
 } from "./lib/session-token-collectors.mjs";
 import { collectDeepSeekEvents } from "./deepseek-usage-collector.mjs";
+import { collectCodexEvents } from "./codex-usage-collector.mjs";
 import { collectFxEvents } from "./fx-usage-collector.mjs";
 import { collectOpencodeEvents } from "./opencode-usage-collector.mjs";
 import {
@@ -41,6 +42,7 @@ import {
   COLLECTOR_STATE_OVERLAP_MINUTES,
   botFleetChildExclusionEnabled,
   canAdvanceCollectorCheckpoint,
+  codexSessionCwd,
   codexSessionId,
   codexSessionKeyFor,
   isBotFleetManagedCodexSession,
@@ -324,6 +326,20 @@ try {
     onTraversalError: () => { traversalErrors += 1; },
   });
   assert(traversalErrors === 0, "a missing provider root remains a valid empty scan");
+  const child = join(traversalRoot, "disappearing-child");
+  mkdirSync(child);
+  await writeFile(join(child, "usage.jsonl"), "fixture");
+  const missingChild = await walkFiles(traversalRoot, {
+    suffix: ".jsonl",
+    reportMissing: true,
+    readDirectory: async (directory, options) => {
+      const entries = await readdir(directory, options);
+      if (directory === traversalRoot) await rm(child, { recursive: true });
+      return entries;
+    },
+    onTraversalError: (error) => { if (error.code === "ENOENT") traversalErrors += 1; },
+  });
+  assert(missingChild.length === 0 && traversalErrors === 1, "opted-in scans report a nested directory disappearing after discovery");
 } finally {
   await rm(traversalRoot, { recursive: true, force: true });
 }
@@ -593,6 +609,47 @@ assert(
   ),
   "standalone Codex sessions remain eligible",
 );
+
+{
+  const root = await mkdtemp(join(tmpdir(), "codex-workspace-attribution-"));
+  try {
+    mkdirSync(join(root, "sessions"));
+    const metadata = (id, cwd, originator = "codex_cli_rs") => ({ type: "session_meta", payload: { id, cwd, originator } });
+    const usage = { type: "event_msg", timestamp: "2026-11-01T12:00:00Z", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } };
+    for (const [id, cwd] of [
+      ["managed", "/srv/botfleet/data/workspaces/child"],
+      ["sibling", "/srv/botfleet/data/workspaces-other/child"],
+      ["traversal", "/srv/botfleet/data/workspaces/../ordinary"],
+      ["ordinary", "/ordinary"],
+    ]) {
+      await writeFile(join(root, "sessions", `${id}.jsonl`), [metadata(id, cwd), usage,
+        metadata("later-hint", "/srv/botfleet/data/workspaces/decoy")].map(JSON.stringify).join("\n"));
+    }
+    const baseline = await collectCodexEvents({ codexHome: root, env: {} });
+    const configuredEnv = { BOTFLEET_WORKSPACES_DIRS: "/srv/botfleet/data/workspaces/" };
+    const linked = await collectCodexEvents({ codexHome: root, env: configuredEnv });
+    assert(baseline.length === 8 && linked.length === baseline.length, "configured Codex attribution keeps every native token slice");
+    const withoutWorkspaceHint = (events) => events.map((event) => {
+      const copy = structuredClone(event);
+      delete copy.metadata["workspace.botfleetHint"];
+      return copy;
+    });
+    assert(JSON.stringify(withoutWorkspaceHint(linked)) === JSON.stringify(baseline), "Codex workspace hint changes no event id, measurement, session identity or other field");
+    assert(linked.filter((event) => event.metadata["session.id"] === "managed").every((event) => event.metadata["workspace.botfleetHint"] === "configured-root"), "configured workspace adds a non-authoritative hint to the exact Codex session");
+    assert(linked.every((event) => !event.metadata["agent.launcher"]), "workspace membership never asserts BotFleet launch provenance");
+    assert(linked.filter((event) => event.metadata["session.id"] !== "managed").every((event) => !event.metadata["workspace.botfleetHint"]), "siblings, traversal and later metadata hints do not acquire a workspace hint");
+    assert(!JSON.stringify(linked).includes("/srv/"), "workspace paths are never emitted");
+    const exclusionEnabled = await collectCodexEvents({ codexHome: root, env: { ...configuredEnv, USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN: "1" } });
+    assert(JSON.stringify(exclusionEnabled) === JSON.stringify(linked), "new configured-root attribution never expands legacy child exclusion");
+    assert(codexSessionCwd([metadata("first", undefined), metadata("later", "/srv/botfleet/data/workspaces/decoy")].map(JSON.stringify).join("\n")) === undefined, "missing authoritative cwd stays unknown");
+    assert(codexSessionCwd([metadata(undefined, "/srv/botfleet/data/workspaces/decoy"), metadata("later", "/ordinary")].map(JSON.stringify).join("\n")) === undefined, "a cwd without its own session identity is never joined to a later session");
+    await writeFile(join(root, "sessions", "legacy-managed.jsonl"), [metadata("legacy-managed", "/ordinary", "botfleet"), usage].map(JSON.stringify).join("\n"));
+    const legacyExcluded = await collectCodexEvents({ codexHome: root, env: { ...configuredEnv, USAGE_MONITOR_EXCLUDE_BOTFLEET_CHILDREN: "1" } });
+    assert(JSON.stringify(legacyExcluded) === JSON.stringify(linked), "previously recognized BotFleet children still obey the existing exclusion switch");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 const codexHome = "/Users/jay/.codex";
 const rolloutName =
@@ -1480,6 +1537,79 @@ assert(
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+// AFC-667: the claude-code quota batch must present its ingest bearer, and a
+// route 401 must surface as the collector's "Unauthorized" failure line.
+{
+  const realFetch = globalThis.fetch;
+  let authorization = "";
+  let producerId = "";
+  globalThis.fetch = async (_url, init) => {
+    authorization = init.headers.authorization;
+    producerId = JSON.parse(init.body).producerId;
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        schemaVersion: 2,
+        error: { code: "unauthorized", message: "Unauthorized", retryable: false },
+      }),
+      { status: 401 }
+    );
+  };
+  try {
+    let message = "";
+    try {
+      await postUsageBatches({
+        events: [{ eventId: "subq-five-hour", occurredAt: "2026-11-12T01:00:00.000Z" }],
+        ingestUrl: "https://usage.example/api/ingest/usage",
+        ingestToken: "scoped-ingest-token",
+        producerId: "claude-code",
+        log: () => {},
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    assert(authorization === "Bearer scoped-ingest-token", `ingest bearer: ${authorization}`);
+    assert(producerId === "claude-code", `producer id: ${producerId}`);
+    assert(
+      message === "Ingest rejected the batch (HTTP 401): Unauthorized",
+      `401 line: ${message}`
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// A failing seat must not abort the remaining seats: earlier persisted seats
+// stay counted, later seats still get their first attempt, and the failure is
+// surfaced in failedSeats so the caller can fail the pass loudly afterwards.
+{
+  const attempted = [];
+  const ack = { received: 2, persisted: 2, rejected: 0, dryRun: false };
+  const post = async ({ producerId }) => {
+    attempted.push(producerId);
+    if (producerId === "bad-seat") throw new Error("HTTP 500 boom");
+    return ack;
+  };
+  const jobs = [
+    { producerId: "seat-a", events: [{}] },
+    { producerId: "bad-seat", events: [{}] },
+    { producerId: "seat-c", events: [{}] },
+  ];
+  const result = await postFleetJobs(jobs, { ingestUrl: "http://localhost/ingest", post, log: () => {} });
+  assert(
+    attempted.join(",") === "seat-a,bad-seat,seat-c",
+    `later seats still attempted after a failure: ${attempted.join(",")}`
+  );
+  assert(result.received === 4 && result.persisted === 4 && result.rejected === 0,
+    `only successful seats are tallied: ${JSON.stringify(result)}`);
+  assert(result.failedSeats.length === 1 &&
+    result.failedSeats[0].producerId === "bad-seat" &&
+    result.failedSeats[0].error.includes("HTTP 500 boom"),
+    `failedSeats surfaces the failing seat: ${JSON.stringify(result.failedSeats)}`);
+  const clean = await postFleetJobs(jobs.slice(0, 1), { ingestUrl: "http://localhost/ingest", post, log: () => {} });
+  assert(clean.failedSeats.length === 0 && clean.received === 2, "clean pass has no failedSeats");
 }
 
 console.log("ok session-token-collectors");

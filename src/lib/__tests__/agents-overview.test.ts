@@ -20,6 +20,7 @@ vi.mock("@/lib/ingest-admission", () => ({
 }));
 
 import {
+  AGENT_PLATFORMS,
   computeAgentsOverview,
   preferPlatformEstimatedCostUsd,
   platformIdForSourceApp,
@@ -43,6 +44,7 @@ type UsageGroupByRow = Pick<
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
   service?: string | null;
+  confidence?: string;
   _sum?: { quantity?: number | null; costUsd?: number | null };
 };
 
@@ -55,6 +57,7 @@ type RollupGroupByRow = Pick<
   "sourceApp" | "provider" | "keyRef" | "label"
 > & {
   service?: string | null;
+  confidence?: string;
   _sum?: { totalQuantity?: number | null; totalCostUsd?: number | null };
 };
 
@@ -105,6 +108,90 @@ describe("agents-overview", () => {
       secondsSinceHeartbeat: null,
       mac: null,
     });
+  });
+
+  it("registers exact Kimi and ZCode local-ledger coverage", () => {
+    const kimi = AGENT_PLATFORMS.find((platform) => platform.id === "kimi-code");
+    const zcode = AGENT_PLATFORMS.find((platform) => platform.id === "zcode");
+    expect(kimi).toMatchObject({
+      tokenTelemetryKind: "session_jsonl",
+      fidelityTier: "session_jsonl",
+      dataCapability: expect.stringContaining("per-turn tokens"),
+    });
+    expect(kimi?.notes).toContain("per-turn");
+    expect(zcode).toMatchObject({
+      provider: "Z.ai",
+      tokenTelemetryKind: "local_database",
+      fidelityTier: "local_database",
+      dataCapability: expect.stringContaining("local database"),
+    });
+    expect(platformIdForSourceApp("moonshot-kimi")).toBe("kimi-code");
+    for (const alias of ["z.ai", "zai", "glm", "bigmodel.cn"]) {
+      expect(platformIdForSourceApp(alias)).toBe("zcode");
+    }
+  });
+
+  it("queries the exact Kimi and ZCode source apps for overview telemetry", async () => {
+    const sourceFilters: unknown[] = [];
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      sourceFilters.push(args.where?.OR);
+      if (metricTypeFromWhere(args.where) !== "usage") return [];
+      return usageGroupByRows([
+        {
+          sourceApp: "kimi-code",
+          provider: "moonshot",
+          keyRef: "kimi-k2",
+          label: "token:input",
+          _sum: { quantity: 11 },
+        },
+        {
+          sourceApp: "zcode",
+          provider: "zcode",
+          keyRef: "glm-4.6",
+          label: "token:output",
+          _sum: { quantity: 17 },
+        },
+      ]);
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const serializedFilters = JSON.stringify(sourceFilters);
+    expect(serializedFilters).toContain("kimi-code");
+    expect(serializedFilters).toContain("zcode");
+    expect(result.platforms.find((platform) => platform.id === "kimi-code")?.totalTokens).toBe(11);
+    expect(result.platforms.find((platform) => platform.id === "zcode")?.totalTokens).toBe(17);
+  });
+
+  it("keeps estimated Kimi rows visible while reporting partial lower-bound accuracy", async () => {
+    prismaMock.externalUsageEvent.groupBy.mockImplementation(async (args: UsageGroupByArgs) => {
+      if (metricTypeFromWhere(args.where) !== "usage") return [];
+      return usageGroupByRows([
+        {
+          sourceApp: "kimi-code",
+          provider: "moonshot",
+          keyRef: "kimi-k2",
+          label: "token:input",
+          confidence: "estimated",
+          _sum: { quantity: 11 },
+        },
+      ]);
+    });
+    prismaMock.externalUsageEventDailyRollup.groupBy.mockResolvedValue([]);
+
+    const result = await computeAgentsOverview(30);
+    const kimi = result.platforms.find((platform) => platform.id === "kimi-code");
+    expect(kimi).toMatchObject({
+      telemetryAccuracy: "partial",
+      telemetryAccuracyLabel: "partial report",
+      usageIsReliable: true,
+      totalTokens: 11,
+    });
+    expect(kimi?.telemetryAccuracyNote).toContain("lower bound");
+    expect(result.summary.totalTokens).toBe(11);
+    expect(result.summary.telemetryIncomplete).toBe(true);
+    expect(result.summary.telemetryIncompleteNote).toContain("lower bound");
+    expect(result.summary.telemetryIncompleteNote).not.toContain("omit Kimi Code");
   });
 
   afterEach(() => {
@@ -163,7 +250,7 @@ describe("agents-overview", () => {
     const result = await computeAgentsOverview(30);
     expect(result.ok).toBe(true);
     expect(result.summary.totalTokens).toBe(170_000);
-    expect(result.platforms.length).toBe(12);
+    expect(result.platforms.length).toBe(13);
     // 30-day window sits inside the raw-event retention window, so rollups
     // must not be queried (they would double-count the same days).
     expect(rollupSpy).not.toHaveBeenCalled();
@@ -197,6 +284,7 @@ describe("agents-overview", () => {
     expect(minimax?.billedMonthlySeatCostUsd).toBe(0);
     expect(result.platforms.find((p) => p.id === "deepseek-dsh")).toBeDefined();
     expect(result.platforms.find((p) => p.id === "kimi-code")).toBeDefined();
+    expect(result.platforms.find((p) => p.id === "zcode")).toBeDefined();
   });
 
   it("uses rollups only for days before the raw-event cutoff", async () => {
