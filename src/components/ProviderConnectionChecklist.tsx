@@ -63,18 +63,11 @@ export default function ProviderConnectionChecklist({
       </ul>
       {pushOnlyHint && (
         <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
-          <p className="font-semibold">Push / OTLP setup</p>
+          <p className="font-semibold">Send usage from the app</p>
           <p className="mt-1">
-            This provider has no safe poll API. Send usage via{" "}
-            <code className="rounded bg-white/70 px-1 dark:bg-black/30">
-              POST /api/ingest/usage
-            </code>{" "}
-            (Bearer <code className="rounded bg-white/70 px-1 dark:bg-black/30">USAGE_INGEST_TOKEN</code>
-            ) or Claude Code OTLP at{" "}
-            <code className="rounded bg-white/70 px-1 dark:bg-black/30">
-              POST /api/otlp/v1/metrics
-            </code>
-            . Set a monthly budget under Settings so spend still gates alerts.
+            This provider does not offer a safe account report. Send usage from the app that spends it, or from Claude Code&apos;s metrics feed.
+            {"\u00A0 "}
+            Set a monthly budget in Settings so alerts still fire.
           </p>
         </div>
       )}
@@ -94,14 +87,14 @@ export function buildProviderConnectionChecklist(input: {
     {
       id: "poll-or-push",
       label: input.isBlindOrPushOnly
-        ? "Push or OTLP path configured"
-        : "Poll adapter can fetch",
+        ? "Usage is sent from the app"
+        : "Usage Monitor can read this account",
       done: input.hasSnapshot || input.isBlindOrPushOnly,
       detail: input.isBlindOrPushOnly
-        ? "No provider poll API — cost arrives only via ingest/OTLP."
+        ? "This provider has no account report. Cost arrives only when an app sends it."
         : input.hasSnapshot
           ? "At least one usage snapshot exists."
-          : "Waiting for first successful poll.",
+          : "Waiting for the first successful read.",
       href: `/providers/${input.providerId}`,
     },
     {

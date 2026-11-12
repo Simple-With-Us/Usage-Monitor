@@ -93,7 +93,7 @@ export default function ProvidersPageClient() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Providers</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Family workspace for spend, health, and sync — same table as Overview.
+            Spend, health, and the latest sync for each provider. This is the same list as Overview.
           </p>
         </div>
         <Link
