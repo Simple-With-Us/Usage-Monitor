@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   advancePeriod,
   applyAnchorDay,
+  effectiveSubscriptionStatus,
+  isAmbiguousSubscriptionPeriodWindow,
   rescheduleCycle,
   initialCycle,
   normalizeMonthlyUsd,
@@ -9,6 +11,32 @@ import {
 } from "../subscriptions";
 
 const iso = (d: Date) => d.toISOString();
+
+describe("effectiveSubscriptionStatus", () => {
+  it("expires only a stored-active non-renewing term after its end", () => {
+    const now = new Date("2026-07-12T00:00:00.000Z");
+    expect(
+      effectiveSubscriptionStatus(
+        {
+          status: "active",
+          autoRenew: false,
+          nextRenewalAt: "2026-07-10T00:00:00.000Z",
+        },
+        now
+      )
+    ).toBe("expired");
+    expect(
+      effectiveSubscriptionStatus(
+        {
+          status: "active",
+          autoRenew: true,
+          nextRenewalAt: "2026-07-10T00:00:00.000Z",
+        },
+        now
+      )
+    ).toBe("active");
+  });
+});
 
 describe("advancePeriod", () => {
   it("advances monthly, clamping to the shorter month", () => {
@@ -141,6 +169,46 @@ describe("rollForwardRenewal", () => {
     const future = new Date("2026-12-01T00:00:00Z");
     expect(iso(rollForwardRenewal(future, "monthly", 1, new Date("2026-03-15T00:00:00Z")))).toBe(
       iso(future)
+    );
+  });
+});
+
+describe("isAmbiguousSubscriptionPeriodWindow (Wave K / E13)", () => {
+  it("accepts exact monthly cadence", () => {
+    const start = new Date("2026-07-01T00:00:00.000Z");
+    const end = advancePeriod(start, "monthly", 1);
+    expect(isAmbiguousSubscriptionPeriodWindow(start, end, "monthly", 1)).toBe(
+      false
+    );
+  });
+
+  it("rejects UTC-midnight calendar renewal unless the CF exception is opted in", () => {
+    const start = new Date("2026-07-16T14:22:00.000Z");
+    // Expected end is ~Aug 16 14:22; midnight on Aug 16 is non-exact without opt-in.
+    const end = new Date("2026-08-16T00:00:00.000Z");
+    expect(isAmbiguousSubscriptionPeriodWindow(start, end, "monthly", 1)).toBe(
+      true
+    );
+    expect(
+      isAmbiguousSubscriptionPeriodWindow(start, end, "monthly", 1, {
+        allowUtcMidnightCalendarException: true,
+      })
+    ).toBe(false);
+  });
+
+  it("flags a mid-period window that is not exact cadence", () => {
+    const start = new Date("2026-07-01T00:00:00.000Z");
+    const end = new Date("2026-07-10T00:00:00.000Z"); // 9 days — not monthly
+    expect(isAmbiguousSubscriptionPeriodWindow(start, end, "monthly", 1)).toBe(
+      true
+    );
+  });
+
+  it("flags inverted or zero-length windows", () => {
+    const start = new Date("2026-07-10T00:00:00.000Z");
+    const end = new Date("2026-07-01T00:00:00.000Z");
+    expect(isAmbiguousSubscriptionPeriodWindow(start, end, "monthly", 1)).toBe(
+      true
     );
   });
 });

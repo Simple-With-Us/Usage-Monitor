@@ -1,0 +1,46 @@
+{
+  "name": "usage-monitor-receipt-inbox",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-07-18",
+  "preview_urls": false,
+  "limits": {
+    "cpu_ms": 500,
+    "subrequests": 30
+  },
+  "routes": [
+    {
+      "pattern": "receipt-inbox.jays.services",
+      "custom_domain": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RECEIPTS_BUCKET",
+      "bucket_name": "usage-monitor-receipts"
+    }
+  ],
+  "services": [
+    {
+      "binding": "LIFECYCLE_AUDITOR",
+      "service": "usage-monitor-receipt-lifecycle-auditor"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RECEIPT_INDEX",
+        "class_name": "ReceiptInboxIndex"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ReceiptInboxIndex"]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

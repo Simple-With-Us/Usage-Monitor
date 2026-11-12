@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRuntimeIdentity } from "@/lib/runtime-health";
+import { getPublicR2WeeklyHealth, getRuntimeIdentity } from "@/lib/runtime-health";
 
 // Unauthenticated liveness check for external uptime monitors. Deliberately
 // excluded from src/middleware.ts's session gate, since the dashboard's own
@@ -16,6 +16,14 @@ export async function GET() {
       ...getRuntimeIdentity(),
       uptimeSeconds: Math.floor(process.uptime()),
       checkedAt: new Date().toISOString(),
+      // Fleet-standard shape (matches Socratic.Trade / Congress.Trade) so
+      // fleet-backup-status.ts's peer parser and external monitors can read
+      // this app's own weekly R2 archive freshness off the public path.
+      checks: {
+        storage: {
+          r2Weekly: getPublicR2WeeklyHealth(),
+        },
+      },
     },
     { headers: { "Cache-Control": "no-store" } }
   );

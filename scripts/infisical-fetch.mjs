@@ -1,0 +1,321 @@
+// CI-side Infisical fetch: service-token bearer read, one bulk secrets list, then
+// per requested name mask + export into $GITHUB_ENV -- falling back to a
+// same-named GH_FALLBACK_<NAME> step env var, warning when a name stays
+// empty everywhere, and failing only for a name listed in `required`.
+//
+// Runs on GitHub-hosted macOS, Windows and Linux runners without the
+// Infisical CLI.  Needs `zod` (installed by the composite action before
+// this script runs) plus global `fetch` from the runner Node.
+//
+// Never prints a secret value except as the payload of an `::add-mask::`
+// workflow command, which is the mechanism GitHub uses to scrub it from the
+// rendered log from that point on -- one command per LINE of the value, see
+// `maskValue` below, because the runner's parser stops at the first newline.
+// Ordinary list failures may use GH_FALLBACK_<NAME>; metadata verification
+// failures stop before any fallback value is resolved
+import { appendFileSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
+import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
+const SecretsResponseSchema = z
+  .object({
+    secrets: z.array(
+      z.object({
+        secretKey: z.string().min(1),
+        secretValue: z.string(),
+      }).passthrough()
+    ),
+  })
+  .passthrough();
+
+const ServiceTokenScopeSchema = z.object({
+  secretPath: z.string(),
+  environment: z.string(),
+}).strict();
+
+const ServiceTokenMetadataSchema = z.object({
+  projectId: z.string().min(1),
+  workspace: z.string().optional(),
+  expiresAt: z.string().nullable().optional(),
+  scopes: z.array(ServiceTokenScopeSchema),
+  permissions: z.array(z.string()),
+}).passthrough();
+
+const ServiceTokenMetadataResponseSchema = z.union([
+  ServiceTokenMetadataSchema,
+  z.object({ serviceTokenData: ServiceTokenMetadataSchema }).passthrough(),
+]);
+
+export class InfisicalTokenScopeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InfisicalTokenScopeError";
+  }
+}
+
+function splitNames(raw) {
+  return String(raw ?? "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function stripTrailingSlash(url) {
+  return String(url ?? "").replace(/\/+$/, "");
+}
+
+function validatedSiteUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Infisical site URL must be a valid base URL");
+  }
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "" && url.pathname !== "/")) {
+    throw new Error("Infisical site URL must be a base origin without credentials, path, query, or fragment");
+  }
+  if (url.protocol === "https:") return url.origin;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const loopback = (isIP(hostname) === 4 && hostname.startsWith("127.")) || hostname === "::1";
+  if (url.protocol === "http:" && loopback) return url.origin;
+  throw new Error("Infisical site URL must use HTTPS (HTTP is allowed only for literal loopback test servers)");
+}
+
+/** GET .../api/v3/secrets/raw for the whole path in one call -- returns a
+ * Map<secretKey, secretValue>.  viewSecretValue is always "true" here; this
+ * script only ever runs where values are needed (it exists to populate
+ * GITHUB_ENV), unlike the probe path in server/infisical.ts.
+ *
+ * expandSecretReferences is "true": a secret whose stored value is a bare
+ * reference such as ${prod.some-folder.NAME} (the Fleet-OPS root, OPS-818) comes
+ * back as the referenced value.  With "false" the literal reference string
+ * would land in GITHUB_ENV as if it were the credential.  Expanding needs the
+ * scoped service token to be able to read the referenced folder too. */
+export async function listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 30_000 }) {
+  const safeSiteUrl = validatedSiteUrl(siteUrl);
+  await verifyServiceTokenScope({ safeSiteUrl, token, projectId, environment, secretPath, fetchImpl, timeoutMs });
+  const qs = new URLSearchParams({
+    workspaceId: projectId,
+    environment,
+    secretPath,
+    recursive: "false",
+    viewSecretValue: "true",
+    expandSecretReferences: "true",
+    include_imports: "false",
+  });
+  const res = await fetchImpl(`${safeSiteUrl}/api/v3/secrets/raw?${qs.toString()}`, {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: "error",
+  });
+  if (!res.ok) {
+    throw new Error(`Infisical secrets list failed: HTTP ${res.status}`);
+  }
+  const body = SecretsResponseSchema.parse(await res.json());
+  const values = new Map();
+  for (const s of body.secrets) {
+    values.set(s.secretKey, s.secretValue);
+  }
+  return values;
+}
+
+export async function verifyServiceTokenScope({ safeSiteUrl, token, projectId, environment, secretPath, fetchImpl = fetch, timeoutMs = 15_000 }) {
+  let response;
+  try {
+    response = await fetchImpl(`${safeSiteUrl}/api/v2/service-token`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "error",
+    });
+  } catch {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata request failed");
+  }
+  if (!response.ok) {
+    throw new InfisicalTokenScopeError(`Infisical service-token metadata returned HTTP ${response.status}`);
+  }
+
+  let responseBody;
+  try {
+    responseBody = await response.json();
+  } catch {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata response was invalid");
+  }
+  const parsed = ServiceTokenMetadataResponseSchema.safeParse(responseBody);
+  if (!parsed.success) {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata did not match the required scope contract");
+  }
+  const metadata = "serviceTokenData" in parsed.data ? parsed.data.serviceTokenData : parsed.data;
+  const valid = metadata.projectId === projectId &&
+    (metadata.workspace === undefined || metadata.workspace === projectId) &&
+    (metadata.expiresAt === undefined || metadata.expiresAt === null ||
+      (Number.isFinite(Date.parse(metadata.expiresAt)) && Date.parse(metadata.expiresAt) > Date.now())) &&
+    metadata.permissions.length === 1 && metadata.permissions[0] === "read" &&
+    metadata.scopes.length === 1 &&
+    metadata.scopes[0]?.environment === environment &&
+    metadata.scopes[0]?.secretPath === secretPath;
+  if (!valid) {
+    throw new InfisicalTokenScopeError("Infisical service-token metadata does not match the requested project and exact read scope");
+  }
+}
+
+/** Registers each LINE of the value as its own mask, and never the joined
+ * value.
+ *
+ * `::add-mask::` is a workflow command the runner parses one LINE at a
+ * time: it registers only the text up to the first newline, then echoes the
+ * remaining lines of that same write to the job log as ordinary, unmasked
+ * output.  So a command carrying a whole multi-line value is not merely
+ * useless -- emitting it FIRST is the leak itself: the runner registers line
+ * one and prints every line after it into a public log, before the per-line
+ * commands that would have hidden them have run.  A wrapped base64 blob --
+ * which is exactly what `base64` produces on both macOS and GNU coreutils
+ * unless given `-b 0` / `-w 0` -- is the everyday shape of such a value.
+ *
+ * GitHub's own `secrets.*` machinery registers each line of a multi-line
+ * secret as a separate mask; this does the same, so a signing certificate or
+ * an ASC key routed through this action is scrubbed as thoroughly as it was
+ * when the workflow read it from `secrets.*`.  A single-line value is its own
+ * only line, so it still costs exactly one command.
+ *
+ * The `seen` set collapses a value whose lines repeat, and the `trim()`
+ * guard keeps a blank trailing line from registering the empty string (which
+ * would mask nothing and warn on some runner versions). */
+export function maskValue(value, log) {
+  const seen = new Set();
+  for (const line of String(value).split(/\r?\n/)) {
+    if (!line.trim() || seen.has(line)) continue;
+    seen.add(line);
+    log(`::add-mask::${line}`);
+  }
+}
+
+/** Appends one GitHub Actions multiline env-var entry.  The delimiter is
+ * random per call so a value that happens to contain a fixed delimiter
+ * string can never break the file for a later name. */
+export function writeGithubEnvValue(path, name, value, appendFileImpl = appendFileSync) {
+  if (!path) return;
+  const delimiter = `INFISICAL_${randomUUID().replace(/-/g, "")}`;
+  appendFileImpl(path, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+}
+
+/** A value that is still a bare Infisical reference such as
+ * ${prod.some-folder.NAME}: the server did not expand it (target missing, or
+ * the service token cannot read the referenced folder).  Exporting it would
+ * hand a workflow the literal reference string as if it were the credential. */
+export const UNRESOLVED_REFERENCE = /^\$\{[^}]+\}$/;
+
+export function isUnresolvedReference(value) {
+  return UNRESOLVED_REFERENCE.test(String(value ?? "").trim());
+}
+
+/** Returns an empty map when unconfigured; metadata-scope failures propagate,
+ * while ordinary list failures warn and let the caller use GH_FALLBACK values. */
+async function resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log }) {
+  if (!projectId || !token) {
+    return new Map();
+  }
+  try {
+    return await listSecretsRaw({ siteUrl, token, projectId, environment, secretPath, fetchImpl });
+  } catch (err) {
+    if (err instanceof InfisicalTokenScopeError) throw err;
+    // Never interpolate the raw error body -- Infisical error payloads have
+    // echoed request fields on some 4xx responses in the past, and none of
+    // that belongs in a public Actions log.
+    const reason = err instanceof Error ? err.message : "unknown error";
+    log(`::warning::Infisical ${environment} fetch unavailable (${reason}); using GitHub secret fallbacks only.`);
+    return new Map();
+  }
+}
+
+export async function run({ env = process.env, fetchImpl = fetch, log = (line) => console.log(line) } = {}) {
+  const names = splitNames(env.INFISICAL_NAMES);
+  const required = new Set(splitNames(env.INFISICAL_REQUIRED));
+  const siteUrl = stripTrailingSlash(env.INFISICAL_SITE_URL || "https://app.infisical.com");
+  const projectId = env.INFISICAL_PROJECT_ID || "";
+  const environment = env.INFISICAL_ENVIRONMENT || "prod";
+  const secretPath = env.INFISICAL_SECRET_PATH || "/";
+  const token = env.INFISICAL_TOKEN || "";
+  const githubEnvPath = env.GITHUB_ENV || "";
+
+  const legacyMachineIdentityKeys = [
+    "INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
+    "INFISICAL_AUTOMATION_CLIENT_ID", "INFISICAL_AUTOMATION_CLIENT_SECRET",
+    "INFISICAL_UM_CLIENT_ID", "INFISICAL_UM_CLIENT_SECRET",
+    "INFISICAL_SHARED_CLIENT_ID", "INFISICAL_SHARED_CLIENT_SECRET",
+  ];
+  const hasLegacyMachineIdentity = legacyMachineIdentityKeys.some((key) => Boolean(env[key]));
+  const hasInfisicalConfig = Boolean(projectId || env.INFISICAL_SITE_URL || env.INFISICAL_SECRET_PATH || hasLegacyMachineIdentity);
+  if (!token && hasLegacyMachineIdentity) {
+    throw new Error("Infisical machine-identity credentials are no longer accepted here; configure a scoped INFISICAL_TOKEN.");
+  }
+  if (!token && projectId) {
+    throw new Error("Infisical project is configured but INFISICAL_TOKEN is missing.");
+  }
+  if (token && !projectId) {
+    throw new Error("INFISICAL_TOKEN is configured but INFISICAL_PROJECT_ID is missing.");
+  }
+  if (!token && hasInfisicalConfig) {
+    throw new Error("Infisical is configured but INFISICAL_TOKEN is missing.");
+  }
+
+  const vaultValues = await resolveVaultValues({ siteUrl, projectId, token, environment, secretPath, fetchImpl, log });
+
+  const missingRequired = [];
+  const unresolved = [];
+  for (const name of names) {
+    let value = vaultValues.get(name) || "";
+    if (!value) {
+      value = env[`GH_FALLBACK_${name}`] || "";
+    }
+    if (!value) {
+      const message = `${name} is empty after the Infisical ${environment} export and the GitHub secret fallback.`;
+      if (required.has(name)) {
+        missingRequired.push(name);
+        log(`::error::${message}`);
+      } else {
+        log(`::warning::${message}`);
+      }
+      continue;
+    }
+    if (isUnresolvedReference(value)) {
+      // Name the KEY only -- never the value, even though it is a reference.
+      unresolved.push(name);
+      log(`::error::${name} is still an unresolved Infisical secret reference after the ${environment} export; check the target exists and the scoped service token can read the referenced folder.`);
+      continue;
+    }
+    maskValue(value, log);
+    writeGithubEnvValue(githubEnvPath, name, value);
+  }
+
+  if (unresolved.length > 0) {
+    throw new Error(`Unresolved Infisical secret reference(s): ${unresolved.join(", ")}`);
+  }
+
+  if (missingRequired.length > 0) {
+    throw new Error(`Missing required Infisical name(s): ${missingRequired.join(", ")}`);
+  }
+}
+
+// Compare physical paths.  Node's ESM loader realpaths the entry module, so an
+// invocation through a symlinked directory (macOS /var -> /private/var) never
+// matches process.argv[1] when compared as text.
+function isEntryModule() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const isMain = isEntryModule();
+if (isMain) {
+  run().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  });
+}

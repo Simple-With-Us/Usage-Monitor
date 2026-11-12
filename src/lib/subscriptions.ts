@@ -23,6 +23,28 @@ export function isSubscriptionStatus(value: string): value is SubscriptionStatus
   return (SUBSCRIPTION_STATUSES as readonly string[]).includes(value);
 }
 
+/** Stored status plus term semantics used consistently by API and billing UI. */
+export function effectiveSubscriptionStatus(
+  subscription: {
+    status: string;
+    autoRenew: boolean;
+    nextRenewalAt: Date | string;
+  },
+  now: Date = new Date()
+): string {
+  const status = subscription.status.trim().toLowerCase() || "active";
+  const termEnd = new Date(subscription.nextRenewalAt).getTime();
+  if (
+    status === "active" &&
+    !subscription.autoRenew &&
+    Number.isFinite(termEnd) &&
+    termEnd <= now.getTime()
+  ) {
+    return "expired";
+  }
+  return status;
+}
+
 // Months in one whole interval unit — the multiplier used for both period
 // advancement (quarterly = 3 months, annual = 12) and monthly-equivalent cost.
 // Weekly is special-cased in the functions below since it isn't month-based.
@@ -74,6 +96,53 @@ export function advancePeriod(
     return new Date(periodStart.getTime() + count * 7 * 24 * 60 * 60 * 1000);
   }
   return addUtcMonths(periodStart, monthsPerUnit(interval) * count);
+}
+
+/**
+ * Wave K / E13: true when [periodStart, periodEnd) is not an exact supported
+ * cadence duration. Managed rows with ambiguous windows must not be charged
+ * until reconcile rewrites exact bounds.
+ *
+ * The UTC-midnight calendar exception (provider end at 00:00Z on the expected
+ * calendar day while start carries a creation time) is opt-in and reserved for
+ * the exact Cloudflare legacy handoff row — never for general managed terms.
+ */
+export function isAmbiguousSubscriptionPeriodWindow(
+  periodStart: Date,
+  periodEnd: Date,
+  interval: SubscriptionInterval,
+  intervalCount: number,
+  options?: { allowUtcMidnightCalendarException?: boolean }
+): boolean {
+  const startMs = periodStart.getTime();
+  const endMs = periodEnd.getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return true;
+  }
+  const expectedEnd = advancePeriod(periodStart, interval, intervalCount);
+  if (endMs === expectedEnd.getTime()) return false;
+
+  if (!options?.allowUtcMidnightCalendarException) return true;
+
+  // Opt-in midnight calendar exception only (Cloudflare Workers Paid legacy).
+  const endIsUtcMidnight =
+    periodEnd.getUTCHours() === 0 &&
+    periodEnd.getUTCMinutes() === 0 &&
+    periodEnd.getUTCSeconds() === 0 &&
+    periodEnd.getUTCMilliseconds() === 0;
+  if (!endIsUtcMidnight) return true;
+
+  const expectedDay = Date.UTC(
+    expectedEnd.getUTCFullYear(),
+    expectedEnd.getUTCMonth(),
+    expectedEnd.getUTCDate()
+  );
+  const endDay = Date.UTC(
+    periodEnd.getUTCFullYear(),
+    periodEnd.getUTCMonth(),
+    periodEnd.getUTCDate()
+  );
+  return expectedDay !== endDay;
 }
 
 // Override the day-of-month of `date` to `anchorDay` (clamped to the month's

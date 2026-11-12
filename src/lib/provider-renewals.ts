@@ -20,7 +20,12 @@ export async function rollForwardProviderRenewals(
 ): Promise<RollForwardProviderRenewalsResult> {
   const plans = await prisma.providerPlan.findMany({
     where: { renewalDate: { lt: now, not: null } },
-    select: { id: true, renewalDate: true, billingInterval: true },
+    select: {
+      id: true,
+      providerId: true,
+      renewalDate: true,
+      billingInterval: true,
+    },
   });
 
   let advanced = 0;
@@ -30,11 +35,19 @@ export async function rollForwardProviderRenewals(
     }
     const next = rollForwardRenewal(plan.renewalDate, plan.billingInterval, 1, now);
     if (next.getTime() !== plan.renewalDate.getTime()) {
-      await prisma.providerPlan.update({
-        where: { id: plan.id },
-        data: { renewalDate: next },
+      const changed = await prisma.$transaction(async (tx) => {
+        const updated = await tx.providerPlan.updateMany({
+          where: { id: plan.id, renewalDate: plan.renewalDate },
+          data: { renewalDate: next },
+        });
+        if (updated.count === 0) return false;
+        await tx.provider.update({
+          where: { id: plan.providerId },
+          data: { alertConfigGeneration: { increment: 1 } },
+        });
+        return true;
       });
-      advanced += 1;
+      if (changed) advanced += 1;
     }
   }
 

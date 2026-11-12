@@ -50,13 +50,20 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       records.push({
         externalId,
         kind: "account",
+        serviceName: row.restriction ?? row.access_code ?? "Intrinio feed",
         planName: row.restriction ?? row.access_code ?? null,
         status: "active",
         requestLimit: limit,
         requestLimitWindow: "provider-defined",
+        usageQuantity: count,
+        remainingQuantity:
+          count != null && limit != null ? Math.max(0, limit - count) : null,
+        usageUnit: "calls",
         currentPeriodEnd: resetSeconds != null
           ? new Date(now + resetSeconds * 1000).toISOString()
           : null,
+        rollupRole: "metadata",
+        dateKind: "quota_reset",
       });
     }
   }

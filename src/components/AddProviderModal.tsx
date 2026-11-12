@@ -1,11 +1,36 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import ModalDialog from "@/components/ModalDialog";
+import ProviderIntegrationInfo from "@/components/ProviderIntegrationInfo";
+import {
+  ADDABLE_BUILT_IN_PROVIDERS,
+  BUILT_IN_PROVIDERS,
+  hasConfiguredProviderField,
+  PROVIDER_CATEGORIES,
+  type ProviderDefinition,
+} from "@/lib/provider-definitions";
+import { isMustKeepFundedOptionVisible } from "@/lib/provider-funding-policy";
+import {
+  FIXED_FEE_SUBSCRIPTION_WARNING,
+  PROVIDER_WIZARD_STEPS,
+  formatWizardProgress,
+  hasFixedMonthlyCostSet,
+  isFirstWizardStep,
+  isLastWizardStep,
+  nextWizardStep,
+  prevWizardStep,
+  validateBudgetStep,
+  validateCredentialsStep,
+  validateTypeStep,
+  wizardStepById,
+  type WizardStepId,
+} from "@/lib/provider-wizard";
 
 type BillingMode = "actual" | "estimated" | "manual";
 
-interface ProviderPlan {
+export interface ProviderPlan {
   billingMode: BillingMode;
   fixedMonthlyCostUsd: number | null;
   monthlyBudgetUsd: number | null;
@@ -18,6 +43,89 @@ interface ProviderPlan {
   notes: string | null;
 }
 
+export interface ProviderSecretConfigOperation {
+  path: string[];
+  action: "clear";
+}
+
+const GOOGLE_BILLING_CONFIG_FIELDS = [
+  "billingDataset",
+  "googleProjectId",
+  "billingTable",
+  "serviceAccountJson",
+] as const;
+
+export const CLOUDFLARE_RESOURCE_PROBE_DISCLOSURE =
+  "When supplied, each field enables one metadata/readability check for only that resource. These probes do not affect billing, subscriptions, spend, usage, quotas, or PayGo eligibility.";
+
+export function actualUsageBillingPlan(plan: ProviderPlan): ProviderPlan {
+  return {
+    ...plan,
+    billingMode: "actual",
+  };
+}
+
+export function withoutGoogleBillingConfig(
+  config: Record<string, unknown>
+): Record<string, unknown> {
+  const remaining = { ...config };
+  for (const field of GOOGLE_BILLING_CONFIG_FIELDS) delete remaining[field];
+  return remaining;
+}
+
+export function validateGoogleIntegrationSubmission(input: {
+  config: Record<string, unknown>;
+  protectedConfigFields?: string[];
+  plan: ProviderPlan;
+}): ProviderPlan {
+  const configured = (key: string) =>
+    hasConfiguredProviderField(
+      input.config,
+      key,
+      input.protectedConfigFields ?? []
+    );
+  const projectConfigured = configured("googleProjectId");
+  const serviceAccountConfigured = configured("serviceAccountJson");
+  const billingRequested =
+    configured("billingDataset") || configured("billingTable");
+  // A service account with a billing dataset/table can be a billing-only
+  // credential. Without a billing target, the shared credential expresses
+  // Monitoring intent and therefore needs the exact Gemini project.
+  const monitoringRequested =
+    projectConfigured || (serviceAccountConfigured && !billingRequested);
+
+  if (
+    projectConfigured &&
+    !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(
+      String(input.config.googleProjectId).trim()
+    )
+  ) {
+    throw new Error("Exact Gemini project ID is not a valid Google Cloud project ID");
+  }
+  if (monitoringRequested && !projectConfigured) {
+    throw new Error(
+      "Exact Gemini project ID is required for Cloud Monitoring"
+    );
+  }
+  if (monitoringRequested && !serviceAccountConfigured) {
+    throw new Error(
+      "Google service-account JSON is required for Cloud Monitoring"
+    );
+  }
+  if (billingRequested && !configured("billingDataset")) {
+    throw new Error(
+      "Billing export dataset is required when a billing table is configured"
+    );
+  }
+  if (billingRequested && !serviceAccountConfigured) {
+    throw new Error(
+      "Google service-account JSON is required for Cloud Billing"
+    );
+  }
+
+  return billingRequested ? actualUsageBillingPlan(input.plan) : input.plan;
+}
+
 interface Provider {
   id?: string;
   name: string;
@@ -25,11 +133,21 @@ interface Provider {
   type: string;
   config?: Record<string, unknown>;
   apiKey?: string;
+  secretConfigOperations?: ProviderSecretConfigOperation[];
   label?: string | null;
+  refreshIntervalMin?: number;
   keyPreview?: string | null;
   plan?: ProviderPlan | null;
   allocations?: { projectId: string; percentage: number }[];
   secretConfigMeta?: { configured: boolean; fields: string[]; readable: boolean };
+  credentialManagement?: {
+    source: "infisical";
+    scope: "st-primary";
+    label: string;
+    status: "active" | "revoked";
+    alias: boolean;
+    readOnlyFields: readonly string[];
+  } | null;
 }
 
 interface AddProviderModalProps {
@@ -39,96 +157,6 @@ interface AddProviderModalProps {
   editProvider?: Provider | null;
   existingProviders?: Provider[];
 }
-
-interface ProviderDef {
-  name: string;
-  displayName: string;
-  type: string;
-  category: string;
-  needsAccountId?: boolean;
-  needsOrgId?: boolean;
-  needsOrgSlug?: boolean;
-  creditBased?: boolean;
-  helpNote?: string;
-  needsConfig?: {
-    fields: {
-      key: string;
-      label: string;
-      placeholder: string;
-      required?: boolean;
-      type?: string;
-    }[];
-  };
-}
-
-const BUILT_IN_PROVIDERS: ProviderDef[] = [
-  // LLM/AI
-  { name: "openai", displayName: "OpenAI", type: "builtin", category: "LLM/AI", helpNote: "For authoritative organization cost, add an Organization Admin key below. It is encrypted separately from the normal API key.", needsConfig: { fields: [{ key: "adminApiKey", label: "Organization Admin key (optional)", placeholder: "sk-admin-...", type: "password" }] } },
-  { name: "anthropic", displayName: "Anthropic", type: "builtin", category: "LLM/AI", helpNote: "The Usage & Cost API requires an organization Admin API key. A standard Messages API key cannot read billing.", needsConfig: { fields: [{ key: "adminApiKey", label: "Organization Admin API key (optional)", placeholder: "sk-ant-admin...", type: "password" }] } },
-  { name: "google-ai", displayName: "Google AI", type: "builtin", category: "LLM/AI", helpNote: "Google AI Studio has no public usage API. Usage is visible at aistudio.google.com/app/apikey. Configure Google Cloud Billing for spend tracking." },
-  { name: "deepseek", displayName: "DeepSeek", type: "builtin", category: "LLM/AI", helpNote: "Reads the official prepaid/granted balance endpoint; DeepSeek does not expose invoice or subscription status here." },
-  { name: "xai", displayName: "xAI (Grok)", type: "builtin", category: "LLM/AI", helpNote: "Reads prepaid balance, postpaid invoice preview, billing cycle, and spending limits through the Management API.", needsConfig: { fields: [{ key: "teamId", label: "Team ID", placeholder: "xAI team ID", required: true }, { key: "managementKey", label: "Management API key (optional)", placeholder: "Management API key", type: "password" }] } },
-  { name: "mistral", displayName: "Mistral AI", type: "builtin", category: "LLM/AI", helpNote: "Reads organization usage, payment/limit status, spend cap, and rate limits with a Backoffice Admin key.", needsConfig: { fields: [{ key: "adminApiKey", label: "Backoffice Admin API key (optional)", placeholder: "Admin API key", type: "password" }] } },
-
-  // Developer platforms
-  { name: "github", displayName: "GitHub", type: "builtin", category: "Developer Platform", helpNote: "Uses GitHub billing APIs for plan and metered-usage data. Enter the organization login the token can read.", needsConfig: { fields: [{ key: "org", label: "Organization", placeholder: "GitHub organization login", required: true }] } },
-  { name: "vercel", displayName: "Vercel", type: "builtin", category: "Developer Platform", helpNote: "Reads account/team billing and usage. Leave Team ID blank for the token owner's personal scope.", needsConfig: { fields: [{ key: "teamId", label: "Team ID (optional)", placeholder: "team_..." }] } },
-  { name: "render", displayName: "Render", type: "builtin", category: "Developer Platform", helpNote: "Reads the service plan and suspended/active state. Render's service API does not expose invoice cost, so none is inferred.", needsConfig: { fields: [{ key: "serviceId", label: "Service ID", placeholder: "srv-...", required: true }] } },
-
-  // Vector DB & Embeddings
-  { name: "pinecone", displayName: "Pinecone", type: "builtin", category: "Vector DB", helpNote: "Fetches index stats (record count, dimension). No billing API." },
-  { name: "voyage", displayName: "Voyage AI", type: "builtin", category: "Vector DB", creditBased: true, helpNote: "Credit-based embedding service. Check dashboard at voyageai.com." },
-
-  // Market Data
-  { name: "fmp", displayName: "FMP", type: "builtin", category: "Market Data", helpNote: "No public usage API. Track calls via dashboard. Rate limits in response headers." },
-  { name: "finnhub", displayName: "Finnhub", type: "builtin", category: "Market Data", helpNote: "No public usage API. Free: 60 calls/min. Check finnhub.io." },
-  { name: "alphavantage", displayName: "Alpha Vantage", type: "builtin", category: "Market Data", helpNote: "No public usage API. Free: 25 calls/day. Check dashboard." },
-  { name: "tradier", displayName: "Tradier", type: "builtin", category: "Market Data", helpNote: "Reads documented API rate-limit headers and brokerage account status; portfolio value is not treated as provider spend." },
-  { name: "marketstack", displayName: "Marketstack", type: "builtin", category: "Market Data", helpNote: "No public usage API. Check marketstack.com dashboard." },
-  { name: "intrinio", displayName: "Intrinio", type: "builtin", category: "Market Data", helpNote: "Reads the official per-feed current-usage, limit, remaining-call, and reset-window endpoint. Pricing remains manual." },
-  { name: "tiingo", displayName: "Tiingo", type: "builtin", category: "Market Data", helpNote: "No public usage API. Freemium. Check tiingo.com." },
-  { name: "twelvedata", displayName: "Twelve Data", type: "builtin", category: "Market Data", helpNote: "Reads the documented plan response and real-time credits-used/remaining headers. Price and renewal remain manual." },
-  { name: "fintech-studios", displayName: "Fintech Studios", type: "builtin", category: "Market Data", helpNote: "No public usage API. Paid service." },
-  { name: "massive", displayName: "Massive", type: "builtin", category: "Market Data", helpNote: "No public usage API. Paid unlimited plan available." },
-  { name: "fred", displayName: "FRED", type: "builtin", category: "Market Data", helpNote: "Free federal data. No usage limits or billing." },
-
-  // Observability
-  { name: "sentry", displayName: "Sentry", type: "builtin", category: "Observability", needsOrgSlug: true, helpNote: "Enter your Sentry org slug to fetch error/transaction quotas." },
-  { name: "langfuse", displayName: "Langfuse", type: "builtin", category: "Observability", creditBased: true, helpNote: "LLM observability. Usage visible at cloud.langfuse.com." },
-
-  // Notifications
-  { name: "twilio", displayName: "Twilio", type: "builtin", category: "Notifications", needsAccountId: true, helpNote: "Reads account balance and the official ThisMonth Usage Record total price. Use an Auth Token or restricted key with billing usage read access." },
-  { name: "resend", displayName: "Resend", type: "builtin", category: "Notifications", helpNote: "Email provider. Free: 100/day. Check resend.com dashboard." },
-  { name: "pushover", displayName: "Pushover", type: "builtin", category: "Notifications", helpNote: "Reads the application message limit, remaining messages, and reset date. The API does not expose subscription price." },
-
-  // Infrastructure
-  { name: "cloudflare", displayName: "Cloudflare", type: "builtin", category: "Infrastructure", needsAccountId: true, helpNote: "Reads fixed subscriptions and, for eligible PayGo accounts, billing-grade usage cost. A Billing Read API token needs no email; email is only for a Global API key." },
-  { name: "hetzner", displayName: "Hetzner Cloud", type: "builtin", category: "Infrastructure", helpNote: "Reads server plan, status, location, and provider-published monthly run-rate. The API does not expose accrued invoice cost." },
-
-  // Data
-  { name: "apify", displayName: "Apify", type: "builtin", category: "Data", creditBased: true, helpNote: "Reads billing cycle, usage USD, maximum usage, active plan, base price, and included credits from official account APIs." },
-  { name: "llamaindex", displayName: "LlamaIndex Cloud", type: "builtin", category: "Data", creditBased: true, helpNote: "Credit-based OCR/parsing (free: 10k credits/mo). Check cloud.llamaindex.ai." },
-
-  // Payments
-  { name: "stripe", displayName: "Stripe", type: "builtin", category: "Payments", helpNote: "Tracks merchant balance and actual month-to-date Stripe processing fees. Customer subscriptions and merchant revenue are never counted as provider cost." },
-
-  // Brokerage
-  { name: "robinhood", displayName: "Robinhood", type: "builtin", category: "Brokerage", helpNote: "Portfolio tracking. Best-effort via MCP. No public usage API." },
-  { name: "alpaca", displayName: "Alpaca", type: "builtin", category: "Brokerage", helpNote: "Tracks portfolio value and day trade count via account endpoint." },
-];
-
-const CATEGORIES = [
-  "LLM/AI",
-  "Developer Platform",
-  "Vector DB",
-  "Market Data",
-  "Observability",
-  "Notifications",
-  "Infrastructure",
-  "Data",
-  "Payments",
-  "Brokerage",
-];
 
 type Tab = "builtin" | "custom" | "generic";
 
@@ -162,13 +190,18 @@ export default function AddProviderModal({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [wizardStep, setWizardStep] = useState<WizardStepId>("type");
 
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [allocations, setAllocations] = useState<{ projectId: string; percentage: number }[]>(
     editProvider?.allocations || []
   );
 
+  // Gated on `open` (same convention as the effect below) — this modal is
+  // always mounted by the settings page, so an ungated fetch duplicated the
+  // page's own /api/projects request on every visit.
   useEffect(() => {
+    if (!open) return;
     fetch("/api/projects")
       .then((res) => {
         if (!res.ok) throw new Error("Failed to fetch projects");
@@ -176,18 +209,29 @@ export default function AddProviderModal({
       })
       .then((data) => setProjects(data))
       .catch((err) => console.error("Error fetching projects:", err));
-  }, []);
+  }, [open]);
 
   const [selectedBuiltin, setSelectedBuiltin] = useState(editProvider?.name || "");
   const [builtinDisplayName, setBuiltinDisplayName] = useState(editProvider?.displayName || "");
   const [apiKey, setApiKey] = useState(editProvider?.apiKey || "");
+  // Default to visible so a pasted/typed key can be verified. This only ever
+  // affects what the user types — the stored key is never placed in this input
+  // (edit mode shows a first6…last4 preview below instead).
+  const [showApiKey, setShowApiKey] = useState(true);
   const [label, setLabel] = useState(editProvider?.label || "");
+  const [refreshIntervalMin, setRefreshIntervalMin] = useState(
+    editProvider?.refreshIntervalMin ?? 60
+  );
   const [originalConfig, setOriginalConfig] = useState<Record<string, unknown>>(editProvider?.config || {});
   const [extraFields, setExtraFields] = useState<Record<string, string>>(
     stringFieldsFromConfig(editProvider?.config)
   );
+  const [disconnectGoogleBilling, setDisconnectGoogleBilling] = useState(false);
+  const credentialManaged = editProvider?.credentialManagement ?? null;
 
-  const selectedDef = BUILT_IN_PROVIDERS.find((p) => p.name === selectedBuiltin);
+  const selectedDef: ProviderDefinition | undefined = BUILT_IN_PROVIDERS.find(
+    (provider) => provider.name === selectedBuiltin
+  );
 
   const matchingExisting = existingProviders.filter(
     (p) => p.name === selectedBuiltin && p.id !== editProvider?.id
@@ -259,15 +303,17 @@ export default function AddProviderModal({
     const config = editProvider?.config || {};
     const stringConfig = stringFieldsFromConfig(config);
     const nextTab: Tab = editProvider?.type === "custom" ? "custom" : editProvider?.type === "generic" ? "generic" : "builtin";
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset form state when modal opens
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset form state when modal opens
     setTab(nextTab);
     setError("");
     setSelectedBuiltin(editProvider?.name || "");
     setBuiltinDisplayName(editProvider?.displayName || "");
     setApiKey("");
     setLabel(editProvider?.label || "");
+    setRefreshIntervalMin(editProvider?.refreshIntervalMin ?? 60);
     setOriginalConfig(config);
     setExtraFields(stringConfig);
+    setDisconnectGoogleBilling(false);
     setCustomName(nextTab !== "builtin" ? editProvider?.name || "" : "");
     setCustomDisplayName(nextTab !== "builtin" ? editProvider?.displayName || "" : "");
     setCustomEndpoint(stringConfig.endpoint || "");
@@ -289,9 +335,56 @@ export default function AddProviderModal({
     setMustKeepFunded(editProvider?.plan?.mustKeepFunded ?? false);
     setPlanNotes(editProvider?.plan?.notes ?? "");
     setAllocations(editProvider?.allocations || []);
+    setWizardStep("type");
   }, [editProvider, open]);
 
   if (!open) return null;
+
+  const validateCurrentWizardStep = (): string | null => {
+    if (wizardStep === "type") {
+      return validateTypeStep({
+        tab,
+        selectedBuiltin,
+        builtinDisplayName,
+        customName,
+        customDisplayName,
+      });
+    }
+    if (wizardStep === "credentials") {
+      return validateCredentialsStep({
+        tab,
+        customEndpoint,
+        missingRequiredConfigLabels: [],
+      });
+    }
+    if (wizardStep === "budget") {
+      return validateBudgetStep({
+        fixedMonthlyCostUsd,
+        monthlyBudgetUsd,
+        monthlyRequestLimit,
+        lowBalanceUsd,
+        lowCredits,
+      });
+    }
+    return null;
+  };
+
+  const goNextStep = () => {
+    const stepError = validateCurrentWizardStep();
+    if (stepError) {
+      setError(stepError);
+      return;
+    }
+    setError("");
+    const next = nextWizardStep(wizardStep);
+    if (next) setWizardStep(next);
+  };
+
+  const goPrevStep = () => {
+    setError("");
+    const prev = prevWizardStep(wizardStep);
+    if (prev) setWizardStep(prev);
+  };
 
   const parseNumberField = (value: string, labelText: string, integer = false) => {
     const trimmed = value.trim();
@@ -306,7 +399,10 @@ export default function AddProviderModal({
     return parsed;
   };
 
-  const buildPlan = () => ({
+  const stayFundedVisible =
+    tab !== "builtin" || isMustKeepFundedOptionVisible(selectedBuiltin);
+
+  const buildPlan = (): ProviderPlan => ({
     billingMode,
     fixedMonthlyCostUsd: parseNumberField(
       fixedMonthlyCostUsd,
@@ -322,7 +418,9 @@ export default function AddProviderModal({
     lowCredits: parseNumberField(lowCredits, "Low credit alert"),
     renewalDate: renewalDate || null,
     billingInterval,
-    mustKeepFunded,
+    // LLM/AI accounts hide the option; do not persist a stale true from a
+    // previous provider selection. API still accepts true if re-enabled later.
+    mustKeepFunded: stayFundedVisible ? mustKeepFunded : false,
     notes: planNotes.trim() || null,
   });
 
@@ -331,7 +429,7 @@ export default function AddProviderModal({
     setSaving(true);
 
     try {
-      const plan = buildPlan();
+      let plan = buildPlan();
       const allocationProjectIds = allocations.map((allocation) => allocation.projectId);
       if (allocationProjectIds.some((projectId) => !projectId)) {
         throw new Error("Select a project for every allocation");
@@ -355,16 +453,54 @@ export default function AddProviderModal({
           return;
         }
 
-        const config: Record<string, unknown> = { ...originalConfig };
+        let config: Record<string, unknown> = { ...originalConfig };
+        let secretConfigOperations: ProviderSecretConfigOperation[] | undefined;
         for (const [key, value] of Object.entries(extraFields)) {
           if (value.trim()) config[key] = value.trim();
           else delete config[key];
+        }
+        if (selectedDef.name === "cloudflare") {
+          const authMode = String(
+            config.authMode ?? (originalConfig.accountEmail ? "global_key" : "api_token")
+          );
+          if (authMode !== "api_token" && authMode !== "global_key") {
+            throw new Error("Select a supported Cloudflare authentication mode");
+          }
+          config.authMode = authMode;
+          if (authMode === "api_token") {
+            delete config.accountEmail;
+          } else if (!String(config.accountEmail ?? "").trim()) {
+            throw new Error("Account email is required for a Global API key");
+          }
+          plan = actualUsageBillingPlan(plan);
+        }
+        if (selectedDef.name === "google-ai") {
+          if (disconnectGoogleBilling) {
+            config = withoutGoogleBillingConfig(config);
+            secretConfigOperations = [
+              { path: ["serviceAccountJson"], action: "clear" },
+            ];
+          } else {
+            plan = validateGoogleIntegrationSubmission({
+              config,
+              protectedConfigFields:
+                editProvider?.secretConfigMeta?.fields ?? [],
+              plan,
+            });
+          }
         }
         if (selectedDef.needsAccountId && !String(config.accountId ?? "").trim()) {
           throw new Error(`${selectedDef.name === "twilio" ? "Account SID" : "Account ID"} is required`);
         }
         for (const field of selectedDef.needsConfig?.fields ?? []) {
-          if (field.required && !String(config[field.key] ?? "").trim()) {
+          if (
+            field.required &&
+            !hasConfiguredProviderField(
+              config,
+              field.key,
+              editProvider?.secretConfigMeta?.fields ?? []
+            )
+          ) {
             throw new Error(`${field.label} is required`);
           }
         }
@@ -375,9 +511,19 @@ export default function AddProviderModal({
           name: selectedDef.name,
           displayName: builtinDisplayName.trim(),
           type: "builtin",
-          apiKey: apiKey || undefined,
-          config: Object.keys(config).length > 0 ? config : undefined,
-          label: label.trim() || null,
+          apiKey:
+            selectedDef.usesApiKey === false || credentialManaged
+              ? undefined
+              : apiKey || undefined,
+          config:
+            Object.keys(config).length > 0 || disconnectGoogleBilling
+              ? config
+              : undefined,
+          secretConfigOperations,
+          label: credentialManaged
+            ? editProvider?.label ?? null
+            : label.trim() || null,
+          refreshIntervalMin,
           plan,
           allocations: allocationPayload,
         });
@@ -408,6 +554,7 @@ export default function AddProviderModal({
           apiKey: apiKey || undefined,
           config,
           label: label.trim() || null,
+          refreshIntervalMin,
           plan,
           allocations: allocationPayload,
         });
@@ -424,6 +571,7 @@ export default function AddProviderModal({
           displayName: customDisplayName.trim(),
           type: "generic",
           label: label.trim() || null,
+          refreshIntervalMin,
           plan,
           allocations: allocationPayload,
         });
@@ -437,17 +585,17 @@ export default function AddProviderModal({
   };
 
   const renderBillingFields = () => (
-    <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3">
-      <legend className="text-sm font-medium text-gray-700 px-1">
+    <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3 dark:border-gray-700">
+      <legend className="text-sm font-medium text-gray-700 px-1 dark:text-gray-200">
         Billing and Limits
       </legend>
       <div>
-        <label className="block text-xs text-gray-500 mb-1">Cost visibility</label>
+        <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Cost visibility</label>
         <select
           aria-label="Cost visibility"
           value={billingMode}
           onChange={(e) => setBillingMode(e.target.value as BillingMode)}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
         >
           <option value="actual">Actual from provider</option>
           <option value="estimated">Estimated from usage</option>
@@ -456,39 +604,53 @@ export default function AddProviderModal({
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
-            Plan price / mo
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
+            Fixed cost add-on / mo
           </label>
           <input
-            aria-label="Plan price per month"
+            aria-label="Fixed cost add-on per month (not a Subscription)"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={fixedMonthlyCostUsd}
             onChange={(e) => setFixedMonthlyCostUsd(e.target.value)}
             placeholder="49"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            title="Use this OR a Paid service Subscription for the same fee — not both. Both would double-count spend."
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            Not a Subscription. Do not also Track a paid service for the same fee.
+          </p>
+          {hasFixedMonthlyCostSet(fixedMonthlyCostUsd) && (
+            <p
+              role="status"
+              className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+            >
+              {FIXED_FEE_SUBSCRIPTION_WARNING}
+            </p>
+          )}
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Budget / mo
           </label>
           <input
             aria-label="Monthly budget"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={monthlyBudgetUsd}
             onChange={(e) => setMonthlyBudgetUsd(e.target.value)}
             placeholder="100"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Request limit / mo
           </label>
           <input
@@ -499,11 +661,11 @@ export default function AddProviderModal({
             value={monthlyRequestLimit}
             onChange={(e) => setMonthlyRequestLimit(e.target.value)}
             placeholder="100000"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Renewal date
           </label>
           <input
@@ -511,18 +673,18 @@ export default function AddProviderModal({
             type="date"
             value={renewalDate}
             onChange={(e) => setRenewalDate(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Renewal cadence
           </label>
           <select
             aria-label="Renewal cadence"
             value={billingInterval}
             onChange={(e) => setBillingInterval(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           >
             <option value="weekly">Weekly</option>
             <option value="monthly">Monthly</option>
@@ -533,22 +695,23 @@ export default function AddProviderModal({
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Low balance alert
           </label>
           <input
             aria-label="Low balance alert"
             type="number"
+            inputMode="decimal"
             min="0"
             step="0.01"
             value={lowBalanceUsd}
             onChange={(e) => setLowBalanceUsd(e.target.value)}
             placeholder="10"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
+          <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">
             Low credit alert
           </label>
           <input
@@ -559,46 +722,102 @@ export default function AddProviderModal({
             value={lowCredits}
             onChange={(e) => setLowCredits(e.target.value)}
             placeholder="1000"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           />
         </div>
       </div>
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={mustKeepFunded}
-          onChange={(e) => setMustKeepFunded(e.target.checked)}
-          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-        />
-        <span className="text-sm text-gray-700">Must stay funded</span>
-      </label>
+      {stayFundedVisible ? (
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={mustKeepFunded}
+            onChange={(e) => setMustKeepFunded(e.target.checked)}
+            className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900"
+          />
+          <span className="text-sm text-gray-700 dark:text-gray-200">Must stay funded</span>
+        </label>
+      ) : null}
       <div>
-        <label className="block text-xs text-gray-500 mb-1">Notes</label>
+        <label className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Notes</label>
         <textarea
           aria-label="Billing notes"
           value={planNotes}
           onChange={(e) => setPlanNotes(e.target.value)}
           rows={2}
           placeholder="Plan name, billing owner, pricing caveats"
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
         />
       </div>
     </fieldset>
   );
 
+  const renderSyncCadence = () => (
+    <div>
+      <label htmlFor="provider-refresh-interval" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
+        Automatic sync cadence
+      </label>
+      <select
+        id="provider-refresh-interval"
+        value={refreshIntervalMin}
+        onChange={(event) => setRefreshIntervalMin(Number(event.target.value))}
+        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base sm:text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+      >
+        {![15, 60, 360, 1440].includes(refreshIntervalMin) && (
+          <option value={refreshIntervalMin}>Every {refreshIntervalMin} minutes (custom)</option>
+        )}
+        <option value={15}>Every 15 minutes</option>
+        <option value={60}>Hourly</option>
+        <option value={360}>Every 6 hours</option>
+        <option value={1440}>Daily</option>
+      </select>
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        Use a longer interval for quota-bearing provider endpoints.
+      </p>
+    </div>
+  );
+
   const renderExtraFields = () => {
     if (!selectedDef) return null;
 
-    const fields: { key: string; label: string; placeholder: string; type?: string; required?: boolean }[] = [];
+    type ExtraField = {
+      key: string;
+      label: string;
+      placeholder: string;
+      type?: string;
+      required?: boolean;
+      advanced?: boolean;
+      options?: { value: string; label: string }[];
+    };
+    const fields: ExtraField[] = [];
 
     if (selectedDef.needsAccountId) {
       if (selectedDef.name === "cloudflare") {
         fields.push({ key: "accountId", label: "Account ID", placeholder: "Cloudflare Account ID" });
-        fields.push({ key: "accountEmail", label: "Account Email", placeholder: "Cloudflare Account Email", type: "email" });
-        fields.push({ key: "databaseId", label: "D1 Database ID (optional)", placeholder: "D1 database UUID" });
-        fields.push({ key: "r2BucketName", label: "R2 Bucket Name (optional)", placeholder: "R2 bucket name" });
-        fields.push({ key: "kvNamespaceId", label: "KV Namespace ID (optional)", placeholder: "KV namespace UUID" });
-        fields.push({ key: "queueId", label: "Queue ID (optional)", placeholder: "Queue UUID" });
+        fields.push({
+          key: "authMode",
+          label: "Authentication",
+          placeholder: "",
+          type: "select",
+          options: [
+            { value: "api_token", label: "API token (Billing Read) — recommended" },
+            { value: "global_key", label: "Legacy Global API key" },
+          ],
+        });
+        const cloudflareAuthMode =
+          extraFields.authMode ||
+          (originalConfig.accountEmail ? "global_key" : "api_token");
+        if (cloudflareAuthMode === "global_key") {
+          fields.push({
+            key: "accountEmail",
+            label: "Account email (Global API key only)",
+            placeholder: "Cloudflare account email",
+            type: "email",
+          });
+        }
+        fields.push({ key: "databaseId", label: "D1 database ID", placeholder: "D1 database UUID", advanced: true });
+        fields.push({ key: "r2BucketName", label: "R2 bucket name", placeholder: "R2 bucket name", advanced: true });
+        fields.push({ key: "kvNamespaceId", label: "KV namespace ID", placeholder: "KV namespace UUID", advanced: true });
+        fields.push({ key: "queueId", label: "Queue ID", placeholder: "Queue UUID", advanced: true });
       } else if (selectedDef.name === "twilio") {
         fields.push({ key: "accountId", label: "Account SID", placeholder: "Twilio Account SID" });
       }
@@ -617,36 +836,156 @@ export default function AddProviderModal({
     }
 
     const hasHelp = !!selectedDef.helpNote;
+    const primaryFields = fields.filter((field) => !field.advanced);
+    const advancedFields = fields.filter((field) => field.advanced);
+
+    const renderField = (field: ExtraField) => {
+      const configuredSecret =
+        editProvider?.secretConfigMeta?.fields.includes(field.key) ?? false;
+      const googleBillingFieldDisabled =
+        disconnectGoogleBilling &&
+        selectedDef.name === "google-ai" &&
+        GOOGLE_BILLING_CONFIG_FIELDS.includes(
+          field.key as (typeof GOOGLE_BILLING_CONFIG_FIELDS)[number]
+        );
+      const value =
+        field.key === "authMode"
+          ? extraFields[field.key] ||
+            (originalConfig.accountEmail ? "global_key" : "api_token")
+          : extraFields[field.key] || "";
+      return (
+        <div key={field.key}>
+          <label htmlFor={`provider-extra-${field.key}`} className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
+            {field.label}
+          </label>
+          {field.type === "textarea" ? (
+            <textarea
+              id={`provider-extra-${field.key}`}
+              aria-label={field.label}
+              aria-describedby={
+                selectedDef.name === "cloudflare" && field.advanced
+                  ? "cloudflare-resource-probe-help"
+                  : undefined
+              }
+              required={field.required}
+              disabled={googleBillingFieldDisabled}
+              value={value}
+              onChange={(event) =>
+                setExtraFields((previous) => ({ ...previous, [field.key]: event.target.value }))
+              }
+              placeholder={configuredSecret ? "Configured — paste a replacement only to rotate" : field.placeholder}
+              rows={7}
+              spellCheck={false}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+            />
+          ) : field.type === "select" ? (
+            <select
+              id={`provider-extra-${field.key}`}
+              aria-label={field.label}
+              aria-describedby={
+                selectedDef.name === "cloudflare" && field.advanced
+                  ? "cloudflare-resource-probe-help"
+                  : undefined
+              }
+              disabled={googleBillingFieldDisabled}
+              value={value}
+              onChange={(event) =>
+                setExtraFields((previous) => ({ ...previous, [field.key]: event.target.value }))
+              }
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+            >
+              {field.options?.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              id={`provider-extra-${field.key}`}
+              aria-label={field.label}
+              aria-describedby={
+                selectedDef.name === "cloudflare" && field.advanced
+                  ? "cloudflare-resource-probe-help"
+                  : undefined
+              }
+              type={field.type || "text"}
+              required={field.required}
+              disabled={googleBillingFieldDisabled}
+              value={value}
+              onChange={(event) =>
+                setExtraFields((previous) => ({ ...previous, [field.key]: event.target.value }))
+              }
+              placeholder={configuredSecret ? "Configured — leave blank to keep current" : field.placeholder}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+            />
+          )}
+          {configuredSecret && !value && (
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Configured and encrypted; the value is never returned to this form.</p>
+          )}
+        </div>
+      );
+    };
 
     return fields.length > 0 || hasHelp ? (
       <div className="space-y-3">
-        {fields.length > 0 && (
+        {primaryFields.length > 0 && (
           <>
-            <p className="text-xs font-medium text-gray-500">Extra Configuration</p>
-            {fields.map((f) => (
-              <div key={f.key}>
-                <label htmlFor={`provider-extra-${f.key}`} className="block text-sm font-medium text-gray-700 mb-1">
-                  {f.label}
-                </label>
-                <input
-                  id={`provider-extra-${f.key}`}
-                  aria-label={f.label}
-                  type={f.type || "text"}
-                  required={f.required}
-                  value={extraFields[f.key] || ""}
-                  onChange={(e) =>
-                    setExtraFields((prev) => ({ ...prev, [f.key]: e.target.value }))
-                  }
-                  placeholder={f.placeholder}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-            ))}
+            <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Extra Configuration</p>
+            {primaryFields.map(renderField)}
           </>
         )}
+        {advancedFields.length > 0 && (
+          <details className="rounded-lg border border-gray-200 px-3 py-2 dark:border-gray-700">
+            <summary className="cursor-pointer text-sm font-medium text-gray-600 dark:text-gray-300">
+              {selectedDef.name === "cloudflare"
+                ? "Optional single-resource metadata probes"
+                : "Advanced optional configuration"}
+            </summary>
+            {selectedDef.name === "cloudflare" && (
+              <p
+                id="cloudflare-resource-probe-help"
+                className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400"
+              >
+                {CLOUDFLARE_RESOURCE_PROBE_DISCLOSURE}
+              </p>
+            )}
+            <div className="mt-3 space-y-3">{advancedFields.map(renderField)}</div>
+          </details>
+        )}
+        {selectedDef.name === "google-ai" &&
+          editProvider &&
+          (Boolean(originalConfig.billingDataset) ||
+            Boolean(originalConfig.googleProjectId) ||
+            Boolean(originalConfig.billingTable) ||
+            (editProvider.secretConfigMeta?.fields.includes(
+              "serviceAccountJson"
+            ) ?? false)) && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900 dark:bg-red-950/40">
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={disconnectGoogleBilling}
+                  onChange={(event) =>
+                    setDisconnectGoogleBilling(event.target.checked)
+                  }
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500 dark:border-gray-600 dark:bg-gray-900"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-red-800 dark:text-red-300">
+                    Disconnect Google Cloud integrations
+                  </span>
+                  <span className="mt-0.5 block text-xs text-red-700 dark:text-red-300">
+                    On save, remove the billing dataset, Gemini project/table,
+                    and encrypted service-account JSON. Cloud Billing and Cloud
+                    Monitoring will both disconnect. The Gemini API key, manual
+                    price, renewal date, and unrelated configuration stay unchanged.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
         {hasHelp && (
-          <div className="rounded-lg bg-blue-50 border border-blue-100 p-3">
-            <p className="text-xs text-blue-800 leading-relaxed">{selectedDef.helpNote}</p>
+          <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 dark:border-blue-900 dark:bg-blue-950/30">
+            <p className="text-xs text-blue-800 leading-relaxed dark:text-blue-200">{selectedDef.helpNote}</p>
           </div>
         )}
       </div>
@@ -657,8 +996,8 @@ export default function AddProviderModal({
     if (projects.length === 0) return null;
     const allocationTotal = allocations.reduce((sum, allocation) => sum + allocation.percentage, 0);
     return (
-      <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3">
-        <legend className="text-sm font-medium text-gray-700 px-1">
+      <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3 dark:border-gray-700">
+        <legend className="text-sm font-medium text-gray-700 px-1 dark:text-gray-200">
           Project Allocations
         </legend>
         <div className="space-y-2">
@@ -675,7 +1014,7 @@ export default function AddProviderModal({
                     )
                   );
                 }}
-                className="min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
               >
                 <option value="">Select project...</option>
                 {projects.map((p) => (
@@ -692,6 +1031,7 @@ export default function AddProviderModal({
                 <input
                   aria-label={`Percentage for allocation ${idx + 1}`}
                   type="number"
+                  inputMode="decimal"
                   min="0.01"
                   max="100"
                   step="0.01"
@@ -705,21 +1045,32 @@ export default function AddProviderModal({
                     );
                   }}
                   placeholder="0"
-                  className="w-full rounded-lg border border-gray-300 py-2 pl-3 pr-7 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full rounded-lg border border-gray-300 py-2 pl-3 pr-7 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
-                <span className="pointer-events-none absolute right-2 top-2 text-sm text-gray-500">%</span>
+                <span className="pointer-events-none absolute right-2 top-2 text-sm text-gray-500 dark:text-gray-400">%</span>
               </div>
               <button
                 type="button"
                 aria-label={`Remove allocation ${idx + 1}`}
-                onClick={() => setAllocations((current) => current.filter((_, i) => i !== idx))}
-                className="min-h-9 min-w-9 rounded text-lg font-bold leading-none text-red-600 hover:bg-red-50 hover:text-red-800"
+                onClick={() => {
+                  setAllocations((current) => {
+                    const newAllocations = current.filter((_, i) => i !== idx);
+                    if (newAllocations.length === 0) return newAllocations;
+                    
+                    const defaultPercentage = Number((100 / newAllocations.length).toFixed(2));
+                    return newAllocations.map(item => ({
+                      ...item,
+                      percentage: defaultPercentage
+                    }));
+                  });
+                }}
+                className="min-h-9 min-w-9 rounded text-lg font-bold leading-none text-red-600 hover:bg-red-50 hover:text-red-800 dark:text-red-400 dark:hover:bg-red-950/60 dark:hover:text-red-300"
               >
                 &times;
               </button>
             </div>
           ))}
-          <p className={`text-xs ${allocationTotal > 100 ? "text-red-600" : "text-gray-500"}`}>
+          <p className={`text-xs ${allocationTotal > 100 ? "text-red-600 dark:text-red-400" : "text-gray-500 dark:text-gray-400"}`}>
             {allocationTotal.toFixed(2).replace(/\.00$/, "")}% allocated · {Math.max(0, 100 - allocationTotal).toFixed(2).replace(/\.00$/, "")}% unallocated
           </p>
           <button
@@ -729,12 +1080,30 @@ export default function AddProviderModal({
               const nextProject = projects.find(
                 (project) => !allocations.some((allocation) => allocation.projectId === project.id)
               );
-              setAllocations((current) => [
-                ...current,
-                { projectId: nextProject?.id || "", percentage: 0 },
-              ]);
+              setAllocations((current) => {
+                const newLength = current.length + 1;
+                const defaultPercentage = Number((100 / newLength).toFixed(2));
+                
+                const newAllocations = current.map(item => ({
+                  ...item,
+                  percentage: defaultPercentage
+                }));
+                
+                newAllocations.push({
+                  projectId: nextProject?.id || "",
+                  percentage: defaultPercentage
+                });
+                
+                // Adjust the first one to ensure exact 100% sum if there are rounding errors
+                const sum = newAllocations.reduce((acc, curr) => acc + curr.percentage, 0);
+                if (sum !== 100) {
+                  newAllocations[0].percentage = Number((newAllocations[0].percentage + (100 - sum)).toFixed(2));
+                }
+                
+                return newAllocations;
+              });
             }}
-            className="text-sm text-blue-600 hover:text-blue-800 font-medium mt-1 disabled:cursor-not-allowed disabled:text-gray-400"
+            className="text-sm text-blue-600 hover:text-blue-800 font-medium mt-1 disabled:cursor-not-allowed disabled:text-gray-400 dark:text-blue-400 dark:hover:text-blue-300 dark:disabled:text-gray-600"
           >
             + Add Project
           </button>
@@ -749,7 +1118,43 @@ export default function AddProviderModal({
       onClose={onClose}
       closeDisabled={saving}
     >
-          <div className="flex border-b border-gray-200 mb-6">
+          <nav aria-label="Provider setup steps" className="mb-5">
+            <ol className="flex flex-wrap items-center gap-1 sm:gap-2">
+              {PROVIDER_WIZARD_STEPS.map((step, index) => {
+                const active = step.id === wizardStep;
+                const done = wizardStepById(wizardStep).index > step.index;
+                return (
+                  <li key={step.id} className="flex items-center gap-1 sm:gap-2">
+                    {index > 0 && (
+                      <span aria-hidden="true" className="mx-0.5 h-px w-3 sm:w-5 bg-gray-200 dark:bg-gray-600" />
+                    )}
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium ${
+                        active
+                          ? "bg-accent text-white"
+                          : done
+                            ? "bg-accent-soft text-gray-900 dark:text-gray-100"
+                            : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                      }`}
+                      aria-current={active ? "step" : undefined}
+                    >
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold bg-white/20">
+                        {step.index}
+                      </span>
+                      <span className="hidden sm:inline">{step.label}</span>
+                      <span className="sm:hidden">{step.shortLabel}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Step {formatWizardProgress(wizardStep)}
+              {editProvider ? " · editing existing provider" : ""}
+            </p>
+          </nav>
+
+          <div className={`flex border-b border-gray-200 mb-6 dark:border-gray-700 ${wizardStep === "type" ? "" : "hidden"}`}>
             <button
               type="button"
               onClick={() => setTab("builtin")}
@@ -757,8 +1162,8 @@ export default function AddProviderModal({
               aria-pressed={tab === "builtin"}
               className={`flex-1 pb-3 text-sm font-medium border-b-2 transition-colors ${
                 tab === "builtin"
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:text-gray-700"
+                  ? "border-blue-500 text-blue-600 dark:text-blue-400"
+                  : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
               } disabled:cursor-not-allowed disabled:opacity-60`}
             >
               Built-in
@@ -770,8 +1175,8 @@ export default function AddProviderModal({
               aria-pressed={tab === "custom"}
               className={`flex-1 pb-3 text-sm font-medium border-b-2 transition-colors ${
                 tab === "custom"
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:text-gray-700"
+                  ? "border-blue-500 text-blue-600 dark:text-blue-400"
+                  : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
               } disabled:cursor-not-allowed disabled:opacity-60`}
             >
               Custom
@@ -783,20 +1188,20 @@ export default function AddProviderModal({
               aria-pressed={tab === "generic"}
               className={`flex-1 pb-3 text-sm font-medium border-b-2 transition-colors ${
                 tab === "generic"
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:text-gray-700"
+                  ? "border-blue-500 text-blue-600 dark:text-blue-400"
+                  : "border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
               } disabled:cursor-not-allowed disabled:opacity-60`}
             >
               Generic
             </button>
           </div>
           {editProvider && (
-            <p className="-mt-4 mb-5 text-xs text-gray-500">
+            <p className="-mt-4 mb-5 text-xs text-gray-500 dark:text-gray-400">
               Provider type and slug are fixed after creation; editable fields below are persisted.
             </p>
           )}
           {editProvider?.secretConfigMeta?.configured && (
-            <div className="-mt-2 mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            <div className="-mt-2 mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
               Protected configuration is stored for {editProvider.secretConfigMeta.fields.join(", ") || "this provider"}.
               Leave hidden values blank to keep them unchanged.
             </div>
@@ -805,7 +1210,7 @@ export default function AddProviderModal({
           {tab === "builtin" ? (
             <div className="space-y-4">
               <div>
-                <label htmlFor="provider-builtin-name" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-builtin-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   Provider
                 </label>
                 <select
@@ -815,22 +1220,24 @@ export default function AddProviderModal({
                   disabled={Boolean(editProvider)}
                   onChange={(e) => {
                     setSelectedBuiltin(e.target.value);
-                    const def = BUILT_IN_PROVIDERS.find((p) => p.name === e.target.value);
+                    const def = ADDABLE_BUILT_IN_PROVIDERS.find((p) => p.name === e.target.value);
                     setBuiltinDisplayName(def?.displayName || "");
+                    setRefreshIntervalMin(def?.defaultRefreshIntervalMin ?? 60);
                     setOriginalConfig({});
                     setExtraFields({});
+                    setDisconnectGoogleBilling(false);
                     if (def?.creditBased && editProvider) {
                       // keep existing config
                       setOriginalConfig(editProvider.config || {});
                       setExtraFields(stringFieldsFromConfig(editProvider.config));
                     }
                   }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                 >
                   <option value="">Select a provider...</option>
-                  {CATEGORIES.map((cat) => (
+                  {PROVIDER_CATEGORIES.map((cat) => (
                     <optgroup key={cat} label={cat}>
-                      {BUILT_IN_PROVIDERS.filter((p) => p.category === cat).map(
+                      {ADDABLE_BUILT_IN_PROVIDERS.filter((p) => p.category === cat).map(
                         (p) => (
                           <option key={p.name} value={p.name}>
                             {p.displayName}
@@ -842,25 +1249,23 @@ export default function AddProviderModal({
                   ))}
                 </select>
                 {selectedDef?.creditBased && (
-                  <p className="text-xs text-purple-600 mt-1">
+                  <p className="text-xs text-purple-600 mt-1 dark:text-purple-400">
                     Credit-based provider — credits tracking enabled
                   </p>
                 )}
                 {selectedDef && (
-                  <p className="text-xs text-blue-600 dark:text-blue-400 mt-1 flex items-center gap-1">
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <span className="font-medium">Tracking Method:</span>{" "}
-                    {["anthropic", "voyage", "robinhood"].includes(selectedDef.name)
-                      ? "Pushed Telemetry (External API events)"
-                      : "Poll Adapter (Automatic fetching)"}
-                  </p>
+                  <ProviderIntegrationInfo
+                    providerName={selectedDef.name}
+                    providerType="builtin"
+                    displayName={selectedDef.displayName}
+                    variant="button"
+                    className="mt-2"
+                  />
                 )}
               </div>
 
               <div>
-                <label htmlFor="provider-builtin-display-name" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-builtin-display-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   Display Name
                 </label>
                 <input
@@ -870,25 +1275,25 @@ export default function AddProviderModal({
                   value={builtinDisplayName}
                   onChange={(e) => setBuiltinDisplayName(e.target.value)}
                   placeholder={selectedDef?.displayName || "Provider display name"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
               {matchingExisting.length > 0 && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-                  <p className="text-xs font-medium text-blue-700 mb-2">
+                <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 dark:border-blue-900 dark:bg-blue-950/30">
+                  <p className="text-xs font-medium text-blue-700 mb-2 dark:text-blue-300">
                     You already have {matchingExisting.length}{" "}
                     {matchingExisting.length === 1 ? "provider" : "providers"} configured
                     for {selectedDef?.displayName ?? selectedBuiltin}:
                   </p>
                   <ul className="space-y-1">
                     {matchingExisting.map((p) => (
-                      <li key={p.id} className="text-xs text-blue-600 flex items-center gap-2">
-                        <code className="bg-blue-100 px-1.5 py-0.5 rounded text-[11px]">
+                      <li key={p.id} className="text-xs text-blue-600 flex items-center gap-2 dark:text-blue-300">
+                        <code className="bg-blue-100 px-1.5 py-0.5 rounded text-[11px] dark:bg-blue-900/60">
                           {p.keyPreview ?? "(no key preview)"}
                         </code>
                         {p.label && (
-                          <span className="text-blue-500">({p.label})</span>
+                          <span className="text-blue-500 dark:text-blue-400">({p.label})</span>
                         )}
                       </li>
                     ))}
@@ -896,30 +1301,67 @@ export default function AddProviderModal({
                 </div>
               )}
 
+              {(wizardStep === "credentials" || wizardStep === "review") && selectedDef?.usesApiKey !== false && (
               <div>
-                <label htmlFor="provider-builtin-api-key" className="block text-sm font-medium text-gray-700 mb-1">
-                  API Key
+                <label htmlFor="provider-builtin-api-key" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
+                  {selectedDef?.name === "cloudflare"
+                    ? ((extraFields.authMode || (originalConfig.accountEmail ? "global_key" : "api_token")) === "global_key"
+                        ? "Global API key"
+                        : "API token (Account Billing Read)")
+                    : selectedDef?.name === "xai"
+                      ? "Management API key"
+                      : "API Key"}
                 </label>
-                <input
-                  id="provider-builtin-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="relative">
+                  <input
+                    id="provider-builtin-api-key"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    disabled={Boolean(credentialManaged)}
+                    placeholder={
+                      credentialManaged
+                        ? "Managed by Infisical"
+                        : editProvider
+                          ? "Leave blank to keep current"
+                          : selectedDef?.name === "xai"
+                            ? "Management API key"
+                            : "Your API key"
+                    }
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
+                  />
+                  {!credentialManaged && (
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey((v) => !v)}
+                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                      aria-pressed={showApiKey}
+                      title={showApiKey ? "Hide API key" : "Show API key"}
+                      className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 rounded-r-lg hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-500 dark:hover:text-gray-300"
+                    >
+                      {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  )}
+                </div>
                 {editProvider && !apiKey && editProvider.keyPreview && (
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-gray-500 mt-1 dark:text-gray-400">
                     Current key:{" "}
-                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px]">
+                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px] dark:bg-gray-700">
                       {editProvider.keyPreview}
                     </code>
                   </p>
                 )}
+                {credentialManaged && (
+                  <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">
+                    Credential and activation are read-only here and sync from the isolated Socratic primary-account source.
+                  </p>
+                )}
               </div>
+              )}
 
+              {(wizardStep === "credentials" || wizardStep === "review") && (
               <div>
-                <label htmlFor="provider-builtin-label" className="block text-xs font-medium text-gray-500 mb-1">
+                <label htmlFor="provider-builtin-label" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
                   Label (optional)
                 </label>
                 <input
@@ -927,22 +1369,39 @@ export default function AddProviderModal({
                   type="text"
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
-                  placeholder="e.g. Agentic Trading, Congress.Trade"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  disabled={Boolean(credentialManaged)}
+                  placeholder="e.g. Socratic Trade, Congress.Trade"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                 />
-                <p className="text-xs text-gray-400 mt-0.5">Tag this key to distinguish it from others with the same provider name</p>
+                <p className="text-xs text-gray-400 mt-0.5 dark:text-gray-500">Tag this key to distinguish it from others with the same provider name</p>
               </div>
+              )}
 
-              {renderExtraFields()}
-
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "credentials" || wizardStep === "review") && renderExtraFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
+              {wizardStep === "review" && (
+                <div className="rounded-lg border border-orange-100 bg-orange-50/60 px-3 py-3 text-sm text-gray-900 dark:border-orange-900/40 dark:bg-orange-950/20 dark:text-gray-100">
+                  <p className="font-medium">Review</p>
+                  <p className="mt-1 text-xs opacity-90">
+                    {builtinDisplayName || selectedBuiltin} · {tab}
+                    {label ? ` · ${label}` : ""} · budget{" "}
+                    {monthlyBudgetUsd.trim() ? `$${monthlyBudgetUsd}` : "unset"}
+                    {fixedMonthlyCostUsd.trim() ? ` · fixed $${fixedMonthlyCostUsd}/mo` : ""}
+                  </p>
+                </div>
+              )}
             </div>
           ) : tab === "custom" ? (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label htmlFor="provider-custom-name" className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="provider-custom-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                     Name (slug)
                   </label>
                   <input
@@ -953,11 +1412,11 @@ export default function AddProviderModal({
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={Boolean(editProvider)}
                     placeholder="my-api"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                   />
                 </div>
                 <div>
-                  <label htmlFor="provider-custom-display-name" className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="provider-custom-display-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                     Display Name
                   </label>
                   <input
@@ -967,27 +1426,39 @@ export default function AddProviderModal({
                     value={customDisplayName}
                     onChange={(e) => setCustomDisplayName(e.target.value)}
                     placeholder="My API"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
               </div>
 
               <div>
-                <label htmlFor="provider-custom-api-key" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-custom-api-key" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   API Key
                 </label>
-                <input
-                  id="provider-custom-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="relative">
+                  <input
+                    id="provider-custom-api-key"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={editProvider ? "Leave blank to keep current" : "Your API key"}
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((v) => !v)}
+                    aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                    aria-pressed={showApiKey}
+                    title={showApiKey ? "Hide API key" : "Show API key"}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 rounded-r-lg hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-500 dark:hover:text-gray-300"
+                  >
+                    {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
                 {editProvider && !apiKey && editProvider.keyPreview && (
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-gray-500 mt-1 dark:text-gray-400">
                     Current key:{" "}
-                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px]">
+                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-[11px] dark:bg-gray-700">
                       {editProvider.keyPreview}
                     </code>
                   </p>
@@ -995,7 +1466,7 @@ export default function AddProviderModal({
               </div>
 
               <div>
-                <label htmlFor="provider-custom-label" className="block text-xs font-medium text-gray-500 mb-1">
+                <label htmlFor="provider-custom-label" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
                   Label (optional)
                 </label>
                 <input
@@ -1004,13 +1475,13 @@ export default function AddProviderModal({
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="e.g. Production, Staging"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
-                <p className="text-xs text-gray-400 mt-0.5">Tag this key to distinguish it from others</p>
+                <p className="text-xs text-gray-400 mt-0.5 dark:text-gray-500">Tag this key to distinguish it from others</p>
               </div>
 
               <div>
-                <label htmlFor="provider-custom-endpoint" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-custom-endpoint" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   Endpoint URL
                 </label>
                 <input
@@ -1019,19 +1490,19 @@ export default function AddProviderModal({
                   value={customEndpoint}
                   onChange={(e) => setCustomEndpoint(e.target.value)}
                   placeholder="https://api.example.com/usage"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
               <div>
-                <label htmlFor="provider-custom-auth-type" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-custom-auth-type" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   Auth Type
                 </label>
                 <select
                   id="provider-custom-auth-type"
                   value={customAuthType}
                   onChange={(e) => setCustomAuthType(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 >
                   <option value="bearer">Bearer Token</option>
                   <option value="api-key">API Key</option>
@@ -1040,7 +1511,7 @@ export default function AddProviderModal({
               </div>
 
               <div>
-                <label htmlFor="provider-custom-auth-header" className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="provider-custom-auth-header" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                   Auth Header Name
                 </label>
                 <input
@@ -1049,7 +1520,7 @@ export default function AddProviderModal({
                   value={customAuthHeader}
                   onChange={(e) => setCustomAuthHeader(e.target.value)}
                   placeholder="Authorization"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
@@ -1058,71 +1529,76 @@ export default function AddProviderModal({
                   type="checkbox"
                   checked={trackCredits}
                   onChange={(e) => setTrackCredits(e.target.checked)}
-                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900"
                 />
-                <span className="text-sm text-gray-700">Track credits</span>
+                <span className="text-sm text-gray-700 dark:text-gray-200">Track credits</span>
               </label>
 
-              <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3">
-                <legend className="text-sm font-medium text-gray-700 px-1">
+              <fieldset className="border border-gray-200 rounded-lg p-3 space-y-3 dark:border-gray-700">
+                <legend className="text-sm font-medium text-gray-700 px-1 dark:text-gray-200">
                   Response Mapping (JSON paths)
                 </legend>
                 <div>
-                  <label htmlFor="provider-custom-balance-path" className="block text-xs text-gray-500 mb-1">Balance path</label>
+                  <label htmlFor="provider-custom-balance-path" className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Balance path</label>
                   <input
                     id="provider-custom-balance-path"
                     type="text"
                     value={customBalancePath}
                     onChange={(e) => setCustomBalancePath(e.target.value)}
                     placeholder="$.balance"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 <div>
-                  <label htmlFor="provider-custom-cost-path" className="block text-xs text-gray-500 mb-1">Cost path</label>
+                  <label htmlFor="provider-custom-cost-path" className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Cost path</label>
                   <input
                     id="provider-custom-cost-path"
                     type="text"
                     value={customCostPath}
                     onChange={(e) => setCustomCostPath(e.target.value)}
                     placeholder="$.cost"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 <div>
-                  <label htmlFor="provider-custom-requests-path" className="block text-xs text-gray-500 mb-1">Requests path</label>
+                  <label htmlFor="provider-custom-requests-path" className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Requests path</label>
                   <input
                     id="provider-custom-requests-path"
                     type="text"
                     value={customRequestsPath}
                     onChange={(e) => setCustomRequestsPath(e.target.value)}
                     placeholder="$.requests"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
                 {trackCredits && (
                   <div>
-                    <label htmlFor="provider-custom-credits-path" className="block text-xs text-gray-500 mb-1">Credits path</label>
+                    <label htmlFor="provider-custom-credits-path" className="block text-xs text-gray-500 mb-1 dark:text-gray-400">Credits path</label>
                     <input
                       id="provider-custom-credits-path"
                       type="text"
                       value={customCreditsPath}
                       onChange={(e) => setCustomCreditsPath(e.target.value)}
                       placeholder="$.credits"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                     />
                   </div>
                 )}
               </fieldset>
 
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label htmlFor="provider-generic-name" className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="provider-generic-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                     Name (slug)
                   </label>
                   <input
@@ -1133,11 +1609,11 @@ export default function AddProviderModal({
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={Boolean(editProvider)}
                     placeholder="my-service"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:disabled:bg-gray-800 dark:disabled:text-gray-400"
                   />
                 </div>
                 <div>
-                  <label htmlFor="provider-generic-display-name" className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="provider-generic-display-name" className="block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200">
                     Display Name
                   </label>
                   <input
@@ -1147,13 +1623,13 @@ export default function AddProviderModal({
                     value={customDisplayName}
                     onChange={(e) => setCustomDisplayName(e.target.value)}
                     placeholder="My Service"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                   />
                 </div>
               </div>
 
               <div>
-                <label htmlFor="provider-generic-label" className="block text-xs font-medium text-gray-500 mb-1">
+                <label htmlFor="provider-generic-label" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
                   Label (optional)
                 </label>
                 <input
@@ -1162,38 +1638,66 @@ export default function AddProviderModal({
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="e.g. Production, Staging"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
                 />
               </div>
 
-              {renderAllocations()}
-              {renderBillingFields()}
+              {(wizardStep === "budget" || wizardStep === "review") && (
+                <>
+                  {renderSyncCadence()}
+                  {renderAllocations()}
+                  {renderBillingFields()}
+                </>
+              )}
             </div>
           )}
 
           {error && (
-            <p role="alert" className="mt-4 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+            <p role="alert" className="mt-4 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 dark:text-red-300 dark:bg-red-950/60">
               {error}
             </p>
           )}
 
-          <div className="mt-6 flex flex-wrap gap-3 justify-end">
+          <div className="mt-6 flex flex-wrap gap-3 justify-between">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors dark:text-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600"
             >
               Cancel
             </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? "Saving..." : editProvider ? "Update" : "Add Provider"}
-            </button>
+            <div className="flex flex-wrap gap-3 justify-end">
+              {!isFirstWizardStep(wizardStep) && (
+                <button
+                  type="button"
+                  onClick={goPrevStep}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600"
+                >
+                  Back
+                </button>
+              )}
+              {!isLastWizardStep(wizardStep) ? (
+                <button
+                  type="button"
+                  onClick={goNextStep}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-accent rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {saving ? "Saving..." : editProvider ? "Update" : "Add Provider"}
+                </button>
+              )}
+            </div>
           </div>
     </ModalDialog>
   );

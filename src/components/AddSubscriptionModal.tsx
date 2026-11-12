@@ -1,15 +1,22 @@
-/* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import { useEffect, useState } from "react";
 import ModalDialog from "@/components/ModalDialog";
 import { startDateForStatusTransition, toDateInputValue } from "@/lib/subscription-form";
 import type { ExternalBillingRecord } from "@/components/ExternalBillingDetails";
+import {
+  externalBillingFreshnessWindowMs,
+  formatExternalBillingAmount,
+  isExternalBillingLinkCandidate,
+  normalizeExternalBillingCadence,
+} from "@/lib/external-billing-link";
 
 export interface SubscriptionProviderOption {
   id: string;
   name: string;
   displayName: string;
+  refreshIntervalMin?: number;
   externalBilling?: ExternalBillingRecord[];
 }
 
@@ -32,9 +39,13 @@ export interface SubscriptionFormValue {
   startDate: string;
   autoRenew: boolean;
   status: string;
+  canceledAt?: string | null;
+  effectiveStatus?: string;
   notes: string | null;
   externalBillingSource?: string | null;
   externalBillingId?: string | null;
+  /** When true, owner edits (including pause) permanently relinquish auto-management. */
+  externalBillingManaged?: boolean | null;
   activationMode?: "repurchase" | "resume";
 }
 
@@ -82,6 +93,7 @@ export default function AddSubscriptionModal({
   const [startDate, setStartDate] = useState(todayIso());
   const [autoRenew, setAutoRenew] = useState(true);
   const [status, setStatus] = useState("considering");
+  const [canceledAt, setCanceledAt] = useState(todayIso());
   const [notes, setNotes] = useState("");
   const [activationDateReset, setActivationDateReset] = useState(false);
   const [externalBillingKey, setExternalBillingKey] = useState("");
@@ -102,6 +114,7 @@ export default function AddSubscriptionModal({
     setStartDate(editSubscription?.startDate ? editSubscription.startDate.slice(0, 10) : todayIso());
     setAutoRenew(editSubscription?.autoRenew ?? true);
     setStatus(editSubscription?.status || "considering");
+    setCanceledAt(editSubscription?.canceledAt ? editSubscription.canceledAt.slice(0, 10) : todayIso());
     setNotes(editSubscription?.notes || "");
     setExternalBillingKey(
       editSubscription?.externalBillingSource && editSubscription.externalBillingId
@@ -150,6 +163,7 @@ export default function AddSubscriptionModal({
         startDate,
         autoRenew,
         status,
+        canceledAt: status === "canceled" ? canceledAt : null,
         notes: notes.trim() || null,
         externalBillingSource,
         externalBillingId,
@@ -164,8 +178,8 @@ export default function AddSubscriptionModal({
   };
 
   const inputClass =
-    "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
-  const labelClass = "block text-sm font-medium text-gray-700 mb-1";
+    "w-full px-3 py-2 border border-gray-300 rounded-lg text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
+  const labelClass = "block text-sm font-medium text-gray-700 mb-1 dark:text-gray-200";
 
   const handleStatusChange = (nextStatus: string) => {
     const nextStartDate = startDateForStatusTransition({
@@ -186,10 +200,79 @@ export default function AddSubscriptionModal({
   const canResumeExistingTerm =
     isActivating &&
     (editSubscription?.status === "paused" || editSubscription?.status === "canceled");
+  const pausingManaged =
+    Boolean(editSubscription?.externalBillingManaged) &&
+    status === "paused" &&
+    editSubscription?.status !== "paused";
+  const editingManagedLinked =
+    Boolean(editSubscription?.externalBillingManaged) ||
+    Boolean(
+      editSubscription?.externalBillingSource &&
+        editSubscription?.externalBillingId &&
+        (status === "paused" || status === "canceled") &&
+        editSubscription?.status === "active"
+    );
+  const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const isLinkCandidate = (record: ExternalBillingRecord) =>
+    isExternalBillingLinkCandidate(record, {
+      staleAfterMs: externalBillingFreshnessWindowMs(
+        selectedProvider?.refreshIntervalMin ?? 60
+      ),
+    });
   const billingRecords =
-    providers.find((provider) => provider.id === providerId)?.externalBilling?.filter(
-      (record) => record.externalId && ["plan", "subscription", "service_plan"].includes(record.kind)
+    selectedProvider?.externalBilling?.filter(
+      (record) => {
+        if (isLinkCandidate(record)) return true;
+        if (!record.externalId || !editSubscription?.externalBillingSource || !editSubscription.externalBillingId) {
+          return false;
+        }
+        return (
+          record.source === editSubscription.externalBillingSource &&
+          record.externalId === editSubscription.externalBillingId
+        );
+      }
     ) ?? [];
+  if (
+    providerId === editSubscription?.providerId &&
+    editSubscription.externalBillingSource &&
+    editSubscription.externalBillingId &&
+    !billingRecords.some(
+      (record) =>
+        record.source === editSubscription.externalBillingSource &&
+        record.externalId === editSubscription.externalBillingId
+    )
+  ) {
+    billingRecords.push({
+      source: editSubscription.externalBillingSource,
+      externalId: editSubscription.externalBillingId,
+      kind: "subscription",
+      serviceName: editSubscription.externalBillingId,
+      planName: "No longer reported by provider",
+      status: null,
+      amountUsd: null,
+      currency: null,
+      billingInterval: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      nextRenewalAt: null,
+      requestLimit: null,
+      requestLimitWindow: null,
+      spendLimitUsd: null,
+      spendLimitWindow: null,
+      usageQuantity: null,
+      remainingQuantity: null,
+      usageUnit: null,
+      rollupRole: "canonical",
+      dateKind: null,
+      syncedAt: "",
+    });
+  }
+  const selectedLinkedBillingRecord = billingRecords.find(
+    (record) =>
+      `${encodeURIComponent(record.source)}|${encodeURIComponent(record.externalId ?? "")}` ===
+      externalBillingKey
+  );
+  const providerControlsSchedule = Boolean(externalBillingKey);
 
   return (
     <ModalDialog
@@ -198,7 +281,27 @@ export default function AddSubscriptionModal({
       closeDisabled={saving}
     >
           {error && (
-            <div role="alert" className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg">{error}</div>
+            <div role="alert" className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg dark:bg-red-950/60 dark:text-red-300">{error}</div>
+          )}
+
+          {editSubscription?.effectiveStatus === "expired" && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+              This term ended. Notes-only edits preserve its history. Enabling Auto-renews starts a new term now, anchored to current provider billing data when linked; for a one-term repurchase, unlink this record and track the new term separately.
+            </div>
+          )}
+
+          {pausingManaged && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+              This plan is auto-managed from the provider&apos;s billing records. Pausing
+              <strong> permanently converts it to owner-managed</strong>: the monitor will no longer
+              reconcile, pause, or reprice it from billing syncs. Future charges stop until you
+              reactivate it.
+            </div>
+          )}
+          {!pausingManaged && editingManagedLinked && editSubscription?.externalBillingManaged && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+              Auto-managed from provider billing. Any owner edit permanently relinquishes auto-management.
+            </div>
           )}
 
           <div className="space-y-4">
@@ -263,22 +366,64 @@ export default function AddSubscriptionModal({
                 <select
                   id="subscription-external-billing"
                   value={externalBillingKey}
-                  onChange={(event) => setExternalBillingKey(event.target.value)}
+                  onChange={(event) => {
+                    const key = event.target.value;
+                    setExternalBillingKey(key);
+                    const [source, externalId] = key
+                      .split("|")
+                      .map((part) => (part ? decodeURIComponent(part) : ""));
+                    const record = billingRecords.find(
+                      (candidate) =>
+                        candidate.source === source &&
+                        candidate.externalId === externalId
+                    );
+                    if (!record || !isLinkCandidate(record)) return;
+
+                    const cadence = normalizeExternalBillingCadence(
+                      record.billingInterval
+                    );
+                    setCostUsd(String(record.amountUsd));
+                    setCurrency(record.currency!.trim().toUpperCase());
+                    setInterval(cadence!);
+                    setIntervalCount("1");
+                    setStatus("active");
+                    if (record.currentPeriodStart) {
+                      setStartDate(record.currentPeriodStart.slice(0, 10));
+                      setActivationDateReset(false);
+                    }
+                    if (!name.trim()) {
+                      setName(
+                        record.serviceName ||
+                          record.planName ||
+                          record.externalId ||
+                          "Paid service"
+                      );
+                    }
+                  }}
                   className={inputClass}
                 >
                   <option value="">Not linked — count as a separate manual cost</option>
                   {billingRecords.map((record) => {
                     const value = `${encodeURIComponent(record.source)}|${encodeURIComponent(record.externalId!)}`;
-                    const amount = record.amountUsd == null ? "" : ` · $${record.amountUsd.toFixed(2)}`;
+                    const amount = record.amountUsd == null
+                      ? ""
+                      : ` · ${formatExternalBillingAmount(record.amountUsd, record.currency)}`;
+                    const noLongerCompatible = !isLinkCandidate(record);
+                    const noLongerReported = !record.syncedAt;
                     return (
                       <option key={value} value={value}>
-                        {record.planName || record.externalId}{amount} · {record.source}
+                        {record.serviceName || record.planName || record.externalId}{amount} · {record.source}
+                        {noLongerReported
+                          ? " · no longer reported"
+                          : noLongerCompatible
+                            ? " · existing link no longer dedupe-compatible"
+                            : ""}
                       </option>
                     );
                   })}
                 </select>
-                <p className="mt-1 text-xs text-gray-500">
-                  Linking the exact provider record lets the budget engine dedupe the same fixed charge safely.
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Selecting a compatible record fills its amount, cadence, active status, and current-period start so the budget engine can dedupe that exact fixed charge safely.
                 </p>
               </div>
             )}
@@ -289,6 +434,7 @@ export default function AddSubscriptionModal({
                 <input
                   id="subscription-cost"
                   type="number"
+                  inputMode="decimal"
                   min="0"
                   step="0.01"
                   value={costUsd}
@@ -308,7 +454,7 @@ export default function AddSubscriptionModal({
                   {currency !== "USD" && <option value={currency}>{currency} (convert before saving)</option>}
                   <option value="USD">USD</option>
                 </select>
-                <p className="mt-1 text-xs text-gray-500">Budget and telemetry totals are normalized to USD.</p>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Budget and telemetry totals are normalized to USD.</p>
               </div>
             </div>
 
@@ -356,7 +502,9 @@ export default function AddSubscriptionModal({
                 <label htmlFor="subscription-start-date" className={labelClass}>
                   {isActivating && activationMode === "repurchase"
                     ? "Activation date"
-                    : "Start date"}
+                    : providerControlsSchedule
+                      ? "Start date (provider-linked)"
+                      : "Start date"}
                 </label>
                 <input
                   id="subscription-start-date"
@@ -366,11 +514,19 @@ export default function AddSubscriptionModal({
                     setStartDate(e.target.value);
                     setActivationDateReset(false);
                   }}
-                  disabled={canResumeExistingTerm && activationMode === "resume"}
+                  disabled={
+                    providerControlsSchedule ||
+                    (canResumeExistingTerm && activationMode === "resume")
+                  }
                   className={inputClass}
                 />
+                {providerControlsSchedule && (
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    The provider billing period controls this date. Unlink the record to edit the schedule manually.
+                  </p>
+                )}
                 {isActivating && activationMode === "repurchase" && (
-                  <p className={`mt-1 text-xs ${activationDateReset ? "text-emerald-700" : "text-gray-500"}`}>
+                  <p className={`mt-1 text-xs ${activationDateReset ? "text-emerald-700 dark:text-emerald-400" : "text-gray-500 dark:text-gray-400"}`}>
                     Reset to today to avoid charging evaluation time. Change it only to the actual purchase date.
                   </p>
                 )}
@@ -384,14 +540,32 @@ export default function AddSubscriptionModal({
                       </option>
                     ))}
                   </select>
-                  <p className="mt-1 text-xs text-gray-500">{selectedStatus?.help}</p>
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{selectedStatus?.help}</p>
               </div>
             </div>
 
+            {status === "canceled" && (
+              <div className="mt-3">
+                <label htmlFor="subscription-canceled-date" className={labelClass}>
+                  Effective Canceled Date
+                </label>
+                <input
+                  id="subscription-canceled-date"
+                  type="date"
+                  value={canceledAt}
+                  onChange={(e) => setCanceledAt(e.target.value)}
+                  className={inputClass}
+                />
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Specify the date this subscription was canceled to prevent synthetic charges after that day.
+                </p>
+              </div>
+            )}
+
             {canResumeExistingTerm && (
-              <fieldset className="rounded-lg border border-gray-200 p-3">
-                <legend className="px-1 text-sm font-medium text-gray-700">Reactivation billing</legend>
-                <label className="mt-1 flex items-start gap-2 text-sm text-gray-700">
+              <fieldset className="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                <legend className="px-1 text-sm font-medium text-gray-700 dark:text-gray-200">Reactivation billing</legend>
+                <label className="mt-1 flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200">
                   <input
                     type="radio"
                     name="activation-mode"
@@ -405,7 +579,7 @@ export default function AddSubscriptionModal({
                   />
                   <span><strong>Repurchase now</strong> — start a new paid term and post a charge now.</span>
                 </label>
-                <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+                <label className="mt-2 flex items-start gap-2 text-sm text-gray-700 dark:text-gray-200">
                   <input
                     type="radio"
                     name="activation-mode"
@@ -419,17 +593,30 @@ export default function AddSubscriptionModal({
                       setActivationDateReset(false);
                     }}
                   />
-                  <span><strong>Resume paid-through term</strong> — keep the existing cadence and wait until its next renewal to charge.</span>
+                  <span><strong>Resume paid-through term</strong> — align to the linked provider period, or keep the existing manual cadence, and wait until renewal to charge.</span>
                 </label>
               </fieldset>
             )}
 
-            <label className="flex items-center gap-2 text-sm text-gray-700">
+            <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
               <input
                 type="checkbox"
                 checked={autoRenew}
-                onChange={(e) => setAutoRenew(e.target.checked)}
-                className="rounded border-gray-300"
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setAutoRenew(checked);
+                  if (
+                    checked &&
+                    editSubscription?.effectiveStatus === "expired" &&
+                    selectedLinkedBillingRecord?.currentPeriodStart &&
+                    isLinkCandidate(selectedLinkedBillingRecord)
+                  ) {
+                    setStartDate(
+                      selectedLinkedBillingRecord.currentPeriodStart.slice(0, 10)
+                    );
+                  }
+                }}
+                className="rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900"
               />
               Auto-renews
             </label>
@@ -446,12 +633,12 @@ export default function AddSubscriptionModal({
             </div>
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center justify-end gap-3 pt-6 border-t border-gray-100">
+          <div className="mt-6 flex flex-wrap items-center justify-end gap-3 pt-6 border-t border-gray-100 dark:border-gray-700">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600 dark:hover:bg-gray-700"
             >
               Cancel
             </button>
@@ -459,7 +646,7 @@ export default function AddSubscriptionModal({
               type="button"
               onClick={handleSave}
               disabled={saving || providers.length === 0}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              className="min-h-11 px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-lg hover:bg-blue-700 disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save Subscription"}
             </button>

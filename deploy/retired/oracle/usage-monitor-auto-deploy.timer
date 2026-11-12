@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll GitHub for verified Usage Monitor main revisions
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+RandomizedDelaySec=10s
+AccuracySec=5s
+Persistent=true
+Unit=usage-monitor-auto-deploy.service
+
+[Install]
+WantedBy=timers.target

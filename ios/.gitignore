@@ -1,0 +1,41 @@
+# -------------------------------------------------------------------------
+# Xcode / iOS build artifacts and user state
+# -------------------------------------------------------------------------
+## User settings & workspace state
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+*.xcscmblueprint
+*.xccheckout
+
+## Build products
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+## CocoaPods / Carthage (not used, but ignore if ever added)
+Pods/
+Carthage/Build/
+
+## macOS
+.DS_Store
+
+## fastlane
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+
+# The .xcodeproj IS committed (generated from project.yml) so the project
+# opens without XcodeGen. Ignore only its per-user state:
+UsageMonitor.xcodeproj/xcuserdata/
+UsageMonitor.xcodeproj/project.xcworkspace/xcuserdata/
+UsageMonitor.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist

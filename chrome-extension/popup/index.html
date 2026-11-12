@@ -14,6 +14,11 @@
       margin-top: 0;
       font-size: 16px;
     }
+    p.note {
+      font-size: 12px;
+      color: #666;
+      margin: 0 0 12px;
+    }
     .field {
       margin-bottom: 12px;
     }
@@ -33,15 +38,30 @@
     button {
       width: 100%;
       padding: 8px;
-      background: #000;
-      color: #fff;
       border: none;
       border-radius: 4px;
       cursor: pointer;
       font-weight: 500;
     }
-    button:hover {
+    #openBtn {
+      background: #000;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+    #openBtn:hover {
       background: #333;
+    }
+    #saveBtn {
+      background: #f1f1f1;
+      color: #333;
+    }
+    #openAppBtn {
+      background: #e8f0ff;
+      color: #154aa0;
+      margin-bottom: 8px;
+    }
+    #saveBtn:hover {
+      background: #e4e4e4;
     }
     #status {
       margin-top: 12px;
@@ -53,18 +73,17 @@
   </style>
 </head>
 <body>
-  <h2>API Usage Sync Config</h2>
+  <h2>Usage Monitor</h2>
+  <p class="note">Opens your self-hosted dashboard. This extension reads no site data.</p>
   <div class="field">
-    <label for="apiUrl">Monitor API URL</label>
-    <input type="text" id="apiUrl" placeholder="e.g. http://localhost:4103">
+    <label for="dashboardUrl">Dashboard URL</label>
+    <input type="text" id="dashboardUrl" placeholder="e.g. https://usage.jays.services">
   </div>
-  <div class="field">
-    <label for="apiToken">USAGE_INGEST_TOKEN</label>
-    <input type="password" id="apiToken" placeholder="Enter token">
-  </div>
-  <button id="saveBtn">Save Configuration</button>
-  <div id="status">Saved successfully!</div>
-  
+  <button id="openBtn">Open Dashboard</button>
+  <button id="openAppBtn">Open iPhone/iPad App</button>
+  <button id="saveBtn">Save URL</button>
+  <div id="status"></div>
+
   <script src="popup.js"></script>
 </body>
 </html>

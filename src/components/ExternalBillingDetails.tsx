@@ -1,7 +1,14 @@
+import { externalBillingFreshnessWindowMs } from "@/lib/external-billing-link";
+import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatStatusLabel } from "@/lib/status-vocab";
+
+const SENTENCE_GAP = "\u00a0 ";
+
 export interface ExternalBillingRecord {
   source: string;
   externalId: string | null;
   kind: string;
+  serviceName?: string | null;
   planName: string | null;
   status: string | null;
   amountUsd: number | null;
@@ -14,35 +21,25 @@ export interface ExternalBillingRecord {
   requestLimitWindow: string | null;
   spendLimitUsd: number | null;
   spendLimitWindow: string | null;
+  usageQuantity?: number | null;
+  remainingQuantity?: number | null;
+  usageUnit?: string | null;
+  rollupRole?: string | null;
+  dateKind?: string | null;
   syncedAt: string;
 }
 
-const EXTERNAL_BILLING_STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
-
 export function isExternalBillingStale(
   record: Pick<ExternalBillingRecord, "syncedAt">,
-  staleAfterMs = EXTERNAL_BILLING_STALE_AFTER_MS,
+  staleAfterMs = externalBillingFreshnessWindowMs(),
   now = Date.now()
 ): boolean {
   const syncedAt = Date.parse(record.syncedAt);
-  return !Number.isFinite(syncedAt) || now - syncedAt > EXTERNAL_BILLING_STALE_AFTER_MS;
+  return !Number.isFinite(syncedAt) || now - syncedAt > staleAfterMs;
 }
 
-function formatCurrency(amount: number, currency: string | null): string {
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: currency || "USD",
-    }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency || "USD"}`;
-  }
-}
-
-function formatDate(value: string | null): string {
-  return value
-    ? new Date(value).toLocaleDateString(undefined, { timeZone: "UTC" })
-    : "--";
+function formatMoney(amount: number, currency: string | null): string {
+  return formatCurrency(amount, { currency: currency ?? "UNKNOWN" });
 }
 
 function statusClass(status: string): string {
@@ -72,10 +69,10 @@ export default function ExternalBillingDetails({
     <section className="overflow-hidden rounded-xl border border-blue-200 bg-white" aria-labelledby="provider-billing-heading">
       <div className="border-b border-blue-100 bg-blue-50 px-4 py-3 sm:px-6">
         <h2 id="provider-billing-heading" className="text-sm font-semibold text-blue-800">
-          Provider-reported billing
+          Provider-Reported Billing
         </h2>
         <p className="mt-0.5 text-xs text-blue-700">
-          Read-only data synced from the provider. It does not create or duplicate local Subscription charges.
+          Read-only data synced from the provider.{SENTENCE_GAP}It does not create or duplicate local Subscription charges.
         </p>
       </div>
       <div className="divide-y divide-gray-100">
@@ -83,16 +80,16 @@ export default function ExternalBillingDetails({
           <article key={`${record.source}-${record.externalId ?? record.kind}-${index}`} className="space-y-3 px-4 py-4 sm:px-6">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p className="font-medium text-gray-900">{record.planName || record.kind}</p>
+                <p className="font-medium text-gray-900">{record.serviceName || record.planName || record.kind}</p>
+                {record.serviceName && record.planName && (
+                  <p className="text-xs text-gray-600">{record.planName}</p>
+                )}
                 <p className="text-xs text-gray-500">{record.source} · {record.kind}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {isExternalBillingStale(
                   record,
-                  Math.min(
-                    EXTERNAL_BILLING_STALE_AFTER_MS,
-                    Math.max(60 * 60 * 1_000, refreshIntervalMin * 3 * 60 * 1_000)
-                  )
+                  externalBillingFreshnessWindowMs(refreshIntervalMin)
                 ) && (
                   <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">
                     stale sync
@@ -100,51 +97,59 @@ export default function ExternalBillingDetails({
                 )}
                 {record.status && (
                   <span className={`rounded-full px-2 py-1 text-xs font-medium ${statusClass(record.status)}`}>
-                    {record.status}
+                    {formatStatusLabel(record.status)}
                   </span>
                 )}
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
               <div>
-                <dt className="text-xs text-gray-500">Reported amount</dt>
+                <dt className="text-xs text-gray-500">Reported Amount</dt>
                 <dd className="mt-0.5 font-medium text-gray-900">
-                  {record.amountUsd == null ? "--" : formatCurrency(record.amountUsd, record.currency)}
+                  {record.amountUsd == null ? "--" : formatMoney(record.amountUsd, record.currency)}
                   {record.billingInterval ? ` / ${record.billingInterval}` : ""}
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Current period</dt>
+                <dt className="text-xs text-gray-500">Current Period</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {formatDate(record.currentPeriodStart)} – {formatDate(record.currentPeriodEnd)}
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Next renewal</dt>
+                <dt className="text-xs text-gray-500">Next Renewal</dt>
                 <dd className="mt-0.5 text-gray-700">{formatDate(record.nextRenewalAt)}</dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Request limit</dt>
+                <dt className="text-xs text-gray-500">Request Limit</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {record.requestLimit == null
                     ? "--"
-                    : `${new Intl.NumberFormat("en-US").format(record.requestLimit)}${
+                    : `${formatNumber(record.requestLimit)}${
                         record.requestLimitWindow ? ` / ${record.requestLimitWindow}` : ""
                       }`}
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Spend limit</dt>
+                <dt className="text-xs text-gray-500">Spend Limit</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {record.spendLimitUsd == null
                     ? "--"
-                    : `${formatCurrency(record.spendLimitUsd, "USD")}${
+                    : `${formatCurrency(record.spendLimitUsd)}${
                         record.spendLimitWindow ? ` / ${record.spendLimitWindow}` : ""
                       }`}
                 </dd>
               </div>
+              {record.usageQuantity != null && (
+                <div>
+                  <dt className="text-xs text-gray-500">Tracked Usage</dt>
+                  <dd className="mt-0.5 font-medium text-gray-900">
+                    {formatNumber(record.usageQuantity)} {record.usageUnit ?? ""}
+                  </dd>
+                </div>
+              )}
               <div>
-                <dt className="text-xs text-gray-500">Last synced</dt>
+                <dt className="text-xs text-gray-500">Last Synced</dt>
                 <dd className="mt-0.5 text-gray-700">{new Date(record.syncedAt).toLocaleString()}</dd>
               </div>
             </dl>

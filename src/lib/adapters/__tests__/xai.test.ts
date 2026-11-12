@@ -58,4 +58,26 @@ describe("xAI billing adapter", () => {
     ]);
     expect(sources).not.toContain("xai-postpaid-invoice");
   });
+
+  it("does not roll an invalid billing-cycle month into another year", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(json({ total: { val: "-4500" } }))
+        .mockResolvedValueOnce(
+          json({
+            coreInvoice: { totalWithCorr: { val: "1234" } },
+            billingCycle: { year: 2026, month: 13 },
+          })
+        )
+        .mockResolvedValueOnce(json({ spendingLimits: {} }))
+    );
+
+    const result = await fetchUsage("management-key", { teamId: "team-1" });
+
+    expect(result.totalCost).toBeNull();
+    expect(result.externalBillingSyncs?.map((sync) => sync.source)).not.toContain(
+      "xai-postpaid-invoice"
+    );
+  });
 });

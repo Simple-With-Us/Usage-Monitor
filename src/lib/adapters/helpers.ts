@@ -1,6 +1,32 @@
 import { lookup } from "node:dns/promises";
 import https from "node:https";
 import net from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { appSettings } from "@/lib/app-settings";
+
+/**
+ * Generic, adapter-agnostic signal that totalCost is known-incomplete for a
+ * specific, nameable reason - for example a provider's usage-based billing
+ * endpoint being unreachable while fixed subscription cost is still known.
+ * Any adapter may set this on UsageResult when it can name the exact missing
+ * cost surface; do not set it merely because totalCost is null (that already
+ * has its own "unconfigured"/"no data" handling elsewhere).
+ *
+ * This is intentionally distinct from two other signals and must never be
+ * conflated with or silently overwrite either:
+ *  - costIncludesUnknownFixed: flags totalCost may be an OVER-count (contains
+ *    fixed charges the adapter can't classify exactly).
+ *  - spendCoverage/pushedCostCoverage: describe pushed-telemetry pricing
+ *    completeness, computed downstream in budget-status.ts.
+ * costCoverageCaveat instead flags a possible UNDER-count in the adapter's
+ * own poll-time totalCost.
+ */
+export interface CostCoverageCaveat {
+  /** Stable machine-readable identifier, e.g. "cloudflare_paygo_usage_unavailable". */
+  code: string;
+  /** User-facing explanation of what's missing and why totalCost may be understated. */
+  message: string;
+}
 
 export interface UsageResult {
   balance: number | null;
@@ -11,6 +37,8 @@ export interface UsageResult {
   costWindowEnd?: Date | string | null;
   costScope?: "calendar_month_to_date" | "billing_cycle_to_date" | "daily" | "unknown";
   costIncludesUnknownFixed?: boolean;
+  /** See CostCoverageCaveat. Only set when a specific cost surface is known-missing. */
+  costCoverageCaveat?: CostCoverageCaveat | null;
   totalRequests: number | null;
   credits: number | null;
   rawData: unknown;
@@ -21,11 +49,37 @@ export interface UsageResult {
    */
   externalBilling?: AdapterExternalBillingSync;
   externalBillingSyncs?: AdapterExternalBillingSync[];
+  /**
+   * Persist the safe partial result first, then surface this adapter failure to
+   * scheduler/manual-fetch callers. This is used when independent sub-checks
+   * produce useful connection health even though another sub-check failed.
+   */
+  postPersistError?: AdapterError;
+}
+
+/**
+ * Server-side credential state supplied by the adapter router. Adapters should
+ * use this only when separate credentials power independent read channels.
+ * It is never derived from or exposed through provider-supplied config.
+ */
+export interface AdapterInvocationContext {
+  apiKeyConfigured: boolean;
+  apiKeyReadable: boolean;
+  secretConfigConfigured: boolean;
+  secretConfigReadable: boolean;
 }
 
 export interface AdapterExternalBillingRecord {
   externalId: string;
+  /**
+   * Explicit authority to create/reconcile a paid recurring local charge from
+   * this exact record. Defaults false at persistence. Collection completeness
+   * (`AdapterExternalBillingSync.authoritative`) is only a pruning contract and
+   * must never imply that an individual row is safe to charge.
+   */
+  paidRecurringAuthoritative?: boolean;
   kind: "account" | "billing_period" | "invoice" | "plan" | "subscription" | "service_plan";
+  serviceName?: string | null;
   planName?: string | null;
   status?: string | null;
   amountUsd?: number | null;
@@ -38,6 +92,11 @@ export interface AdapterExternalBillingRecord {
   requestLimitWindow?: string | null;
   spendLimitUsd?: number | null;
   spendLimitWindow?: string | null;
+  usageQuantity?: number | null;
+  remainingQuantity?: number | null;
+  usageUnit?: string | null;
+  rollupRole?: "canonical" | "component" | "metadata" | null;
+  dateKind?: "renewal" | "period_end" | "quota_reset" | "contract_end" | "report_through" | null;
 }
 
 export interface AdapterExternalBillingSync {
@@ -155,12 +214,12 @@ export function isoDateTimeDaysAgo(days: number): string {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_RETRY_AFTER_WAIT_MS = 15_000; // never block longer than this - the next 15-min scheduler tick is the real retry
+export const MAX_RETRY_AFTER_WAIT_MS = 15_000; // never block longer than this - the next 15-min scheduler tick is the real retry
 const MAX_RETRIES = 2;
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
 function resolveDefaultTimeoutMs(): number {
-  const raw = process.env.ADAPTER_HTTP_TIMEOUT_MS;
+  const raw = appSettings.get("ADAPTER_HTTP_TIMEOUT_MS");
   if (raw == null || raw.trim() === "") return DEFAULT_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TIMEOUT_MS;
@@ -168,8 +227,8 @@ function resolveDefaultTimeoutMs(): number {
 }
 
 // Strips query strings from a URL before it can end up in an Error message.
-// Several adapters pass API keys as query params (e.g. google-ai.ts's
-// ?key=...) - those must never leak into persisted fetch-all error arrays
+// Some adapters must pass credentials as query params (for example Pushover's
+// token parameter) - those must never leak into persisted fetch-all error arrays
 // or logs.
 export function redactUrlForError(url: string): string {
   const queryIndex = url.indexOf("?");
@@ -180,7 +239,7 @@ export function redactUrlForError(url: string): string {
 // Parses a Retry-After header value, which per RFC 9110 is either an
 // integer number of seconds or an HTTP-date. Returns milliseconds to wait,
 // or null if the header is absent/unparseable.
-function parseRetryAfterMs(value: string | null): number | null {
+export function parseRetryAfterMs(value: string | null): number | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (trimmed === "") return null;
@@ -195,7 +254,7 @@ function parseRetryAfterMs(value: string | null): number | null {
   return dateMs - Date.now();
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -211,6 +270,9 @@ export interface FetchJsonOptions {
    */
   security?: "trusted" | "untrusted";
 }
+
+/** Optional outer AbortSignal for provider-timeout cancellation across adapter fetches. */
+export const adapterHttpAbortStorage = new AsyncLocalStorage<AbortSignal>();
 
 export async function fetchJson(
   url: string,
@@ -230,6 +292,17 @@ export async function fetchJson(
   // a GET, but gate on method explicitly rather than assuming.
   const method = (init?.method ?? "GET").toUpperCase();
   const isRetryable = method === "GET";
+  // Compose provider-timeout ALS signal (if any) with caller init.signal.
+  const outer = adapterHttpAbortStorage.getStore();
+  if (outer) {
+    init = {
+      ...init,
+      signal:
+        init?.signal && init.signal !== outer
+          ? AbortSignal.any([outer, init.signal])
+          : outer,
+    };
+  }
 
   let attempt = 0;
    

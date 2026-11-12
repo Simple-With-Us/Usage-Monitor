@@ -1,6 +1,7 @@
 export {
   getExternalEventRawCutoff,
   getSnapshotRawCutoff,
+  isAutomaticVacuumEnabled,
   runDataRetentionMaintenance as runUsageRetention,
   runScheduledDataRetentionMaintenance,
   startOfUtcDay,

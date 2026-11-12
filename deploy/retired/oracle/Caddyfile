@@ -1,0 +1,27 @@
+{$USAGE_MONITOR_HOSTNAME:usage.jays.services} {
+  encode zstd gzip
+  reverse_proxy app:3000
+
+  # Cloudflare terminates public TLS for the proxied hostname, so the origin
+  # must use the ACME HTTP-01 challenge instead of TLS-ALPN-01. Keep both of
+  # Caddy's Automatic HTTPS ACME issuers (Let's Encrypt default directory +
+  # ZeroSSL ACME directory) so renewal can fall back when one CA is
+  # rate-limited. Use two `issuer acme` blocks — not the proprietary
+  # `issuer zerossl` API, which requires ZeroSSL EAB credentials.
+  tls {
+    issuer acme {
+      disable_tlsalpn_challenge
+    }
+    issuer acme {
+      dir https://acme.zerossl.com/v2/DV90
+      disable_tlsalpn_challenge
+    }
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    -Server
+  }
+}

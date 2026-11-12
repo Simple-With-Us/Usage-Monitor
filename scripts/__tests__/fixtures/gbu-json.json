@@ -1,0 +1,21 @@
+{
+  "active": "mail@example.com",
+  "accounts": [
+    {
+      "account": "mail@example.com",
+      "email": "mail@example.com",
+      "active": true,
+      "weeklyUsagePercent": 85.37,
+      "available": true,
+      "resetsAt": "2026-09-28T18:35:19.304Z",
+      "planLabel": "Grok Bot Plan",
+      "onDemandUsed": 0,
+      "onDemandLimit": null,
+      "onDemandRemaining": null,
+      "billingCycleEnd": 1792261946000,
+      "includedSpend": 33262,
+      "includedLimit": 40000,
+      "includedRemaining": 6738
+    }
+  ]
+}

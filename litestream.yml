@@ -13,22 +13,87 @@
 #     does not work - use a bare `${VAR}`. An empty region is fine here: with an
 #     S3 endpoint set (R2 always sets one) Litestream falls back to us-east-1 and
 #     R2 accepts any region for SigV4.
+#
+# Production target (2026-08-07): Backblaze B2 bucket jays-usage-monitor-eu
+# (S3-compatible EU). Cloudflare R2 is weekly archive only (prefix weekly/).
+# Historic LTX on usage-monitor-prod-v3 was deleted 2026-08-16. Litestream 0.5
+# only supports ONE active replica per DB, so R2 is not dual-written.
+#
+# Backup philosophy for THIS app (usage monitor, not a trading ledger):
+#   Disaster recovery only — survive disk death / host loss. Same-disk
+#   pre-migration snapshots (retention 1) cover schema rollbacks. B2 has no
+#   10 GiB free-tier trap, so retention/sync can stay modest without thrashing.
 
-# Point-in-time retention: keep 30 days of snapshot history, a fresh snapshot
-# every 24h. Litestream 0.5.x stores LTX files and GCs snapshots older than
-# `retention`; the finer-grained LTX/WAL window is governed by the default
-# l0-retention, which is sufficient here.
 snapshot:
   interval: 24h
-  retention: 720h
+  # Jay 2026-10-29 fleet policy: short-term backups are kept 3 days (72h), and the
+  # privacy policy (src/app/privacy/page.tsx) says so.  B2 is paid capacity, and
+  # compaction is L1-only, so the 3x window does not reopen the Aug 2026 R2 growth mode.
+  retention: 72h
+
+# Product compaction is L0 + bounded L1 + 24h snapshots.  L2 and L3 are OFF.
+#
+# Litestream 0.5.x (this repo pins 0.5.13) has no disable-L2 flag.
+# cmd/litestream/main.go Config.Levels is L1..N in list order
+# (CompactionLevels() prepends L0).  DefaultConfig() otherwise starts
+# monitors at 30s / 5m / 1h.  One entry here is how 0.5.x turns L2/L3
+# off: MaxLevel() becomes 1 and NextLevel(1) is the snapshot level.
+# Housekeeper already applied this live via a volume overlay; baking it
+# here keeps the next image L1-only instead of restoring DefaultConfig.
+# Mirror Socratic.Trade litestream.coolify.yml.  Do NOT add a second or
+# third item unless L2/L3 are intentionally product-on again.
+#
+# There is also no compaction-backoff yaml key.  store.go
+# monitorCompactionLevel retries on the level interval with no
+# exponential delay.  Removing L2/L3 is the backoff.  Remaining L1
+# retries every 30s against a small L0 window.
+#
+# Do NOT add verify-compaction: true (ListObjects after every compact).
+levels:
+  - interval: 30s
+
+# Checkpoints are owned by Litestream: the app sets PRAGMA wal_autocheckpoint=0
+# when LITESTREAM_ACTIVE=true (src/lib/prisma.ts), so Litestream's defaults
+# (PASSIVE at 1000 pages / 1m, emergency TRUNCATE at ~500 MB) are the only
+# checkpointer.  Do NOT set truncate-page-n: 0 here; on 0.5.13 that disables
+# the emergency TRUNCATE backstop (fixed upstream in 0.5.16, #1348).
+#
+# Shutdown sync retries for up to this long before Litestream exits.  The
+# 30s default cut uploads off mid-flight on restarts.  Coolify's stop grace
+# period is 60s (docs/litestream.md), so 45s leaves room to stop the child.
+shutdown-sync-timeout: 45s
 
 dbs:
   - path: /data/prod.db
+    # Keep this replica generation separate from the previous local LTX chain.
+    meta-path: /data/.prod-recovery-v1.db-litestream
     replica:
       type: s3
+      # Expected production values (Infisical prod):
+      #   LITESTREAM_S3_BUCKET=jays-usage-monitor-eu
+      #   LITESTREAM_S3_ENDPOINT=https://s3.eu-central-003.backblazeb2.com
+      #   LITESTREAM_S3_REGION=eu-central-003
+      #   keys: fleet-usage-monitor-backup (write) — NOT the monitor read-only key
       bucket: ${LITESTREAM_S3_BUCKET}
-      path: api-usage-monitor/prod.db
+      # Fresh baseline after the prior chain failed an independent restore.
+      # Keep the previous prefix intact for incident recovery and inspection.
+      path: api-usage-monitor/prod-recovery-v1.db
       region: ${LITESTREAM_S3_REGION}
       endpoint: ${LITESTREAM_S3_ENDPOINT}
       access-key-id: ${LITESTREAM_S3_ACCESS_KEY_ID}
       secret-access-key: ${LITESTREAM_S3_SECRET_ACCESS_KEY}
+      # Large L1-compaction multipart uploads to B2 fail with "read multipart
+      # upload data failed ... checksum mismatch" around part 14 on the default
+      # 5MB part size, and each abort restarts the whole multipart — on
+      # 2026-08-27 that retry storm (119 failed compactions in ~2h, one every
+      # ~61s) burned through the shared Backblaze daily transaction caps.
+      # Socratic.Trade hit the identical failure class on 2026-08-07/22 and
+      # fixed it with larger parts + modest parallelism (its
+      # litestream.coolify.yml: part-size 10MB, concurrency 2) — mirror that
+      # proven pair here.  Larger parts cut request count per compaction;
+      # concurrency 2 keeps memory modest on the shared box.
+      part-size: 10MB
+      concurrency: 2
+      # Disaster recovery only (host/disk death), not continuous PITR.
+      # B2 is Class A cost-tolerant vs R2 free tier; 1h is a good DR cadence.
+      sync-interval: 1h

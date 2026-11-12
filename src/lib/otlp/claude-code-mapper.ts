@@ -22,11 +22,14 @@ import {
 // Metrics and Logs Export"), current as of 2026-07-04. Claude Code's OTel
 // meter name is `com.anthropic.claude_code`; every metric below is a Sum
 // (monotonic counter). Attributes listed are the ones this mapper actually
-// reads. Claude Code emits several more (session.id, user.email,
-// organization.id, terminal.type, query_source, speed, effort, agent.name,
-// skill.name, plugin.name, mcp_server.name, mcp_tool.name, ...). Those values
+// reads. Claude Code emits several more (user.email, organization.id,
+// terminal.type, query_source, speed, effort, agent.name, skill.name,
+// plugin.name, mcp_server.name, mcp_tool.name, ...). Those values
 // participate in one-way series/idempotency hashes but are not persisted;
-// metadata storage uses the explicit allowlist in mapping-utils.ts.
+// metadata storage uses the explicit allowlist in mapping-utils.ts. session.id
+// is the one exception -- it IS persisted (added 2026-09-24) so
+// GET /api/cost-by-session can sum cost across the session(s) THE BOARD
+// records on a finding. See mapping-utils.ts's METADATA_ALLOWLIST comment.
 //
 //   OTLP metric name                      | unit   | -> ExternalUsageEvent fields
 //   ---------------------------------------+--------+---------------------------------
@@ -38,7 +41,10 @@ import {
 //                                           |        | sub-bucket via label suffix so the
 //                                           |        | four token types don't collide on
 //                                           |        | one idempotency key (see keyRef below)
-//   claude_code.cost.usage                  | USD    | metricType="cost", costUsd=value
+//   claude_code.cost.usage                  | USD    | metricType="cost", costUsd=value,
+//                                           |        | billingMode="estimated"; this is an
+//                                           |        | API-equivalent analytics estimate,
+//                                           |        | not canonical cash spend
 //   claude_code.session.count               | count  | metricType="usage", unit="request",
 //                                           |        | requests=value (session starts)
 //   claude_code.lines_of_code.count          | count  | metricType="usage", unit="row",
@@ -61,9 +67,10 @@ import {
 //
 // provider/service dimension: every row is provider="anthropic",
 // service="claude-code" (per the owner's goal split: usage metrics land here
-// under the anthropic provider so existing budgets/alerts apply; Sentry
-// keeps errors/health). sourceApp is always "claude-code" so these rows are
-// distinguishable from any other Anthropic usage pushed via the generic
+// under the anthropic provider for analytics; exact Claude Code rows are
+// excluded from cash budgets/alerts. Sentry keeps errors/health. sourceApp is
+// always "claude-code" so these rows are distinguishable from any other
+// Anthropic usage pushed via the generic
 // POST /api/ingest/usage contract (e.g. a hand-rolled app-level Anthropic
 // SDK cost push would use a different sourceApp).
 // ---------------------------------------------------------------------------
@@ -88,7 +95,8 @@ export interface MappedUsageEvent {
   provider: string;
   service: string;
   environment?: string;
-  // Producer-supplied project name from the `project` (or `project.name`)
+  // Producer-supplied project name from the `project` (or `project.name`;
+  // else `vcs.repository.name`)
   // OTLP resource attribute, set via OTEL_RESOURCE_ATTRIBUTES on the Claude
   // Code side (e.g. `OTEL_RESOURCE_ATTRIBUTES=project=socratic-trade`, ideally
   // per-repo via direnv). Resolved to a Project.id at the ingest route. Claude
@@ -176,12 +184,17 @@ function mapDataPoint(
   const environment = asString(resourceAttrs["deployment.environment"]) ?? asString(pointAttrs["deployment.environment"]);
   // `project` is the canonical key; accept `project.name` too since operators
   // may follow OTel's dotted-namespace convention. A point-level attribute
-  // wins over the resource-level one if both are somehow present.
+  // wins over the resource-level one if both are somehow present.  When
+  // neither is set, fall back to the repository name Claude Code attaches to
+  // every datapoint under OTEL_METRICS_INCLUDE_REPOSITORY=1 (UM-1599); an
+  // explicit project always wins because it is the operator's own naming.
   const projectName =
     asString(pointAttrs.project) ??
     asString(pointAttrs["project.name"]) ??
     asString(resourceAttrs.project) ??
-    asString(resourceAttrs["project.name"]);
+    asString(resourceAttrs["project.name"]) ??
+    asString(pointAttrs["vcs.repository.name"]) ??
+    asString(resourceAttrs["vcs.repository.name"]);
 
   const base = {
     sourceApp: SOURCE_APP,
@@ -189,7 +202,7 @@ function mapDataPoint(
     service: SERVICE,
     environment,
     projectName,
-    billingMode: "actual" as const,
+    billingMode: "estimated" as const,
     occurredAt,
     otlp: describeOtlpPoint({
       metricName,
@@ -222,8 +235,10 @@ function mapDataPoint(
         metricType: "cost",
         costUsd: value,
         keyRef: model,
-        label: "cost",
-        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs),
+        label: "estimated_api_equivalent",
+        metadata: cleanOtlpMetadata(resourceAttrs, pointAttrs, {
+          costSemantics: "estimated_api_equivalent_not_authoritative",
+        }),
         idempotencyKey: deriveIdempotencyKey(metricName, resourceAttrs, point, value),
       };
     }

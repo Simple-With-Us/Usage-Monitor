@@ -1,0 +1,163 @@
+// Ingest-time cost derivation for generic pushed telemetry (Langfuse's
+// worker-side lesson: when the producer omits cost, compute it from token
+// counts x a pricing catalog). DEFAULT-OFF behind
+// INGEST_COST_DERIVATION_ENABLED.
+//
+// Money-safety contract (this is why the feature is shaped the way it is):
+//   - The derived value is written to METADATA ONLY (`_derivedCostUsd`).
+//     `costUsd` stays null, so the pushed-cash pool in
+//     external-usage-events.ts (`usagePushed` -> pushedMonthToDateUsd ->
+//     budget spend) is byte-for-byte unaffected. Producers' own costUsd —
+//     including their billingMode="estimated" values — is the only cost that
+//     ever enters that pool; a monitor-computed estimate must not silently
+//     join it.
+//   - priced/unpriced coverage counts are untouched: a derived event is
+//     still "unpriced" (the producer did not report a price). The estimate is
+//     surfaced separately as `derivedCostEstimateUsd` in the usage-events
+//     summary, explicitly labeled monitor-estimated.
+//   - The four metadata keys are in RESERVED_V2_METADATA_KEYS
+//     (usage-telemetry.ts) so a producer cannot spoof them; only this
+//     server-side path may set them.
+//   - Derivation is deterministic for a given bundled snapshot, so
+//     idempotent replays of the same event derive the same value. The
+//     snapshot's fetch timestamp is recorded per event so a later pricing
+//     refresh is distinguishable.
+//
+// Scope: only metricType="usage" events whose model resolves in the LiteLLM
+// snapshot.
+//   - Canonical path (UM-1592): when ingest stamped canonical `_ai*` tokens
+//     (from the shared-contract `ai` block or the legacy-key mapping in
+//     ai-usage-metadata.ts), every bucket is priced at its own rate, 1-hour
+//     cache writes included, by `_aiModelServed`, then `_aiModelRequested`,
+//     then keyRef.  Reasoning tokens are inside output and never priced twice.
+//   - Fallback: unit="token" events with a keyRef.  When the producer supplies
+//     a metadata.tokenType (input/output/cacheRead/cacheCreation, plus the 1h
+//     cache write names cacheCreation1h / cacheWrite1h, or cacheCreation with
+//     metadata.cacheTtl = "1h") the matching rate is used; otherwise the INPUT
+//     rate is used as a floor and the event is flagged
+//     `_derivedCostIncomplete` (output-side tokens usually cost more, so the
+//     floor under-estimates — never over).
+
+import {
+  canonicalTokenType,
+  deriveTokenCostUsd,
+  getModelPricing,
+  isOneHourCacheTtl,
+  PRICING_SNAPSHOT_META,
+} from "./model-pricing";
+import { appSettings } from "@/lib/app-settings";
+import { readCanonicalAiModelCandidates, readCanonicalAiTokens } from "@/lib/ai-usage-metadata";
+
+export const DERIVED_COST_METADATA_KEYS = [
+  "_derivedCostUsd",
+  "_derivedCostPricingKey",
+  "_derivedCostSnapshot",
+  "_derivedCostIncomplete",
+] as const;
+
+export function ingestCostDerivationEnabled(): boolean {
+  const raw = appSettings.get("INGEST_COST_DERIVATION_ENABLED")?.trim().toLowerCase();
+  return raw === "true" || raw === "1" || raw === "yes";
+}
+
+/** Minimal event shape the derivation reads (satisfied by
+ * ParsedUsageTelemetryEvent and by the route's persistence-event mapping). */
+export interface CostDerivationEvent {
+  metricType: string;
+  unit?: string;
+  quantity?: number;
+  costUsd?: number;
+  keyRef?: string;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+export interface DerivedCostEstimate {
+  costUsd: number;
+  pricingKey: string;
+  /** True when the estimate is a floor (unknown token mix) or the catalog
+   * lacks a rate for a token type that was used. */
+  incomplete: boolean;
+}
+
+export function deriveEventCostEstimate(
+  event: CostDerivationEvent
+): DerivedCostEstimate | null {
+  if (event.costUsd != null) return null;
+  if (event.metricType !== "usage") return null;
+
+  const canonicalTokens = readCanonicalAiTokens(event.metadata);
+  if (canonicalTokens) {
+    const breakdown = {
+      input: canonicalTokens.input,
+      output: canonicalTokens.output,
+      cacheRead: canonicalTokens.cacheRead,
+      cacheCreation: canonicalTokens.cacheWrite5m,
+      cacheCreation1h: canonicalTokens.cacheWrite1h,
+    };
+    const billed = Object.values(breakdown).reduce<number>((sum, value) => sum + (value ?? 0), 0);
+    if (billed <= 0) return null;
+    // Served model first, then requested, then keyRef:  a served id the
+    // catalog does not know must not hide a priceable requested model.
+    const candidates = readCanonicalAiModelCandidates(event.metadata);
+    if (event.keyRef && !candidates.includes(event.keyRef)) candidates.push(event.keyRef);
+    let resolved: ReturnType<typeof getModelPricing> = null;
+    for (const candidate of candidates) {
+      resolved = getModelPricing(candidate);
+      if (resolved) break;
+    }
+    if (!resolved) return null;
+    const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
+    return {
+      costUsd: derived.costUsd,
+      pricingKey: resolved.key,
+      incomplete: !derived.complete,
+    };
+  }
+
+  if (event.unit !== "token") return null;
+  const quantity = event.quantity;
+  if (quantity == null || !Number.isFinite(quantity) || quantity <= 0) return null;
+  if (!event.keyRef) return null;
+  const resolved = getModelPricing(event.keyRef);
+  if (!resolved) return null;
+
+  const rawType = event.metadata?.tokenType;
+  let tokenType =
+    typeof rawType === "string" ? canonicalTokenType(rawType) ?? undefined : undefined;
+  if (
+    tokenType === "cacheCreation" &&
+    (isOneHourCacheTtl(event.metadata?.cacheTtl) || isOneHourCacheTtl(event.metadata?.ttl))
+  ) {
+    tokenType = "cacheCreation1h";
+  }
+  const breakdown = tokenType ? { [tokenType]: quantity } : { input: quantity };
+  const derived = deriveTokenCostUsd(resolved.pricing, breakdown);
+  return {
+    costUsd: derived.costUsd,
+    pricingKey: resolved.key,
+    incomplete: !derived.complete || !tokenType,
+  };
+}
+
+/**
+ * Derives and stamps cost estimates onto events IN PLACE (metadata only).
+ * Returns the number of events that received an estimate. No-op when the
+ * flag is disabled.
+ */
+export function applyIngestCostDerivation(events: CostDerivationEvent[]): number {
+  if (!ingestCostDerivationEnabled()) return 0;
+  let stamped = 0;
+  for (const event of events) {
+    const estimate = deriveEventCostEstimate(event);
+    if (!estimate) continue;
+    event.metadata = {
+      ...(event.metadata ?? {}),
+      _derivedCostUsd: estimate.costUsd,
+      _derivedCostPricingKey: estimate.pricingKey,
+      _derivedCostSnapshot: PRICING_SNAPSHOT_META.fetchedAt,
+      ...(estimate.incomplete ? { _derivedCostIncomplete: true } : {}),
+    };
+    stamped += 1;
+  }
+  return stamped;
+}

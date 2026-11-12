@@ -74,9 +74,63 @@ describe("parseSubscriptionCreateInput — knobEnv", () => {
     );
   });
 
+  it("rejects prototype-pollution and non-env-safe knob names (CodeQL #1)", () => {
+    // Object-literal `__proto__` does not create an enumerable own key; use JSON.
+    expect(() =>
+      parseSubscriptionCreateInput({
+        ...baseBody,
+        knobEnv: JSON.parse('{"__proto__":"x"}') as Record<string, string>,
+      })
+    ).toThrowError(/safe env-var name/);
+    expect(() =>
+      parseSubscriptionCreateInput({ ...baseBody, knobEnv: { "evil-key": "x" } })
+    ).toThrowError(/safe env-var name/);
+  });
+
   it("rejects a non-object primitive", () => {
     expect(() => parseSubscriptionCreateInput({ ...baseBody, knobEnv: "nope" })).toThrowError(
       /knobEnv must be a JSON object/
+    );
+  });
+});
+
+describe("autoRenew — strict boolean validation", () => {
+  it("defaults autoRenew to true when omitted on create", () => {
+    expect(parseSubscriptionCreateInput(baseBody).autoRenew).toBe(true);
+  });
+
+  it("accepts explicit true/false booleans on create", () => {
+    expect(parseSubscriptionCreateInput({ ...baseBody, autoRenew: true }).autoRenew).toBe(true);
+    expect(parseSubscriptionCreateInput({ ...baseBody, autoRenew: false }).autoRenew).toBe(false);
+  });
+
+  it("rejects the truthy string 'false' instead of silently coercing it to true", () => {
+    expect(() => parseSubscriptionCreateInput({ ...baseBody, autoRenew: "false" })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+  });
+
+  it("rejects other truthy non-boolean values on create (number, object, array)", () => {
+    expect(() => parseSubscriptionCreateInput({ ...baseBody, autoRenew: 1 })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+    expect(() => parseSubscriptionCreateInput({ ...baseBody, autoRenew: {} })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+    expect(() => parseSubscriptionCreateInput({ ...baseBody, autoRenew: [] })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+  });
+
+  it("only sets autoRenew on update when present, and requires a real boolean", () => {
+    expect(parseSubscriptionUpdateInput({}).autoRenew).toBeUndefined();
+    expect(parseSubscriptionUpdateInput({ autoRenew: true }).autoRenew).toBe(true);
+    expect(parseSubscriptionUpdateInput({ autoRenew: false }).autoRenew).toBe(false);
+    expect(() => parseSubscriptionUpdateInput({ autoRenew: "false" })).toThrowError(
+      /autoRenew must be a boolean/
+    );
+    expect(() => parseSubscriptionUpdateInput({ autoRenew: 0 })).toThrowError(
+      /autoRenew must be a boolean/
     );
   });
 });

@@ -1,15 +1,21 @@
 import { decrypt } from "@/lib/crypto";
 import {
-  decryptProviderSecretConfig,
   mergeProviderConfig,
+  providerConfigForServer,
   splitProviderConfig,
 } from "@/lib/provider-secret-config";
+import { configurationError, unsupportedError, blindProviderResult } from "./helpers";
+import type { AdapterInvocationContext } from "./helpers";
 import type { Provider } from "@prisma/client";
+import type { BuiltInProviderName } from "@/lib/provider-definitions";
+import { canonicalProviderKey } from "@/lib/provider-identity";
+import { isDecommissionedProviderName } from "@/lib/provider-definitions";
 import type { UsageResult } from "./openai";
 
 type AdapterFn = (
   apiKey: string,
-  config?: Record<string, unknown>
+  config?: Record<string, unknown>,
+  context?: AdapterInvocationContext
 ) => Promise<UsageResult>;
 
 const adapters: Record<string, AdapterFn> = {};
@@ -27,19 +33,18 @@ async function loadAdapters() {
     import("./deepseek"),
     import("./xai"),
     import("./mistral"),
+    import("./openrouter"),
     import("./llamaindex"),
     import("./fmp"),
     import("./finnhub"),
     import("./alphavantage"),
-    import("./tradier"),
     import("./marketstack"),
-    import("./intrinio"),
     import("./tiingo"),
     import("./twelvedata"),
     import("./fintech_studios"),
     import("./massive"),
     import("./fred"),
-    import("./voyage"),
+    import("./unusualwhales"),
     import("./sentry"),
     import("./langfuse"),
     import("./twilio"),
@@ -47,93 +52,104 @@ async function loadAdapters() {
     import("./pushover"),
     import("./apify"),
     import("./stripe"),
-    import("./robinhood"),
-    import("./alpaca"),
-    import("./agent-sync-relay"),
+    import("./simple-tools-relay"),
     import("./hetzner"),
+    import("./backblaze"),
     import("./github"),
-    import("./vercel"),
     import("./render"),
+    import("./oracle"),
+    import("./coolify"),
+    import("./deno"),
+    import("./namecheap"),
   ]);
 
   const [
     openai, anthropic, googleAi, pinecone, cloudflare, custom,
-    deepseek, xai, mistral, llamaindex,
-    fmp, finnhub, alphavantage, tradier, marketstack, intrinio, tiingo, twelvedata, fintech_studios, massive, fred,
-    voyage,
+    deepseek, xai, mistral, openrouter, llamaindex,
+    fmp, finnhub, alphavantage, marketstack, tiingo, twelvedata, fintech_studios, massive, fred,
+    unusualwhales,
     sentry, langfuse,
     twilio, resend, pushover,
     apify,
     stripe,
-    robinhood, alpaca,
-    agentSyncRelay,
+    simpleToolsRelay,
     hetzner,
+    backblaze,
     github,
-    vercel,
     render,
+    oracle,
+    coolify,
+    deno,
+    namecheap,
   ] = modules;
 
-  // LLM/AI
-  adapters["openai"] = openai.fetchUsage;
-  adapters["anthropic"] = anthropic.fetchUsage;
-  adapters["google-ai"] = googleAi.fetchUsage;
+  // Active built-ins are loaded into the poll registry. Retired and dormant
+  // adapter implementations remain in source for historical context only.
+  const builtInAdapters: Partial<Record<BuiltInProviderName, AdapterFn>> = {
+    openai: openai.fetchUsage,
+    anthropic: anthropic.fetchUsage,
+    "google-ai": googleAi.fetchUsage,
+    deepseek: deepseek.fetchUsage,
+    xai: xai.fetchUsage,
+    mistral: mistral.fetchUsage,
+    openrouter: openrouter.fetchUsage,
+    github: github.fetchUsage,
+    render: render.fetchUsage,
+    pinecone: pinecone.fetchUsage,
+    voyage: async () =>
+      blindProviderResult(
+        "voyage",
+        "No documented non-billable usage or billing API exists; no inference probe was sent."
+      ),
+    roic: async () =>
+      blindProviderResult(
+        "roic",
+        "No documented non-billable ROIC.ai usage/billing API is wired; track via Subscription or push telemetry."
+      ),
+    fmp: fmp.fetchUsage,
+    finnhub: finnhub.fetchUsage,
+    alphavantage: alphavantage.fetchUsage,
+    marketstack: marketstack.fetchUsage,
+    tiingo: tiingo.fetchUsage,
+    twelvedata: twelvedata.fetchUsage,
+    "fintech-studios": fintech_studios.fetchUsage,
+    massive: massive.fetchUsage,
+    fred: fred.fetchUsage,
+    "quiver-quant": async () =>
+      blindProviderResult(
+        "quiver-quant",
+        "Quiver Quantitative does not expose a billing or usage quota API endpoint. Usage tracked via dashboard."
+      ),
+    "unusual-whales": unusualwhales.fetchUsage,
+    sentry: sentry.fetchUsage,
+    langfuse: langfuse.fetchUsage,
+    twilio: twilio.fetchUsage,
+    resend: resend.fetchUsage,
+    pushover: pushover.fetchUsage,
+    cloudflare: cloudflare.fetchUsage,
+    hetzner: hetzner.fetchUsage,
+    backblaze: backblaze.fetchUsage,
+    apify: apify.fetchUsage,
+    llamaindex: llamaindex.fetchUsage,
+    stripe: stripe.fetchUsage,
+    namecheap: namecheap.fetchUsage,
+    oracle: oracle.fetchUsage,
+    coolify: coolify.fetchUsage,
+    deno: deno.fetchUsage,
+  };
+  Object.assign(adapters, builtInAdapters);
+
+  // Historical aliases retained for existing rows.
   adapters["google_ai"] = googleAi.fetchUsage;
   adapters["googleai"] = googleAi.fetchUsage;
   adapters["google"] = googleAi.fetchUsage;
-  adapters["deepseek"] = deepseek.fetchUsage;
-  adapters["xai"] = xai.fetchUsage;
-  adapters["mistral"] = mistral.fetchUsage;
-  adapters["llamaindex"] = llamaindex.fetchUsage;
-
-  // Vector DB
-  adapters["pinecone"] = pinecone.fetchUsage;
-  adapters["voyage"] = voyage.fetchUsage;
-
-  // Market Data
-  adapters["fmp"] = fmp.fetchUsage;
-  adapters["finnhub"] = finnhub.fetchUsage;
-  adapters["alphavantage"] = alphavantage.fetchUsage;
-  adapters["tradier"] = tradier.fetchUsage;
-  adapters["marketstack"] = marketstack.fetchUsage;
-  adapters["intrinio"] = intrinio.fetchUsage;
-  adapters["tiingo"] = tiingo.fetchUsage;
-  adapters["twelvedata"] = twelvedata.fetchUsage;
-  adapters["fintech-studios"] = fintech_studios.fetchUsage;
-  adapters["massive"] = massive.fetchUsage;
-  adapters["fred"] = fred.fetchUsage;
-
-  // Observability
-  adapters["sentry"] = sentry.fetchUsage;
-  adapters["langfuse"] = langfuse.fetchUsage;
-
-  // Notifications
-  adapters["twilio"] = twilio.fetchUsage;
-  adapters["resend"] = resend.fetchUsage;
-  adapters["pushover"] = pushover.fetchUsage;
-
-  // Infrastructure
-  adapters["cloudflare"] = cloudflare.fetchUsage;
-  adapters["hetzner"] = hetzner.fetchUsage;
-  adapters["github"] = github.fetchUsage;
-  adapters["vercel"] = vercel.fetchUsage;
-  adapters["render"] = render.fetchUsage;
-
-  // Data
-  adapters["apify"] = apify.fetchUsage;
-
-  // Payments
-  adapters["stripe"] = stripe.fetchUsage;
-
-  // Brokerage
-  adapters["robinhood"] = robinhood.fetchUsage;
-  adapters["alpaca"] = alpaca.fetchUsage;
 
   // Custom
   adapters["custom"] = custom.fetchUsage;
 
-  // Agent Sync Relay (monitoring)
-  adapters["agent-sync-relay"] = agentSyncRelay.fetchUsage;
-  adapters["agent_sync_relay"] = agentSyncRelay.fetchUsage;
+  // Simple Tools Relay (monitoring)
+  adapters["simple-tools-relay"] = simpleToolsRelay.fetchUsage;
+  adapters["simple_tools_relay"] = simpleToolsRelay.fetchUsage;
 }
 
 export async function fetchProviderUsage(
@@ -141,20 +157,83 @@ export async function fetchProviderUsage(
 ): Promise<UsageResult> {
   await loadAdapters();
 
-  const adapter = adapters[provider.name.toLowerCase()] ?? adapters["custom"];
-  if (!adapter) {
-    throw new Error(`No adapter found for provider: ${provider.name}`);
+  if (isDecommissionedProviderName(provider.name)) {
+    unsupportedError(
+      `${provider.name}: this built-in provider is dormant or retired and is not polled`
+    );
   }
 
-  const apiKey = provider.apiKey ? decrypt(provider.apiKey) : "";
-  const storedConfig =
-    (provider.config as Record<string, unknown> | null) ?? {};
-  const legacySplit = splitProviderConfig(storedConfig);
-  const encryptedSecrets = decryptProviderSecretConfig(provider.secretConfig);
-  const config = mergeProviderConfig(
-    legacySplit.publicConfig,
-    mergeProviderConfig(legacySplit.secretConfig, encryptedSecrets)
-  );
+  // Provider type is the credential-routing boundary. A custom provider may
+  // deliberately use the same display slug as a built-in, but its credential
+  // must still go only to its configured custom endpoint. Conversely, generic
+  // manual rows and unknown built-ins must fail closed instead of falling back
+  // to an adapter selected only by name.
+  const providerType = provider.type.trim().toLowerCase();
+  const providerName = provider.name.trim().toLowerCase();
+  let adapter: AdapterFn;
+  let isGeminiAdapter = false;
+
+  if (providerType === "custom") {
+    adapter = adapters["custom"];
+  } else if (providerType === "generic" || providerType === "push") {
+    unsupportedError(
+      `${provider.name}: ${providerType} providers are manual/push-only and have no poll adapter`
+    );
+  } else if (providerType === "builtin") {
+    // Historical Gemini labels participate in accounting identity resolution,
+    // so they must reach the same poll adapter too. Keep this canonicalization
+    // narrow: custom providers still route only by type and unrelated aliases
+    // cannot silently acquire a built-in credential destination.
+    const adapterName =
+      canonicalProviderKey(providerName) === "google-ai"
+        ? "google-ai"
+        : providerName === "cloudflare" || providerName.startsWith("cloudflare-")
+          ? "cloudflare"
+          : providerName;
+    isGeminiAdapter = adapterName === "google-ai";
+    const builtinAdapter =
+      providerName === "custom" ? undefined : adapters[adapterName];
+    if (!builtinAdapter) {
+      configurationError(`No built-in adapter found for provider: ${provider.name}`);
+    }
+    adapter = builtinAdapter;
+  } else {
+    configurationError(`Unsupported provider type: ${provider.type}`);
+  }
+
+  let apiKey = "";
+  let apiKeyReadable = true;
+  if (provider.apiKey) {
+    try {
+      apiKey = decrypt(provider.apiKey);
+    } catch (error) {
+      if (!isGeminiAdapter) throw error;
+      apiKeyReadable = false;
+    }
+  }
+
+  let config: Record<string, unknown>;
+  let secretConfigReadable = true;
+  try {
+    config = providerConfigForServer(provider.config, provider.secretConfig);
+  } catch (error) {
+    if (!isGeminiAdapter) throw error;
+    secretConfigReadable = false;
+    // Preserve readable public and legacy configuration so Gemini key
+    // validation can still run. The Google adapter receives the unreadable
+    // envelope state out-of-band and will not attempt billing with it.
+    const split = splitProviderConfig(provider.config);
+    config = mergeProviderConfig(split.publicConfig, split.secretConfig);
+  }
+
+  if (isGeminiAdapter) {
+    return adapter(apiKey, config, {
+      apiKeyConfigured: provider.apiKey != null,
+      apiKeyReadable,
+      secretConfigConfigured: provider.secretConfig != null,
+      secretConfigReadable,
+    });
+  }
 
   return adapter(apiKey, config);
 }

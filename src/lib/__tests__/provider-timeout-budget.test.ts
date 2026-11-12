@@ -10,14 +10,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the real 90s budget.
 
 const findMany = vi.fn();
+const snapshotGroupBy = vi.fn();
+const snapshotFindMany = vi.fn();
+const queryRaw = vi.fn();
 const create = vi.fn();
 const fetchProviderUsage = vi.fn();
 const runUsageMaintenance = vi.fn();
+const bootstrapStGeminiCredentialToInfisical = vi.fn();
+const syncProviderCredentialsFromInfisical = vi.fn();
+const ensureRoicProviderSeeded = vi.fn();
+const ensureCloudflareFleetProvidersSeeded = vi.fn();
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    provider: { findMany: () => findMany(), create: vi.fn() },
-    usageSnapshot: { create: (args: unknown) => create(args) },
+    provider: { findMany: (args: unknown) => findMany(args), create: vi.fn() },
+    usageSnapshot: {
+      create: (args: unknown) => create(args),
+      groupBy: (args: unknown) => snapshotGroupBy(args),
+      findMany: (args: unknown) => snapshotFindMany(args),
+    },
+    $queryRaw: (args: unknown) => queryRaw(args),
     $transaction: (run: (tx: unknown) => unknown) =>
       run({ usageSnapshot: { create: (args: unknown) => create(args) } }),
   },
@@ -27,8 +39,37 @@ vi.mock("@/lib/adapters", () => ({
   fetchProviderUsage: (provider: unknown) => fetchProviderUsage(provider),
 }));
 
+vi.mock("@/lib/ensure-roic-provider", () => ({
+  ensureRoicProviderSeeded: () => ensureRoicProviderSeeded(),
+}));
+
+vi.mock("@/lib/ensure-cloudflare-fleet-providers", () => ({
+  ensureCloudflareFleetProvidersSeeded: () =>
+    ensureCloudflareFleetProvidersSeeded(),
+}));
+
 vi.mock("@/lib/usage-maintenance", () => ({
   runUsageMaintenance: () => runUsageMaintenance(),
+  isUsageMaintenanceHealthy: (result: {
+    subscriptionAdoption: {
+      degradedError: unknown;
+      cloudflareLegacyHandoff: string;
+    };
+    alerts: { deferredError: unknown; persistenceDegraded: unknown[] };
+  }) =>
+    result.subscriptionAdoption.degradedError === null &&
+    ["disabled", "handed_off", "already_managed"].includes(
+      result.subscriptionAdoption.cloudflareLegacyHandoff
+    ) &&
+    result.alerts.deferredError === null &&
+    result.alerts.persistenceDegraded.length === 0,
+}));
+
+vi.mock("@/lib/infisical-provider-sync", () => ({
+  bootstrapStGeminiCredentialToInfisical: () =>
+    bootstrapStGeminiCredentialToInfisical(),
+  syncProviderCredentialsFromInfisical: (options: unknown) =>
+    syncProviderCredentialsFromInfisical(options),
 }));
 
 function providerRow(name: string) {
@@ -36,8 +77,63 @@ function providerRow(name: string) {
     id: `id-${name}`,
     name,
     refreshIntervalMin: 60,
-    // no prior snapshots => always "due"
-    snapshots: [],
+    // no prior poll-snapshot marker => always "due"
+  };
+}
+
+// Stub the E4 marker pipeline (groupBy -> findMany ids -> json_extract) for a
+// provider whose latest poll snapshot is `fetchedAt`, with an optional
+// __apiUsageMonitor.partialFailure marker. `retryable: null` models a blob
+// with no marker at all.
+function stubLatestPollSnapshot(
+  providerId: string,
+  fetchedAt: Date,
+  marker: { version: number | null; code: string | null; status: number | null; retryable: number | null } = {
+    version: null,
+    code: null,
+    status: null,
+    retryable: null,
+  }
+) {
+  snapshotGroupBy.mockResolvedValueOnce([
+    { providerId, _max: { fetchedAt } },
+  ]);
+  snapshotFindMany.mockResolvedValueOnce([
+    { id: `snap-${providerId}`, providerId, fetchedAt },
+  ]);
+  queryRaw.mockResolvedValueOnce([{ id: `snap-${providerId}`, ...marker }]);
+}
+
+// A minimal maintenance result that isUsageMaintenanceHealthy accepts as
+// healthy, so tests below can isolate the provider-fetch-degraded signal
+// from maintenance health.
+function healthyMaintenanceResult() {
+  return {
+    subscriptionAdoption: {
+      examined: 0,
+      eligible: 0,
+      adopted: 0,
+      existing: 0,
+      ambiguous: 0,
+      reconciled: 0,
+      deactivated: 0,
+      raced: 0,
+      cloudflareLegacyHandoff: "disabled" as const,
+      degradedError: null,
+    },
+    subscriptions: { examined: 0, charged: 0, eventsWritten: 0, ambiguousPaused: 0 },
+    providerRenewals: { examined: 0, advanced: 0 },
+    retention: { skipped: true as const, reason: "interval" as const },
+    alerts: {
+      evaluatedProviders: 0,
+      activeAlerts: 0,
+      sent: 0,
+      resolved: 0,
+      skipped: 0,
+      errors: [],
+      persistenceDegraded: [],
+      deferredError: null,
+    },
   };
 }
 
@@ -45,16 +141,101 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
   beforeEach(() => {
     vi.resetModules();
     findMany.mockReset();
+    snapshotGroupBy.mockReset();
+    snapshotGroupBy.mockResolvedValue([]);
+    snapshotFindMany.mockReset();
+    snapshotFindMany.mockResolvedValue([]);
+    queryRaw.mockReset();
+    queryRaw.mockResolvedValue([]);
     create.mockReset();
     fetchProviderUsage.mockReset();
     runUsageMaintenance.mockReset();
+    ensureRoicProviderSeeded.mockReset();
+    ensureRoicProviderSeeded.mockResolvedValue(undefined);
+    ensureCloudflareFleetProvidersSeeded.mockReset();
+    ensureCloudflareFleetProvidersSeeded.mockResolvedValue(undefined);
+    bootstrapStGeminiCredentialToInfisical.mockReset();
+    bootstrapStGeminiCredentialToInfisical.mockResolvedValue({
+      enabled: false,
+      attempted: false,
+      providerId: "4a888d41-3988-4774-86d8-67d7aa14d7e2",
+      status: "disabled",
+    });
+    syncProviderCredentialsFromInfisical.mockReset();
+    syncProviderCredentialsFromInfisical.mockResolvedValue({
+      enabled: true,
+      configured: false,
+      sources: [],
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      missing: 0,
+      failed: 0,
+      suppressed: 0,
+    });
     process.env.ADAPTER_PROVIDER_TIMEOUT_MS = "5000";
     create.mockResolvedValue({ id: "snap" });
   });
 
+  it.each([
+    ["created", false],
+    ["already_present_same", false],
+    ["conflict", true],
+    ["ineligible", true],
+    ["error", true],
+    ["unconfigured", true],
+  ] as const)(
+    "runs a %s bootstrap before the normal pull with the expected ST Gemini safety gate",
+    async (status, suppressStGemini) => {
+      findMany.mockResolvedValue([]);
+      bootstrapStGeminiCredentialToInfisical.mockResolvedValue({
+        enabled: true,
+        attempted: status === "created",
+        providerId: "4a888d41-3988-4774-86d8-67d7aa14d7e2",
+        status,
+      });
+      const order: string[] = [];
+      bootstrapStGeminiCredentialToInfisical.mockImplementationOnce(async () => {
+        order.push("bootstrap");
+        return {
+          enabled: true,
+          attempted: status === "created",
+          providerId: "4a888d41-3988-4774-86d8-67d7aa14d7e2",
+          status,
+        };
+      });
+      syncProviderCredentialsFromInfisical.mockImplementationOnce(
+        async () => {
+          order.push("pull");
+          return {
+            enabled: true,
+            configured: true,
+            sources: [],
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            missing: 0,
+            failed: 0,
+            suppressed: suppressStGemini ? 1 : 0,
+          };
+        }
+      );
+
+      const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+      const result = await fetchAllDueProviders();
+
+      expect(order).toEqual(["bootstrap", "pull"]);
+      expect(syncProviderCredentialsFromInfisical).toHaveBeenCalledWith({
+        suppressStGemini,
+      });
+      expect(result.credentialBootstrap).toMatchObject({ status });
+    }
+  );
+
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.ADAPTER_PROVIDER_TIMEOUT_MS;
+    delete process.env.PROVIDER_FETCH_TICK_BUDGET_MS;
   });
 
   it("counts a hung provider as a timeout failure and still processes the others", async () => {
@@ -101,6 +282,178 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
     ]);
   });
 
+  it("E4: never selects rawData blobs when loading providers or poll markers", async () => {
+    const now = new Date();
+    findMany.mockResolvedValue([providerRow("marked")]);
+    stubLatestPollSnapshot("id-marked", new Date(now.getTime() - 30 * 60 * 1000));
+    fetchProviderUsage.mockResolvedValue({
+      balance: 1,
+      totalCost: null,
+      totalRequests: null,
+      credits: null,
+      rawData: {},
+    });
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    await fetchAllDueProviders();
+
+    // The provider query no longer includes the per-provider latest-snapshot
+    // rawData blob at all.
+    expect(findMany).toHaveBeenCalledWith({ where: { isActive: true } });
+    // The marker pipeline selects only scalar columns; rawData is only ever
+    // touched inside SQLite via json_extract in the $queryRaw batch.
+    expect(snapshotFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: { id: true, providerId: true, fetchedAt: true },
+      })
+    );
+    const markerQuery = queryRaw.mock.calls[0]?.[0];
+    expect(JSON.stringify(markerQuery)).toContain("json_extract");
+  });
+
+  it("E5: stops starting new providers past the total-tick budget and marks them budget-skipped", async () => {
+    vi.useFakeTimers();
+    process.env.PROVIDER_FETCH_TICK_BUDGET_MS = "1000";
+    findMany.mockResolvedValue([
+      providerRow("one"),
+      providerRow("two"),
+      providerRow("three"),
+      providerRow("four"),
+    ]);
+    // Each fetch consumes 800ms of tick time; the 1s budget therefore admits
+    // exactly two fetches before the remaining providers are budget-skipped.
+    fetchProviderUsage.mockImplementation(async () => {
+      vi.advanceTimersByTime(800);
+      return {
+        balance: 1,
+        totalCost: null,
+        totalRequests: null,
+        credits: null,
+        rawData: {},
+      };
+    });
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 4,
+      successes: 2,
+      failures: 0,
+      skipped: 2,
+      tickBudgetExceeded: true,
+    });
+    expect(fetchProviderUsage).toHaveBeenCalledTimes(2);
+    expect(result.outcomes.map((outcome) => outcome.status)).toEqual([
+      "success",
+      "success",
+      "skipped",
+      "skipped",
+    ]);
+    expect(result.outcomes.slice(2)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "three", skipReason: "tick_budget" }),
+        expect.objectContaining({ name: "four", skipReason: "tick_budget" }),
+      ])
+    );
+  });
+
+  it("E5: reports tickBudgetExceeded=false when the tick fits inside the budget", async () => {
+    findMany.mockResolvedValue([providerRow("only")]);
+    fetchProviderUsage.mockResolvedValue({
+      balance: 1,
+      totalCost: null,
+      totalRequests: null,
+      credits: null,
+      rawData: {},
+    });
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result.tickBudgetExceeded).toBe(false);
+    expect(result.successes).toBe(1);
+  });
+
+  it("E5: surfaces a budget-exhausted tick through providerFetchDegraded", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 3,
+      successes: 1,
+      failures: 0,
+      skipped: 2,
+      errors: [],
+      outcomes: [
+        { providerId: "a", name: "a", status: "success" as const, durationMs: 1 },
+        {
+          providerId: "b",
+          name: "b",
+          status: "skipped" as const,
+          durationMs: 0,
+          skipReason: "tick_budget" as const,
+        },
+        {
+          providerId: "c",
+          name: "c",
+          status: "skipped" as const,
+          durationMs: 0,
+          skipReason: "tick_budget" as const,
+        },
+      ],
+      tickBudgetExceeded: true,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickStarted,
+      markTickCompleted,
+    });
+
+    // 0 failures / 1 attempted would NOT be degraded on the failure-ratio
+    // path alone - the budget exhaustion itself is the degradation signal.
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 3,
+      successes: 1,
+      failures: 0,
+      skipped: 2,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("classifies an intentionally unsupported push-only poll as skipped", async () => {
+    findMany.mockResolvedValue([providerRow("push-only")]);
+    const { AdapterError } = await import("@/lib/adapters/helpers");
+    fetchProviderUsage.mockRejectedValue(
+      new AdapterError("Use pushed telemetry or a manual plan.", {
+        code: "UNSUPPORTED",
+      })
+    );
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 0,
+      failures: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({
+        name: "push-only",
+        status: "skipped",
+        errorCode: "UNSUPPORTED",
+      }),
+    ]);
+  });
+
   it("rolls back a late result after a newer attempt supersedes it", async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
     let resolveSecond: ((value: unknown) => void) | undefined;
@@ -132,6 +485,579 @@ describe("fetchAllDueProviders per-provider timeout budget", () => {
       expect.objectContaining({
         data: expect.objectContaining({ totalCost: 10 }),
       })
+    );
+  });
+
+  it("marks the first handoff-only maintenance failure unhealthy and exposes only its bounded reason", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 2,
+      successes: 1,
+      failures: 1,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => ({
+      subscriptionAdoption: {
+        examined: 0,
+        eligible: 0,
+        adopted: 0,
+        existing: 0,
+        ambiguous: 0,
+        reconciled: 0,
+        deactivated: 0,
+        raced: 0,
+        cloudflareLegacyHandoff: "charge_proof_missing" as const,
+        unsafeDiagnosticThatMustNotEscape: {
+          targetId: "must-not-leak-target-id",
+          rawEnv: "must-not-leak-env-value",
+          billingPayload: "must-not-leak-billing-payload",
+          providerError: "must-not-leak-provider-error",
+        },
+        degradedError: null,
+      },
+      subscriptions: { examined: 0, charged: 0, eventsWritten: 0, ambiguousPaused: 0 },
+      providerRenewals: { examined: 0, advanced: 0 },
+      retention: { skipped: true as const, reason: "interval" as const },
+      alerts: {
+        evaluatedProviders: 2,
+        activeAlerts: 0,
+        sent: 0,
+        resolved: 0,
+        skipped: 0,
+        errors: [],
+        persistenceDegraded: [],
+        deferredError: null,
+      },
+    }));
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickStarted,
+      markTickCompleted,
+    });
+
+    expect(markTickStarted).toHaveBeenCalledOnce();
+    // 1 failure / 2 attempted = 0.5, meeting the default
+    // PROVIDER_FETCH_DEGRADED_FAILURE_RATIO - this tick is also
+    // provider-fetch degraded, independently of maintenanceHealthy.
+    expect(markTickCompleted).toHaveBeenCalledWith(false, {
+      total: 2,
+      successes: 1,
+      failures: 1,
+      skipped: 0,
+      maintenanceHealthy: false,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "charge_proof_missing",
+    });
+    expect(JSON.stringify(markTickCompleted.mock.calls)).not.toContain(
+      "must-not-leak"
+    );
+  });
+
+  it("marks a completed scheduler tick unhealthy on channel-state persistence degradation", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => ({
+      subscriptionAdoption: {
+        examined: 0,
+        eligible: 0,
+        adopted: 0,
+        existing: 0,
+        ambiguous: 0,
+        reconciled: 0,
+        deactivated: 0,
+        raced: 0,
+        cloudflareLegacyHandoff: "disabled" as const,
+        degradedError: null,
+      },
+      subscriptions: { examined: 0, charged: 0, eventsWritten: 0, ambiguousPaused: 0 },
+      providerRenewals: { examined: 0, advanced: 0 },
+      retention: { skipped: true as const, reason: "interval" as const },
+      alerts: {
+        evaluatedProviders: 1,
+        activeAlerts: 1,
+        sent: 0,
+        resolved: 0,
+        skipped: 0,
+        errors: [],
+        persistenceDegraded: [
+          {
+            stage: "channel_state" as const,
+            operation: "trigger_success_outcome" as const,
+            code: "P1008" as const,
+            model: "ProviderAlertChannelDelivery" as const,
+            providerId: "id-one",
+            alertCode: "balance_low",
+            channel: "webhook" as const,
+            message: "busy",
+          },
+        ],
+        deferredError: null,
+      },
+    }));
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickStarted,
+      markTickCompleted,
+    });
+
+    expect(markTickCompleted).toHaveBeenCalledWith(false, {
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      maintenanceHealthy: false,
+      providerFetchDegraded: false,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("persists a safe partial snapshot before surfacing postPersistError", async () => {
+    const { AdapterError } = await import("@/lib/adapters/helpers");
+    const postPersistError = new AdapterError(
+      "Billing sync failed: secret-that-must-not-persist",
+      {
+        code: "HTTP_ERROR",
+        status: 503,
+        retryable: true,
+      }
+    );
+    fetchProviderUsage.mockResolvedValue({
+      balance: null,
+      totalCost: null,
+      totalRequests: null,
+      credits: 90,
+      rawData: {
+        keyValidation: { outcome: "valid", status: 200 },
+        billing: { configured: true, status: "error" },
+      },
+      postPersistError,
+    });
+
+    const { recordProviderUsage } = await import("@/lib/usage-recorder");
+
+    await expect(
+      recordProviderUsage(providerRow("partial") as never)
+    ).rejects.toBe(postPersistError);
+    expect(create).toHaveBeenCalledTimes(1);
+    const write = create.mock.calls[0]?.[0]?.data;
+    expect(write).toMatchObject({
+      providerId: "id-partial",
+      totalCost: null,
+      credits: 90,
+    });
+    expect(write.rawData).toMatchObject({
+      keyValidation: { outcome: "valid", status: 200 },
+      billing: { configured: true, status: "error" },
+      __apiUsageMonitor: expect.objectContaining({
+        partialFailure: expect.objectContaining({
+          code: "HTTP_ERROR",
+          status: 503,
+          retryable: true,
+        }),
+      }),
+    });
+    const persistedRawData = create.mock.calls[0]?.[0]?.data?.rawData;
+    expect(JSON.stringify(persistedRawData)).not.toContain(
+      "secret-that-must-not-persist"
+    );
+    expect(JSON.stringify(persistedRawData)).not.toContain("Billing sync failed");
+  });
+
+  it("retries a fresh retryable partial snapshot on the next scheduler tick", async () => {
+    const { AdapterError } = await import("@/lib/adapters/helpers");
+    fetchProviderUsage.mockResolvedValueOnce({
+      balance: null,
+      totalCost: null,
+      totalRequests: null,
+      credits: 90,
+      rawData: { billing: { configured: true, status: "error" } },
+      postPersistError: new AdapterError("Temporary billing outage", {
+        code: "HTTP_ERROR",
+        status: 503,
+        retryable: true,
+      }),
+    });
+
+    const { fetchAllDueProviders, recordProviderUsage } = await import(
+      "@/lib/usage-recorder"
+    );
+    await expect(
+      recordProviderUsage(providerRow("partial-retry") as never)
+    ).rejects.toMatchObject({ code: "HTTP_ERROR", retryable: true });
+
+    const firstWrite = create.mock.calls[0]?.[0]?.data;
+    findMany.mockResolvedValue([providerRow("partial-retry")]);
+    // E4: the marker now arrives through groupBy + id resolution + json_extract
+    // (never the rawData blob). retryable=1 is the extracted JSON boolean true.
+    stubLatestPollSnapshot("id-partial-retry", firstWrite.fetchedAt, {
+      version: 1,
+      code: "HTTP_ERROR",
+      status: 503,
+      retryable: 1,
+    });
+    fetchProviderUsage.mockResolvedValueOnce({
+      balance: 1,
+      totalCost: 2,
+      totalRequests: 3,
+      credits: 4,
+      rawData: {},
+    });
+    create.mockClear();
+
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+    });
+    expect(fetchProviderUsage).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(snapshotGroupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ["providerId"],
+        where: expect.objectContaining({
+          providerId: { in: ["id-partial-retry"] },
+          rawData: { not: expect.anything() },
+        }),
+      })
+    );
+    expect(snapshotFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: { id: true, providerId: true, fetchedAt: true },
+      })
+    );
+    expect(queryRaw).toHaveBeenCalled();
+  });
+
+  it("does not let a fresh pushed snapshot hide a stale poll", async () => {
+    const now = new Date();
+    findMany.mockResolvedValue([providerRow("stale-poll")]);
+    stubLatestPollSnapshot(
+      "id-stale-poll",
+      new Date(now.getTime() - 61 * 60 * 1000)
+    );
+    fetchProviderUsage.mockResolvedValueOnce({
+      balance: 1,
+      totalCost: 2,
+      totalRequests: 3,
+      credits: 4,
+      rawData: {},
+    });
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+    });
+    expect(fetchProviderUsage).toHaveBeenCalledOnce();
+  });
+
+  it("uses a fresh poll behind a pushed snapshot for interval skipping", async () => {
+    const now = new Date();
+    findMany.mockResolvedValue([providerRow("fresh-poll")]);
+    stubLatestPollSnapshot(
+      "id-fresh-poll",
+      new Date(now.getTime() - 30 * 60 * 1000)
+    );
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 0,
+      failures: 0,
+      skipped: 1,
+    });
+    expect(fetchProviderUsage).not.toHaveBeenCalled();
+  });
+
+  it("respects the normal interval after a nonretryable partial snapshot", async () => {
+    findMany.mockResolvedValue([providerRow("partial-terminal")]);
+    stubLatestPollSnapshot("id-partial-terminal", new Date(), {
+      version: 1,
+      code: "HTTP_ERROR",
+      status: 404,
+      retryable: 0,
+    });
+
+    const { fetchAllDueProviders } = await import("@/lib/usage-recorder");
+    const result = await fetchAllDueProviders();
+
+    expect(result).toMatchObject({
+      total: 1,
+      successes: 0,
+      failures: 0,
+      skipped: 1,
+    });
+    expect(fetchProviderUsage).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("strips adapter-supplied retry metadata instead of trusting it", async () => {
+    fetchProviderUsage.mockResolvedValue({
+      balance: null,
+      totalCost: null,
+      totalRequests: null,
+      credits: null,
+      rawData: {
+        providerField: "preserved",
+        __apiUsageMonitor: {
+          version: 1,
+          partialFailure: {
+            code: "HTTP_ERROR",
+            status: 503,
+            retryable: true,
+          },
+        },
+      },
+    });
+
+    const { recordProviderUsage } = await import("@/lib/usage-recorder");
+    await recordProviderUsage(providerRow("spoof") as never);
+
+    // Wave H / E10: allowlisted field retained; spoofed retry metadata must not
+    // be trusted as a top-level rawData truth beyond the redacted bag.
+    const raw = create.mock.calls[0]?.[0]?.data?.rawData as Record<string, unknown>;
+    expect(raw).toMatchObject({ providerField: "preserved" });
+    expect(JSON.stringify(raw)).not.toContain("secret");
+  });
+
+  it("drops a provider result aborted while its database write is queued", async () => {
+    fetchProviderUsage.mockResolvedValue({
+      balance: 1,
+      totalCost: 2,
+      totalRequests: 3,
+      credits: null,
+      rawData: {},
+    });
+
+    const [{ recordProviderUsage }, { tryAcquireIngestAdmission }] = await Promise.all([
+      import("@/lib/usage-recorder"),
+      import("@/lib/ingest-admission"),
+    ]);
+    const releaseHttpWriter = tryAcquireIngestAdmission();
+    expect(releaseHttpWriter).not.toBeNull();
+
+    const controller = new AbortController();
+    const pending = recordProviderUsage(
+      providerRow("queued-abort") as never,
+      controller.signal
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    releaseHttpWriter?.();
+
+    await expect(pending).rejects.toMatchObject({ code: "SUPERSEDED" });
+    expect(create).not.toHaveBeenCalled();
+    const releaseAfterAbort = tryAcquireIngestAdmission();
+    expect(releaseAfterAbort).not.toBeNull();
+    releaseAfterAbort?.();
+  });
+
+  describe("isProviderFetchTickDegraded", () => {
+    afterEach(() => {
+      delete process.env.PROVIDER_FETCH_DEGRADED_FAILURE_RATIO;
+    });
+
+    it("is not degraded when nothing was attempted (all skipped)", async () => {
+      const { isProviderFetchTickDegraded } = await import("@/lib/usage-recorder");
+      expect(
+        isProviderFetchTickDegraded({ successes: 0, failures: 0 })
+      ).toBe(false);
+    });
+
+    it("hits the total-outage fast path even if the configured ratio is out of range", async () => {
+      process.env.PROVIDER_FETCH_DEGRADED_FAILURE_RATIO = "2"; // outside (0,1], ignored
+      const { isProviderFetchTickDegraded } = await import("@/lib/usage-recorder");
+      expect(
+        isProviderFetchTickDegraded({ successes: 0, failures: 1 })
+      ).toBe(true);
+    });
+
+    it("is degraded once the failure ratio meets the default 0.5 threshold", async () => {
+      const { isProviderFetchTickDegraded } = await import("@/lib/usage-recorder");
+      expect(isProviderFetchTickDegraded({ successes: 1, failures: 5 })).toBe(
+        true
+      ); // 5/6 attempted
+      expect(isProviderFetchTickDegraded({ successes: 1, failures: 1 })).toBe(
+        true
+      ); // 1/2 == 0.5
+      expect(isProviderFetchTickDegraded({ successes: 3, failures: 1 })).toBe(
+        false
+      ); // 1/4 < 0.5
+    });
+
+    it("honors a configured PROVIDER_FETCH_DEGRADED_FAILURE_RATIO", async () => {
+      process.env.PROVIDER_FETCH_DEGRADED_FAILURE_RATIO = "0.25";
+      const { isProviderFetchTickDegraded } = await import("@/lib/usage-recorder");
+      expect(isProviderFetchTickDegraded({ successes: 3, failures: 1 })).toBe(
+        true
+      ); // 1/4 == 0.25
+    });
+  });
+
+  it("marks a tick provider-fetch degraded via the total-outage fast path, independent of tick success", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 3,
+      successes: 0,
+      failures: 3,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickStarted,
+      markTickCompleted,
+    });
+
+    // maintenanceHealthy stays true (consecutiveFailures unchanged), but the
+    // summary still records a total provider-poll outage for readiness.
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 3,
+      successes: 0,
+      failures: 3,
+      skipped: 0,
+      maintenanceHealthy: true,
+      providerFetchDegraded: true,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("does not mark a skipped-only tick (nothing attempted) as provider-fetch degraded", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 3,
+      successes: 0,
+      failures: 0,
+      skipped: 3,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickStarted,
+      markTickCompleted,
+    });
+
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 3,
+      successes: 0,
+      failures: 0,
+      skipped: 3,
+      maintenanceHealthy: true,
+      providerFetchDegraded: false,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("keeps the tick healthy when the Cursor admin poller throws", async () => {
+    const markTickStarted = vi.fn();
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => {
+      throw new Error("cursor admin down");
+    });
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await expect(
+      runUsagePollingSchedulerTick({
+        fetchProviders,
+        runMaintenance,
+        markTickStarted,
+        markTickCompleted,
+        pollCursorAdmin,
+        cursorAdminEnabled: true,
+      })
+    ).resolves.toBeUndefined();
+
+    expect(pollCursorAdmin).toHaveBeenCalledOnce();
+    expect(markTickCompleted).toHaveBeenCalledWith(true, {
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      maintenanceHealthy: true,
+      providerFetchDegraded: false,
+      cloudflareLegacyHandoff: "disabled",
+    });
+  });
+
+  it("does not call the Cursor admin poller when it is left off", async () => {
+    const markTickCompleted = vi.fn();
+    const fetchProviders = vi.fn(async () => ({
+      total: 1,
+      successes: 1,
+      failures: 0,
+      skipped: 0,
+      errors: [],
+      outcomes: [],
+      tickBudgetExceeded: false,
+    }));
+    const runMaintenance = vi.fn(async () => healthyMaintenanceResult());
+    const pollCursorAdmin = vi.fn(async () => undefined);
+    const { runUsagePollingSchedulerTick } = await import("@/lib/usage-recorder");
+
+    await runUsagePollingSchedulerTick({
+      fetchProviders,
+      runMaintenance,
+      markTickCompleted,
+      pollCursorAdmin,
+    });
+
+    expect(pollCursorAdmin).not.toHaveBeenCalled();
+    expect(markTickCompleted).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ maintenanceHealthy: true })
     );
   });
 });

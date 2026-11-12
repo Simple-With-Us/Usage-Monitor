@@ -17,11 +17,20 @@ function cents(value: unknown): number | null {
 }
 
 function billingWindow(cycle: { year?: number; month?: number } | undefined) {
-  if (!cycle || !Number.isInteger(cycle.year) || !Number.isInteger(cycle.month)) {
+  if (
+    !cycle ||
+    !Number.isInteger(cycle.year) ||
+    !Number.isInteger(cycle.month) ||
+    cycle.year! < 1970 ||
+    cycle.year! > 9999 ||
+    cycle.month! < 1 ||
+    cycle.month! > 12
+  ) {
     return null;
   }
   const start = new Date(Date.UTC(cycle.year!, cycle.month! - 1, 1));
   const end = new Date(Date.UTC(cycle.year!, cycle.month!, 1));
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return null;
   return {
     id: `${cycle.year}-${String(cycle.month).padStart(2, "0")}`,
     start: start.toISOString(),
@@ -106,8 +115,12 @@ export async function fetchUsage(
         {
           externalId: teamId,
           kind: "account",
+          serviceName: "xAI API prepaid balance",
           planName: "xAI prepaid billing account",
           status: "active",
+          remainingQuantity: balance,
+          usageUnit: "USD credits",
+          rollupRole: "metadata",
         },
       ],
     });
@@ -120,6 +133,7 @@ export async function fetchUsage(
         {
           externalId: `${teamId}:${window.id}`,
           kind: "invoice",
+          serviceName: "xAI API",
           planName: "xAI postpaid invoice preview",
           status: "open",
           amountUsd: totalCost,
@@ -129,6 +143,14 @@ export async function fetchUsage(
           nextRenewalAt: window.end,
           spendLimitUsd: invoiceSpendLimitUsd,
           spendLimitWindow: invoiceSpendLimitUsd == null ? null : "month",
+          usageQuantity: totalCost,
+          remainingQuantity:
+            invoiceSpendLimitUsd != null && totalCost != null
+              ? Math.max(0, invoiceSpendLimitUsd - totalCost)
+              : null,
+          usageUnit: "USD",
+          rollupRole: "canonical",
+          dateKind: "period_end",
         },
       ],
     });
@@ -141,10 +163,16 @@ export async function fetchUsage(
         {
           externalId: teamId,
           kind: "account",
+          serviceName: "xAI API spending limit",
           planName: "xAI postpaid spending limits",
           status: "active",
           spendLimitUsd,
           spendLimitWindow: "month",
+          usageQuantity: totalCost,
+          remainingQuantity:
+            totalCost != null ? Math.max(0, spendLimitUsd - totalCost) : null,
+          usageUnit: "USD",
+          rollupRole: "metadata",
         },
       ],
     });

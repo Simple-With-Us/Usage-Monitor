@@ -16,13 +16,16 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const providerId = searchParams.get("providerId");
   const maxRawPoints = parseMaxRawPoints(searchParams.get("maxPoints"));
-  const requestedDays = Number(searchParams.get("days") ?? 30);
-  const days = Number.isFinite(requestedDays)
-    ? Math.min(Math.max(Math.trunc(requestedDays), 1), 365)
+  const rawDaysParam = searchParams.get("days");
+  const isAllTime = rawDaysParam === "all" || rawDaysParam === "all_time";
+  const requestedDays = Number(rawDaysParam ?? 30);
+  const days = isAllTime
+    ? 3650
+    : Number.isFinite(requestedDays)
+    ? Math.min(Math.max(Math.trunc(requestedDays), 1), 3650)
     : 30;
 
-  const since = new Date();
-  since.setDate(since.getDate() - days);
+  const since = isAllTime || days >= 3650 ? new Date(0) : new Date(Date.now() - days * 86_400_000);
   const rawCutoff = getSnapshotRawCutoff();
   const rawSince = since > rawCutoff ? since : rawCutoff;
 

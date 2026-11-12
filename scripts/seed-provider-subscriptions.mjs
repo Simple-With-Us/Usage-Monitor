@@ -4,17 +4,18 @@
  * docs/rollouts/2026-07-10-subscription-knob-linkage.md).
  *
  * Creates/updates:
- *   1. `Subscription` rows for the market-data plans the owner is on (or
- *      considering) — massive "Stocks Starter" (active), fmp "Starter"
- *      (active), tiingo "Power" (considering), fmp "Premium" (considering) —
+ *   1. `Subscription` rows for catalog plans the owner may be on (or
+ *      considering).  New rows default to `considering` so a seed pass
+ *      cannot invent paid cash on the next maintenance cycle.  Activate a
+ *      row only after a receipt or owner-recorded expense confirms it.
  *      each carrying a `knobEnv` map (env-var knob name -> string value) that
  *      overrides the provider's free-tier baseline while active/considered.
  *   2. `ProviderPlan.knobEnv` FREE-TIER baseline maps for tiingo, twelvedata,
  *      alphavantage, and finnhub — the values a consuming app (Socratic.Trade)
  *      should use when NOT on a paid plan for that provider.
  *
- * Run this EXACTLY ONCE against prod, from Render's Shell tab for the
- * deployed `api-usage-monitor` web service:
+ * Run this EXACTLY ONCE against a writable app database (local or the
+ * Coolify / Hetzner SQLite volume).  Do not use it to invent paid cash:
  *
  *   node scripts/seed-provider-subscriptions.mjs
  *
@@ -31,16 +32,16 @@
  * IMPORTANT - Alpha Vantage provider name: "alphavantage" (NO hyphen). The
  * adapter registry (src/lib/adapters/index.ts) dispatches usage-fetch on
  * `provider.name.toLowerCase()` and only registers the key "alphavantage" —
- * a Provider row named e.g. "alpha-vantage" would silently fall through to
- * the generic "custom" adapter (no real usage polling) instead of the actual
- * Alpha Vantage adapter. This script creates/matches the provider as
+ * a Provider row named e.g. "alpha-vantage" would fail closed as an unknown
+ * built-in (no polling) instead of reaching the Alpha Vantage adapter. This
+ * script creates/matches the provider as
  * "alphavantage" and WARNS (does not rename) if a hyphenated near-miss name
  * is found in the database instead.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./lib/create-prisma-client.mjs";
 
-const prisma = new PrismaClient();
+const prisma = createPrismaClient();
 
 function log(message) {
   console.log(`[seed-provider-subscriptions] ${message}`);
@@ -85,6 +86,8 @@ const PROVIDER_DEFAULTS = {
   twelvedata: { displayName: "Twelve Data", category: "Market Data" },
   alphavantage: { displayName: "Alpha Vantage", category: "Market Data" },
   finnhub: { displayName: "Finnhub", category: "Market Data" },
+  anthropic: { displayName: "Anthropic", category: "LLM" },
+  kimi: { displayName: "Kimi / Moonshot AI", category: "LLM" },
 };
 
 // Subscriptions to seed. costUsd/interval are the CURRENT (monthly) sticker
@@ -94,17 +97,37 @@ const SUBSCRIPTIONS = [
   {
     providerName: "massive",
     name: "Stocks Starter",
-    status: "active",
+    status: "considering",
     costUsd: 29,
-    notes: "annual available $288/yr",
+    notes:
+      "Catalog only.  Gmail 2026-07: Stripe $29 renewals failed (not paid).  Activate only after a successful receipt.",
     knobEnv: { MASSIVE_REST_MAX_CALLS_PER_MINUTE: "100" },
   },
   {
     providerName: "fmp",
     name: "Starter",
-    status: "active",
-    costUsd: 22,
-    notes: "billed annually $264/yr",
+    status: "considering",
+    costUsd: 29,
+    notes:
+      "Catalog only.  Gmail: last paid receipt #2240-0152 on 2026-06-22 ($31.90 with tax); July renewals failed and API was suspended 2026-07-27.",
+    knobEnv: {},
+  },
+  {
+    providerName: "anthropic",
+    name: "Claude Pro",
+    status: "considering",
+    costUsd: 20,
+    notes:
+      "Catalog only.  Gmail: Pro $21.32 on 2026-07-02, then Max upgrades, then Max canceled 2026-07-03 (access ended 2026-08-03).  No August Anthropic receipt in Gmail.",
+    knobEnv: {},
+  },
+  {
+    providerName: "kimi",
+    name: "Kimi Apple IAP",
+    status: "considering",
+    costUsd: 199,
+    notes:
+      "Catalog only.  Owner email 2026-08-11: highest tier $199 via Apple IAP.  Apple receipt lives on iCloud, not Gmail.",
     knobEnv: {},
   },
   {
@@ -166,8 +189,8 @@ async function warnOnHyphenatedNearMiss(canonicalName) {
       log(
         `WARNING: found provider "${nearMiss.name}" (id=${nearMiss.id}) which looks like a ` +
           `hyphen/underscore variant of "${canonicalName}". The adapter registry only recognizes ` +
-          `the exact name "alphavantage" (src/lib/adapters/index.ts) — "${nearMiss.name}" silently ` +
-          `falls through to the generic "custom" adapter (no real usage polling). This script does ` +
+          `the exact name "alphavantage" (src/lib/adapters/index.ts) — "${nearMiss.name}" fails ` +
+          `closed without a poll adapter. This script does ` +
           `NOT rename it; that is a manual data-repair decision.`
       );
     }

@@ -38,11 +38,13 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
       limit != null && remaining != null ? Math.max(0, limit - remaining) : null,
     credits: remaining,
     rawData: {
+      quotaScope: "account-or-team-pool",
       monthlyMessageLimit: limit,
       monthlyMessagesRemaining: remaining,
       resetAt,
       capabilities: {
         messageQuota: true,
+        pooledQuotaSince: "2026-05-01",
         billingCost: false,
         subscriptionStatus: false,
       },
@@ -55,11 +57,21 @@ export async function fetchUsage(apiKey: string): Promise<UsageResult> {
             {
               externalId: "application-quota",
               kind: "account",
-              planName: "Pushover application quota",
+              serviceName: "Pushover messages",
+              planName: "Pooled account/team quota",
               status: "active",
               requestLimit: limit,
               requestLimitWindow: "month",
+              usageQuantity:
+                limit != null && remaining != null
+                  ? Math.max(0, limit - remaining)
+                  : null,
+              remainingQuantity: remaining,
+              usageUnit: "messages",
+              nextRenewalAt: resetAt,
               currentPeriodEnd: resetAt,
+              rollupRole: "metadata",
+              dateKind: "quota_reset",
             },
           ],
         }

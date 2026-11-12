@@ -7,6 +7,7 @@ function resetEnv() {
   process.env = { ...ORIGINAL_ENV };
   delete process.env.SENTRY_READ_TOKEN;
   delete process.env.SENTRY_ORG;
+  delete process.env.SENTRY_SELF_PROJECT;
 }
 
 describe("sentry-health", () => {
@@ -32,17 +33,32 @@ describe("sentry-health", () => {
 
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (url) => {
       const urlStr = String(url);
-      const projectSlug = urlStr.includes("socratic-trade")
-        ? "socratic-trade"
-        : urlStr.includes("congress-trade")
-          ? "congress-trade"
-          : "fleet-infra";
+      const projectSlug = urlStr.includes("usage-monitor")
+        ? "usage-monitor"
+        : urlStr.includes("socratic-trade")
+          ? "socratic-trade"
+          : urlStr.includes("congress-trade")
+            ? "congress-trade"
+            : urlStr.includes("dealdex")
+              ? "dealdex"
+              : urlStr.includes("botfleet")
+                ? "botfleet"
+                : urlStr.includes("autorotate")
+                  ? "autorotate"
+                  : urlStr.includes("contactlogo")
+                    ? "contactlogo"
+                    : "fleet-infra";
       const bodies: Record<string, unknown[]> = {
+        "usage-monitor": [{ id: "9" }],
         "socratic-trade": [{ id: "1" }, { id: "2" }],
         "congress-trade": [],
         "fleet-infra": [{ id: "3" }],
+        "dealdex": [],
+        "botfleet": [],
+        "autorotate": [],
+        "contactlogo": [],
       };
-      return new Response(JSON.stringify(bodies[projectSlug]), {
+      return new Response(JSON.stringify(bodies[projectSlug] || []), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -52,12 +68,18 @@ describe("sentry-health", () => {
     expect(result.configured).toBe(true);
     if (!result.configured) throw new Error("expected configured result");
     expect(result.org).toBe("jays-services");
-    expect(result.projects).toHaveLength(3);
+    expect(result.projects).toHaveLength(8);
 
     const bySlug = new Map(result.projects.map((p) => [p.projectSlug, p]));
+    expect(bySlug.get("usage-monitor")!.unresolvedCount).toBe(1);
+    expect(bySlug.get("usage-monitor")!.displayName).toBe("Usage Monitor (this app)");
     expect(bySlug.get("socratic-trade")!.unresolvedCount).toBe(2);
     expect(bySlug.get("congress-trade")!.unresolvedCount).toBe(0);
     expect(bySlug.get("fleet-infra")!.unresolvedCount).toBe(1);
+    expect(bySlug.get("dealdex")!.unresolvedCount).toBe(0);
+    expect(bySlug.get("botfleet")!.unresolvedCount).toBe(0);
+    expect(bySlug.get("autorotate")!.unresolvedCount).toBe(0);
+    expect(bySlug.get("contactlogo")!.unresolvedCount).toBe(0);
     for (const project of result.projects) {
       expect(project.issuesUrl).toContain("sentry.io");
       expect(project.error).toBeUndefined();
@@ -66,7 +88,44 @@ describe("sentry-health", () => {
     fetchMock.mockRestore();
   });
 
-  it("defaults SENTRY_ORG to jays-services when unset", async () => {
+  it("uses SENTRY_SELF_PROJECT for the self-project slug when set", async () => {
+    process.env.SENTRY_READ_TOKEN = "test-sentry-token";
+    process.env.SENTRY_SELF_PROJECT = "usage-monitor-prod";
+
+    const requestedUrls: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (url) => {
+      requestedUrls.push(String(url));
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const result = await fetchSentryHealth();
+    expect(result.configured).toBe(true);
+    if (!result.configured) throw new Error("expected configured result");
+    expect(result.projects).toHaveLength(8);
+    const selfProject = result.projects[0];
+    expect(selfProject.projectSlug).toBe("usage-monitor-prod");
+    expect(selfProject.displayName).toBe("Usage Monitor (this app)");
+    expect(requestedUrls.some((u) => u.includes("/usage-monitor-prod/"))).toBe(true);
+    expect(requestedUrls.some((u) => u.includes("/usage-monitor/"))).toBe(false);
+  });
+
+  it("dedupes the self project when SENTRY_SELF_PROJECT matches a fleet slug", async () => {
+    process.env.SENTRY_READ_TOKEN = "test-sentry-token";
+    process.env.SENTRY_SELF_PROJECT = "fleet-infra";
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response("[]", { status: 200, headers: { "content-type": "application/json" } })
+    );
+
+    const result = await fetchSentryHealth();
+    expect(result.configured).toBe(true);
+    if (!result.configured) throw new Error("expected configured result");
+    expect(result.projects).toHaveLength(7);
+    expect(
+      result.projects.filter((p) => p.projectSlug === "fleet-infra")
+    ).toHaveLength(1);
+  });
+
+  it("defaults SENTRY_ORG to simple-with-us when unset", async () => {
     process.env.SENTRY_READ_TOKEN = "test-sentry-token";
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response("[]", { status: 200, headers: { "content-type": "application/json" } })
@@ -75,7 +134,7 @@ describe("sentry-health", () => {
     const result = await fetchSentryHealth();
     expect(result.configured).toBe(true);
     if (!result.configured) throw new Error("expected configured result");
-    expect(result.org).toBe("jays-services");
+    expect(result.org).toBe("simple-with-us");
   });
 
   it("captures a per-project error without failing the whole request", async () => {

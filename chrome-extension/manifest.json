@@ -1,37 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "API Usage Monitor Sync",
-  "version": "1.0.0",
-  "description": "Automatically syncs API keys and usage tokens from provider dashboards.",
+  "name": "Usage Monitor Launcher",
+  "version": "2.0.0",
+  "description": "Opens your self-hosted Usage Monitor dashboard in a new tab. Reads no page content, cookies, or storage from any site.",
   "permissions": [
-    "storage",
-    "activeTab",
-    "scripting"
-  ],
-  "host_permissions": [
-    "https://console.anthropic.com/*",
-    "https://platform.openai.com/*",
-    "https://*.jays.services/*",
-    "http://localhost:4103/*",
-    "http://localhost:3000/*"
-  ],
-  "background": {
-    "service_worker": "scripts/background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://console.anthropic.com/*"],
-      "js": ["scripts/anthropic.js"],
-      "run_at": "document_end"
-    },
-    {
-      "matches": ["https://platform.openai.com/*"],
-      "js": ["scripts/openai.js"],
-      "run_at": "document_end"
-    }
+    "storage"
   ],
   "action": {
     "default_popup": "popup/index.html",
-    "default_title": "API Usage Monitor Sync"
+    "default_title": "Usage Monitor Client"
   }
 }

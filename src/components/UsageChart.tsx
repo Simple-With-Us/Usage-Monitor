@@ -10,6 +10,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { formatCompactNumber, formatCurrency, formatNumber } from "@/lib/format";
 
 interface Snapshot {
   id: string;
@@ -29,8 +30,8 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
 
   if (snapshots.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 bg-gray-50 rounded-xl border border-dashed border-gray-300">
-        <p className="text-gray-400 text-sm">No usage data yet</p>
+      <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-gray-300 bg-gray-50 dark:border-gray-700 dark:bg-gray-800">
+        <p className="text-sm text-gray-600 dark:text-gray-300">No usage data yet</p>
       </div>
     );
   }
@@ -48,33 +49,33 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
     <div
       role="region"
       aria-label="Provider balance, reported cost, and credits over time"
-      className="min-w-0 bg-white rounded-xl border border-gray-200 p-3 sm:p-4"
+      className="min-w-0 rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800 sm:p-4"
     >
-      <h3 className="text-sm font-semibold text-gray-700 mb-4">
+      <h3 className="mb-4 text-sm font-semibold text-gray-700 dark:text-gray-200">
         Usage Over Time
       </h3>
       <ResponsiveContainer width="100%" height={300} minWidth={0} debounce={50}>
         <AreaChart accessibilityLayer data={data} margin={{ top: 5, right: 5, left: -12, bottom: 5 }}>
           <defs>
             <linearGradient id={`${gradientPrefix}-balance`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.15} />
-              <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+              <stop offset="5%" stopColor="var(--chart-balance)" stopOpacity={0.2} />
+              <stop offset="95%" stopColor="var(--chart-balance)" stopOpacity={0} />
             </linearGradient>
             <linearGradient id={`${gradientPrefix}-cost`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.15} />
-              <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
+              <stop offset="5%" stopColor="var(--chart-cost)" stopOpacity={0.2} />
+              <stop offset="95%" stopColor="var(--chart-cost)" stopOpacity={0} />
             </linearGradient>
             <linearGradient id={`${gradientPrefix}-credits`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#a855f7" stopOpacity={0.15} />
-              <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
+              <stop offset="5%" stopColor="var(--chart-credits)" stopOpacity={0.2} />
+              <stop offset="95%" stopColor="var(--chart-credits)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
           <XAxis
             dataKey="timestamp"
-            tick={{ fontSize: 12, fill: "#9ca3af" }}
+            tick={{ fontSize: 12, fill: "var(--chart-axis)" }}
             tickLine={false}
-            axisLine={{ stroke: "#e5e7eb" }}
+            axisLine={{ stroke: "var(--chart-grid)" }}
             minTickGap={28}
             tickFormatter={(timestamp: number) =>
               new Date(timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })
@@ -83,9 +84,9 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
           <YAxis
             yAxisId="usd"
             width="auto"
-            tick={{ fontSize: 12, fill: "#9ca3af" }}
+            tick={{ fontSize: 12, fill: "var(--chart-axis)" }}
             tickLine={false}
-            axisLine={{ stroke: "#e5e7eb" }}
+            axisLine={{ stroke: "var(--chart-grid)" }}
             tickFormatter={(v: number) => `$${v}`}
           />
           {hasCredits && (
@@ -93,10 +94,10 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
               yAxisId="credits"
               orientation="right"
               width="auto"
-              tick={{ fontSize: 11, fill: "#a855f7" }}
+              tick={{ fontSize: 11, fill: "var(--chart-credits)" }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(value: number) => new Intl.NumberFormat("en-US", { notation: "compact" }).format(value)}
+              tickFormatter={(value: number) => formatCompactNumber(value)}
             />
           )}
           <Tooltip
@@ -114,9 +115,9 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
             formatter={(value, name) => {
               const numericValue = Number(value);
               const key = String(name).toLowerCase();
-              if (key === "balance") return [`$${numericValue.toFixed(2)}`, "Balance"];
-              if (key === "reported cost") return [`$${numericValue.toFixed(2)}`, "Reported cost"];
-              if (key === "credits") return [numericValue.toLocaleString(), "Credits"];
+              if (key === "balance") return [formatCurrency(numericValue), "Balance"];
+              if (key === "reported cost") return [formatCurrency(numericValue), "Reported cost"];
+              if (key === "credits") return [formatNumber(numericValue), "Credits"];
               return [numericValue, name];
             }}
           />
@@ -124,7 +125,7 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
             type="monotone"
             dataKey="balance"
             yAxisId="usd"
-            stroke="#3b82f6"
+            stroke="var(--chart-balance)"
             strokeWidth={2}
             fill={`url(#${gradientPrefix}-balance)`}
             name="Balance"
@@ -133,7 +134,7 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
             type="monotone"
             dataKey="cost"
             yAxisId="usd"
-            stroke="#f59e0b"
+            stroke="var(--chart-cost)"
             strokeWidth={2}
             fill={`url(#${gradientPrefix}-cost)`}
             name="Reported cost"
@@ -143,7 +144,7 @@ export default function UsageChart({ snapshots }: UsageChartProps) {
               type="monotone"
               dataKey="credits"
               yAxisId="credits"
-              stroke="#a855f7"
+              stroke="var(--chart-credits)"
               strokeWidth={2}
               fill={`url(#${gradientPrefix}-credits)`}
               name="Credits"

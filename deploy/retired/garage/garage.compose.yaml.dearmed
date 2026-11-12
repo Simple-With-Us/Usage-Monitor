@@ -1,0 +1,65 @@
+# RETIRED — DO NOT DEPLOY.
+#
+# This file was moved here on 2026-09-18 (PR `cursor/health-sweep-20260918`)
+# from `deploy/coolify/garage.compose.yaml`.  Garage was the Hetzner/Coolify
+# self-hosted S3 attempt that PR #869 retired in favour of Backblaze B2
+# (`jays-usage-monitor-eu`) + Cloudflare R2 weekly archive.  The original
+# still had `GARAGE_ALLOW_WORLD_READABLE_SECRETS=true` and a publicly routed
+# Traefik S3 endpoint — both removed below.  The file is preserved here only
+# so the diff against the retired-stack history is auditable; it is not
+# expected to start (the `garage.toml` it bind-mounts is intentionally
+# absent), and the dangerous env line is now gone so even a copy/paste from
+# this file cannot produce a world-readable-secrets deployment.
+#
+# See `deploy/README.md` for the canonical deploy index and
+# `DEPLOY.md` invariant #3 for the current B2 + R2 split.
+#
+# Original file retained below for diff audit only.
+services:
+  garage:
+    image: dxflrs/garage:v2.3.0
+    command:
+      - /garage
+      - server
+      - --single-node
+      - --default-bucket
+    environment:
+      - GARAGE_S3_API_URL=$GARAGE_S3_API_URL
+      - GARAGE_WEB_URL=$GARAGE_WEB_URL
+      - GARAGE_ADMIN_URL=$GARAGE_ADMIN_URL
+      - GARAGE_RPC_SECRET=$SERVICE_HEX_64_RPCSECRET
+      - GARAGE_ADMIN_TOKEN=$SERVICE_PASSWORD_GARAGE
+      - GARAGE_METRICS_TOKEN=$SERVICE_PASSWORD_GARAGEMETRICS
+      # REMOVED 2026-09-18: GARAGE_ALLOW_WORLD_READABLE_SECRETS=true
+      # The original retired stack had this set, which made every Garage
+      # secret world-readable.  Production never re-enabled Garage after the
+      # PR #869 cutover; the line was only here because the Hetzner host
+      # kept a copy.  Do not restore it.
+      - GARAGE_DEFAULT_ACCESS_KEY=$GARAGE_DEFAULT_ACCESS_KEY
+      - GARAGE_DEFAULT_SECRET_KEY=$GARAGE_DEFAULT_SECRET_KEY
+      - GARAGE_DEFAULT_BUCKET=usage-monitor
+      - RUST_LOG=garage=info
+    volumes:
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+      - type: bind
+        # REMOVED 2026-09-18: public Traefik S3 endpoint label.
+        # The original published `s3-lm5xwdc9ml1hkfdp2n9d90eh.<ip>.sslip.io`
+        # to the public internet with auto-issued Let's Encrypt TLS — that
+        # host no longer exists and the cert resolver entry is gone.
+        source: ./garage.toml
+        target: /etc/garage.toml
+    healthcheck:
+      test:
+        - CMD
+        - /garage
+        - stats
+        - -a
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels: []
+
+volumes:
+  garage-meta:
+  garage-data:
