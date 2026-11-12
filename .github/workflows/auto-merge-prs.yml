@@ -71,6 +71,9 @@ jobs:
             echo "pr_number="
           } >> "$GITHUB_OUTPUT"
           PR_NUMBER="$EVENT_PR_NUMBER"
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            PR_NUMBER=""
+          fi
           REVIEW_METADATA_HEAD=""
           review_metadata_valid() {
             jq -e --argjson repo_id "$REPO_ID" '
@@ -100,8 +103,8 @@ jobs:
             REVIEW_METADATA_HEAD=$(jq -r '.[0].head.sha' <<< "$METADATA")
           fi
           if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::PR number was missing or invalid."
-            exit 1
+            echo "::notice::PR number was missing or invalid; exiting without arming or disarming."
+            exit 0
           fi
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           if ! live=$(gh api "repos/$REPO/pulls/$PR_NUMBER"); then
