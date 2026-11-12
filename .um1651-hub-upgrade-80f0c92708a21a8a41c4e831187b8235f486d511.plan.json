@@ -1,0 +1,107 @@
+{
+  "configMountSource": "/mnt/fleet-extra/apps/telemetry-hub/config.json",
+  "currentCompose": {
+    "services": {
+      "telemetry-hub": {
+        "cap_drop": [
+          "ALL"
+        ],
+        "container_name": "telemetry-hub-a4tp0kk9jmfibzvbmsxvmtqg",
+        "cpus": 0.5,
+        "env_file": [
+          ".env"
+        ],
+        "environment": {
+          "COOLIFY_APP_NAME": "usage-monitor-telemetry-hub",
+          "COOLIFY_CONTAINER_NAME": "telemetry-hub-a4tp0kk9jmfibzvbmsxvmtqg",
+          "COOLIFY_ENVIRONMENT_NAME": "production",
+          "COOLIFY_PROJECT_NAME": "Fleet Infra",
+          "COOLIFY_RESOURCE_UUID": "a4tp0kk9jmfibzvbmsxvmtqg",
+          "COOLIFY_SERVER_IP": "host.docker.internal",
+          "SERVICE_NAME_TELEMETRY_HUB": "telemetry-hub",
+          "TELEMETRY_HUB_BIND_HOST": "100.69.77.26",
+          "TELEMETRY_HUB_CONFIG_FILE": "/run/secrets/telemetry-hub.json"
+        },
+        "image": "usage-monitor-telemetry-hub:80f0c92708a21a8a41c4e831187b8235f486d511",
+        "init": true,
+        "labels": [
+          "telemetry.task=UM-1646",
+          "telemetry.commit=80f0c92708a21a8a41c4e831187b8235f486d511",
+          "coolify.managed=true",
+          "coolify.version=4.5.3",
+          "coolify.serviceUuid=a4tp0kk9jmfibzvbmsxvmtqg",
+          "coolify.type=service",
+          "coolify.name=telemetry-hub-a4tp0kk9jmfibzvbmsxvmtqg",
+          "coolify.resourceName=usage-monitor-telemetry-hub",
+          "coolify.projectName=fleet-infra",
+          "coolify.serviceName=telemetry-hub",
+          "coolify.environmentName=production",
+          "coolify.pullRequestId=0",
+          "coolify.service.subUuid=s4oqyz6lbb0yn6kg4sljaonk",
+          "coolify.service.subType=application",
+          "coolify.service.subName=telemetry-hub"
+        ],
+        "mem_limit": "512m",
+        "network_mode": "host",
+        "pull_policy": "never",
+        "read_only": true,
+        "restart": "unless-stopped",
+        "security_opt": [
+          "no-new-privileges:true"
+        ],
+        "tmpfs": [
+          "/tmp:rw,noexec,nosuid,size=16m"
+        ],
+        "volumes": [
+          "a4tp0kk9jmfibzvbmsxvmtqg_journal:/data",
+          {
+            "bind": {
+              "create_host_path": true
+            },
+            "read_only": true,
+            "source": "/mnt/fleet-extra/apps/telemetry-hub/config.json",
+            "target": "/run/secrets/telemetry-hub.json",
+            "type": "bind"
+          }
+        ]
+      }
+    },
+    "volumes": {
+      "a4tp0kk9jmfibzvbmsxvmtqg_journal": {
+        "name": "a4tp0kk9jmfibzvbmsxvmtqg_journal"
+      },
+      "journal": {
+        "name": "usage-monitor-telemetry-hub-journal"
+      }
+    }
+  },
+  "currentComposeSha256": "7c7cc57899ca52c31fe6842b0fd7660565d6a6865e29f1435dd378f04a38124b",
+  "durableVolume": "a4tp0kk9jmfibzvbmsxvmtqg_journal",
+  "metadata": {
+    "configMode": 384,
+    "configSha256": "4de53644a6cfc8bc79af1c2f7da1b6b52c1db19fbd8bc806920e30ce6b671579",
+    "configUid": 10001,
+    "journalBase": 33388798,
+    "journalBytes": 12891238,
+    "pendingBytes": 0,
+    "sentryOffset": 46280036
+  },
+  "mode": "plan-only",
+  "oldContainer": "3cefe8519dd3",
+  "oldImageId": "sha256:57ddfdd0b33583f215238738954ee703fc437c11029292f58ecf13d44b790cf7",
+  "preparedComposeSha256": "3531da30d755e97a5e027efaa64f0f5d426eb83e7f03665a811a011a5142482a",
+  "runtimeChanges": false,
+  "service": {
+    "environment_uuid": "tmrwg4denz09sb6qn9rlvjfu",
+    "image_id": "sha256:57ddfdd0b33583f215238738954ee703fc437c11029292f58ecf13d44b790cf7",
+    "project_uuid": "l11qegr5vie93o7dqlfjgd6n",
+    "server_uuid": "jxzqcs3h6g1wiipnnblhismp",
+    "source_commit": "80f0c92708a21a8a41c4e831187b8235f486d511",
+    "status": "exited",
+    "uuid": "a4tp0kk9jmfibzvbmsxvmtqg"
+  },
+  "serviceStatus": "running:healthy",
+  "targetCommit": "80f0c92708a21a8a41c4e831187b8235f486d511",
+  "targetImageId": "sha256:57ddfdd0b33583f215238738954ee703fc437c11029292f58ecf13d44b790cf7",
+  "upgradeContract": "Build before stop; recheck live compose/image/config and zero pending bytes before one stop; preserve current compose except image/telemetry.commit; same service/volume/config; inspect unknown outcomes before any retry"
+}

@@ -1,0 +1,130 @@
+{
+  "code": {
+    "controllerSha256": "0b2887e70ac5117b7d934b63a79ebc48daf0e9c6797b53bafaa0b0eceae96831",
+    "localModuleSha256": "bf985135a63c8f4129c1a2c0d8029a7dff074fc6d1df9d823259da8fb2fb1f2b",
+    "remoteSha256": "6ff4e606a01202ea6a1ec671d2b09464367e16c4f2bd18b12f7ec6f6851e62a5"
+  },
+  "installed": {
+    "hashes": {
+      "lib/collector-sentry-bridge.mjs": "c0e50eecccbf33447a0872e6f3d8acd1fe5e24170f203583abea41a131cdfb7d",
+      "lib/fleet-secrets.mjs": "965161f006d83325d136c1b9a0ce4295a56bf75b388a5729209cec734b7cd95c",
+      "lib/opencode-session-telemetry.mjs": "ee2b5c32ace959c88654a3d0b50cedcd408ab6a159ba2b6213682a9f7d1858e8",
+      "lib/run-session-token-collector.mjs": "adc6674e7b957fd0562212ecd9dd3bbbc24b53bdc4f40f70ddaab46293036d53",
+      "lib/session-token-collectors.mjs": "816829d8df98b2518164e58f0f697072d4e6bd369ec2e400a8173a2800ca6505",
+      "opencode-usage-collector.mjs": "78bfeaddc395d9e5a41b0c4fe0dec19a975231f5c586bfbafe7a35160ee3088c",
+      "telemetry-hub/allowlist.mjs": "d9020928a99d258e975b406ef152b787e9212329f753ed5179dbca75dd141be1",
+      "telemetry-hub/internal-event.mjs": "d061efdad89096a99e982aaeed8dff4a5ffd110fe3a1ba2a08bdcf9985fcca7d",
+      "telemetry-hub/journal.mjs": "da3893330b9f5f6861edab614687e4b0fa5dec4e2013c2e1e266415e42c61434",
+      "telemetry-hub/metadata-projection.mjs": "8b91b390859eebc729de0b4118340a7a3bff114e105121ff38ead83264c18c51",
+      "telemetry-hub/sentry-sender.mjs": "bf6fb45f7ef1e921aba9487d6479dbcf00f95329b6f0784ebeaaee5ce96a8a92"
+    },
+    "sourceCommit": "ca19ad6ab8e98b5ac506d75d15b72dd0b9cd9015"
+  },
+  "local": {
+    "desiredValueSha256": {
+      "BOTFLEET_WORKSPACES_DIRS": "f5099a13db2d688fadbb916ae270f1b0ed6a758b8b05dc99fa8f4601550bf77e",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "c3f9990ffa4c45c50c16fad923e748412451e4dbb0af64e835635d22b2b715f2"
+    },
+    "fileIdentity": {
+      "bytes": 832,
+      "device": 2049,
+      "inode": 274578,
+      "mtimeNs": 1793403562519636205
+    },
+    "keys": {
+      "BOTFLEET_WORKSPACES_DIRS": "absent",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "absent"
+    },
+    "mode": "0600",
+    "ownerGid": 1001,
+    "ownerUid": 1001,
+    "sourceSha256": "7e7f8408962c84ca3925536a6da5f3cffe2a49615b23bc0c25592964c17792de"
+  },
+  "releaseMessageId": 637193996,
+  "remote": {
+    "ok": true,
+    "remoteCodeSha256": "6ff4e606a01202ea6a1ec671d2b09464367e16c4f2bd18b12f7ec6f6851e62a5",
+    "remoteWrites": false,
+    "snapshot": {
+      "custody": {
+        "read": {
+          "bytes": 105,
+          "device": 16777233,
+          "gid": 20,
+          "inode": 757911686,
+          "mode": 384,
+          "mtimeNs": 1793711131926484407,
+          "parent": {
+            "device": 16777233,
+            "gid": 20,
+            "inode": 757911654,
+            "mode": 448,
+            "uid": 501
+          },
+          "sha256": "e8a0c8582f931dce2c179565f45880bc82b91dc9076eb6bacf459c3210530715",
+          "uid": 501
+        },
+        "write": {
+          "bytes": 105,
+          "device": 16777233,
+          "gid": 20,
+          "inode": 757911697,
+          "mode": 384,
+          "mtimeNs": 1793711132492581515,
+          "parent": {
+            "device": 16777233,
+            "gid": 20,
+            "inode": 757911654,
+            "mode": 448,
+            "uid": 501
+          },
+          "sha256": "27fc3af9abe4035163a9fa8d652d7108385c3538b5adfea29461db6e80a025fc",
+          "uid": 501
+        }
+      },
+      "keys": {
+        "BOTFLEET_SERVER_WORKSPACES_DIRS": {
+          "state": "absent",
+          "valueSha256": null
+        },
+        "OPENCODE_SERVER_ADDITIONAL_DBS_JSON": {
+          "state": "absent",
+          "valueSha256": null
+        }
+      },
+      "serviceMetadata": {
+        "read": {
+          "expiresAt": "2027-02-01T13:05:31.892Z",
+          "explicitIds": {
+            "_id": "2da57b07-1bed-4955-85ad-4db24ff60c43",
+            "id": "2da57b07-1bed-4955-85ad-4db24ff60c43"
+          },
+          "metadataSha256": "99cf668852d65a5dc0773b4b7a1e607c73eebed4b2130c384db6cbc2a988c547",
+          "nameVerified": true,
+          "projectVerified": true,
+          "role": "read",
+          "singletonEnvironment": "prod",
+          "singletonFolder": "/telemetry",
+          "singletonPermission": "read"
+        },
+        "write": {
+          "expiresAt": "2027-02-01T13:05:32.458Z",
+          "explicitIds": {
+            "_id": "81318b7a-7e2e-41f9-8788-cb0fefa12273",
+            "id": "81318b7a-7e2e-41f9-8788-cb0fefa12273"
+          },
+          "metadataSha256": "0c76ad22503593f306c9ebc5bf944dc1efb3a01f7fdf0982fb1b500d24519965",
+          "nameVerified": true,
+          "projectVerified": true,
+          "role": "write",
+          "singletonEnvironment": "prod",
+          "singletonFolder": "/telemetry",
+          "singletonPermission": "write"
+        }
+      }
+    }
+  },
+  "scope": "two-child-source-settings-only",
+  "version": 1,
+  "wireMessageId": 637192947
+}

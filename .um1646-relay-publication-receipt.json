@@ -1,0 +1,1 @@
+{"result": {"content": [{"type": "text", "text": "{\"branch\":\"codex/um-1646-completion-audit\",\"commit\":\"fab3a4fc2b15dedf3faf9b17b695883eeb2bf746\",\"files\":2}"}], "structuredContent": {"branch": "codex/um-1646-completion-audit", "commit": "fab3a4fc2b15dedf3faf9b17b695883eeb2bf746", "files": 2}}, "jsonrpc": "2.0", "id": 2}
