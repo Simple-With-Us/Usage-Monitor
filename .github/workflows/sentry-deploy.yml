@@ -43,7 +43,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.id == github.repository_id
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 65
     env:
       PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
     steps:

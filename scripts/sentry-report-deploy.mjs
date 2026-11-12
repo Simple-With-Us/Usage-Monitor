@@ -60,12 +60,12 @@ export function gitAncestry(ancestor, descendant, spawn = spawnSync) {
 
 export async function observeProduction({ expected, fetchImpl = fetch, sleep = pause,
   isAncestor = gitAncestry, refreshMain = () => execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { stdio: 'ignore', timeout: 30000 }),
-  attempts = 135, intervalMs = 20000, now = Date.now } = {}) {
+  attempts = 180, intervalMs = 20000, now = Date.now } = {}) {
   if (!SHA.test(expected || '')) throw new Error('Expected CI revision must be a full SHA');
   // Coolify can lag GitHub merge by well over the old 25-minute window
-  // (Sentry Deploy 38160197337 timed out waiting for 7f03155). 45 minutes
-  // still fails closed if production never picks up the revision.
-  const deadline = now() + 45 * 60 * 1000;
+  // (Sentry Deploy 38160197337 timed out waiting for 7f03155). Keep attempts
+  // aligned with the deadline so the loop can use the full window (20s cadence).
+  const deadline = now() + 60 * 60 * 1000;
   let prior = null;
   let reason = 'No healthy live revision observed';
   for (let attempt = 0; attempt < attempts; attempt++) {

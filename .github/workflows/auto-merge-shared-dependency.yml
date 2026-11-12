@@ -112,7 +112,7 @@ jobs:
           echo "disarm=0" >> "$GITHUB_OUTPUT"
           head_ref=$(jq -r '.head.ref | ascii_downcase' <<< "$live")
           if [[ ! "$head_ref" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]] &&
-             [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
+             [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared|@Simple-With-Us/congress-trading-shared) ]]; then
             exit 0
           fi
           {
@@ -216,7 +216,7 @@ jobs:
             title=$(jq -r '.title | ascii_downcase' <<< "$live")
             head_ref=$(jq -r '.head.ref | ascii_downcase' <<< "$live")
             if [[ ! "$head_ref" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]] &&
-               [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
+               [[ ! "$title" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared|@Simple-With-Us/congress-trading-shared) ]]; then
               return 1
             fi
             return 0
