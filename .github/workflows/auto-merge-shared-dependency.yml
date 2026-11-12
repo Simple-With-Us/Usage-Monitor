@@ -38,6 +38,7 @@ jobs:
           REPO_ID: ${{ github.repository_id }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_PULL_REQUESTS: ${{ toJson(github.event.workflow_run.pull_requests) }}
+          SIGNAL_RUN_ID: ${{ github.event.workflow_run.id || '' }}
         run: |
           set -euo pipefail
           {
@@ -48,21 +49,32 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           PR_NUMBER="$EVENT_PR_NUMBER"
           REVIEW_METADATA_HEAD=""
-          if [ -z "$PR_NUMBER" ]; then
-            # Review workflows run on the merge ref; only associated PR metadata identifies its head.
-            if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! jq -e --argjson repo_id "$REPO_ID" '
+          review_metadata_valid() {
+            jq -e --argjson repo_id "$REPO_ID" '
               type == "array" and length == 1 and (.[0] |
                 type == "object" and
                 (.number | type == "number" and . > 0 and . <= 9007199254740991 and . == floor) and
                 (.base.repo.id | type == "number" and . == $repo_id) and
                 (.head.repo.id | type == "number" and . == $repo_id) and
                 (.head.sha | type == "string" and test("^[0-9a-fA-F]{40}$")))
-              ' <<< "$REVIEW_PULL_REQUESTS" >/dev/null; then
-              echo "::error::Review signal PR metadata was missing or invalid; no PR could be identified safely and cancellation was not attempted."
-              exit 1
+              ' <<< "$1" >/dev/null
+          }
+          if [ -z "$PR_NUMBER" ]; then
+            # Review workflows run on the merge ref; only associated PR metadata identifies its head.
+            METADATA="$REVIEW_PULL_REQUESTS"
+            if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! review_metadata_valid "$METADATA"; then
+              if [[ "$SIGNAL_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+                if fetched=$(gh api "repos/$REPO/actions/runs/$SIGNAL_RUN_ID" --jq '.pull_requests' 2>/dev/null); then
+                  METADATA="$fetched"
+                fi
+              fi
             fi
-            PR_NUMBER=$(jq -r '.[0].number' <<< "$REVIEW_PULL_REQUESTS")
-            REVIEW_METADATA_HEAD=$(jq -r '.[0].head.sha' <<< "$REVIEW_PULL_REQUESTS")
+            if [[ ! "$REPO_ID" =~ ^[1-9][0-9]*$ ]] || ! review_metadata_valid "$METADATA"; then
+              echo "::notice::Review signal PR metadata was missing or invalid; exiting without arming or disarming."
+              exit 0
+            fi
+            PR_NUMBER=$(jq -r '.[0].number' <<< "$METADATA")
+            REVIEW_METADATA_HEAD=$(jq -r '.[0].head.sha' <<< "$METADATA")
           fi
           if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::PR number was missing or invalid."
