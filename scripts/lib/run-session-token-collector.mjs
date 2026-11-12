@@ -4,19 +4,40 @@ import { dirname, join, relative } from "node:path";
 import { homedir } from "node:os";
 
 
-// Candidate folder order mirrors the old JS helper. Actual runtime project,
+// Candidate folder order mirrors the old JS helper.  Actual runtime project,
 // exact-name placement and reference-expansion continuity remain unverified.
 const COLLECTOR_TOKEN_FOLDERS = ["/", "/global-api-keys"];
+
+// A non-zero exit is a confirmed miss only when stderr names the secret or
+// the folder as the thing that is absent.  Project, environment, and route
+// failures use the same "not found" / "doesn't exist" words, and the CLI's
+// pretty 404 printer always appends "Response Code: 404 Not Found", so a
+// generic not-found match would hide a bad project or environment as a miss.
+// A missing folder still falls through: the next candidate path can exist.
+// stderr is matched as a boolean and its content is never used, logged, or
+// propagated (a CLI error can echo its input).
+const INFISICAL_SECRET_MISS_PATTERN = /secret with name\b[^\n]{0,240}?(?:not[\s-]*found|does not exist|doesn't exist)|the secret (?:does not exist|doesn't exist)|secret ["'][^"'\n]{1,200}["'] (?:does not exist|doesn't exist)/i;
+const INFISICAL_FOLDER_MISS_PATTERN = /folder with (?:path|id)\b[^\n]{0,300}?not[\s-]*found|folder ["'][^"'\n]{1,200}["'] (?:does not exist|doesn't exist)/i;
+const INFISICAL_SCOPE_FAILURE_PATTERN = /project\b[^\n]{0,240}?(?:not[\s-]*found|does not exist|doesn't exist)|environment with slug\b[^\n]{0,240}?not[\s-]*found|environment ["'][^"'\n]+["'] (?:does not exist|doesn't exist)|route\b[^\n]{0,400}?not[\s-]*found/i;
+
+function infisicalNonZeroExitIsMiss(stderrText) {
+  const text = String(stderrText).replace(/\u001b\[[0-9;]*m/g, "");
+  if (INFISICAL_SCOPE_FAILURE_PATTERN.test(text)) return false;
+  return INFISICAL_SECRET_MISS_PATTERN.test(text) || INFISICAL_FOLDER_MISS_PATTERN.test(text);
+}
 
 // Default token lookup: this consumer's scoped direct Infisical read
 // (INFISICAL_TOKEN + INFISICAL_FLEET_OPS_PROJECT_ID in the environment),
 // replacing the retired fleet-secrets CLI.  No binding means env-only
 // operation: null WITHOUT spawning the CLI, so no personal login session
 // can serve the read.  Exit 0 + empty stdout is a confirmed miss in that
-// folder (the next folder is tried); any non-zero exit is a read/auth
-// failure and throws instead of looking like a miss.  --expand=false is
-// deliberate: the stored value is read as-is; each name's literal/reference
-// status is verified separately before continuity is claimed for it.
+// folder (the next folder is tried); a missing-secret or missing-folder
+// non-zero exit is a confirmed miss too (infisicalNonZeroExitIsMiss); any
+// other non-zero exit is a read/auth failure and throws instead of looking
+// like a miss.
+// --expand=false is deliberate: the stored value is read as-is; each name's
+// literal/reference status is verified separately before continuity is
+// claimed for it.
 function scopedInfisicalRead(name, env) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
   const token = (env.INFISICAL_TOKEN || "").trim();
@@ -39,8 +60,12 @@ function scopedInfisicalRead(name, env) {
       out = execFileSync(env.INFISICAL_BIN || "infisical",
         ["secrets", "get", name, "--plain", "--silent", "--telemetry=false",
          "--expand=false", "--env=prod", `--path=${folder}`, `--projectId=${project}`],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15000, killSignal: "SIGKILL", env: childEnv });
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000, killSignal: "SIGKILL", env: childEnv });
     } catch (err) {
+      // stderr is read ONLY as a boolean miss classification against the
+      // fixed wording whitelist; its content never leaves this check.
+      const stderrText = typeof err.stderr === "string" ? err.stderr : "";
+      if (infisicalNonZeroExitIsMiss(stderrText)) continue;
       // Whitelisted diagnostics only - spawn code, timeout-kill, signal or
       // exit status; never err.stderr/cause/message (a CLI error can echo
       // its input).
@@ -84,8 +109,8 @@ export function resolveCollectorToken(
   for (const name of tokenEnvVarNames) {
     const val = env[name]?.trim();
     if (val) return val;
-    // Strict injected-secrets mode (from main) skips the runtime lookup
-    // entirely: only values already injected into the environment count.
+    // Strict injected-secrets mode skips the runtime lookup entirely:
+    // only values already injected into the environment count.
     let fromLookup = null;
     if (env.COLLECTOR_STRICT_INJECTED_SECRETS !== "1") {
       try {
@@ -106,7 +131,7 @@ export function resolveCollectorToken(
   return null;
 }
 
-/** Load one producer-scoped hub bearer into this collector process only.  The
+/** Load one producer-scoped hub bearer into this collector process only.  The
  * source value remains in Infisical and never enters a plist. */
 export function configureCollectorSentryToken(
   tokenEnvVarNames,
@@ -116,19 +141,21 @@ export function configureCollectorSentryToken(
   if (!env.COLLECTOR_TELEMETRY_HUB_ENDPOINT?.trim()) return false;
   if (env.COLLECTOR_TELEMETRY_HUB_TOKEN?.trim()) return true;
   if (env.COLLECTOR_TELEMETRY_HUB_TOKENS_JSON?.trim()) return true;
-  let token = null;
+  // Optional telemetry must never abort collection: a token-resolution
+  // failure (e.g. the scoped Infisical read is down) downgrades this run to
+  // no Sentry instead of throwing.  Only the whitelisted infisicalDiag tag
+  // is logged - never err.message, which a lookup could stuff with secret
+  // material.
+  let hubBearer = null;
   try {
-    token = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
-  } catch {
-    // Telemetry is optional: a failed token lookup must not abort usage
-    // collection.  The thrown error's message is deliberately not logged -
-    // lookup errors are constructed to be secret-free, but an injected
-    // lookup's errors are not covered by that guarantee.
-    console.warn("configureCollectorSentryToken: collector token lookup failed; continuing without a telemetry hub token");
+    hubBearer = resolveCollectorToken(tokenEnvVarNames, { env, fleetSecretsGet: lookup });
+  } catch (err) {
+    const diag = typeof err?.infisicalDiag === "string" ? ` (${err.infisicalDiag})` : "";
+    console.warn(`collector sentry: telemetry credential resolution failed${diag}; continuing without Sentry`);
     return false;
   }
-  if (!token) return false;
-  env.COLLECTOR_TELEMETRY_HUB_TOKEN = token;
+  if (!hubBearer) return false;
+  env.COLLECTOR_TELEMETRY_HUB_TOKEN = hubBearer;
   return true;
 }
 
