@@ -9,6 +9,36 @@ import {
   mergeLlmClassification,
 } from "./src/classify.mjs";
 
+describe("pathological input guard", () => {
+  // Hostile mail from the public MX.  These took 12 seconds or more before the caps.
+  const dotted = "a.".repeat(100_000);
+
+  it("caps the body before the redaction regexes run", () => {
+    const started = performance.now();
+    const review = classifyReceipt({ subject: "x", text: dotted, receivedAt: "2026-08-22T00:00:00.000Z" });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(review.action).toBe("file");
+  });
+
+  it("caps the subject before the redaction regexes run", () => {
+    const started = performance.now();
+    expect(boundedSubject(dotted).length).toBeLessThanOrEqual(180);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  it("still redacts ordinary addresses and card numbers", () => {
+    const subject = boundedSubject("Paid by person@example.com with 4242 4242 4242 4242");
+    expect(subject).not.toContain("person@example.com");
+    expect(subject).not.toContain("4242");
+  });
+
+  it("still finds an amount inside the first 8,000 characters and ignores one past it", () => {
+    const receivedAt = "2026-08-22T00:00:00.000Z";
+    expect(classifyReceipt({ subject: "x", text: "Total $19.99", receivedAt }).amountUsd).toBe(19.99);
+    expect(classifyReceipt({ subject: "x", text: `${"y ".repeat(4_000)}Total $19.99`, receivedAt }).amountUsd).toBeNull();
+  });
+});
+
 describe("boundedSubject", () => {
   it("strips emails and cards and truncates", () => {
     expect(boundedSubject("Receipt for billing@x.com visa 4111 1111 1111 1111")).toContain("[email]");

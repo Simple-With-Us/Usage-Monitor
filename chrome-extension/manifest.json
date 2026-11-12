@@ -8,6 +8,6 @@
   ],
   "action": {
     "default_popup": "popup/index.html",
-    "default_title": "Usage Client Monitor"
+    "default_title": "Usage Monitor Client"
   }
 }

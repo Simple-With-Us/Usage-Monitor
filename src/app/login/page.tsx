@@ -73,7 +73,7 @@ function LoginForm() {
         </div>
 
         <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Log in</h2>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Log In</h2>
           <form onSubmit={handleSubmit} className="mt-4 space-y-4">
             <div>
               <label htmlFor="password" className="block text-xs font-medium text-gray-500 mb-1 dark:text-gray-400">
@@ -101,7 +101,7 @@ function LoginForm() {
               disabled={submitting || !password}
               className="w-full min-h-11 px-4 py-2 text-base font-medium text-white bg-accent rounded-lg hover:opacity-90 transition-colors disabled:opacity-50"
             >
-              {submitting ? "Logging in…" : "Log in"}
+              {submitting ? "Logging in…" : "Log In"}
             </button>
           </form>
         </div>

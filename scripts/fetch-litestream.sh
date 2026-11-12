@@ -137,7 +137,13 @@ log "Downloading ${LITESTREAM_URL}"
 # Dockerfile killed two production deploys on 2026-08-12 with
 # `curl: (16) Error in the HTTP2 framing layer`, a transient GitHub-CDN flake.
 # Same host, same asset-download path, so the same hardening applies here.
-if ! curl -fsSL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors \
+#
+# The retry BUDGET matters as much as the flags.  Measured on 2026-11-09, the
+# release-asset CDN degrades in rotating windows of roughly 20 seconds to 2
+# minutes, and the window moves between assets.  The previous 5x2s budget
+# spans about 10 seconds and cannot survive one of those windows; 180 seconds
+# is the bound.  A genuinely missing asset still fails closed.
+if ! curl -fsSL --http1.1 --retry 10 --retry-delay 10 --retry-max-time 180 --retry-all-errors \
     --retry-connrefused -o "${TARBALL}" "${LITESTREAM_URL}"; then
   echo "[fetch-litestream] WARNING: failed to download ${LITESTREAM_URL}" >&2
   echo "[fetch-litestream] Check network access and that v${LITESTREAM_VERSION} still has a" >&2

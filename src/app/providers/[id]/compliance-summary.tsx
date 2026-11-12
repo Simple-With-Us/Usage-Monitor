@@ -131,7 +131,7 @@ export function ComplianceSummaryPanel({
     <section className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">
-          Usage compliance
+          Usage Compliance
         </h2>
         <ComplianceBadge state={state} />
       </div>

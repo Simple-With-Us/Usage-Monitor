@@ -6,14 +6,20 @@
 set -euo pipefail
 
 INGEST_URL="${INGEST_URL:-https://usage.jays.services/api/ingest/mac-heartbeat}"
-SECRETS_FILE="/Users/jay/.secrets/global-api-keys"
+FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-/Users/jay/.local/bin/fleet-secrets}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
 # refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
+#
+# OPS-818:  the retired flat key file is no longer read.  A name missing from
+# the environment comes from `fleet-secrets get` (root, then the
+# /global-api-keys folder);  the value is captured, never echoed.
 read_secret() {
-  [[ -f "$SECRETS_FILE" ]] || return 0
-  grep -m1 "^$1=" "$SECRETS_FILE" | cut -d'=' -f2- | tr -d '"' || true
+  [[ -x "$FLEET_SECRETS_BIN" ]] || return 0
+  "$FLEET_SECRETS_BIN" get "$1" --path / 2>/dev/null \
+    || "$FLEET_SECRETS_BIN" get "$1" --path /global-api-keys 2>/dev/null \
+    || true
 }
 
 TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
@@ -22,7 +28,7 @@ TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
 [[ -n "$TOKEN" ]] || TOKEN="$(read_secret USAGE_INGEST_TOKEN)"
 
 if [[ -z "$TOKEN" ]]; then
-  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or $SECRETS_FILE" >&2
+  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or fleet-secrets" >&2
   exit 1
 fi
 
@@ -59,38 +65,71 @@ ARCH="$(uname -m 2>/dev/null || echo "arm64")"
 #
 # Correct method: read the kernel's own CPU tick counters and take 1 - idle/total.
 # Two sources, both from the same counters, differing only in window:
-#   top    = ~1-minute decaying average, i.e. what Activity Monitor's top bar
-#            shows.  This is the primary, because a human comparing this card
-#            against Activity Monitor or HogHunter is comparing against this.
-#   iostat = 1-second instantaneous window, far spikier.  Kept as the fallback
-#            for hosts where `top` is unavailable or restricted.
-# On a noisy host the two can disagree by 20+ points honestly (one is a 1s
-# window, the other a 1m average), so prefer the stable one rather than the
+#   top    = ~5-second window per run (the second sample; the first has no
+#            measured interval behind it, so the script keeps the LAST line).
+#            Steadier than iostat's 1-second window.  This is NOT a 1-minute
+#            decaying average and is NOT what Activity Monitor's top bar shows;
+#            a single 1s spike at 90%+ would otherwise flip the whole
+#            heartbeat to "degraded".
+#   iostat = 1-second instantaneous window, the spikiest of the two.  Kept as
+#            the fallback for hosts where `top` is unavailable or restricted.
+# On a noisy host the two can still disagree by 20+ points honestly (one is a
+# 5s window, the other a 1s window), so prefer the stable one rather than the
 # larger sample count.
 CPU_USAGE=""
 _cpu_from_top() {
   # `top -l 2` prints a CPU line per sample.  The FIRST sample has no measured
   # interval behind it (top has just started), so keep the LAST one rather than
   # exiting on the first match.
-  top -l 2 -n 0 2>/dev/null \
+  top -l 2 -s 5 -n 0 2>/dev/null \
     | awk -F'[:,]' '/CPU usage/ && /user/ {
+          # macOS prints each value and its label in the SAME field
+          # (" 7.31% user"), so strip the number from the field that matched
+          # the label.  Taking $(i+1) instead reads the NEXT value (sys for
+          # user, idle for sys) and reports sys+idle = 100 - user.
+          # Some top builds append per-core sections (e.g. "CPU0: 9.00% user,
+          # 9.00% sys, ...") to the same "CPU usage" line.  Reset u/s per
+          # matching line and break on /CPU[0-9]+:?/ so a trailing per-core
+          # field cannot overwrite the machine-wide values.  The "CPU usage"
+          # header does not match the digit-required pattern, so it never
+          # triggers the break; the optional ":?" covers both "CPU0" (after
+          # the FS ate the trailing colon) and a literal "CPU0:" form.
+          u = ""; s = ""
           for (i = 1; i <= NF; i++) {
-            if ($i ~ /user/) u = $(i + 1)
-            if ($i ~ /sys/)  s = $(i + 1)
+            if ($i ~ /CPU[0-9]+:?/) break
+            if ($i ~ /user/) { gsub(/[^0-9.]/, "", $i); u = $i }
+            if ($i ~ /sys/)  { gsub(/[^0-9.]/, "", $i); s = $i }
           }
-          gsub(/[^0-9.]/, "", u); gsub(/[^0-9.]/, "", s)
           if (u != "" || s != "") { v = u + s; if (v > 100) v = 100; last = v }
         }
         END { if (last == "") exit 1; printf "%.1f", last }'
 }
 _cpu_from_iostat() {
+  # The `id` (idle) column index depends on the host's /dev/disk* count (3
+  # columns per disk before `us sy id`), so resolve it from the header row
+  # instead of assuming a fixed $12; a wrong index reads the 1m load average
+  # as idle and reports ~97% CPU on a lightly loaded host.
   iostat -w 1 -c 2 2>/dev/null \
-    | awk '/^ *[0-9]/ && NF>11 { idle = $12 }          # 3 disk groups x3 cols, then us sy id
-          END { if (idle == "") exit 1; v = 100 - idle; if (v < 0) v = 0; if (v > 100) v = 100
-                printf "%.1f", v }'
+    | awk 'BEGIN { idcol = 0 }
+           $0 ~ /us[ \t]+sy[ \t]+id/ {
+             for (i = 1; i <= NF; i++) if ($i == "id") { idcol = i; break }
+             next
+           }
+           /^ *[0-9]/ && idcol > 0 { idle = $idcol }
+           END { if (idle == "") exit 1; v = 100 - idle; if (v < 0) v = 0; if (v > 100) v = 100
+                 printf "%.1f", v }'
 }
-CPU_USAGE="$(_cpu_from_top)"
-[ -z "$CPU_USAGE" ] && CPU_USAGE="$(_cpu_from_iostat)"
+# Under `set -euo pipefail` a failing command substitution aborts the whole
+# script, so neutralize each probe's status inside the substitution: a failed
+# probe must fall through to the next fallback, not skip the heartbeat POST.
+# If both probes fail, warn on stderr so a broken/Restricted/locale-only
+# `top` doesn't masquerade as an idle Mac in the launchd log; still post 0%
+# so the heartbeat (and the online check) keep flowing.
+CPU_USAGE="$(_cpu_from_top || true)"
+if [ -z "$CPU_USAGE" ]; then
+  CPU_USAGE="$(_cpu_from_iostat || true)"
+  [ -n "$CPU_USAGE" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: top and iostat CPU probes both failed; reporting 0% for this heartbeat" >&2
+fi
 [ -z "$CPU_USAGE" ] && CPU_USAGE=0
 CPU_USAGE="$(printf '%.1f' "$CPU_USAGE" 2>/dev/null || echo 0)"
 
@@ -135,7 +174,7 @@ LITESTREAM_STATUS="$(check_process "litestream" "true")"
 # wrong when the runtime is OrbStack).
 ORBSTACK_STATUS="$(check_process "(OrbStack|orbstack)" "true")"
 DOCKER_STATUS="$(check_process "Docker" "true")"
-AGENT_SYNC_STATUS="$(check_process "agent-sync" "false")"
+OPERATOR_STATUS="$(check_process "operator-live" "false")"
 
 # Coding agent live execution checks
 check_agent() {
@@ -187,7 +226,7 @@ PAYLOAD="$(jq -n \
   --arg litestream "$LITESTREAM_STATUS" \
   --arg orbstack "$ORBSTACK_STATUS" \
   --arg docker "$DOCKER_STATUS" \
-  --arg agentSync "$AGENT_SYNC_STATUS" \
+  --arg operator "$OPERATOR_STATUS" \
   --arg claudeAgent "$CLAUDE_STATUS" \
   --arg cursorAgent "$CURSOR_STATUS" \
   --arg grokAgent "$GROK_STATUS" \
@@ -212,7 +251,7 @@ PAYLOAD="$(jq -n \
       litestream: $litestream,
       orbstack: $orbstack,
       docker: $docker,
-      "agent-sync": $agentSync
+      "operator": $operator
     },
     agentProcesses: {
       "claude-code": $claudeAgent,

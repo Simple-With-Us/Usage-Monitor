@@ -15,6 +15,25 @@ import XCTest
 /// `providerLabel` and `via` as ADDITIVE fields alongside new collectors.
 final class QuotaWindowsDecodingTests: XCTestCase {
 
+    func testPlanMetadataDecodesAndMalformedOptionalFieldsDoNotDropWindow() throws {
+        let json = #"{"windows":[{"id":"plan","provider":"claude","remainingUnknown":true,"planName":"Max 20x","planMetadata":{"detectedPlanName":"Max 20x","userPlanName":"Team","userCostUsd":"200","userRenewalDateText":"Tomorrow","userSubtitle":"Work","showCostAndRenewal":false,"hasMismatch":true}},{"id":"legacy","provider":"codex"},{"id":"partial","provider":"claude","planMetadata":{"userSubtitle":42}}]}"#
+        let response = try JSONDecoder().decode(QuotaWindowsResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(response.windows.count, 3)
+        let row = response.windows[0]
+        XCTAssertEqual(row.planName, "Max 20x")
+        XCTAssertEqual(row.planMetadata?.detectedPlanName, "Max 20x")
+        XCTAssertEqual(row.planMetadata?.userPlanName, "Team")
+        XCTAssertEqual(row.planMetadata?.userCostUsd, "200")
+        XCTAssertEqual(row.planMetadata?.userRenewalDateText, "Tomorrow")
+        XCTAssertEqual(row.planMetadata?.userSubtitle, "Work")
+        XCTAssertEqual(row.planMetadata?.showCostAndRenewal, false)
+        XCTAssertEqual(row.planMetadata?.hasMismatch, true)
+        XCTAssertNil(row.remainingPercent)
+        XCTAssertNil(response.windows[1].planMetadata)
+        XCTAssertNil(response.windows[2].planMetadata?.userSubtitle)
+        XCTAssertEqual(response.windows[2].planMetadata?.hasMismatch, false)
+    }
+
     private let quotaWindowsJSON = """
         {
           "ok": true,

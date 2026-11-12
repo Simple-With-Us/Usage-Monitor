@@ -36,9 +36,15 @@
 //     GBU_INGEST_TOKEN (gbu).
 //   Each falls back to SUBSCRIPTION_QUOTA_INGEST_TOKEN, then USAGE_INGEST_TOKEN
 //     (unscoped; refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true).  Every
-//     name is read from the environment first, then ~/.secrets/global-api-keys
+//     name is read from the environment first, then `fleet-secrets get`
 //     via resolveCollectorToken.
 //   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
+//   CLAUDE_CODE_OAUTH_CREDENTIALS_JSON — Claude Code OAuth credential JSON
+//     (same shape as ~/.claude/.credentials.json).  The LaunchAgent injects it
+//     through scripts/run-subscription-quota-collector.sh, which reads the
+//     "Claude Code-credentials" Keychain item (UM-1616); one-off dry runs can
+//     use scripts/claude-code-oauth-credentials-from-keychain.sh.  See
+//     docs/rollouts/2026-09-12-subscription-quota-collector.md.
 //   CLAUDE_HOME / CODEX_HOME / GROK_HOME / MINIMAX_CONFIG_PATH / GBU_BIN to override
 //     credential locations or the gbu binary path
 //   PATH should include $HOME/.gbu/bin and $HOME/.local/bin so `gbu` resolves
@@ -54,7 +60,7 @@ import { readFile, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -63,7 +69,7 @@ import {
   GROK_PRODUCER_ID,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
-import { expandHome, resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { expandHome, resolveCollectorToken } from "./lib/subscription-quota-run-session-token-collector.mjs";
 import { planTypeFromCodexAuth } from "./lib/codex-observed-plan.mjs";
 import { buildQuotaEvent } from "./lib/quota-event.mjs";
 import {
@@ -73,6 +79,7 @@ import {
   parseMinimaxRemains,
   parseGbuJson,
 } from "./lib/subscription-quota-parsers.mjs";
+import { parseClaudeCodeCredentialsJson } from "./lib/claude-code-oauth-credentials.mjs";
 
 /** MiniMax has no seat in session-token-collectors yet; give it its own id. */
 export const MINIMAX_PRODUCER_ID = "minimax-code";
@@ -100,6 +107,24 @@ function log(message) {
 async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Read Claude OAuth credentials from CLAUDE_CODE_OAUTH_CREDENTIALS_JSON only. */
+function readClaudeCredentialsFromEnv() {
+  const raw = process.env.CLAUDE_CODE_OAUTH_CREDENTIALS_JSON;
+  if (raw == null || !String(raw).trim()) return null;
+  return parseClaudeCodeCredentialsJson(raw, { logImpl: log });
+}
+
+/** Legacy file path when env injection is unset (older CLI releases). */
+async function readClaudeCredentialsFromFile() {
+  const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
+  try {
+    const text = await readFile(path, "utf8");
+    return parseClaudeCodeCredentialsJson(text, { logImpl: log });
   } catch {
     return null;
   }
@@ -291,8 +316,11 @@ const PROVIDERS = {
     defaultSource: hostOf(CLAUDE_USAGE_URL),
     parse: (payload, context) => parseClaudeUsage(payload, context),
     async fetch() {
-      const path = join(expandHome(process.env.CLAUDE_HOME || "~/.claude"), ".credentials.json");
-      const credentials = await readJson(path);
+      // Env-injected JSON first (launchd wrapper or operator export), then the
+      // legacy file path for older CLI releases.  Keychain is never read here;
+      // scripts/run-subscription-quota-collector.sh does that and injects it.
+      const credentials =
+        readClaudeCredentialsFromEnv() ?? (await readClaudeCredentialsFromFile());
       const oauth = asRecord(asRecord(credentials).claudeAiOauth);
       const token = resolveCredentialField(oauth, ["accessToken", "access_token"]);
       if (!token) return { skipped: "no Claude Code OAuth credential found" };
@@ -466,11 +494,19 @@ export function parseArgs(argv) {
   return args;
 }
 
+const COLLECTOR_MACHINE = hostname();
+
 /** Turn one provider's raw payload into ingest events.  Pure; used by tests. */
-export function eventsForProvider(providerKey, payload, { context, source, occurredAtIso } = {}) {
+export function eventsForProvider(
+  providerKey,
+  payload,
+  { context, source, occurredAtIso, machine } = {},
+) {
   const definition = PROVIDERS[providerKey];
   if (!definition) throw new Error(`Unknown provider ${providerKey}`);
   const readings = definition.parse(payload, context ?? {});
+  const observedAtIso = occurredAtIso ?? new Date().toISOString();
+  const host = machine ?? COLLECTOR_MACHINE;
   // A window whose remaining percent we could not read is dropped, not posted.
   // The read path's "N/A remaining means none remains" rule is an Antigravity
   // ruling (owner 2026-09-04); applying it to a field-name mismatch would tell
@@ -484,7 +520,9 @@ export function eventsForProvider(providerKey, payload, { context, source, occur
         service: definition.service,
         reading: r,
         source: source ?? definition.defaultSource,
-        occurredAtIso: occurredAtIso ?? new Date().toISOString(),
+        occurredAtIso: observedAtIso,
+        reportedAtIso: r.reportedAt ?? observedAtIso,
+        machine: host,
       }),
     );
 }
@@ -583,7 +621,7 @@ async function main() {
       const definition = PROVIDERS[result.providerKey];
       // Each provider posts as its own producerId, and a scoped ingest token
       // only authorizes its own producer, so resolve one token per producer.
-      const token = resolveCollectorToken(ingestTokenEnvNames(definition));
+      const token = await resolveCollectorToken(ingestTokenEnvNames(definition));
       try {
         const ack = await postUsageBatches({
           events: result.events,

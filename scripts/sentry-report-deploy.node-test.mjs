@@ -1,0 +1,268 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { CONFIG, readIdentity, observeProduction, reportDeploy } from './sentry-report-deploy.mjs';
+const old = '1'.repeat(40), expected = '2'.repeat(40), newer = '3'.repeat(40), foreign = '4'.repeat(40);
+const healthy = (revision) => ({ ok: true, status: 'live', environment: 'production', revision, build: { sha: revision }, checks: { release: { sha: revision } } });
+const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
+const isAncestor = (a, b) => b === 'refs/remotes/origin/main' ? [old, expected, newer].includes(a) : a === b || a === expected && b === newer;
+const observe = (values, options = {}) => {
+  let i = 0;
+  return observeProduction({ expected, attempts: values.length, intervalMs: 0, sleep: async () => {}, refreshMain: () => {}, isAncestor,
+    fetchImpl: async (url, init) => { assert.equal(url.origin, new URL(CONFIG.health).origin); assert.equal(init.headers.Authorization, undefined); assert.equal(init.redirect, 'error'); assert.equal(init.cache, 'no-store'); const value = values[i++]; return value instanceof Response ? value : json(healthy(value)); }, ...options });
+};
+test('requires healthy, full source identity', () => {
+  assert.equal(readIdentity(healthy(expected)), expected);
+  for (const body of [null, {ok:false}, healthy('unknown'), healthy(expected.slice(0,12))]) assert.throws(() => readIdentity(body));
+  if (CONFIG.project === 'usage-monitor') assert.throws(() => readIdentity({...healthy(expected), environment:'development'}));
+});
+test('requires two stable healthy uncached observations', async () => { assert.equal((await observe([old,expected,expected])).revision, expected); });
+test('reports actual newer deployment instead of its CI ancestor', async () => { const result = await observe([newer,newer]); assert.equal(result.revision,newer); assert.equal(result.superseded,true); });
+test('older, unknown and foreign revisions never become deployment evidence', async () => { for (const value of [old,foreign,'unknown']) await assert.rejects(observe([value,value]), /Deployment not confirmed/); });
+test('mixed rollout revisions need stabilization', async () => { await assert.rejects(observe([expected,newer,expected]), /Deployment not confirmed/); });
+test('unhealthy, cached or invalid JSON reset stabilization', async () => {
+  for (const invalid of [json({ok:false},503),json(healthy(expected),200,{age:'20'}),json(healthy(expected),200,{'cf-cache-status':'HIT'}),new Response('not json')]) {
+    await assert.rejects(observe([expected,invalid,expected]), /Deployment not confirmed/);
+  }
+});
+test('network errors are bounded and never leaked', async () => { await assert.rejects(observe(['unused'],{ fetchImpl:async()=>{throw Error('secret details')} }), (e)=> !e.message.includes('secret details')); });
+test('force-pushed expected revision fails closed', async () => { await assert.rejects(observe([expected], {isAncestor:()=>false}), /no longer on main/); });
+const receipt = {revision:newer,confirmedAt:'2026-10-06T08:00:00.000Z'};
+function service({ existing = true, deploys = [], repoId = CONFIG.repositoryId, failure, conflict = false } = {}) {
+  const calls=[];
+  const fetchImpl = async (url, init) => {
+    calls.push({url,method:init.method,body:init.body && JSON.parse(init.body)});
+    assert.ok(url.startsWith('https://sentry.io/api/0/organizations/simple-with-us/'));
+    assert.equal(init.redirect,'error');
+    if (failure === `${init.method} deploy` && url.endsWith('/deploys/')) return json({},503);
+    if (url.includes('/repos/?')) return json([{externalId:repoId,name:'old-owner/repo',status:'active'}]);
+    if (url.endsWith('/deploys/')) return json(init.method==='GET'?deploys:{id:'42'});
+    if (init.method==='GET') return existing ? json({version:newer,ref:conflict?old:newer,projects:[{slug:CONFIG.project}]}) : json({},404);
+    return json({version:newer});
+  };
+  return {calls,fetchImpl};
+}
+const report = (fetchImpl,extra={})=>reportDeploy(receipt,{token:'test-only',repositoryId:CONFIG.repositoryId,runId:'123',fetchImpl,sleep:async()=>{},...extra});
+test('missing token or wrong stable GitHub ID refuses all API writes', async () => {
+  const s=service(); await assert.rejects(report(s.fetchImpl,{token:''}), /required/); await assert.rejects(report(s.fetchImpl,{repositoryId:'999'}), /repository ID/); assert.equal(s.calls.length,0);
+});
+test('matches Sentry stable ID before refs using its current configured name', async()=>{
+ const s=service(); const result=await report(s.fetchImpl); assert.equal(result.version,newer);
+ const put=s.calls.find(c=>c.method==='PUT'); assert.equal(put.body.refs[0].repository,'old-owner/repo'); assert.equal(put.body.refs[0].commit,newer); assert.equal(put.body.dateReleased,undefined);
+ assert.equal(s.calls.filter(c=>c.method==='POST').length,1);
+});
+test('rejects a mismatched Sentry repository or release ref', async()=>{for(const opts of [{repoId:'999'},{conflict:true}]) {const s=service(opts); await assert.rejects(report(s.fetchImpl)); assert.ok(s.calls.every(c=>c.method==='GET'));}});
+test('only explicitly SHA-wired Deno runtime may create a missing release', async()=>{const s=service({existing:false}); if(CONFIG.project !== 'congress-trade') { await assert.rejects(report(s.fetchImpl), /refusing to invent/); assert.ok(s.calls.every(c=>c.method==='GET')); return; } await report(s.fetchImpl); const creates=s.calls.filter(c=>c.method==='POST'); assert.equal(creates.length,2); assert.deepEqual(creates[0].body.projects,[CONFIG.project]); assert.equal(creates[0].body.version,newer);});
+test('deduplicates by actual release/environment including legacy names',async()=>{const s=service({deploys:[{id:'old-id',environment:'production',name:'seat:codex pr:#1'}]}); const r=await report(s.fetchImpl); assert.equal(r.alreadyRecorded,true); assert.ok(!s.calls.some(c=>c.method==='POST'));});
+test('reporting errors fail visibly without duplicate write retry',async()=>{const s=service({failure:'POST deploy'}); await assert.rejects(report(s.fetchImpl), /HTTP 503/); assert.equal(s.calls.filter(c=>c.method==='POST').length,1);});
+test('ambiguous writes never retry or leak response errors',async()=>{const s=service();const fetchImpl=async(url,init)=>{if(init.method==='POST') throw Error('secret details');return s.fetchImpl(url,init)};await assert.rejects(report(fetchImpl), /inspect outcome/);});
+test('pagination finds an older production deployment without posting again',async()=>{
+ const s=service(); let pages=0;
+ const fetchImpl=async(url,init)=>{
+  if(url.includes('/deploys/')) {pages++;return pages===1?json([{environment:'staging'}],200,{link:`<https://sentry.io/api/0/organizations/simple-with-us/releases/${newer}/deploys/?cursor=next>; rel="next"; results="true"`}):json([{id:'old-prod',environment:'production'}]);}
+  return s.fetchImpl(url,init);
+ };const result=await report(fetchImpl);assert.equal(result.deployId,'old-prod');assert.equal(pages,2);assert.ok(!s.calls.some(c=>c.method==='POST'));
+});
+test('untrusted Sentry pagination cannot forward the token',async()=>{
+ let calls=0;await assert.rejects(report(async()=>{calls++;return json([],200,{link:'<https://evil.invalid/steal>; rel="next"; results="true"'});}),/not trusted/);assert.equal(calls,1);
+});
+
+
+test('UM attribution uses actual deployed merge SHA, never its triggering ancestor',async()=>{
+ const {deploymentAttribution}=await import('./sentry-report-deploy.mjs');
+ const pr={number:1536,merged_at:'2026-10-01',merge_commit_sha:newer,base:{ref:'main',repo:{id:Number(CONFIG.repositoryId)}},head:{ref:'codex/feature'}};
+ const attribution=await deploymentAttribution(newer,{token:'test-only',fetchImpl:async(url,init)=>{assert.ok(url.includes(`/commits/${newer}/pulls`));assert.equal(init.redirect,'error');return json([pr]);}});
+ assert.deepEqual(attribution,{number:1536,seat:'codex'});
+ assert.equal(await deploymentAttribution(newer,{token:'test-only',fetchImpl:async()=>json([{...pr,merge_commit_sha:expected}])}),undefined);
+ const s=service();await report(s.fetchImpl,{attribution});const deploy=s.calls.find(c=>c.method==='POST');assert.ok(deploy.body.name.endsWith('seat:codex pr:#1536'));
+});
+test('longest verified seat and PR attribution fits Sentry 64-character limit',async()=>{
+ const s=service();await report(s.fetchImpl,{attribution:{seat:'a'.repeat(32),number:Number.MAX_SAFE_INTEGER}});
+ const name=s.calls.find(c=>c.method==='POST').body.name;
+ assert.ok(name.length<=64);assert.ok(name.includes(`pr:#${Number.MAX_SAFE_INTEGER}`));assert.ok(name.includes('a'.repeat(24)));
+});
+
+test('build release matches a full source SHA, independent of git metadata',async()=>{
+ const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
+ assert.equal(sentryBuildRelease({SOURCE_COMMIT:newer,GIT_COMMIT_SHA:expected,SENTRY_RELEASE:'unrelated'}),newer);
+ assert.equal(sentryBuildRelease({}),undefined);
+ assert.equal(sentryBuildRelease({SOURCE_COMMIT:'unknown'}),undefined);
+ assert.equal(sentryBuildRelease({SOURCE_COMMIT:newer.slice(0,12)}),undefined);
+});
+test('Next build config wires explicit Sentry release identity',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const config=readFileSync(new URL('../next.config.js',import.meta.url),'utf8');
+ assert.match(config,/release:\s*\{ name: releaseName \}/);
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const builder=docker.split(/FROM .* AS runtime/)[0];
+ assert.match(builder,/ARG SOURCE_COMMIT=/);
+ assert.match(builder,/SOURCE_COMMIT=\$\{SOURCE_COMMIT\}/);
+ assert.ok(builder.indexOf('SOURCE_COMMIT=${SOURCE_COMMIT}')<builder.lastIndexOf('npm run build'));
+});
+
+async function nextBuildConfig(env, onPluginLoad=()=>{}, phase='phase-production-build') {
+ const {readFileSync}=await import('node:fs');
+ const {runInNewContext}=await import('node:vm');
+ const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
+ let options, calls=0;
+ const context={__dirname:'/app',process:{env},module:{exports:{}},require:(name)=>{
+   if(name==='path')return {join:()=>'/app'};
+   if(name==='next/constants')return {PHASE_PRODUCTION_BUILD:'phase-production-build',PHASE_DEVELOPMENT_SERVER:'phase-development-server'};
+   if(name==='./scripts/sentry-build-release.cjs')return {sentryBuildRelease:()=>sentryBuildRelease(env)};
+   assert.equal(name,'@sentry/nextjs/config');
+   onPluginLoad();
+   return {withSentryConfig:(config,input)=>{calls++;options=input;return config;}};
+ }};
+ runInNewContext(readFileSync(new URL('../next.config.js',import.meta.url),'utf8'),context);
+ const config=await context.module.exports(phase);
+ return {options,calls,config};
+}
+test('runtime token without source SHA does not load the upload plugin or fail startup',async()=>{
+ for(const phase of ['phase-production-server','phase-development-server']) {
+   for(const source of [undefined,'','unknown',newer.slice(0,12)]) {
+     const {calls,config}=await nextBuildConfig({NODE_ENV:'production',SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:source},()=>{},phase);
+     assert.equal(calls,0);
+     assert.equal(config.poweredByHeader,false);
+   }
+ }
+ const {calls,options}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SENTRY_DSN:'test-only'},()=>{},'phase-production-server');
+ assert.equal(calls,1);
+ assert.equal(options.authToken,undefined);
+ assert.equal(options.sourcemaps.disable,true);
+ assert.equal(options.errorHandler,undefined);
+});
+test('credential-free builds avoid uploads and the plugin when no DSN is set',async()=>{
+ assert.equal((await nextBuildConfig({})).calls,0);
+ assert.equal((await nextBuildConfig({SENTRY_AUTH_TOKEN:''})).calls,0);
+ const {options}=await nextBuildConfig({NEXT_PUBLIC_SENTRY_DSN:'test-only'});
+ assert.equal(options.sourcemaps.disable,true);
+ assert.equal(options.authToken,undefined);
+ assert.equal(options.errorHandler,undefined);
+});
+test('build-only token enables uploads to the reporter project for the source SHA',async()=>{
+ const {options,calls,config}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:newer});
+ assert.equal(calls,1);
+ assert.equal(options.org,'simple-with-us');
+ assert.equal(options.project,CONFIG.project);
+ assert.equal(options.release.name,newer);
+ assert.equal(options.authToken,'test-only');
+ assert.equal(options.sourcemaps.disable,false);
+ assert.equal(config.poweredByHeader,false);
+});
+test('authenticated upload errors fail the build without leaking plugin details',async()=>{
+ const {options}=await nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:newer});
+ for(const failure of [new Error('credential-or-response-detail'),null,undefined]) {
+   assert.throws(()=>options.errorHandler(failure),(error)=>{
+     assert.equal(error.message,'Sentry release upload failed');
+     assert.equal(error.cause,undefined);
+     return true;
+   });
+ }
+});
+test('upload token without a full source SHA fails before loading the plugin',async()=>{
+ for(const source of [undefined,'','unknown',newer.slice(0,12)]) {
+   let loaded=false;
+   await assert.rejects(nextBuildConfig({SENTRY_AUTH_TOKEN:'test-only',SOURCE_COMMIT:source},()=>{loaded=true;}),/Sentry upload requires a full source commit SHA/);
+   assert.equal(loaded,false);
+   assert.equal((await nextBuildConfig({SOURCE_COMMIT:source})).calls,0);
+ }
+});
+test('explicit build upload routing is preserved',async()=>{
+ const {options}=await nextBuildConfig({SENTRY_DSN:'test-only',SENTRY_AUTH_TOKEN:'test-only',SENTRY_ORG:'other-org',SENTRY_SELF_PROJECT:'other-project',SOURCE_COMMIT:newer});
+ assert.equal(options.org,'other-org');
+ assert.equal(options.project,'other-project');
+});
+test('Docker exposes the upload token only as an optional build secret',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const [builder,runtime]=docker.split(/FROM .* AS runtime/);
+ const buildRun=builder.match(/RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN[\s\S]*?npm run build/)?.[0];
+ assert.ok(buildRun);
+ assert.ok(buildRun.includes('--mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN,required=false'));
+ for(const key of ['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA']) {
+   assert.ok(buildRun.includes(`--mount=type=secret,id=${key},required=false \\`),`${key} must reach the build as an optional file`);
+   assert.ok(!buildRun.includes(`env=${key}`),`${key} must preserve build-argument fallbacks when absent`);
+ }
+ assert.match(builder,/ARG SENTRY_ORG="simple-with-us"/);
+ assert.match(builder,/ARG SENTRY_SELF_PROJECT="usage-monitor"/);
+ assert.doesNotMatch(docker,/^(?:ARG|ENV)\s+SENTRY_AUTH_TOKEN/m);
+ assert.doesNotMatch(runtime,/SENTRY_AUTH_TOKEN/);
+});
+test('Docker public configuration preserves arguments and accepts mounted overrides',async()=>{
+ const {readFileSync,mkdtempSync,writeFileSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const {execFileSync}=await import('node:child_process');
+ const docker=readFileSync(new URL('../Dockerfile',import.meta.url),'utf8');
+ const exports=docker.match(/for key in NEXT_PUBLIC_SENTRY_DSN[\s\S]*?done/)?.[0].replace(/\\\n/g,'');
+ assert.ok(exports);
+ const keys=['NEXT_PUBLIC_SENTRY_DSN','SENTRY_ORG','SENTRY_SELF_PROJECT','SOURCE_COMMIT','GIT_COMMIT_SHA'];
+ for(const mode of ['absent','complete','partial','empty']) {
+   const mounted=mode==='absent'?[]:mode==='partial'?[keys[0],keys[3]]:keys;
+   const dir=mkdtempSync(join(tmpdir(),'sentry-public-build-'));
+   try {
+     const env={PATH:process.env.PATH};
+     for(const key of keys) {
+       env[key]=`argument-${key}`;
+       if(mounted.includes(key))writeFileSync(join(dir,key),mode==='empty'?'':`mounted-${key}`);
+     }
+     const actual=JSON.parse(execFileSync('sh',['-ec',exports.replaceAll('/run/secrets/',`${dir}/`)+`\nexec '${process.execPath}' -e 'console.log(JSON.stringify(process.env))'`],{env,encoding:'utf8'}));
+     for(const key of keys)assert.equal(actual[key],`${mounted.includes(key)&&mode!=='empty'?'mounted':'argument'}-${key}`);
+   } finally { rmSync(dir,{recursive:true,force:true}); }
+ }
+});
+
+test('UM attribution refuses incomplete GitHub PR pagination',async()=>{
+ const {deploymentAttribution}=await import('./sentry-report-deploy.mjs');
+ assert.equal(await deploymentAttribution(newer,{token:'test-only',fetchImpl:async()=>json([],200,{link:'<https://api.github.com/next>; rel="next"'})}),undefined);
+});
+
+test('git ancestry distinguishes divergence from execution failures',async()=>{
+ const {gitAncestry}=await import('./sentry-report-deploy.mjs');
+ assert.equal(gitAncestry(expected,newer,()=>({status:0})),true);
+ assert.equal(gitAncestry(expected,newer,()=>({status:1})),false);
+ for(const result of [{status:null},{status:128},{status:1,error:new Error('spawn failed')}]) assert.throws(()=>gitAncestry(expected,newer,()=>result),/execution failed/);
+});
+test('transient refresh failures retry without using stale ancestry',async()=>{
+ let calls=0;const r=await observe([expected,expected],{attempts:3,refreshMain:()=>{if(++calls===1)throw Error('temporary network failure');}});
+ assert.equal(r.revision,expected);assert.equal(calls,3);
+});
+test('persistent ancestry errors fail within bounded observation window',async()=>{
+ await assert.rejects(observe([expected,expected],{isAncestor:()=>{throw Error('execution failure')}}),/Unable to refresh or evaluate main ancestry/);
+});
+
+test('release lookup retries a confirmed 404 visibility race, then writes once',async()=>{
+ const s=service();let reads=0;const pauses=[];
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`) && ++reads===1)return json({},404);
+  return s.fetchImpl(url,init);
+ };
+ await report(fetchImpl,{sleep:async(ms)=>pauses.push(ms)});
+ assert.equal(reads,2);assert.deepEqual(pauses,[10000]);
+ assert.equal(s.calls.filter(c=>c.method==='PUT').length,1);
+ assert.equal(s.calls.filter(c=>c.method==='POST').length,1);
+});
+test('persistent missing release lookup is bounded and makes no writes',async()=>{
+ const s=service({existing:false});const pauses=[];
+ await assert.rejects(report(s.fetchImpl,{sleep:async(ms)=>pauses.push(ms)}),/after bounded lookup/);
+ assert.equal(s.calls.filter(c=>c.url.endsWith(`/releases/${newer}/`)).length,6);
+ assert.deepEqual(pauses,[10000,10000,10000,10000,10000]);
+ assert.ok(s.calls.every(c=>c.method==='GET'));
+});
+test('release authentication errors are not retried',async()=>{
+ const s=service();let reads=0;let pauses=0;
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`)){reads++;return json({},401);}
+  return s.fetchImpl(url,init);
+ };
+ await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/HTTP 401/);
+ assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
+});
+test('a null JSON release is invalid data, not a retryable 404',async()=>{
+ const s=service();let reads=0;let pauses=0;
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`)){reads++;return json(null);}
+  return s.fetchImpl(url,init);
+ };
+ await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/identity\/project conflicts/);
+ assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
+});

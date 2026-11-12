@@ -96,7 +96,7 @@ export async function buildWorkspaceExport(): Promise<WorkspaceExportPayload> {
     exportedAt: new Date().toISOString(),
     note: "No API keys or secrets.  Re-enter keys after import on a new device or local instance.  There is no bundle key for this file.",
     copyInstructions:
-      "This JSON is the Local Usage Monitor package.  In Usage Local Monitor: Settings → Import Package, then pick this file.  There is no bundle key or passphrase.  API keys are not included.  Optional: a separate Mac .umkeys file is only for Import Keys.",
+      "This JSON is the Usage Monitor Local package.  In Usage Monitor Local: Settings → Import Package, then pick this file.  There is no bundle key or passphrase.  API keys are not included.  Optional: a separate Mac .umkeys file is only for Import Keys.",
     projects: projects.map((project) => ({
       id: project.id,
       name: project.name,

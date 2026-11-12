@@ -211,7 +211,7 @@ export default function PaidServicesPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-700 sm:px-6">
         <div>
           <h2 id={titleId} className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            Paid services, plans & quotas
+            Paid Services, Plans & Quotas
           </h2>
           <p className="mt-1 max-w-3xl text-xs text-gray-500 dark:text-gray-400">
             Provider-reported billing, quotas, and locally tracked subscriptions in one deduplicated inventory.

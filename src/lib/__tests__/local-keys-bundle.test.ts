@@ -218,6 +218,7 @@ describe("local-keys-bundle CLI round-trip", () => {
   it("refuses a group- or world-readable passphrase file", () => {
     const openPassphraseFile = path.join(tempDirectory, "open-passphrase.txt");
     fs.writeFileSync(openPassphraseFile, "fixture-open-passphrase\n", { mode: 0o644 });
+    fs.chmodSync(openPassphraseFile, 0o644);
     const outPath = path.join(tempDirectory, "refused.umkeys");
     const buildResult = runCli([
       "build",

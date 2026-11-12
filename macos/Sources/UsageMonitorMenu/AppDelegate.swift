@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .aqua)
         configureMenu()
+        AppUpdater.shared.start()
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 410, height: 600)
         popover.contentViewController = NSHostingController(rootView:
@@ -162,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func refresh() { model.refresh() }
+    @objc private func checkForUpdates() { AppUpdater.shared.checkForUpdates() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func configureMenu() {
@@ -177,6 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         add("Quick Quotas", #selector(togglePopover), "2")
         add("Settings…", #selector(showSettings), ",")
         add("Refresh Quotas", #selector(refresh), "r")
+        add("Check For Updates…", #selector(checkForUpdates))
         appMenu.addItem(.separator())
         add("Quit Usage Monitor", #selector(quit), "q")
         appItem.submenu = appMenu

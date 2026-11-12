@@ -6,6 +6,16 @@ Usage Monitor now treats coding-seat telemetry as a source-specific contract.  E
 
 Scheduled collectors run from `~/apps/usage-monitor-collector-runtime/current/scripts`.  `current` is an atomic symlink to a detached, exact commit under `releases/<sha>`; it never points at a seat feature branch or the read-only integration checkout.
 
+The updater copies the invoking checkout's installed `zod` package into each
+release and verifies the collector imports before forward activation.  Install
+the checkout's dependencies before updating; a missing dependency stops activation.
+Before replacing a pre-injector release, the updater copies missing launcher,
+verifier, and Muse collector entrypoints from the validated new release into the
+previous release as an untracked runtime compatibility overlay.  It validates
+the overlay and dependency before switching, so rollback keeps the configured
+launcher available while the release Git HEAD remains its original commit.
+Forward activation still requires those entrypoints to exist in the target commit.
+
 Install or update after the commit is merged to `origin/main`:
 
 ```bash
