@@ -426,7 +426,7 @@ describe("auto-merge hold guards", () => {
       signalRunPullRequests: [],
     });
     expect(empty.status).toBe(0);
-    expect(empty.output).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+    expect(empty.output).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
     expect(empty.calls.trim()).toBe(`token=repo api repos/${REPO}/actions/runs/42948105904 --jq .pull_requests`);
     expect(empty.stdout).toContain("exiting without arming or disarming");
   });
@@ -442,7 +442,7 @@ describe("auto-merge hold guards", () => {
         signalRunPullRequests: [],
       });
       expect(empty.status, eventPrNumber).toBe(0);
-      expect(empty.output, eventPrNumber).toMatchObject({ armable: "0", disarm: "1", pr_number: "", head_sha: "" });
+      expect(empty.output, eventPrNumber).toMatchObject({ armable: "0", disarm: "0", pr_number: "", head_sha: "" });
       expect(empty.stdout, eventPrNumber).toContain("exiting without arming or disarming");
     }
   });
