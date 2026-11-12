@@ -18,3 +18,12 @@
 # the first-commit finding that remains in this branch's history.
 7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:158
 7f4b9b8b6c4ba16b0419dab50b43e58505bfa6f9:src/lib/__tests__/cursor-admin-poller.test.ts:generic-api-key:343
+
+# False-positive: generic-api-key matched hyphenated idempotency-key
+# fixtures in the original key-attribution route test (readable words
+# like matched/unmatched plus a version and "cost").  Not a real secret.
+# Those strings are gone from main; the original commit remains only on
+# the leftover branch that a full-history scan still walks.  Job
+# 131005389954 (Security on main at ed409d65) reported these fingerprints.
+6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:85
+6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:100

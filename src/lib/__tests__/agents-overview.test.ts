@@ -116,14 +116,14 @@ describe("agents-overview", () => {
     expect(kimi).toMatchObject({
       tokenTelemetryKind: "session_jsonl",
       fidelityTier: "session_jsonl",
-      dataCapability: expect.stringContaining("usage.record"),
+      dataCapability: expect.stringContaining("per-turn tokens"),
     });
-    expect(kimi?.notes).toContain("usageScope=turn");
+    expect(kimi?.notes).toContain("per-turn");
     expect(zcode).toMatchObject({
       provider: "Z.ai",
       tokenTelemetryKind: "local_database",
       fidelityTier: "local_database",
-      dataCapability: expect.stringContaining("model_usage SQLite"),
+      dataCapability: expect.stringContaining("local database"),
     });
     expect(platformIdForSourceApp("moonshot-kimi")).toBe("kimi-code");
     for (const alias of ["z.ai", "zai", "glm", "bigmodel.cn"]) {

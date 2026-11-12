@@ -56,7 +56,7 @@ import {
   resolveCollectorToken,
   sessionKeyFor,
   walkFiles,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/claude-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -215,7 +215,7 @@ async function main() {
     }
     return;
   }
-  const token = resolveCollectorToken(["CLAUDE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["CLAUDE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   let ingestUrl;
   try {
     ingestUrl = resolveIngestUrl();
