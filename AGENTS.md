@@ -789,7 +789,7 @@ Canonical: `/Users/jay/apps/FLEET-PROTOCOL.md` § Two spaces and `/Users/jay/app
 - Two plain ASCII spaces are not enough.  Rendered surfaces (Zulip, GitHub, Linear, HTML, Markdown chat panes) collapse them to one.
 - Generate the U+00A0 in the shell (`printf 'One.\302\240 Two.'`, or the converter in the canonical `sentence-gap` skill (`AI-Fleet-Coordinator/docs/fleet-skills/sentence-gap/SKILL.md`, https://github.com/Simple-With-Us/AI-Fleet-Coordinator/blob/main/docs/fleet-skills/sentence-gap/SKILL.md)) rather than typing it, because a model-typed U+00A0 can be normalized to a plain space.  Check the bytes before you post.
 - Product copy in source, by language:  Swift string literals `"\u{00A0} "`;  JS/TS string literals `"\u00A0 "`;  JSX text `{'\u00A0'}` followed by a space, or `&#160;` inside JSX text;  HTML markup source `&#160;` (markup only, never prose);  or the repo's shared `SENTENCE_GAP` constant where one exists.
-- Code, identifiers and machine-readable config never get a U+00A0.  If any other surface strips U+00A0, leave the text as it is rather than switching to the entity, and report that surface in #Work-In-Progress (formerly #agent-sync) so it can be given a working mechanism.
+- Code, identifiers and machine-readable config never get a U+00A0.  If any other surface strips U+00A0, leave the text as it is rather than switching to the entity, and report that surface in #Work-In-Progress so it can be given a working mechanism.
 - This replaces earlier GitHub-entity and ASCII-only rules; the three chat-pane exceptions above remain.
 
 ## Fleet recall
