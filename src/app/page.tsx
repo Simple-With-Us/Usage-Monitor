@@ -585,6 +585,7 @@ export default function DashboardPage() {
           chartFamilies={chartFamilies}
           portfolioSummary={portfolioSummary}
           attentionCount={attentionItems.length}
+          timeframe={timeframe as TimeframeOption}
         />
       </div>
 

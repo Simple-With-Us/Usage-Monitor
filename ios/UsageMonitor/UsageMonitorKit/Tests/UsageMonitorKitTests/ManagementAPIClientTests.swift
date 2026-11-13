@@ -540,6 +540,27 @@ final class ManagementAPIClientTests: XCTestCase {
         )
     }
 
+    func testAgentsOverviewSendsWindowAsQueryItem() async throws {
+        let harness = makeHarness(token: "read-token")
+        ManagementURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/agents-overview")
+            XCTAssertFalse(
+                (request.url?.absoluteString ?? "").contains("%3F"),
+                "window must be a query item; appendingPathComponent encodes an inlined ?"
+            )
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query
+            XCTAssertEqual(query, "window=5h")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer read-token")
+            return .json(Self.agentsOverviewJSON)
+        }
+
+        let response = try await harness.client.agentsOverview(window: "5h")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.windowDays, 0.2083, accuracy: 0.0001)
+        XCTAssertEqual(response.summary.totalAgentCount, 1)
+    }
+
     func testProviderDetailDecodesExternalBilling() async throws {
         let harness = makeHarness()
         installSessionCookie(in: harness)
@@ -755,6 +776,33 @@ final class ManagementAPIClientTests: XCTestCase {
             "nextRenewalAt": "2026-08-17T00:00:00.000Z",
             "syncedAt": "2026-07-29T08:00:00.000Z",
         ]],
+    ]
+
+    private static let agentsOverviewJSON: [String: Any] = [
+        "ok": true,
+        "windowDays": 0.2083,
+        "windowLabel": "Last 24 Hours",
+        "generatedAt": "2026-09-18T08:00:00.000Z",
+        "macHostname": "jays.services",
+        "macChip": "Apple M5",
+        "summary": [
+            "activeAgentCount": 0,
+            "totalAgentCount": 1,
+            "totalTokens": 0,
+            "totalApiEquivalentCostUsd": 0,
+            "totalSubscriptionCostUsd": 0,
+            "totalNetSavingsUsd": 0,
+            "savingsMultiplier": 1,
+            "topModel": NSNull(),
+        ],
+        "burn5h": [
+            "tokens5h": 0,
+            "costEstimate5hUsd": 0,
+            "burnRateTokensPerHour": 0,
+            "burnRateUsdPerHour": 0,
+        ],
+        "platforms": [],
+        "modelDistribution": [],
     ]
 
     private static let subscriptionsJSON: [[String: Any]] = [[

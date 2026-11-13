@@ -1,0 +1,35 @@
+name: macOS app
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - "script/**"
+      - ".github/workflows/macos.yml"
+  pull_request:
+    paths:
+      - "macos/**"
+      - "script/**"
+      - ".github/workflows/macos.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run Swift tests
+        run: swift test --package-path macos
+      - name: Build and stage app
+        run: ./script/build_and_run.sh --build-only
+      - name: Verify app bundle
+        run: |
+          /usr/bin/plutil -lint "macos/dist/Usage Monitor.app/Contents/Info.plist"
+          /usr/bin/codesign --verify --deep --strict "macos/dist/Usage Monitor.app"

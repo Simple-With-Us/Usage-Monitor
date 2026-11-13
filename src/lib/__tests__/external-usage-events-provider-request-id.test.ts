@@ -175,6 +175,47 @@ describe("ExternalUsageEvent providerRequestId (integration)", () => {
     expect(await prisma.externalUsageEvent.count()).toBe(1);
   });
 
+  it("dedupes a replay where occurredAt has minor timestamp jitter (<= 5s)", async () => {
+    const base = {
+      idempotencyKey: "replay-timestamp-jitter",
+      sourceApp: "codex",
+      provider: "openai",
+      billingMode: "estimated" as const,
+      metricType: "tokens" as const,
+      inputTokens: 100,
+      outputTokens: 50,
+      occurredAt,
+    };
+
+    await persistExternalUsageEvents([base]);
+    // Replay with 2.5 seconds difference — should be accepted as duplicate, not a collision
+    const jitteredTime = new Date(occurredAt.getTime() + 2500);
+    const replay = await persistExternalUsageEvents([{ ...base, occurredAt: jitteredTime }]);
+    expect(replay.persisted).toBe(0);
+    expect(replay.attempted).toBe(1);
+    expect(await prisma.externalUsageEvent.count()).toBe(1);
+  });
+
+  it("rejects a replay where occurredAt differs by more than 5s", async () => {
+    const base = {
+      idempotencyKey: "replay-timestamp-large-diff",
+      sourceApp: "codex",
+      provider: "openai",
+      billingMode: "estimated" as const,
+      metricType: "tokens" as const,
+      inputTokens: 100,
+      outputTokens: 50,
+      occurredAt,
+    };
+
+    await persistExternalUsageEvents([base]);
+    // Replay with 10 seconds difference — should trigger collision error
+    const largeDiffTime = new Date(occurredAt.getTime() + 10000);
+    await expect(
+      persistExternalUsageEvents([{ ...base, occurredAt: largeDiffTime }])
+    ).rejects.toMatchObject({ name: "ExternalUsageIdempotencyCollisionError" });
+  });
+
   it("ignores producer-supplied verification fields on the wire — verified* always persist as null", async () => {
     // Hardening (adversarial-review nit): producers must never be able to
     // self-verify. A wire payload that explicitly claims verification state

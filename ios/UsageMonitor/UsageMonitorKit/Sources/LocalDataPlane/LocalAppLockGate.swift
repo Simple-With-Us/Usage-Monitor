@@ -3,7 +3,7 @@ import AppCore
 import AppLock
 import DesignSystem
 
-/// Face ID / passcode gate for Usage Local Monitor without a remote `APIClient`.
+/// Face ID / passcode gate for Usage Monitor Local without a remote `APIClient`.
 /// Uses the same `AppLockController` stack as the remote app.
 public struct LocalAppLockGate<Content: View>: View {
     @Bindable var settings: AppSettings

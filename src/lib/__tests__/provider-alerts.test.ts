@@ -67,6 +67,71 @@ describe("buildProviderAlertState snapshot capability", () => {
   });
 });
 
+describe("buildProviderAlertState catalog-estimate labeling", () => {
+  const base = {
+    isActive: true,
+    refreshIntervalMin: 60,
+    plan: {
+      billingMode: "actual",
+      fixedMonthlyCostUsd: null,
+      monthlyBudgetUsd: 50,
+      monthlyRequestLimit: null,
+      lowBalanceUsd: null,
+      lowCredits: null,
+      renewalDate: null,
+      mustKeepFunded: false,
+    },
+  } as const;
+
+  it("labels a catalog-runrate snapshot as an estimate, never confirmed cash", () => {
+    for (const code of [
+      "backblaze_storage_catalog_prorated",
+      "backblaze_storage_estimate_partial",
+      "hetzner_catalog_runrate_prorated",
+    ]) {
+      const state = buildProviderAlertState(
+        {
+          ...base,
+          latestSnapshot: {
+            balance: null,
+            totalCost: 12.5,
+            totalRequests: null,
+            credits: null,
+            fetchedAt: new Date("2026-07-14T12:00:00.000Z"),
+            costCoverageCaveatCode: code,
+          },
+        },
+        new Date("2026-07-14T12:00:00.000Z")
+      );
+      expect(state.alerts).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: "catalog_estimate" })])
+      );
+      expect(state.billingMode).toBe("estimated");
+    }
+  });
+
+  it("does not label invoice-backed snapshots as catalog estimates", () => {
+    const state = buildProviderAlertState(
+      {
+        ...base,
+        latestSnapshot: {
+          balance: null,
+          totalCost: 12.5,
+          totalRequests: null,
+          credits: null,
+          fetchedAt: new Date("2026-07-14T12:00:00.000Z"),
+          costCoverageCaveatCode: null,
+        },
+      },
+      new Date("2026-07-14T12:00:00.000Z")
+    );
+    expect(state.alerts).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "catalog_estimate" })])
+    );
+    expect(state.billingMode).toBe("actual");
+  });
+});
+
 describe("buildProviderAlertState anomaly emission", () => {
   const costAnomaly: AnomalyResult = {
     providerId: "prov-1",

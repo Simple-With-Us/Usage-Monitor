@@ -1,5 +1,8 @@
 import { externalBillingFreshnessWindowMs } from "@/lib/external-billing-link";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatStatusLabel } from "@/lib/status-vocab";
+
+const SENTENCE_GAP = "\u00a0 ";
 
 export interface ExternalBillingRecord {
   source: string;
@@ -66,10 +69,10 @@ export default function ExternalBillingDetails({
     <section className="overflow-hidden rounded-xl border border-blue-200 bg-white" aria-labelledby="provider-billing-heading">
       <div className="border-b border-blue-100 bg-blue-50 px-4 py-3 sm:px-6">
         <h2 id="provider-billing-heading" className="text-sm font-semibold text-blue-800">
-          Provider-reported billing
+          Provider-Reported Billing
         </h2>
         <p className="mt-0.5 text-xs text-blue-700">
-          Read-only data synced from the provider. It does not create or duplicate local Subscription charges.
+          Read-only data synced from the provider.{SENTENCE_GAP}It does not create or duplicate local Subscription charges.
         </p>
       </div>
       <div className="divide-y divide-gray-100">
@@ -94,31 +97,31 @@ export default function ExternalBillingDetails({
                 )}
                 {record.status && (
                   <span className={`rounded-full px-2 py-1 text-xs font-medium ${statusClass(record.status)}`}>
-                    {record.status}
+                    {formatStatusLabel(record.status)}
                   </span>
                 )}
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
               <div>
-                <dt className="text-xs text-gray-500">Reported amount</dt>
+                <dt className="text-xs text-gray-500">Reported Amount</dt>
                 <dd className="mt-0.5 font-medium text-gray-900">
                   {record.amountUsd == null ? "--" : formatMoney(record.amountUsd, record.currency)}
                   {record.billingInterval ? ` / ${record.billingInterval}` : ""}
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Current period</dt>
+                <dt className="text-xs text-gray-500">Current Period</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {formatDate(record.currentPeriodStart)} – {formatDate(record.currentPeriodEnd)}
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Next renewal</dt>
+                <dt className="text-xs text-gray-500">Next Renewal</dt>
                 <dd className="mt-0.5 text-gray-700">{formatDate(record.nextRenewalAt)}</dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Request limit</dt>
+                <dt className="text-xs text-gray-500">Request Limit</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {record.requestLimit == null
                     ? "--"
@@ -128,7 +131,7 @@ export default function ExternalBillingDetails({
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500">Spend limit</dt>
+                <dt className="text-xs text-gray-500">Spend Limit</dt>
                 <dd className="mt-0.5 text-gray-700">
                   {record.spendLimitUsd == null
                     ? "--"
@@ -139,14 +142,14 @@ export default function ExternalBillingDetails({
               </div>
               {record.usageQuantity != null && (
                 <div>
-                  <dt className="text-xs text-gray-500">Tracked usage</dt>
+                  <dt className="text-xs text-gray-500">Tracked Usage</dt>
                   <dd className="mt-0.5 font-medium text-gray-900">
                     {formatNumber(record.usageQuantity)} {record.usageUnit ?? ""}
                   </dd>
                 </div>
               )}
               <div>
-                <dt className="text-xs text-gray-500">Last synced</dt>
+                <dt className="text-xs text-gray-500">Last Synced</dt>
                 <dd className="mt-0.5 text-gray-700">{new Date(record.syncedAt).toLocaleString()}</dd>
               </div>
             </dl>

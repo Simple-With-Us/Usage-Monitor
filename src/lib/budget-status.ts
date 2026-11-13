@@ -1180,7 +1180,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
   const latestCostSnapshotIds = [...latestCostByProviderId.values()].map(
     (snapshot) => snapshot.id
   );
-  const costCoverageCaveatSnapshotIds = new Set<string>();
+  const costCoverageCaveatCodeBySnapshotId = new Map<string, string>();
   if (latestCostSnapshotIds.length > 0) {
     const rows = await prisma.$queryRaw<Array<{ id: string; version: unknown; code: unknown }>>(
       Prisma.sql`
@@ -1194,7 +1194,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     );
     for (const row of rows) {
       if (Number(row.version) === 1 && typeof row.code === "string") {
-        costCoverageCaveatSnapshotIds.add(row.id);
+        costCoverageCaveatCodeBySnapshotId.set(row.id, row.code);
       }
     }
   }
@@ -1274,7 +1274,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
       anomaliesByProviderId = await loadSpendAnomaliesByProviderId(
         now,
         anomalyConfig,
-        providers.map((p) => ({ id: p.id, name: p.name }))
+        providers.map((p) => ({ id: p.id, name: p.name, type: p.type }))
       );
     } catch (error) {
       console.warn("[anomaly-detection] spend anomaly load failed; skipping", error);
@@ -1316,7 +1316,7 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
     const latestCostSnapshot = latestCostByProviderId.get(p.id) ?? null;
     const snapshotCostCoverageIncomplete =
       latestCostSnapshot != null &&
-      costCoverageCaveatSnapshotIds.has(latestCostSnapshot.id);
+      costCoverageCaveatCodeBySnapshotId.has(latestCostSnapshot.id);
     const geminiCostIdentityStatus = deriveGeminiBillingStatus({
       providerName: p.name,
       providerType: p.type,
@@ -1562,6 +1562,9 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
           totalRequests: latestSnapshot?.totalRequests ?? null,
           credits: latestSnapshot?.credits ?? null,
           fetchedAt: latestSnapshot?.fetchedAt ?? now,
+          costCoverageCaveatCode: latestCostSnapshot
+            ? (costCoverageCaveatCodeBySnapshotId.get(latestCostSnapshot.id) ?? null)
+            : null,
         },
         trackedSpendUsd: spentUsd,
         fixedAccruedUsd: reconciled.fixedAccruedUsd,
@@ -1580,7 +1583,8 @@ async function computeBudgetStatusUncached(now: Date): Promise<BudgetStatusRespo
         a.code === "budget_warning" ||
         a.code === "usage_reconciliation_discrepancy" ||
         a.code === "spend_anomaly" ||
-        a.code === "request_anomaly"
+        a.code === "request_anomaly" ||
+        a.code === "catalog_estimate"
     );
     if (reconciled.fixedCostConflict) {
       budgetAlerts.push({
@@ -1948,6 +1952,10 @@ interface StaleWhileRevalidateCacheEntry<T> {
   computedAt: number;
 }
 
+type StaleWhileRevalidateRefreshResult<T> =
+  | { ok: true; value: T; generation: number }
+  | { ok: false; generation: number };
+
 /**
  * A small stale-while-revalidate memoization helper keyed by an arbitrary
  * string derived from the call's `now`. See the file comment above for the
@@ -1963,7 +1971,7 @@ function createStaleWhileRevalidateCache<T>(options: {
   // The key AND generation of the refresh that currently "owns"
   // refreshPromise. A refresh only writes to `entry` / clears these slots
   // while it still owns them at completion - see the file comment above.
-  let refreshPromise: Promise<void> | null = null;
+  let refreshPromise: Promise<StaleWhileRevalidateRefreshResult<T>> | null = null;
   let refreshKey: string | null = null;
   let refreshGeneration = -1;
   // Bumped by invalidate(). The cache key alone (a month-start string) cannot
@@ -1984,7 +1992,11 @@ function createStaleWhileRevalidateCache<T>(options: {
     return refreshKey === key && refreshGeneration === gen;
   }
 
-  async function refresh(now: Date, key: string, gen: number): Promise<void> {
+  async function refresh(
+    now: Date,
+    key: string,
+    gen: number
+  ): Promise<StaleWhileRevalidateRefreshResult<T>> {
     try {
       const value = await options.compute(now);
       // Only adopt this result if a newer request hasn't already taken over
@@ -2002,6 +2014,11 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (ownsSlot(key, gen) && generation === gen) {
         entry = { key, value, computedAt: Date.now() };
       }
+      // A cold caller owns this promise even if a different cache key has
+      // since taken the shared publication slot.  Return its own computation
+      // directly so alternating keys cannot livelock while waiting for an
+      // entry that only the current slot owner is allowed to publish.
+      return { ok: true, value, generation: gen };
     } catch (error) {
       // A background refresh (there IS a last-good value for this key) must
       // never crash the process or surface to the caller that triggered it -
@@ -2009,7 +2026,6 @@ function createStaleWhileRevalidateCache<T>(options: {
       // cold start (no cached value yet for this key) has nothing to fall
       // back to, so it rethrows and the caller sees the failure, exactly
       // like an uncached call would today.
-      // eslint-disable-next-line no-console -- intentional: surfaces cache-refresh failures for on-call visibility
       console.warn(
         `[${options.label}] refresh failed; serving last good value if available`,
         error
@@ -2017,6 +2033,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       if (!entry || entry.key !== key) {
         throw error;
       }
+      return { ok: false, generation: gen };
     } finally {
       // Only clear the slot if we still own it. Checking the generation too
       // stops a superseded pre-invalidation refresh from releasing the slot
@@ -2049,7 +2066,7 @@ function createStaleWhileRevalidateCache<T>(options: {
         const gen = generation;
         refreshKey = key;
         refreshGeneration = gen;
-        refreshPromise = refresh(now, key, gen).catch(() => {});
+        refreshPromise = refresh(now, key, gen).catch(() => ({ ok: false, generation: gen }));
       }
       return cached.value;
     }
@@ -2065,7 +2082,7 @@ function createStaleWhileRevalidateCache<T>(options: {
       // we are awaiting must send us round the loop for a genuinely fresh
       // compute rather than letting us adopt pre-invalidation work.
       const gen = generation;
-      let inFlight: Promise<void>;
+      let inFlight: Promise<StaleWhileRevalidateRefreshResult<T>>;
       if (refreshPromise && ownsSlot(key, gen)) {
         inFlight = refreshPromise;
       } else {
@@ -2074,13 +2091,18 @@ function createStaleWhileRevalidateCache<T>(options: {
         inFlight = refresh(now, key, gen);
         refreshPromise = inFlight;
       }
-      await inFlight;
+      const result = await inFlight;
+      if (generation !== gen) {
+        continue;
+      }
       if (entry && entry.key === key) {
         return entry.value;
       }
-      // Extremely rare: something else moved the cache on again before we
-      // could read our own result back (e.g. a rapid double rollover).
-      // Loop and try again for our own key.
+      if (result.ok && result.generation === gen) {
+        return result.value;
+      }
+      // A failed background result has no value to return.  If it was a cold
+      // refresh, refresh() already rethrew; otherwise retry this key.
     }
   }
 

@@ -25,7 +25,7 @@ const testKeyPem = generateKeyPairSync("ec", { namedCurve: "P-256" })
 const testConfig = (): ApnsConfig => ({
   keyId: "KEY123456",
   teamId: "CC8UTF7ATG",
-  bundleId: "services.jays.usage.client.monitor",
+  bundleId: "com.simplewithus.usage.client.ios",
   privateKeyPem: testKeyPem,
 });
 
@@ -55,7 +55,7 @@ describe("loadApnsConfig", () => {
     const base = {
       APNS_KEY_ID: "K1",
       APNS_TEAM_ID: "T1",
-      APNS_BUNDLE_ID: "services.jays.usage.client.monitor",
+      APNS_BUNDLE_ID: "com.simplewithus.usage.client.ios",
       APNS_P8: testKeyPem,
     };
     expect(apnsConfigured(loadApnsConfig(base))).toBe(true);
@@ -84,7 +84,7 @@ describe("loadApnsConfig", () => {
       APNS_TEAM_ID: "T1",
       APNS_P8: testKeyPem,
     });
-    expect(config?.bundleId).toBe("services.jays.usage.client.monitor");
+    expect(config?.bundleId).toBe("com.simplewithus.usage.client.ios");
   });
 });
 
@@ -164,7 +164,7 @@ describe("sendApnsPush", () => {
       { config: testConfig(), transport }
     );
     expect(calls[0].path).toBe(`/3/device/${token}`);
-    expect(calls[0].headers["apns-topic"]).toBe("services.jays.usage.client.monitor");
+    expect(calls[0].headers["apns-topic"]).toBe("com.simplewithus.usage.client.ios");
     expect(calls[0].headers["apns-push-type"]).toBe("alert");
     expect(calls[0].headers["apns-collapse-id"]).toBe("budget-openrouter");
     const payload = JSON.parse(calls[0].body);
@@ -253,9 +253,31 @@ describe("fanOutApnsAlert", () => {
 });
 
 describe("buildApnsPayload", () => {
-  it("keeps the alert body inside aps and uses the iOS category", () => {
+  it("keeps the alert body inside aps and preserves the default channel sound", () => {
     expect(buildApnsPayload({ title: "T", body: "B" })).toMatchObject({
-      aps: { alert: { title: "T", body: "B" }, category: "USAGE_ALERT" },
+      aps: { alert: { title: "T", body: "B" }, category: "USAGE_ALERT", sound: "default" },
     });
+  });
+
+  it("supports app-specific sounds and interruption levels", () => {
+    expect(buildApnsPayload({
+      title: "T",
+      body: "B",
+      sound: "alarm-glass.wav",
+      category: "CODECAPS_ALERT",
+      interruptionLevel: "passive",
+    })).toMatchObject({
+      aps: {
+        alert: { title: "T", body: "B" },
+        category: "CODECAPS_ALERT",
+        sound: "alarm-glass.wav",
+        "interruption-level": "passive",
+      },
+    });
+  });
+
+  it("omits aps.sound when the requested sound is silent", () => {
+    const payload = buildApnsPayload({ title: "T", body: "B", sound: null });
+    expect(payload.aps).not.toHaveProperty("sound");
   });
 });

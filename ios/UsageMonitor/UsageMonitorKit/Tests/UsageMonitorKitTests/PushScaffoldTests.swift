@@ -141,7 +141,7 @@ final class PushScaffoldTests: XCTestCase {
         XCTAssertEqual(entitlements["aps-environment"] as? String, "development")
         // The app-group entitlement the widget shares must survive.
         let groups = entitlements["com.apple.security.application-groups"] as? [String]
-        XCTAssertEqual(groups, ["group.services.jays.usage.client.monitor"])
+        XCTAssertEqual(groups, ["group.com.simplewithus.usage"])
     }
 
     /// `remote-notification` background mode is only legitimate with a server

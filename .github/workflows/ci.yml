@@ -199,10 +199,23 @@ jobs:
       - name: Configure test database
         run: echo "DATABASE_URL=file:${RUNNER_TEMP}/api-usage-monitor-ci.db" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
+
+      # `npm run verify` chains `test:node-runtime` but this job had no
+      # matching step, so the gate ran locally and gated nothing in CI.  It
+      # asserts that .node-version, the Dockerfile images and the engines
+      # range agree AND that the interpreter actually running is on the
+      # supported line.
+      #
+      # It runs BEFORE `npm ci`.  The script is plain Node with no
+      # dependencies, so a runner on the wrong runtime fails here, before it
+      # builds node_modules under the wrong ABI and leaves a poisoned install
+      # and npm cache behind for later steps to reuse.
+      - name: Check Node runtime parity
+        run: npm run test:node-runtime
 
       - name: Install dependencies
         run: npm ci
@@ -224,7 +237,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: coverage/lcov.info
@@ -241,11 +254,20 @@ jobs:
       - name: Test receipt-inbox worker
         run: npm run test:receipt-inbox-worker
 
+      # Excluded from the root run for the same reason.  It pins what the expenses
+      # sync's daily write budget trusts: D1's own meta.rows_written.  Offline, with
+      # inline bindings in workers/expenses-site/vitest.config.mjs and no secrets.
+      - name: Test expenses worker
+        run: npm run test:expenses-worker
+
       - name: Test safe migration path
         run: npm run test:migrate-safe
 
       - name: Test pre-migration SQLite backup
         run: npm run test:sqlite-backup
+
+      - name: Test concurrent startup partial cleanup
+        run: npm run test:backup-concurrent-startup
 
       # Fourth instance of the drift class the two comments below/above describe
       # -- in `npm run verify`, no CI step -- and the one flagged as out of scope
@@ -270,6 +292,14 @@ jobs:
       # credentials, which is why it sat outside CI. The guard now compares
       # `import.meta.url`, matching the rest of scripts/. A regression in it
       # re-breaks the exit code, so this step is also that fix's own guard.
+      - name: Test sentry-ci-report
+        run: npm run test:sentry-ci-report
+
+      # Fully offline: every subprocess is stubbed in the unittest, so no
+      # Mac, process table or credential is involved.
+      - name: Test security ancestry audit
+        run: npm run test:security-ancestry
+
       - name: Test R2 weekly archive
         run: npm run test:r2-archive
 
@@ -295,12 +325,64 @@ jobs:
           bash -n scripts/test-ios-scheduled-ship-gate.sh
           bash -n scripts/ios-ship-testflight.sh
           bash -n scripts/ios-ship-testflight-local.sh
+          bash -n scripts/ios-recheck-tf-ready.sh
+          bash -n scripts/ios-fleet/tf-ready-rc.sh
           bash -n scripts/ios-appstore-gm-prepare.sh
+          bash -n scripts/ios-stage-asc-key.sh
+          bash -n scripts/test-ios-stage-asc-key.sh
           bash -n scripts/ios-fleet-pin.sh
           bash -n scripts/test-ios-fleet-appupdate-pin.sh
           bash scripts/ios-fleet-pin.sh --check
           bash scripts/test-ios-scheduled-ship-gate.sh
+          bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-fleet-appupdate-pin.sh
+          bash -n scripts/ios-fleet/publish-ios-versions.sh
+          bash -n scripts/ios-fleet/assign-external-beta.sh
+
+      # The server's storage watch (deploy/server/vps-storage-watch):  a
+      # database past its growth threshold posts one alert tagging both
+      # Housekeepers and Jay, the cooldown holds, and a missing database path
+      # posts nothing.  Fully offline:  curl is replaced by a recorder.
+      - name: Test the server storage watch
+        run: |
+          bash -n deploy/server/vps-storage-watch/vps-storage-watch.sh
+          bash -n deploy/server/vps-storage-watch/install.sh
+          bash deploy/server/vps-storage-watch/test.sh
+
+      # The App Store Connect credential contract (AFC-459):  the private key
+      # comes from the environment or from Infisical, and a path on disk is
+      # not a credential source at all.  Fully offline:  the keys are
+      # generated at test time and the fleet reader is replaced by a fake.
+      - name: Test the App Store Connect credential contract
+        run: |
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-asc-credentials.sh
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          bash scripts/ios-fleet/test-asc-credentials.sh
+
+      # Version-manifest publish and external beta assignment (UM-1640).
+      # Fully offline: a fake gh and a fake App Store Connect client, no secrets.
+      - name: Test the iOS version manifest and external beta assignment
+        run: node --test scripts/ios-fleet/publish-ios-versions.test.mjs scripts/ios-fleet/assign-external-beta.node-test.mjs
+
+      # The fleet's version-numbering rules (AFC-517):  the marketing version
+      # is the next patch on the app's train and the build number is
+      # INDEPENDENT of it, so App Store Connect can no longer show "1.0.N (N)".
+      # The rules live in scripts/ios-fleet/version-plan.mjs (pure, no I/O);
+      # this is their unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet version-numbering rules
+        run: node --test scripts/ios-fleet/version-plan.node-test.mjs
+
+      # The shared merge-timestamp release build (owner, Oct 29 2026):  ONE
+      # build per app across iOS and macOS for a fixed marketing version,
+      # max(S, M + 1) as a plain integer, computed once per release.  The
+      # planner lives in scripts/ios-fleet/shared-build.mjs (pure, no I/O);
+      # this is its unit test.  Fully offline:  no network, no credentials.
+      - name: Test the iOS fleet shared release build
+        run: node --test scripts/ios-fleet/shared-build.test.mjs
+
+      - name: Test ensure-tf-ready exit-code labels
+        run: node --test scripts/ios-fleet/test-ensure-tf-ready-rc.node-test.mjs
 
       # Replays a captured `agy -p "/usage"` envelope — the CLI itself is only
       # installed on the Mac that runs Antigravity, so this is the only place
@@ -334,6 +416,15 @@ jobs:
       #    without jq, so a runner image change degrades rather than breaks).
       - name: Test session token collectors
         run: npm run test:session-token-collectors
+      - name: Test collector telemetry and durable delivery
+        run: node --test scripts/collector-sentry-bridge.node-test.mjs scripts/telemetry-hub-auth.node-test.mjs scripts/telemetry-hub-bootstrap.node-test.mjs scripts/telemetry-native-followup.node-test.mjs
+      - name: Test detached collector runtime updates
+        run: npm run test:collector-runtime
+
+      - name: Test Claude Duplicate Cleanup
+        env:
+          VITEST: "true"
+        run: node --test scripts/__tests__/claude-duplicate-cleanup.test.mjs scripts/__tests__/claude-duplicate-stored-plan.test.mjs scripts/__tests__/claude-duplicate-sqlite.test.mjs
 
       - name: Test CF token map
         run: npm run test:cf-token-map
@@ -341,8 +432,14 @@ jobs:
       - name: Test replica-status probe
         run: npm run test:replica-status-probe
 
+      # Offline: stub `security` and `node` in a mktemp dir, so the real
+      # Keychain, the network and every LaunchAgent are untouched (UM-1616).
+      - name: Test subscription-quota Keychain wrapper
+        run: npm run test:quota-wrapper
+
       - name: Audit high-severity dependencies
-        run: npm audit --audit-level=high
+        # Full lockfile via audit-ci; GHSA-vfj7-8cjw-p6xm is allowlisted in audit-ci.jsonc (2026-10-05).
+        run: npm run test:audit-ci
 
       - name: Production build
         run: npm run build

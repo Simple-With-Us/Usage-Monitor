@@ -17,6 +17,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
+
 import {
   GROK_PRODUCER_ID,
   filterEventsSince,
@@ -24,12 +26,16 @@ import {
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  canAdvanceCollectorCheckpoint,
   expandHome,
-  parseCollectorArgs,
+  fileMayContainEventsSince,
   readIfFresh,
+  recordCollectorSuccess,
+  resolveCollectorArgs,
+  resolveCollectorToken,
   sessionKeyFor,
   walkFiles,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/grok-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -50,12 +56,17 @@ function fail(message, code = 1) {
 export async function collectGrokEvents({
   grokHome = expandHome(process.env.GROK_HOME || join(homedir(), ".grok")),
   since,
+  scanStatus,
 } = {}) {
+  const markIncomplete = () => {
+    if (scanStatus) scanStatus.complete = false;
+  };
   const root = join(grokHome, "sessions");
-  const files = await walkFiles(root, { name: "updates.jsonl" });
+  const files = await walkFiles(root, { name: "updates.jsonl", onTraversalError: markIncomplete });
   const events = [];
   for (const file of files) {
-    const text = await readIfFresh(file);
+    if (!(await fileMayContainEventsSince(file, since, { onStatError: markIncomplete }))) continue;
+    const text = await readIfFresh(file, { onReadError: markIncomplete });
     if (!text) continue;
     const parsed = parseGrokUpdatesJsonl(text, {
       sessionKey: sessionKeyFor(grokHome, file),
@@ -66,29 +77,36 @@ export async function collectGrokEvents({
 }
 
 async function main() {
+  const passStartedAt = new Date();
   let args;
   try {
-    args = parseCollectorArgs(process.argv);
+    args = await resolveCollectorArgs(process.argv, PRODUCER_ID, { now: passStartedAt });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
-  const events = await collectGrokEvents({ since: args.since });
+  const scanStatus = { complete: true };
+  const events = await collectGrokEvents({ since: args.since, scanStatus });
   const tokenEvents = events.filter((e) => e.metricType === "usage").length;
   const costEvents = events.filter((e) => e.metricType === "cost").length;
   log(
-    `parsed ${events.length} event(s) (${tokenEvents} token, ${costEvents} cost) since ${args.since.toISOString()}`
+    `parsed ${events.length} event(s) (${tokenEvents} token, ${costEvents} cost) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`
   );
   if (DEBUG) {
     const models = new Set(events.map((e) => e.producerKeyRef).filter(Boolean));
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
     return;
   }
-  const token =
-    process.env.GROK_INGEST_TOKEN?.trim() ||
-    process.env.USAGE_INGEST_TOKEN?.trim();
+  const token = await resolveCollectorToken([
+    "GROK_INGEST_TOKEN",
+    "USAGE_INGEST_TOKEN",
+  ]);
   try {
     const ack = await postUsageBatches({
       events,
@@ -100,11 +118,14 @@ async function main() {
     });
     log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);
     if (ack.rejected > 0) fail(`Ingest reported rejections: ${ack.rejected}`);
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

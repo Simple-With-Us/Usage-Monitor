@@ -1,24 +1,140 @@
-## Current (2026-09-01 CLAUDE — "never idle-watch a PR" landed + extended)
+## Current (2026-11-03 CODEX — Codex Workspace Hints Candidate)
 
-Owner ruling 2026-09-01: agents "should never just wait and watch for things to merge since
-that wastes tokens/time and they inevitably almost invariably end up slowly wasting
-money/quota while the PR sits there with conflicts or comments/issues unresolved."
+The held draft candidate adds only a non-authoritative configured-root workspace hint to Codex telemetry, preserving all rows and measurements without claiming launch provenance or expanding exclusion.
 
-The rule had already been written for this repo and never committed — a peer seat left
-`## Never wait and watch for PRs to merge / Idle-polling forbidden` as an **uncommitted**
-working-tree edit in the owner's integration tree (` M AGENTS.md`, 12 insertions vs
-`origin/main`), so no other seat could read it.  The rule about not letting work sit was
-itself sitting unlanded.  Their heading, framing, and binding rules 1-5 are adopted
-**verbatim** (authorship preserved; their pending local diff is now a no-op subset of
-`main`), extended with the parts the ruling requires and the text lacked: a
-symptom -> diagnosis -> action table, arm auto-merge at PR-open, the bounded-wait carve-out
-(one `gh pr checks <n> --watch` is legal, an open-ended `sleep` loop is not, and a bounded
-wait that ends unmerged means diagnose rather than wait again), review-bot thread triage
-discipline, background jobs -> end the turn instead of narrating "standing by", and a
-cross-reference to the canonical `/Users/jay/apps/AGENT-SYNC.md` § Never idle-watch a PR.
+The shared collector suite, 57 receiver/OTLP/replay tests, targeted ESLint, TypeScript and diff hygiene pass.  Publication and independent review are the next steps; no collector installation or runtime activation is included.
 
-Docs only.  Owner's integration tree untouched — it will still show ` M AGENTS.md` until
-pulled.  Rollout: `docs/rollouts/2026-09-01-never-idle-watch-rule.md`.
+Rollout: `docs/rollouts/2026-11-03-codex-workspace-hints.md`.
+
+## Current (2026-10-30 CODEX — Repository Report Library)
+
+`docs/reports/README.md` is the entry point for saved reports, audits, reviews and research.  Historical files retain their original paths and links.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The central document collector and placement are tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
+## Current (2026-10-29 CODEX — Host-Isolated Unit Tests)
+
+Unit tests no longer select live `/data` R2 guard files when the runner has a production-style data mount.
+
+Permission fixtures now set exact file modes after creation, so restrictive host umasks cannot invalidate their security assertions.
+
+Verification: 3,328 tests passed and 1 skipped; typecheck passed; lint reported 0 errors and 13 pre-existing warnings.
+
+Rollout: `docs/rollouts/2026-10-29-host-isolated-unit-tests.md`.
+
+## Current (2026-10-23 CODEX — Coding Platform Telemetry Completeness)
+
+UM-1624 adds OpenCode and Fx to Agents Overview, prevents overlapping generic metrics from duplicating their collector usage, preserves Sentry's custom TTFT/context attributes, and fixes hub identity collisions for spans missing native IDs.  A bounded production audit confirmed 20,907 OpenCode events and 2.12 billion tokens omitted from the prior overview.  Other gaps remain explicit: stale ledger receipts alongside newer request telemetry, quota-only sources, at-least-once generic turn persistence, and Sentry read access returning 403.  Rollout and evidence: `docs/rollouts/2026-10-23-telemetry-completeness.md`.  Server deployment does not activate or install the Mac hub.
+
+## Prior (2026-09-18 CLAUDE — USAGE_READ_TOKEN cannot enroll an APNs device)
+
+`POST /api/apns/device-tokens` accepted `USAGE_READ_TOKEN` the same as GET, so a
+read-only credential could register a device to receive push alerts. PR #1458
+(2026-09-13) already fixed `PUT /api/settings` and the full-device-token GET leak
+(boards `154b622e` `e93a83fe`); this closes the remaining gap noted under
+`48334ff1` finding B3. POST is now dashboard-session only, matching the only
+real caller (`APIClient.registerApnsDeviceToken` already sends `.session`). GET
+is unchanged. Boards `68013aab` `48334ff1` `154b622e` `e93a83fe`. Branch
+`claude/security-read-token-scope`.
+
+## Prior (2026-09-18 CLAUDE — Slack wrong-token-type diagnostic + Coolify deploy-gate doc)
+
+Board `1f414cf3`: the Slack platform-status probe now distinguishes "wrong
+token type" (a User OAuth `xoxp-`/legacy token pasted into `SLACK_BOT_TOKEN`)
+from a genuinely revoked `xoxb-` bot token, surfacing an actionable headline
+and a `Configured Token Type` metric instead of a bare `invalid_auth`.
+Verifying the actually-deployed token's prefix still needs Coolify/Infisical
+prod env access (DSH's 2026-09-15 finding stands). Board `d0f5f1db`:
+`DEPLOY.md` now documents, instead of assuming, that the retired Oracle
+host's CI-gated deploy pipeline is not what the live Coolify host runs —
+Coolify's webhook auto-deploys on every push to `main` independent of GitHub
+Actions outcome. No host-side gate exists today; adding one needs Coolify
+dashboard/API access this Mac session does not have, so the gap stays
+open and tracked rather than half-fixed.
+
+## Prior (2026-09-18 CURSOR — Effort Issues Sync Crons margin)
+
+Sentry **FLEET-INFRA-CF** is a missed check-in, not a failed board mirror.
+GitHub starts daily `effort-issues-sync.yml` 4.3-6.4h late; the sync then
+succeeds in ~15s.  Reporter override is now
+`CHECKIN_MARGIN_OVERRIDES["Effort Issues Sync"] = 600`.  Cron and sync
+unchanged.  Do not `Fixes FLEET-INFRA-CF` on merge — wait for the next
+scheduled upsert.  Extra-ship no.  No Coolify.  Rollout:
+`docs/rollouts/2026-09-18-effort-issues-sync-monitor-margin.md`.
+
+## Prior (2026-09-13 FX — read token cannot mutate alerts)
+
+`PUT /api/settings` is dashboard-session only.  `USAGE_READ_TOKEN` still reads GET.  APNs list omits full device tokens.  Auto-merge workflows are `pull_request` + same-repo.  Boards `154b622e` `e93a83fe`.  Branch `fx/read-token-writes`.
+
+## Prior (2026-09-13 FX — Local Import Package tap)
+
+Usage Monitor Local Settings no longer puts a Merge / Replace picker next to
+**Import Package**.  That List Picker stole the button tap (repeat of
+2026-09-04).  Import Package is its own section; merge vs replace is a sheet
+after the file pick.  The website **Download For Local** JSON
+(`usage-monitor-local-export` v1) is the package — no bundle key, no
+passphrase, no API keys.  `.umkeys` is Import Keys only.  Board `b4ebf716`.
+Rollout: `docs/rollouts/2026-09-13-local-import-package-tap.md`.
+
+## Prior (2026-09-04 GROK — Sentry Usage enrichment)
+
+Sentry **Usage** (not Balance) now rolls up official `stats_v2` month-to-date
+totals by category: Errors, Transactions, Replays, Attachments, Profiles,
+Monitors — Accepted and Rate Limited.  Optional `stats-summary` is a companion
+only.  There is no public Sentry API for prepaid credit, remaining sponsored
+balance, reserved quota, PAYG, or invoices, so `balance` / `credits` /
+`totalCost` stay null and `billingCost` stays false.  The Health card is still
+open issues only.  PR #1418 (`aefe2e95`).  Push+PR only this session — do not
+merge, do not bounce Coolify.  Research:
+`docs/research/2026-09-04-sentry-usage-api-coverage.md`.
+
+## Prior (2026-09-04 GROK — Litestream product compaction L1-only)
+
+`litestream.yml` now sets a single top-level `levels:` entry (`interval: 30s`)
+before `dbs:`, matching Socratic.Trade.  `MaxLevel() == 1`, so L2/L3 monitors
+never start.  Snapshot stays 24h.  Replica `sync-interval` / `part-size: 10MB`
+/ `concurrency: 2` and backup health checks stay.  Housekeeper already held
+live L2/L3 off via overlay; this keeps the next image bake L1-only.  Push+PR
+only this session — do not merge, do not bounce Coolify.  Rollout:
+`docs/rollouts/2026-09-04-litestream-l1-only.md`.
+
+## Prior (2026-09-04 GROK — Quota windows API)
+
+`GET /api/quota-windows` (session or `USAGE_READ_TOKEN`) returns latest remaining
+percent, reset time, and `skipModelTypes` for BotFleet.  The Mac collector still
+reads `agy /usage` group bars and now also `antigravity-usage --json` per-model
+rows when that CLI is installed.  The Fleet Quota Matrix no longer invents demo
+buckets.  Rollout: `docs/rollouts/2026-09-04-quota-windows.md`.
+
+## Prior (2026-09-03 GROK — Agent seat plans + Codex lookback)
+
+`/agents` window chips are `5h` / `24h` / `7d` / `30d` / `All Time` on one
+line with real gaps.  Seat cash comes from receipts.  Codex plan is observed
+from the local login JWT (Plus $20), not a guessed Pro $200.  Copilot is
+not billed.  Cursor Ultra is included with SuperGrok Heavy.  MiniMax waits
+on a receipt.  Rollout: `docs/rollouts/2026-09-03-agent-seat-plans.md`.
+
+## Prior (2026-09-03 GROK — Antigravity $70 net + honest missing telemetry)
+
+Antigravity seat is $100 Google AI Ultra minus $30 already spent on Google
+One, so **$70 net for the AI**.  The Agents tab no longer treats missing or
+character-estimate feeds as little/no usage.  Every platform whose number is
+not accurate says **not reported**.  Web + iOS.  Rollout:
+`docs/rollouts/2026-09-03-antigravity-seat-telemetry-honesty.md`.
+
+## Prior (2026-09-01 GROK — Sentry fleet adoption leftovers)
+
+Client Replay was default-on in code but producing zero sessions because
+`NEXT_PUBLIC_SENTRY_DSN` is inlined at build and was missing from the Coolify
+build-time env (server `SENTRY_DSN` via Infisical still produced 230k spans).
+Dockerfile now ARG/ENV that public DSN.  Replay stays 100% on error / 10%
+session with `maskAllText`/`blockAllMedia` (admin app, not ST opt-in).
+`usage-monitor-scheduler` check-ins were firing; the monitor advertised a
+1-minute cadence against a 15-minute in-process tick, which Sentry scored as
+`missed` (maxRuntime 10 was not the failure).  Sparse `Sentry.logger` +
+Application Metrics (`scheduler.tick`, `ingest.failed`) for health outcomes;
+token/cost stays in this app.  Rollout:
+`docs/rollouts/2026-09-01-sentry-fleet-adoption.md`.
 
 ## Prior (2026-08-31 AG — Sentry observability expansion)
 
@@ -134,6 +250,17 @@ Additive workflow-only change; no runtime, deploy, or product impact.  Flagged
 but deliberately not fixed here: `test:r2-archive` is a fourth instance of the
 same drift and needs a follow-up.  Rollout:
 `docs/rollouts/2026-08-31-ci-verify-drift-three-offline-tests.md`.
+
+## Prior (2026-08-31 GROK — top-to-bottom full-stack audit)
+
+Read-only team audit of web (all viewports), iOS Client+Local, backend ingest,
+money path, security, and ops.  Report: `docs/audits/2026-08-31-full-stack-audit.md`.
+No product code changes.  Highest remaining clusters: `USAGE_READ_TOKEN` can
+`PUT /api/settings` and list full APNs tokens; Hetzner/Backblaze catalog estimates
+are written as cash `totalCost`; weekly R2 still uses host `/tmp`; Agents dashboard
+uses undefined Tailwind tokens; Coolify still has no in-repo deploy gate
+(board `d0f5f1db`).  Daily-rollups bearer exclusion is **already in middleware**;
+`AGENTS.md` was stale and is corrected here.  Board `da6edf84`.
 
 ## Previous (2026-08-31 CLAUDE — /api/health r2Weekly + replica-status probe cost trim)
 

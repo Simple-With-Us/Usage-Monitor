@@ -43,4 +43,22 @@ describe("redactProviderRawData (Wave H / E10)", () => {
       expect.arrayContaining(["userEmail", "rawUpstream"])
     );
   });
+
+  it("keeps Sentry stats and categories while dropping per-project groups", () => {
+    const result = redactProviderRawData("builtin", "sentry", {
+      categories: {
+        byCategory: [{ category: "error", label: "Errors", accepted: 1 }],
+      },
+      stats: { capabilities: { billingCost: false } },
+      groups: [{ project: "101", category: "error" }],
+      secretBlob: "nope",
+    }) as Record<string, unknown>;
+
+    expect(result.categories).toEqual({
+      byCategory: [{ category: "error", label: "Errors", accepted: 1 }],
+    });
+    expect(result.stats).toEqual({ capabilities: { billingCost: false } });
+    expect(result.groups).toBeUndefined();
+    expect(result.secretBlob).toBeUndefined();
+  });
 });

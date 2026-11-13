@@ -4,7 +4,8 @@
   Template launchd job for scripts/grok-usage-collector.mjs.
 
   Must run on the Mac that has ~/.grok/sessions.  Same install pattern as
-  com.jays.antigravity-usage-collector.
+  com.jays.antigravity-usage-collector.  Default lookback is 180 days (not
+  UTC month start).
 
   Uninstall:
     launchctl bootout gui/$(id -u)/com.jays.grok-usage-collector
@@ -15,13 +16,6 @@
   <string>com.jays.grok-usage-collector</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/ABSOLUTE/PATH/TO/infisical</string>
-    <string>run</string>
-    <string>--projectId</string>
-    <string>YOUR_UM_PROJECT_ID</string>
-    <string>--env</string>
-    <string>prod</string>
-    <string>--</string>
     <string>/ABSOLUTE/PATH/TO/node</string>
     <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/grok-usage-collector.mjs</string>
   </array>

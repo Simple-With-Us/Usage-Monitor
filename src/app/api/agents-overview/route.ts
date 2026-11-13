@@ -6,7 +6,7 @@ import { isUsageReadAuthorized } from "@/lib/ingest-auth";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/agents-overview?window=5h|24h|7d|30d|all
+ * GET /api/agents-overview?window=30d (clients use fixed 30d; 5h|24h|7d|all still accepted)
  *
  * Dual-auth endpoint:
  * 1. Dashboard session cookie (SESSION_COOKIE_NAME)

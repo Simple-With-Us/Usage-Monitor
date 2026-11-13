@@ -3,7 +3,7 @@ import Foundation
 /// User-visible product name from the hosting app target.
 ///
 /// Prefer the plain App Store / home-screen name (`CFBundleDisplayName`):
-/// **Usage Client Monitor** or **Usage Local Monitor**. Do not invent a third
+/// **Usage Monitor** or **Local Monitor**. Do not invent a third
 /// brand string in kit UI. Bundle IDs stay out of user-facing copy unless the
 /// screen is explicitly about identity/debug.
 public enum AppProductName: Sendable {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Master unified fleet usage collector for ALL coding agent seats:
-// - Google Antigravity (Live Quota Windows + Session Transcripts)
+// - Google Antigravity (Live Quota Windows + Safe Status-Line Snapshots)
 // - Anthropic Claude Code & Monet (~/.claude/projects/)
 // - OpenAI Codex CLI (~/.codex/sessions)
 // - Grok Build (~/.grok/sessions)
@@ -19,13 +19,14 @@ import { pathToFileURL } from "node:url";
 
 import {
   ANTIGRAVITY_PRODUCER_ID,
+  ANTIGRAVITY_STATUSLINE_PRODUCER_ID,
   CLAUDE_PRODUCER_ID,
   CODEX_PRODUCER_ID,
   COPILOT_PRODUCER_ID,
   DEEPSEEK_PRODUCER_ID,
   GROK_PRODUCER_ID,
   filterEventsSince,
-  parseAntigravityTranscriptJsonl,
+  parseAntigravityStatuslineJsonl,
   parseClaudeSessionJsonl,
   parseCodexJsonl,
   parseCopilotEventsJsonl,
@@ -35,12 +36,17 @@ import {
 } from "./lib/session-token-collectors.mjs";
 import {
   codexSessionKeyFor,
+  botFleetChildExclusionEnabled,
   expandHome,
+  isBotFleetManagedCodexSession,
+  isBotFleetSessionPath,
   parseCollectorArgs,
+  resolveCollectorToken,
   readIfFresh,
   sessionKeyFor,
   walkFiles,
 } from "./lib/run-session-token-collector.mjs";
+import { antigravityGroupDisplayName } from "./lib/quota-event.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -76,7 +82,7 @@ async function collectAntigravityQuota() {
           eventId: `agy-quota:${bucket.id}:${bucket.reset_time}`,
           provider: "google-antigravity",
           service: "antigravity-cli",
-          label: `${group.name} (${bucket.window || "window"})`,
+          label: `${antigravityGroupDisplayName(group.name)} (${bucket.window || "window"})`,
           metricType: "quota",
           billingMode: "actual",
           confidence: "actual",
@@ -112,22 +118,45 @@ async function collectAllSessionEvents(since) {
     deepseek: [],
   };
 
-  // Antigravity transcripts
-  const agBrain = expandHome("~/.gemini/antigravity/brain");
-  const agFiles = await walkFiles(agBrain, { name: "transcript.jsonl" });
-  for (const f of agFiles) {
-    const text = await readIfFresh(f);
-    if (!text) continue;
-    results.antigravity.push(...filterEventsSince(parseAntigravityTranscriptJsonl(text, { sessionKey: sessionKeyFor(agBrain, f) }), since));
+  // Antigravity status-line snapshots contain only model and exact counters.
+  const agSnapshots = expandHome(
+    process.env.ANTIGRAVITY_TELEMETRY_SNAPSHOT ||
+      "~/.cache/usage-monitor/antigravity-statusline/usage.jsonl",
+  );
+  const agSnapshotText = await readIfFresh(agSnapshots);
+  if (agSnapshotText) {
+    results.antigravity.push(
+      ...filterEventsSince(parseAntigravityStatuslineJsonl(agSnapshotText), since),
+    );
   }
 
   // Claude Code
-  const claudeHome = expandHome("~/.claude");
-  const claudeFiles = await walkFiles(join(claudeHome, "projects"), { suffix: ".jsonl" });
-  for (const f of claudeFiles) {
-    const text = await readIfFresh(f);
-    if (!text) continue;
-    results.claude.push(...filterEventsSince(parseClaudeSessionJsonl(text, { sessionKey: sessionKeyFor(claudeHome, f) }), since));
+  // Audit 2026-09-21 (Codex P1, board item dd85b8d570e2416b81e322509a17335f
+  // follow-up): native Claude OTLP is the documented active ingest path.
+  // The local Claude section here uses the v2-batch wire whose
+  // idempotency keys do NOT dedup against OTLP metric keys, so running
+  // both would double-count Claude Code usage. The standalone
+  // claude-usage-collector is already .disabled.mjs'd.
+  //
+  // Default OFF (2026-09-21 Codex re-review P1 follow-up): the shipped
+  // LaunchAgent template (com.jays.fleet-usage-collector.plist.example)
+  // does not pass an env, so an opt-out gate would still ship in the
+  // double-count state. Default to skipped; an operator who wants the
+  // local Claude section must explicitly set
+  //   USAGE_MONITOR_FLEET_ENABLE_CLAUDE=1
+  // and acknowledge that native OTLP must NOT also be running.
+  if (process.env.USAGE_MONITOR_FLEET_ENABLE_CLAUDE !== "1") {
+    log(
+      "  - Claude Code: skipped (native OTLP is the active path; set USAGE_MONITOR_FLEET_ENABLE_CLAUDE=1 to re-enable)"
+    );
+  } else {
+    const claudeHome = expandHome("~/.claude");
+    const claudeFiles = await walkFiles(join(claudeHome, "projects"), { suffix: ".jsonl" });
+    for (const f of claudeFiles) {
+      const text = await readIfFresh(f);
+      if (!text) continue;
+      results.claude.push(...filterEventsSince(parseClaudeSessionJsonl(text, { sessionKey: sessionKeyFor(claudeHome, f) }), since));
+    }
   }
 
   // OpenAI Codex
@@ -137,6 +166,7 @@ async function collectAllSessionEvents(since) {
     for (const f of codexFiles) {
       const text = await readIfFresh(f);
       if (!text) continue;
+      if (botFleetChildExclusionEnabled() && isBotFleetManagedCodexSession(text)) continue;
       results.codex.push(...filterEventsSince(parseCodexJsonl(text, { sessionKey: codexSessionKeyFor(codexHome, f) }), since));
     }
   }
@@ -161,11 +191,19 @@ async function collectAllSessionEvents(since) {
 
   // DeepSeek
   const dshHome = expandHome("~/.dsh");
-  const dshFiles = await walkFiles(join(dshHome, "sessions"), { suffix: ".jsonl" });
+  const dshFiles = await walkFiles(join(dshHome, "sessions"), { name: "session.jsonl.zstd" });
   for (const f of dshFiles) {
-    const text = await readIfFresh(f);
-    if (!text) continue;
-    results.deepseek.push(...filterEventsSince(parseDeepSeekSessionJsonl(text, { sessionKey: sessionKeyFor(dshHome, f) }), since));
+    if (botFleetChildExclusionEnabled() && isBotFleetSessionPath(f)) continue;
+    try {
+      const text = execFileSync(process.env.ZSTD_BIN || "/opt/homebrew/bin/zstd", ["-dc", f], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 128 * 1024 * 1024,
+      });
+      results.deepseek.push(...filterEventsSince(parseDeepSeekSessionJsonl(text, { sessionKey: sessionKeyFor(dshHome, f) }), since));
+    } catch (error) {
+      if (DEBUG) log(`DeepSeek archive skipped: ${error instanceof Error ? error.name : "error"}`);
+    }
   }
 
   return results;
@@ -183,18 +221,84 @@ async function collectAllSessionEvents(since) {
  * Keep one batch per seat producer id so eventIds already hashed with those
  * ids stay idempotent with the individual collectors.
  */
+/**
+ * Scoped ingest token names per producer.  A scoped token authorizes exactly
+ * one producerId, so every batch resolves its own token (environment first,
+ * then `fleet-secrets get`) before the unscoped USAGE_INGEST_TOKEN,
+ * which is refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
+ */
+export const FLEET_TOKEN_ENV_BY_PRODUCER = {
+  [ANTIGRAVITY_PRODUCER_ID]: ["ANTIGRAVITY_INGEST_TOKEN"],
+  [ANTIGRAVITY_STATUSLINE_PRODUCER_ID]: ["ANTIGRAVITY_STATUSLINE_INGEST_TOKEN"],
+  [CLAUDE_PRODUCER_ID]: ["CLAUDE_CODE_INGEST_TOKEN", "CLAUDE_INGEST_TOKEN"],
+  [CODEX_PRODUCER_ID]: ["CODEX_INGEST_TOKEN"],
+  [GROK_PRODUCER_ID]: ["GROK_INGEST_TOKEN"],
+  [COPILOT_PRODUCER_ID]: ["COPILOT_INGEST_TOKEN"],
+  [DEEPSEEK_PRODUCER_ID]: ["DEEPSEEK_INGEST_TOKEN"],
+};
+
+export function fleetTokenEnvNames(producerId) {
+  return [...(FLEET_TOKEN_ENV_BY_PRODUCER[producerId] ?? []), "USAGE_INGEST_TOKEN"];
+}
+
 export function fleetIngestJobs({ quotaEvents = [], sessionResults = {} } = {}) {
   return [
     {
       producerId: ANTIGRAVITY_PRODUCER_ID,
-      events: [...quotaEvents, ...(sessionResults.antigravity ?? [])],
+      events: quotaEvents,
     },
+    {
+      producerId: ANTIGRAVITY_STATUSLINE_PRODUCER_ID,
+      events: sessionResults.antigravity ?? [],
+    },
+    // Audit 2026-09-21 (Codex P1): when USAGE_MONITOR_FLEET_DISABLE_CLAUDE=1,
+    // sessionResults.claude is empty (see collectAllSessionEvents), so the
+    // CLAUDE_PRODUCER_ID job below carries zero events and is filtered by
+    // `events.length > 0`. The producerId slot is still reserved for the
+    // case where someone unsets the env in the future.
     { producerId: CLAUDE_PRODUCER_ID, events: sessionResults.claude ?? [] },
     { producerId: CODEX_PRODUCER_ID, events: sessionResults.codex ?? [] },
     { producerId: GROK_PRODUCER_ID, events: sessionResults.grok ?? [] },
     { producerId: COPILOT_PRODUCER_ID, events: sessionResults.copilot ?? [] },
     { producerId: DEEPSEEK_PRODUCER_ID, events: sessionResults.deepseek ?? [] },
   ].filter((job) => job.events.length > 0);
+}
+
+/**
+ * Post every fleet seat's batch, isolating per-seat failures.  A throw from
+ * one seat's upload aborts only that seat: later seats are still attempted
+ * (an abort would silently drop their first attempt while earlier seats are
+ * already persisted, forcing duplicate resends on the next pass).  The pass
+ * tallies only successful seats and returns failedSeats so the caller can
+ * fail loudly once every seat has had its attempt.
+ */
+export async function postFleetJobs(jobs, { ingestUrl, dryRun = false, log = () => {}, post = postUsageBatches }) {
+  let received = 0;
+  let persisted = 0;
+  let rejected = 0;
+  let sawDryRun = false;
+  const failedSeats = [];
+  for (const job of jobs) {
+    try {
+      const ack = await post({
+        events: job.events,
+        ingestUrl,
+        ingestToken: resolveCollectorToken(fleetTokenEnvNames(job.producerId)),
+        producerId: job.producerId,
+        dryRun,
+        log,
+      });
+      received += ack.received;
+      persisted += ack.persisted;
+      rejected += ack.rejected;
+      sawDryRun = sawDryRun || Boolean(ack.dryRun);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failedSeats.push({ producerId: job.producerId, error: message });
+      log(`  ! seat ${job.producerId} upload failed: ${message}`);
+    }
+  }
+  return { received, persisted, rejected, dryRun: sawDryRun, failedSeats };
 }
 
 async function main() {
@@ -236,37 +340,22 @@ async function main() {
     return;
   }
 
-  const token =
-    process.env.USAGE_INGEST_TOKEN?.trim() ||
-    process.env.ANTIGRAVITY_INGEST_TOKEN?.trim() ||
-    process.env.CLAUDE_INGEST_TOKEN?.trim();
-
-  try {
-    let received = 0;
-    let persisted = 0;
-    let rejected = 0;
-    let dryRun = false;
-    for (const job of jobs) {
-      const ack = await postUsageBatches({
-        events: job.events,
-        ingestUrl: INGEST_URL,
-        ingestToken: token,
-        producerId: job.producerId,
-        dryRun: DRY || args.dryRun,
-        log,
-      });
-      received += ack.received;
-      persisted += ack.persisted;
-      rejected += ack.rejected;
-      dryRun = dryRun || Boolean(ack.dryRun);
-    }
-    log(
-      `Pass complete: received=${received} persisted=${persisted} rejected=${rejected}${
-        dryRun ? " (dry-run)" : ""
-      }`
+  const { received, persisted, rejected, dryRun, failedSeats } = await postFleetJobs(jobs, {
+    ingestUrl: INGEST_URL,
+    dryRun: DRY || args.dryRun,
+    log,
+  });
+  log(
+    `Pass complete: seats=${jobs.length} received=${received} persisted=${persisted} rejected=${rejected} failedSeats=${failedSeats.length}${
+      dryRun ? " (dry-run)" : ""
+    }`
+  );
+  if (failedSeats.length > 0) {
+    fail(
+      `Incomplete pass: ${failedSeats.length} of ${jobs.length} seat uploads failed (${failedSeats
+        .map((seat) => seat.producerId)
+        .join(", ")}). Remaining seats were still attempted; rerun to retry the failed seats.`
     );
-  } catch (error) {
-    fail(error instanceof Error ? error.message : String(error));
   }
 }
 

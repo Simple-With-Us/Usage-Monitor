@@ -5,7 +5,7 @@ import LocalBudget
 import LocalStore
 import AppCore
 
-/// Full shell for **Usage Local Monitor** — on-device money-truth that aims to
+/// Full shell for **Usage Monitor Local** — on-device money-truth that aims to
 /// match and exceed web/remote for personal poll + subscription tracking.
 public struct LocalRootView: View {
     @Bindable var settings: AppSettings
@@ -16,6 +16,9 @@ public struct LocalRootView: View {
     @State private var showWipeConfirmation = false
     @State private var pathProviders = NavigationPath()
     @State private var providersFilter: LocalProviderFilter = .all
+    /// Shared state for Import Package.  Mode is chosen after the file pick so
+    /// a List Picker cannot swallow the button tap.
+    @State private var importState = LocalImportState()
 
     /// Caller must supply a main-actor `AppSettings` (e.g. `@State` from the app
     /// entry). No default `AppSettings()` here — its `@MainActor` init cannot run
@@ -37,7 +40,7 @@ public struct LocalRootView: View {
     }
 
     public enum Tab: String, CaseIterable, Identifiable {
-        case overview, providers, projects, fleet, alerts, settings
+        case overview, providers, projects, fleet, alerts, learnMore, settings
         public var id: String { rawValue }
         var title: String {
             switch self {
@@ -46,6 +49,7 @@ public struct LocalRootView: View {
             case .projects: return "Projects"
             case .fleet: return "Fleet"
             case .alerts: return "Alerts"
+            case .learnMore: return "Learn More"
             case .settings: return "Settings"
             }
         }
@@ -56,6 +60,7 @@ public struct LocalRootView: View {
             case .projects: return "folder.fill"
             case .fleet: return "laptopcomputer.and.ipad"
             case .alerts: return "bell.badge.fill"
+            case .learnMore: return "info.circle.fill"
             case .settings: return "gearshape.fill"
             }
         }
@@ -85,6 +90,14 @@ public struct LocalRootView: View {
             .tabItem { Label(Tab.alerts.title, systemImage: Tab.alerts.systemImage) }
             .tag(Tab.alerts)
             .badge(model.alerts.isEmpty ? 0 : model.alerts.count)
+            // Owner 2026-09-09: "just have one part of local app that is a tab
+            // for info about the server and client app including: features
+            // that setup has, the big picture overview of how it works (not
+            // details), and info/link to where they can go to learn more."
+            // No live data, no model dependencies, no Settings state.
+            LocalLearnMoreTab()
+                .tabItem { Label(Tab.learnMore.title, systemImage: Tab.learnMore.systemImage) }
+                .tag(Tab.learnMore)
             settingsTab
                 .tabItem { Label(Tab.settings.title, systemImage: Tab.settings.systemImage) }
                 .tag(Tab.settings)
@@ -103,7 +116,8 @@ public struct LocalRootView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                    // Always-visible product identity (home-screen: "Usage Local Monitor").
+                    // Always-visible product identity:  "Usage Monitor Local" in the app,  and the
+                    // home-screen label is "Local Monitor".
                     HStack(spacing: Theme.Spacing.sm) {
                         Image(systemName: "iphone")
                             .font(.system(size: 14, weight: .semibold))
@@ -285,16 +299,33 @@ public struct LocalRootView: View {
                     Toggle("Require Face ID / Passcode", isOn: $settings.appLockEnabled)
                         .tint(Theme.Colors.accent)
                 }
-                Section("Backup") {
+                Section {
                     LocalExportButton(model: model)
-                    LocalImportButton(model: model)
+                } header: {
+                    Text("Backup")
+                } footer: {
+                    Text("A backup restores cards, budgets, and fees — never API keys.")
+                }
+                // Own Section (not a Picker sibling).  A List Picker in the same
+                // section still steals the next row's tap — owner 2026-09-04 and
+                // 2026-09-13: Import Package always opened Merge / Replace All.
+                Section {
+                    LocalImportButton(model: model, state: importState)
+                    LocalImportMessage(state: importState)
+                } header: {
+                    Text("Import Package")
+                } footer: {
+                    Text("Pick the JSON from usage.jays.services (Download For Local) or a phone export.  There is no bundle key or passphrase.  API keys are not in that file.")
+                }
+                Section {
                     LocalKeysImportButton(model: model)
-                    Text("A backup restores cards, budgets, and fees — never API keys.  After import, open each provider and tap Connect Account, or use Import Keys for a key file from your Mac.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Import Keys")
+                } footer: {
+                    Text("Only for a Mac .umkeys file.  Needs the passphrase you set when you built it.  Do not use this for the website JSON.")
                 }
                 Section("Also in This Project") {
-                    Text("**Usage Client Monitor** is the other app: a live-sync client for a server you host yourself (or the owner fleet). Use that when you run a VPS.")
+                    Text("**Usage Monitor Client** is the other app: a live-sync client for a server you host yourself (or the owner fleet). Use that when you run a VPS.")
                         .font(Theme.Typography.caption)
                 }
                 Section("Providers Catalog") {

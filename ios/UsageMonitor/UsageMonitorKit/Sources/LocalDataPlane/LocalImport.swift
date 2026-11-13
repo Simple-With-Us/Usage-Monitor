@@ -17,6 +17,18 @@ public struct LocalImportResult: Sendable, Equatable {
     public var projects: Int
     public var snapshots: Int
     public var skipped: Int
+
+    /// Owner-facing success line after Import Package.  Always reminds that
+    /// API keys are not in the website JSON / phone export.
+    public var summaryLine: String {
+        var line =
+            "Imported \(providers) providers, \(subscriptions) fees, \(charges) charges, \(snapshots) snapshots"
+        if skipped > 0 {
+            line += " (\(skipped) skipped)"
+        }
+        line += ".  Re-enter API keys — they are not in this file."
+        return line
+    }
 }
 
 /// Import a secret-free Local export package.

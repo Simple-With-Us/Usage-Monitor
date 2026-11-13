@@ -2,9 +2,11 @@
 
 **Date:** 2026-08-10  
 **Team:** CC8UTF7ATG (Jay Wedgeworth, LLC)  
-**Apps:** Usage Client Monitor · Usage Local Monitor  
+**Apps:** Usage Monitor Client · Usage Monitor Local  
 
-Both apps already exist in ASC with version **1.0** in `PREPARE_FOR_SUBMISSION` and VALID TestFlight builds. This pack is the copy, privacy answers, review notes, and screenshot plan agents/humans paste into ASC (or push via `scripts/asc-push-listing.rb`).
+The retired `services.jays.usage.*` ASC records have version **1.0** in `PREPARE_FOR_SUBMISSION` and VALID TestFlight builds; the renamed apps need new records (see the 2026-09-23 note). This pack is the copy, privacy answers, review notes, and screenshot plan agents/humans paste into ASC (or push via `scripts/asc-push-listing.rb`).
+
+> **2026-10-11 identifier note (supersedes the 2026-09-23 and 2026-09-22 notes):**  The apps now use `com.simplewithus.usage.client.ios` (home-screen name Usage Monitor) and `com.simplewithus.usage.local.ios` (Local Monitor), App Group `group.com.simplewithus.usage`.  The owner ruled the trailing `.ios` wins because that is what the live App Store Connect records actually carry, and an ASC record's bundle ID cannot be changed — so the apps align to the records.  New records were created: app `6820881005` (client) and `6820885210` (local).  The IDs in this pack that begin `6799230435` / `6799230729` belong to the retired `services.jays.usage.*` bundle IDs and must not be reused.  The version / localization / app-info IDs below are not yet known; `scripts/asc-push-listing.rb` does not discover them, so fill each one in from the new records in ASC before running it, or the script refuses to push.  The listing copy (names, text, privacy answers) is unchanged and still applies.  See `docs/rollouts/2026-09-23-usage-identifier-fixes.md`.
 
 Public legal URLs (must stay unauthenticated):
 
@@ -27,8 +29,8 @@ Contact (review): Jay Wedgeworth · mail@jays.services · +1 956-420-0244
 | Price | Free |
 | Invalid Binary note | See `docs/rollouts/2026-08-11-local-invalid-binary.md` — TF VALID ≠ App Store review; beta macOS host is likely remaining blocker |
 | Content rights | Does not contain, show, or access third-party content that requires special licensing beyond user-configured APIs |
-| App Groups (Local) | `group.services.jays.usage.local.monitor` — must appear on **App Store** provisioning profile (not empty `[]`) |
-| App Groups (Client) | `group.services.jays.usage.client.monitor` on app + widget App Store profiles |
+| App Groups (Local) | `group.com.simplewithus.usage` — must appear on **App Store** provisioning profile (not empty `[]`) |
+| App Groups (Client) | `group.com.simplewithus.usage` on app + widget App Store profiles (single App Group shared across Client + Local + widget) |
 | PrivacyInfo | Bundle `PrivacyInfo.xcprivacy` in app (+ widget). Required-reason: file timestamp `C617.1`, disk space `E174.1` |
 | Export compliance | Uses only exempt encryption (HTTPS / Keychain / CryptoKit standard). `ITSAppUsesNonExemptEncryption = false` |
 | Age rating | 4+ — all questionnaire items None / No (no UGC, no unrestricted web browser, no gambling, etc.) |
@@ -36,24 +38,24 @@ Contact (review): Jay Wedgeworth · mail@jays.services · +1 956-420-0244
 
 ---
 
-## 1) Usage Client Monitor
+## 1) Usage Monitor Client
 
 | | |
 |--|--|
-| **ASC name** | Usage Client Monitor |
-| **Bundle ID** | `services.jays.usage.client.monitor` |
+| **ASC name** | Usage Monitor Client |
+| **Bundle ID** | `com.simplewithus.usage.client.ios` |
 | **SKU** | `usage-client-monitor` |
-| **ASC app id** | `6799230435` |
-| **Version id (1.0)** | `4dd15570-c956-4895-93f3-d3e7adc21080` |
-| **en-US localization id** | `806f8051-efc5-4edf-8527-3ccbdcdb79a3` |
-| **App info localization** | `d9a5a612-f7e9-459b-9fe9-3a89afb19a98` |
+| **ASC app id** | `6820881005` (was retired: `6799230435`) |
+| **Version id (1.0)** | pending new record (retired: `4dd15570-c956-4895-93f3-d3e7adc21080`) |
+| **en-US localization id** | pending new record (retired: `806f8051-efc5-4edf-8527-3ccbdcdb79a3`) |
+| **App info localization** | pending new record (retired: `d9a5a612-f7e9-459b-9fe9-3a89afb19a98`) |
 | **Subtitle** (≤30) | Live budgets for API spend |
 | **Promotional text** (≤170, editable without new binary) | Connect your self-hosted Usage Monitor server.  See month-to-date spend, provider budgets, project allocation, and alerts — with Face ID lock and offline widgets. |
 
 ### Description
 
 ```
-Usage Client Monitor is the iOS companion for a Usage Monitor server you host.
+Usage Monitor Client is the iOS companion for a Usage Monitor server you host.
 
 See month-to-date API spend, budgets, and alerts without living in a browser tab.  Point the app at your server URL, store a read token in the Keychain, and keep budgets on your Lock Screen and Home Screen widgets.
 
@@ -86,7 +88,7 @@ api,budget,cost,usage,openai,anthropic,llm,devops,monitor,self-host,spend
 ### What's New (1.0)
 
 ```
-Initial App Store release of Usage Client Monitor — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.
+Initial App Store release of Usage Monitor Client — live budgets, providers, project allocation, alerts, Face ID lock, and widgets for your self-hosted Usage Monitor server.
 ```
 
 ### App Review notes
@@ -120,24 +122,24 @@ Declare data types only if the app *by design* sends them off-device: budget JSO
 
 ---
 
-## 2) Usage Local Monitor
+## 2) Usage Monitor Local
 
 | | |
 |--|--|
-| **ASC name** | Usage Local Monitor |
-| **Bundle ID** | `services.jays.usage.local.monitor` |
+| **ASC name** | Usage Monitor Local |
+| **Bundle ID** | `com.simplewithus.usage.local.ios` |
 | **SKU** | `usage-local-monitor` |
-| **ASC app id** | `6799230729` |
-| **Version id (1.0)** | `7ddabffc-9fbd-413d-addd-34476fa5cefd` |
-| **en-US localization id** | `09c8eb6b-8f6d-4629-b14b-6e30a5d73da6` |
-| **App info localization** | `2d225776-d637-483e-aa1a-690f4b40e3fb` |
+| **ASC app id** | `6820885210` (was retired: `6799230729`) |
+| **Version id (1.0)** | pending new record (retired: `7ddabffc-9fbd-413d-addd-34476fa5cefd`) |
+| **en-US localization id** | pending new record (retired: `09c8eb6b-8f6d-4629-b14b-6e30a5d73da6`) |
+| **App info localization** | pending new record (retired: `2d225776-d637-483e-aa1a-690f4b40e3fb`) |
 | **Subtitle** (≤30) | On-device API budget tracker |
 | **Promotional text** | Track OpenRouter, OpenAI, Anthropic, and more on your phone — keys in Keychain, budgets in on-device SQLite.  No Usage Monitor server required. |
 
 ### Description
 
 ```
-Usage Local Monitor keeps API and subscription spend visible on your iPhone — entirely on-device.
+Usage Monitor Local keeps API and subscription spend visible on your iPhone — entirely on-device.
 
 Add the providers you already pay for, store keys in the Keychain, and see month-to-date cost, budgets, renewals, and alerts without running a separate server.
 
@@ -155,7 +157,7 @@ WHO IT IS FOR
 Individual developers and small teams who want phone-first cost awareness without hosting Usage Monitor.
 
 WHAT IT IS NOT
-• Not a remote dashboard client (that is Usage Client Monitor)
+• Not a remote dashboard client (that is Usage Monitor Client)
 • Not a bank, brokerage, or tax product
 • Does not invent spend for providers that only offer console billing — those stay as subscription or manual rows
 
@@ -171,7 +173,7 @@ api,budget,cost,openai,anthropic,openrouter,llm,local,on-device,usage,spend
 ### What's New (1.0)
 
 ```
-Initial App Store release of Usage Local Monitor — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.
+Initial App Store release of Usage Monitor Local — on-device budgets, provider catalog, poll adapters, subscriptions, projects, export/import, and Face ID lock. No server required.
 ```
 
 ### App Review notes

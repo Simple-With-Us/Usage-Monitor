@@ -8,22 +8,25 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 
-import { awsUriEncode, signS3Request } from "./lib/s3-sigv4.mjs";
+import { awsUriEncode, signS3Request, s3Request } from "./lib/s3-sigv4.mjs";
 import {
   archiveKeyFor,
+  archiveKeyTimeMs,
   classifyFailure,
   isManagedArchiveKey,
   resolveArchiveConfig,
   runArchive,
   selectPruneTargets,
+  uploadMultipart,
 } from "./ops/r2-weekly-archive.mjs";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
 let failures = 0;
 let passes = 0;
 
@@ -155,6 +158,46 @@ await test("selectPruneTargets keeps the fresh upload plus keep-1 older generati
   ]);
 });
 
+await test("selectPruneTargets never keeps an archive more than 14 days older than the fresh one", () => {
+  // Jay 2026-10-30: the 2 weeks counts from day 1. Two failed weeks in a row
+  // left the previous good copy 21 days old; keep=2 alone would keep it.
+  const objects = [
+    { key: "weekly/prod-2026-07-22T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-00Z.db.gz" },
+  ];
+  const fresh = "weekly/prod-2026-08-12T00-00-00Z.db.gz";
+  assert.deepEqual(selectPruneTargets(objects, fresh, 2), ["weekly/prod-2026-07-22T00-00-00Z.db.gz"]);
+
+  // A raised keep (R2_ARCHIVE_KEEP_GENERATIONS=4) is capped too; exactly 14 days stays.
+  const weekly = [
+    { key: "weekly/prod-2026-07-22T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-07-29T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-05T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-00Z.db.gz" },
+  ];
+  assert.deepEqual(selectPruneTargets(weekly, fresh, 4), ["weekly/prod-2026-07-22T00-00-00Z.db.gz"]);
+
+  // Run-time jitter: 14 days + 1 second is over the cap.
+  const jitter = [
+    { key: "weekly/prod-2026-07-29T00-00-00Z.db.gz" },
+    { key: "weekly/prod-2026-08-12T00-00-01Z.db.gz" },
+  ];
+  assert.deepEqual(selectPruneTargets(jitter, "weekly/prod-2026-08-12T00-00-01Z.db.gz", 2), [
+    "weekly/prod-2026-07-29T00-00-00Z.db.gz",
+  ]);
+
+  // The normal weekly shape is untouched: fresh + the 7-day-old copy.
+  assert.deepEqual(selectPruneTargets(weekly.slice(2), fresh, 2), []);
+});
+
+await test("archiveKeyTimeMs parses the key stamp", () => {
+  assert.equal(
+    archiveKeyTimeMs("weekly/prod-2026-08-12T09-48-45Z.db.gz"),
+    Date.parse("2026-08-12T09:48:45Z")
+  );
+  assert.ok(Number.isNaN(archiveKeyTimeMs("weekly/README.txt")));
+});
+
 await test("selectPruneTargets never proposes deleting the fresh upload", () => {
   const fresh = "weekly/prod-2026-08-12T00-00-00Z.db.gz";
   const targets = selectPruneTargets([{ key: fresh }], fresh, 1);
@@ -222,6 +265,182 @@ await test("classifyFailure never lets remote error text reach the status file",
   }
 });
 
+await test("S3 transport failures retain operation and bounded nested cause codes", async () => {
+  for (const [method, reason] of [["PUT", "upload_failed"], ["GET", "download_failed"], ["DELETE", "prune_failed"]]) {
+    let calls = 0;
+    await assert.rejects(s3Request({
+      method,
+      creds: { endpoint: "https://fixture.invalid", accessKeyId: "fixture", secretAccessKey: "fixture" },
+      bucket: "fixture",
+      fetchImpl: async () => {
+        calls++;
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("private socket detail"), { code: "ECONNRESET" }) });
+      },
+    }), (error) => {
+      assert.equal(error.message, `S3 ${method} transport failed (ECONNRESET)`);
+      assert.equal(classifyFailure(error), reason);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1, "diagnostics must not retry the request");
+  }
+});
+
+await test("S3 transport diagnostics exclude arbitrary messages, codes and credentials", async () => {
+  const privateDetail = "private-secret https://private.invalid/?token=private-secret";
+  const hostile = Object.assign(new Error(privateDetail), { code: privateDetail });
+  hostile.cause = hostile;
+  await assert.rejects(s3Request({
+    method: "PUT",
+    creds: { endpoint: "https://fixture.invalid", accessKeyId: "private-key", secretAccessKey: "private-secret" },
+    bucket: "private-bucket",
+    key: "private-object",
+    fetchImpl: async () => { throw hostile; },
+  }), (error) => {
+    assert.equal(error.message, "S3 PUT transport failed (unknown)");
+    assert.doesNotMatch(error.stack, /private-|token=/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+// ------------------------------------------------------------ multipart ----
+
+const STUB_CREDS = {
+  endpoint: "https://acct.r2.cloudflarestorage.com",
+  region: "auto",
+  accessKeyId: "test-key",
+  secretAccessKey: "test-secret",
+};
+
+await test("uploadMultipart assembles sequential parts into one object", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    const payload = Buffer.alloc(2500);
+    for (let i = 0; i < payload.length; i += 1) payload[i] = i % 251;
+    writeFileSync(filePath, payload);
+    const s3 = makeS3Stub();
+
+    const { partCount } = await uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath,
+      fileBytes: payload.length,
+      fetchImpl: s3.fetchImpl,
+      partBytes: 1000,
+    });
+
+    assert.equal(partCount, 3, "2500 bytes at 1000-byte parts is 3 parts");
+    assert.deepEqual(s3.store.get("weekly/test.db.gz"), payload);
+    assert.deepEqual(
+      s3.calls.map((c) => c.method),
+      ["POST", "PUT", "PUT", "PUT", "POST"],
+      "create, three parts, complete"
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart retries a part whose connection drops, then completes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    const payload = Buffer.from("one part, dropped once");
+    writeFileSync(filePath, payload);
+    const s3 = makeS3Stub();
+    let putAttempts = 0;
+
+    const result = await uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath,
+      fileBytes: payload.length,
+      fetchImpl: async (url, init) => {
+        if (init.method === "PUT") {
+          putAttempts += 1;
+          if (putAttempts === 1) {
+            // The 2026-11-07 live failure: the socket dies mid-transfer.
+            throw new TypeError("fetch failed", { cause: { code: "UND_ERR_SOCKET" } });
+          }
+        }
+        return s3.fetchImpl(url, init);
+      },
+    });
+
+    assert.equal(result.partCount, 1);
+    assert.equal(putAttempts, 2, "the dropped part is retried, not the whole upload");
+    assert.deepEqual(s3.store.get("weekly/test.db.gz"), payload);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart aborts and preserves the signer error when a part never lands", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const filePath = join(dir, "payload.bin");
+    writeFileSync(filePath, Buffer.from("never lands"));
+    const s3 = makeS3Stub();
+
+    await assert.rejects(
+      uploadMultipart({
+        creds: STUB_CREDS,
+        bucket: "usage-monitor-prod-v3",
+        key: "weekly/test.db.gz",
+        filePath,
+        fileBytes: 11,
+        fetchImpl: async (url, init) => {
+          if (init.method === "PUT") {
+            throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+          }
+          return s3.fetchImpl(url, init);
+        },
+      }),
+      (error) => {
+        assert.equal(error.message, "S3 PUT transport failed (ECONNRESET)");
+        assert.equal(classifyFailure(error), "upload_failed");
+        return true;
+      }
+    );
+    assert.equal(s3.uploads.size, 0, "abort removes the in-flight upload");
+    assert.equal(s3.store.size, 0, "no object is created from a failed upload");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("uploadMultipart rejects non-positive part geometry before any S3 call", async () => {
+  const s3 = makeS3Stub();
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: 10,
+      fetchImpl: s3.fetchImpl,
+      partBytes: 0,
+    }),
+    /partBytes must be a positive integer/
+  );
+  await assert.rejects(
+    uploadMultipart({
+      creds: STUB_CREDS,
+      bucket: "usage-monitor-prod-v3",
+      key: "weekly/test.db.gz",
+      filePath: "/nonexistent",
+      fileBytes: -1,
+      fetchImpl: s3.fetchImpl,
+    }),
+    /fileBytes must be a non-negative integer/
+  );
+  assert.equal(s3.calls.length, 0, "validation happens before CreateMultipartUpload");
+});
+
 // --------------------------------------------------------------- config ----
 
 await test("resolveArchiveConfig refuses to fall back to the B2 litestream keys", () => {
@@ -236,6 +455,26 @@ await test("resolveArchiveConfig refuses to fall back to the B2 litestream keys"
     "R2_ARCHIVE_SECRET_ACCESS_KEY",
   ]);
   assert.equal(config.creds.accessKeyId, "", "B2 credentials must never leak into an R2 request");
+});
+
+await test("resolveArchiveConfig anchors work dir on the data volume beside the DB", () => {
+  const config = resolveArchiveConfig({
+    R2_ARCHIVE_ENDPOINT: "https://acct.r2.cloudflarestorage.com",
+    R2_ARCHIVE_ACCESS_KEY_ID: "k",
+    R2_ARCHIVE_SECRET_ACCESS_KEY: "s",
+    R2_ARCHIVE_DB_PATH: "/data/prod.db",
+  });
+  assert.equal(config.workDirBase, "/data/.r2-archive-work");
+  const overridden = resolveArchiveConfig(
+    {
+      R2_ARCHIVE_ENDPOINT: "https://acct.r2.cloudflarestorage.com",
+      R2_ARCHIVE_ACCESS_KEY_ID: "k",
+      R2_ARCHIVE_SECRET_ACCESS_KEY: "s",
+      R2_ARCHIVE_DB_PATH: "/data/prod.db",
+      R2_ARCHIVE_WORK_DIR: "/opt/r2-work",
+    }
+  );
+  assert.equal(overridden.workDirBase, "/opt/r2-work");
 });
 
 await test("resolveArchiveConfig normalizes prefix and detects the kill switch", () => {
@@ -266,7 +505,15 @@ function makeDatabase(path) {
 /** Tiny in-memory S3 so the full flow runs with no network and no credential. */
 function makeS3Stub({ corruptOnGet = false } = {}) {
   const store = new Map();
+  const uploads = new Map();
   const calls = [];
+  let uploadSeq = 0;
+  const respond = (status, textBody, headers = {}) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
+    async text() { return textBody; },
+  });
   const fetchImpl = async (url, init) => {
     const method = init.method;
     const parsed = new URL(url);
@@ -274,9 +521,42 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
     const key = keyParts.join("/");
     calls.push({ method, key: key || "(list)" });
 
+    // CreateMultipartUpload — POST with ?uploads and no uploadId yet.
+    if (method === "POST" && parsed.searchParams.has("uploads")) {
+      uploadSeq += 1;
+      const uploadId = `stub-upload-${uploadSeq}`;
+      uploads.set(uploadId, { key, parts: new Map() });
+      return respond(
+        200,
+        `<?xml version="1.0"?><InitiateMultipartUploadResult><Bucket>stub</Bucket>` +
+          `<Key>${key}</Key><UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`
+      );
+    }
+    // CompleteMultipartUpload — assemble the parts in part-number order.
+    if (method === "POST" && parsed.searchParams.get("uploadId")) {
+      const uploadId = parsed.searchParams.get("uploadId");
+      const upload = uploads.get(uploadId);
+      if (!upload) return respond(404, "<Error><Code>NoSuchUpload</Code></Error>");
+      const assembled = Buffer.concat(
+        [...upload.parts.entries()].sort((a, b) => a[0] - b[0]).map(([, body]) => body)
+      );
+      store.set(upload.key, assembled);
+      uploads.delete(uploadId);
+      return respond(
+        200,
+        `<?xml version="1.0"?><CompleteMultipartUploadResult><Key>${upload.key}</Key></CompleteMultipartUploadResult>`
+      );
+    }
     if (method === "PUT") {
+      const partNumber = parsed.searchParams.get("partNumber");
+      if (partNumber !== null) {
+        const upload = uploads.get(parsed.searchParams.get("uploadId"));
+        if (!upload) return respond(404, "<Error><Code>NoSuchUpload</Code></Error>");
+        upload.parts.set(Number(partNumber), Buffer.from(init.body));
+        return respond(200, "", { etag: `"stub-etag-${partNumber}"` });
+      }
       store.set(key, Buffer.from(init.body));
-      return { ok: true, status: 200, async text() { return ""; } };
+      return respond(200, "", { etag: '"stub-etag"' });
     }
     if (method === "GET" && parsed.searchParams.get("list-type") === "2") {
       const prefix = parsed.searchParams.get("prefix") ?? "";
@@ -289,26 +569,35 @@ function makeS3Stub({ corruptOnGet = false } = {}) {
         )
         .join("");
       const xml = `<?xml version="1.0"?><ListBucketResult>${contents}<IsTruncated>false</IsTruncated></ListBucketResult>`;
-      return { ok: true, status: 200, async text() { return xml; } };
+      return respond(200, xml);
     }
     if (method === "GET") {
       const stored = store.get(key);
-      if (!stored) return { ok: false, status: 404, async text() { return "<Error/>"; } };
+      if (!stored) return respond(404, "<Error/>");
       const body = corruptOnGet ? Buffer.concat([stored, Buffer.from("x")]) : stored;
       return {
         ok: true,
         status: 200,
+        headers: { get: () => null },
+        // Real fetch exposes a web ReadableStream; the archiver streams it.
+        body: new Response(body).body,
         async arrayBuffer() { return body.buffer.slice(body.byteOffset, body.byteOffset + body.length); },
         async text() { return ""; },
       };
     }
     if (method === "DELETE") {
+      const uploadId = parsed.searchParams.get("uploadId");
+      if (uploadId) {
+        // AbortMultipartUpload — the parts vanish, no object is created.
+        uploads.delete(uploadId);
+        return respond(204, "");
+      }
       store.delete(key);
-      return { ok: true, status: 204, async text() { return ""; } };
+      return respond(204, "");
     }
     throw new Error(`unexpected ${method}`);
   };
-  return { fetchImpl, store, calls };
+  return { fetchImpl, store, calls, uploads };
 }
 
 function baseEnv(dir, dbPath) {
@@ -337,7 +626,6 @@ await test("runArchive uploads a verifiable, restorable snapshot", async () => {
 
     // The stored bytes really are a gzipped, openable SQLite database.
     const restored = join(dir, "restored.db");
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(restored, gunzipSync(s3.store.get(result.key)));
     const db = new DatabaseSync(restored, { readOnly: true });
     const row = db.prepare("SELECT COUNT(*) AS n FROM budget").get();
@@ -358,10 +646,14 @@ await test("runArchive prunes only after verification, honouring the keep count"
     const dbPath = join(dir, "prod.db");
     makeDatabase(dbPath);
     const s3 = makeS3Stub();
-    // Three pre-existing generations plus an unrelated litestream object.
-    s3.store.set("weekly/prod-2026-07-22T00-00-00Z.db.gz", Buffer.from("old-1"));
-    s3.store.set("weekly/prod-2026-07-29T00-00-00Z.db.gz", Buffer.from("old-2"));
-    s3.store.set("weekly/prod-2026-08-05T00-00-00Z.db.gz", Buffer.from("old-3"));
+    // Three pre-existing generations (all inside the 14-day cap, relative to
+    // the real clock the fresh key uses) plus an unrelated litestream object.
+    const old1 = archiveKeyFor("weekly/", new Date(Date.now() - 9 * DAY_MS));
+    const old2 = archiveKeyFor("weekly/", new Date(Date.now() - 8 * DAY_MS));
+    const old3 = archiveKeyFor("weekly/", new Date(Date.now() - 7 * DAY_MS));
+    s3.store.set(old1, Buffer.from("old-1"));
+    s3.store.set(old2, Buffer.from("old-2"));
+    s3.store.set(old3, Buffer.from("old-3"));
     s3.store.set("api-usage-monitor/prod.db/0001/0000.ltx", Buffer.from("litestream"));
 
     const result = await runArchive({
@@ -372,9 +664,9 @@ await test("runArchive prunes only after verification, honouring the keep count"
 
     assert.equal(result.pruned.length, 2);
     assert.ok(s3.store.has(result.key), "fresh upload retained");
-    assert.ok(s3.store.has("weekly/prod-2026-08-05T00-00-00Z.db.gz"), "newest old generation retained");
-    assert.ok(!s3.store.has("weekly/prod-2026-07-29T00-00-00Z.db.gz"));
-    assert.ok(!s3.store.has("weekly/prod-2026-07-22T00-00-00Z.db.gz"));
+    assert.ok(s3.store.has(old3), "newest old generation retained");
+    assert.ok(!s3.store.has(old2));
+    assert.ok(!s3.store.has(old1));
     assert.ok(
       s3.store.has("api-usage-monitor/prod.db/0001/0000.ltx"),
       "the frozen litestream history must never be touched"
@@ -385,6 +677,66 @@ await test("runArchive prunes only after verification, honouring the keep count"
     const verifyGet = s3.calls.findIndex((c) => c.method === "GET" && c.key === result.key);
     assert.ok(verifyGet !== -1, "verification GET must happen");
     assert.ok(firstDelete > verifyGet, "no deletion may happen before verification");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("runArchive applies the 14-day cap even when --keep would retain more", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const dbPath = join(dir, "prod.db");
+    makeDatabase(dbPath);
+    const s3 = makeS3Stub();
+    const stale = archiveKeyFor("weekly/", new Date(Date.now() - 20 * DAY_MS));
+    const lastWeek = archiveKeyFor("weekly/", new Date(Date.now() - 7 * DAY_MS));
+    s3.store.set(stale, Buffer.from("stale"));
+    s3.store.set(lastWeek, Buffer.from("last-week"));
+
+    const result = await runArchive({
+      env: baseEnv(dir, dbPath),
+      argv: ["--keep", "4"],
+      fetchImpl: s3.fetchImpl,
+    });
+
+    assert.deepEqual(result.pruned, [stale]);
+    assert.ok(s3.store.has(result.key), "fresh upload retained");
+    assert.ok(s3.store.has(lastWeek), "7-day-old copy retained");
+    assert.ok(!s3.store.has(stale), "20-day-old copy pruned by the 14-day cap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("an upload transport rejection reports its phase and never verifies or prunes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-test-"));
+  try {
+    const dbPath = join(dir, "prod.db");
+    makeDatabase(dbPath);
+    const s3 = makeS3Stub();
+    const oldKey = archiveKeyFor("weekly/", new Date(Date.now() - 20 * DAY_MS));
+    s3.store.set(oldKey, Buffer.from("old-archive"));
+    const methods = [];
+    await assert.rejects(runArchive({
+      env: baseEnv(dir, dbPath),
+      argv: [],
+      fetchImpl: async (url, init) => {
+        methods.push(init.method);
+        if (init.method === "PUT") {
+          throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+        }
+        return s3.fetchImpl(url, init);
+      },
+    }), (error) => {
+      assert.equal(error.message, "S3 PUT transport failed (UND_ERR_HEADERS_TIMEOUT)");
+      assert.equal(classifyFailure(error), "upload_failed");
+      return true;
+    });
+    // Create, the part's three attempts (the per-part retry budget), then the
+    // abort — and nothing else: a failed upload never verifies or prunes.
+    assert.deepEqual(methods, ["POST", "PUT", "PUT", "PUT", "DELETE"]);
+    assert.equal(s3.uploads.size, 0, "the aborted upload leaves nothing behind");
+    assert.deepEqual([...s3.store.keys()], [oldKey]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -2,7 +2,7 @@
 
 import { ChevronDown, Cloud, Inbox, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import type { FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
+import type { FleetAppBackupStatus, FleetBackupStatusPayload } from "@/lib/fleet-backup-status";
 import type {
   CongressInfrastructureSummary,
   CoolifyFleetSummary,
@@ -14,10 +14,21 @@ import type {
 import type { R2FleetAccountSnapshot, R2FleetSummary } from "@/lib/r2-usage";
 import type { ServerMetricsPayload } from "@/lib/server-metrics";
 import type { HostPreventionPanel } from "@/lib/server-metrics-indicators";
+import {
+  OwnerExpenseErrorSchema,
+  QuarantineListSchema,
+  QuarantineResolveResponseSchema,
+  RecordOwnerExpenseResponseSchema,
+  type QuarantinedExpense,
+} from "@/lib/owner-expense-quarantine-schema";
 
 const REFRESH_INTERVAL_MS = 60_000;
 
+import B2AppUsageBreakdownCard from "@/components/B2AppUsageBreakdownCard";
+import PostedExpensesCard from "@/components/PostedExpensesCard";
 import { MacHealthCard } from "@/components/MacHealthCard";
+import SentryHealthCard from "@/components/SentryHealthCard";
+import FleetAlertsCard from "@/components/FleetAlertsCard";
 
 export function markOperationsStale(previous: OperationsHealthSummary): OperationsHealthSummary {
   return {
@@ -129,7 +140,62 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [quarantined, setQuarantined] = useState<QuarantinedExpense[] | null>(null);
+  const [quarantineBusyId, setQuarantineBusyId] = useState<string | null>(null);
   const count = `${data.countIsLowerBound ? "at least " : ""}${data.needsReviewCount}`;
+
+  const fetchQuarantine = useCallback(async () => {
+    try {
+      const response = await fetch("/api/owner-expenses/quarantine");
+      if (!response.ok) return;
+      const parsed = QuarantineListSchema.safeParse(await response.json());
+      if (!parsed.success) return;
+      setQuarantined(parsed.data.quarantined);
+    } catch {
+      // Quarantine list is advisory; a failed fetch must not break the card.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (expanded) void fetchQuarantine();
+  }, [expanded, fetchQuarantine]);
+
+  async function resolveQuarantine(id: string, action: "post" | "discard") {
+    setQuarantineBusyId(id);
+    setFormError(null);
+    try {
+      const response = await fetch("/api/owner-expenses/quarantine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+      const json: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const failure = OwnerExpenseErrorSchema.safeParse(json);
+        throw new Error(failure.success ? failure.data.error : "Could not resolve this item");
+      }
+      const parsed = QuarantineResolveResponseSchema.safeParse(json);
+      if (!parsed.success) throw new Error("Could not read the resolve response");
+      if (parsed.data.status === "discarded") {
+        setFormNotice("Held expense discarded — nothing was posted.");
+      } else if (parsed.data.record?.tombstoned) {
+        // UM-1659: the owner deleted this expense and its key is
+        // tombstoned, so post-anyway cannot resurrect it.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — it cannot be re-posted.");
+      } else if (parsed.data.record?.persisted === 0) {
+        // Idempotency replay (or a retention tombstone): this exact entry was
+        // recorded before, so post-anyway added nothing new to the ledger.
+        setFormNotice("Nothing new was posted — this exact entry was recorded before.");
+      } else {
+        setFormNotice("Held expense posted to the ledger.");
+      }
+      await fetchQuarantine();
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "Could not resolve this item");
+    } finally {
+      setQuarantineBusyId(null);
+    }
+  }
 
   async function ignoreReceipt(id: string) {
     setBusyId(id);
@@ -156,7 +222,8 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
     event.preventDefault();
     setFormError(null);
     setFormNotice(null);
-    const form = new FormData(event.currentTarget);
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
     const amount = Number(form.get("amountUsd"));
     const occurred = String(form.get("occurredOn") ?? "");
     const occurredAt = occurred
@@ -178,12 +245,35 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      const json: unknown = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(body?.error ?? "Could not record this expense");
+        const failure = OwnerExpenseErrorSchema.safeParse(json);
+        throw new Error(failure.success ? failure.data.error : "Could not record this expense");
       }
-      setFormNotice("Expense recorded on the ledger.");
-      event.currentTarget.reset();
+      const parsed = RecordOwnerExpenseResponseSchema.safeParse(json);
+      if (!parsed.success) throw new Error("Could not read the record response");
+      if (response.status === 202 || parsed.data.quarantined === true) {
+        const reason = parsed.data.matchReason ? `${parsed.data.matchReason}\u00a0 ` : "";
+        setFormNotice(
+          `Held for review as a suspected duplicate — nothing was posted.\u00a0 ${reason}See “Held Duplicates” below to post it anyway or discard it.`
+        );
+        formEl.reset();
+        await fetchQuarantine();
+        return;
+      }
+      if (parsed.data.tombstoned) {
+        // UM-1659: a deleted expense's key is tombstoned; a re-forward of
+        // the same receipt records nothing.
+        setFormNotice("This expense was deleted by the owner and is tombstoned — nothing was posted.");
+        formEl.reset();
+        return;
+      }
+      setFormNotice(
+        parsed.data.persisted === 0
+          ? "Nothing new was posted — this exact entry was recorded before."
+          : "Expense recorded on the ledger."
+      );
+      formEl.reset();
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Could not record this expense");
     }
@@ -261,6 +351,60 @@ export function ReceiptInboxCard({ data }: { data: ReceiptInboxSummary }) {
           ) : (
             <p className="text-xs text-gray-500 dark:text-gray-400">No inbox items waiting.  You can still record an expense from a Gmail or iCloud receipt.</p>
           )}
+          <div className="mt-4 border-t border-gray-100 pt-3 dark:border-gray-700">
+            <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+              Held Duplicates{quarantined && quarantined.length > 0 ? ` (${quarantined.length})` : ""}
+            </h4>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Expenses held by the duplicate guardrail instead of posting.{"\u00a0"} Nothing here is on the ledger.{"\u00a0"} Post one only if you are sure it is genuinely new spend; otherwise discard it.
+            </p>
+            {quarantined === null ? (
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Loading…</p>
+            ) : quarantined.length === 0 ? (
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">No held expenses.</p>
+            ) : (
+              <ul className="mt-2 divide-y divide-gray-100 dark:divide-gray-700">
+                {quarantined.map((item) => (
+                  <li key={item.id} className="py-2 text-xs">
+                    <p className="font-medium text-gray-800 dark:text-gray-200">
+                      {item.provider} · ${item.amountUsd.toFixed(2)} ·{" "}
+                      <time suppressHydrationWarning dateTime={item.occurredAt}>
+                        {item.occurredAt.slice(0, 10)}
+                      </time>
+                      {" · "}{item.label}
+                    </p>
+                    <p className="mt-0.5 text-amber-700 dark:text-amber-300">{item.matchReason}</p>
+                    {item.matchedEntries.length > 0 && (
+                      <p className="mt-0.5 text-gray-500 dark:text-gray-400">
+                        Matched ledger {item.matchedEntries.length === 1 ? "entry" : "entries"}:{" "}
+                        {item.matchedEntries
+                          .map((m) => `${m.provider} $${m.amountUsd != null ? m.amountUsd.toFixed(2) : "—"} on ${m.occurredAt.slice(0, 10)}`)
+                          .join("; ")}
+                      </p>
+                    )}
+                    <div className="mt-1 flex gap-2">
+                      <button
+                        type="button"
+                        disabled={quarantineBusyId === item.id}
+                        onClick={() => void resolveQuarantine(item.id, "post")}
+                        className="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200"
+                      >
+                        Post Anyway
+                      </button>
+                      <button
+                        type="button"
+                        disabled={quarantineBusyId === item.id}
+                        onClick={() => void resolveQuarantine(item.id, "discard")}
+                        className="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <form className="mt-4 grid gap-2 sm:grid-cols-2" onSubmit={(event) => void recordExpense(event)}>
             <label className="text-xs text-gray-600 dark:text-gray-300">
               Provider
@@ -539,7 +683,7 @@ export function R2FleetCard({ data }: { data: R2FleetSummary | null }) {
             <Cloud className="h-4 w-4" />
           </span>
           <div>
-            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 free tier (fleet)</h3>
+            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 Free Tier (Fleet)</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Could not load R2 metrics for Usage Monitor / Socratic / Congress.</p>
           </div>
         </div>
@@ -559,7 +703,7 @@ export function R2FleetCard({ data }: { data: R2FleetSummary | null }) {
             <Cloud className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 free tier (fleet)</h3>
+            <h3 id="r2-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">R2 Free Tier (Fleet)</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Three Cloudflare accounts · 10 GiB / 1M Class A / 10M Class B each · alert at {data.thresholdPct}%
               {data.localBackup.autoDisabled ? " · this host paused Litestream writes" : ""}
@@ -586,18 +730,43 @@ export function R2FleetCard({ data }: { data: R2FleetSummary | null }) {
   );
 }
 
+/**
+ * Runtime & services detail row: embed provider (if the ST health payload
+ * reported one) plus OpenRouter credit state.  Returns null — render
+ * nothing — when neither has data, rather than fabricating a status line.
+ *
+ * Pinecone was dropped from this card (retired per owner 2026-09-04) and
+ * there is no live Qdrant/vector-store health field in this payload to take
+ * its place — qdrant-st's real status is Coolify-resource data and already
+ * surfaces on the Coolify Fleet card, not duplicated here.
+ */
+export function socraticVectorStoreLine(
+  data: Pick<SocraticInfrastructureSummary, "ragEmbedProvider" | "openrouterCreditsOk">
+): string | null {
+  const parts = [
+    data.ragEmbedProvider ? `Embed ${data.ragEmbedProvider}` : null,
+    data.openrouterCreditsOk === null
+      ? null
+      : data.openrouterCreditsOk
+        ? "OpenRouter credits ok"
+        : "OpenRouter credits low",
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 export function SocraticInfrastructureCard({ data }: { data: SocraticInfrastructureSummary }) {
   const [expanded, setExpanded] = useState(false);
   const scheduler = data.schedulerAgeSeconds === null ? "scheduler unavailable" : `scheduler ${Math.round(data.schedulerAgeSeconds)}s ago`;
   const uptime = formatUptime(data.processUptimeSeconds);
   const depTotal = data.dependencyCount ?? data.failedDependencies.length;
+  const vectorStoreLine = socraticVectorStoreLine(data);
   return (
     <section aria-labelledby="socratic-infrastructure-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <div className="flex items-start justify-between gap-4 px-5 py-4">
         <div className="flex min-w-0 items-start gap-3">
           <span className="rounded-lg bg-violet-50 p-2 text-violet-600 dark:bg-violet-950/40 dark:text-violet-300" aria-hidden="true"><Server className="h-4 w-4" /></span>
           <div className="min-w-0">
-            <h3 id="socratic-infrastructure-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Socratic Trade infrastructure</h3>
+            <h3 id="socratic-infrastructure-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Socratic Trade Infrastructure</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Database {data.database} · {scheduler} · {uptime}
               {data.recentRestart ? " · recent restart" : ""}
@@ -640,15 +809,9 @@ export function SocraticInfrastructureCard({ data }: { data: SocraticInfrastruct
               Dependencies: {data.failedDependencies.length > 0 ? data.failedDependencies.join(", ") : "none failed"}
               {data.dependencyCount != null ? ` (${data.dependencyCount} total)` : ""}
             </p>
-            <p className="mt-1 text-gray-500 dark:text-gray-400">
-              Pinecone {data.pineconeConfigured === null ? "unknown" : data.pineconeConfigured ? "configured" : "off"}
-              {data.ragEmbedProvider ? ` · embed ${data.ragEmbedProvider}` : ""}
-              {data.openrouterCreditsOk === null
-                ? ""
-                : data.openrouterCreditsOk
-                  ? " · OpenRouter credits ok"
-                  : " · OpenRouter credits low"}
-            </p>
+            {vectorStoreLine && (
+              <p className="mt-1 text-gray-500 dark:text-gray-400">{vectorStoreLine}</p>
+            )}
             <a href={data.adminUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex min-h-11 items-center font-medium text-blue-600 hover:underline dark:text-blue-300">Open full Socratic admin panel</a>
           </div>
         </div>
@@ -729,12 +892,25 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
       </section>
     );
   }
-  const state: OperationalState = !data.configured
-    ? "unconfigured"
-    : data.ok
-      ? "healthy"
-      : "degraded";
+  // An offline (skipped) check observed nothing: report it as unavailable
+  // instead of claiming a missing key or a healthy fleet.
+  const state: OperationalState = data.offline
+    ? "unavailable"
+    : !data.configured
+      ? "unconfigured"
+      : data.ok
+        ? "healthy"
+        : "degraded";
   const okApps = data.apps.filter((a) => a.ok).length;
+  // Per-app and per-location pills must not contradict each other: offline,
+  // an app with at least one really observed row derives its pill from those
+  // rows; an app whose rows were all skipped stays unavailable.
+  const appState = (app: FleetAppBackupStatus): OperationalState => {
+    if (!data.offline) return app.ok ? "healthy" : "degraded";
+    const anyObserved = app.locations.some((l) => l.ok != null);
+    if (!anyObserved) return "unavailable";
+    return app.ok ? "healthy" : "degraded";
+  };
   return (
     <section aria-labelledby="fleet-backups-heading" className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
       <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -745,9 +921,11 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
           <div className="min-w-0">
             <h3 id="fleet-backups-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Fleet Backups</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {data.configured
-                ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
-                : "Backblaze monitor key not configured"}
+              {data.offline
+                ? "Backup checks skipped (offline mode)"
+                : data.configured
+                  ? `${okApps} of ${data.apps.length} apps OK · B2 dumps + Litestream per location`
+                  : "Backblaze monitor key not configured"}
             </p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Checked <time suppressHydrationWarning dateTime={data.asOf}>{relativeTime(data.asOf)}</time>
@@ -772,22 +950,24 @@ export function FleetBackupsCard({ data }: { data: FleetBackupStatusPayload | nu
                     <span className="ml-1 font-normal text-gray-400">· this app</span>
                   ) : null}
                 </p>
-                <StatePill state={app.ok ? "healthy" : "degraded"} />
+                <StatePill state={appState(app)} />
               </div>
               <ul className="mt-2 space-y-1.5">
                 {app.locations.map((loc) => (
                   <li key={`${app.id}-${loc.id}`} className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">{loc.label}</span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {loc.ok === true
-                        ? "OK"
-                        : loc.ok === false
-                          ? loc.present
-                            ? "Lagging"
-                            : "Missing"
-                          : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
-                            ? "N/A"
-                            : "Unknown"}
+                      {data.offline && loc.ok == null
+                        ? "Unavailable"
+                        : loc.ok === true
+                          ? "OK"
+                          : loc.ok === false
+                            ? loc.present
+                              ? "Lagging"
+                              : "Missing"
+                            : loc.reason === "not_configured" || loc.reason === "b2_unconfigured"
+                              ? "N/A"
+                              : "Unknown"}
                       {loc.latestAgeSeconds != null
                         ? ` · ${fleetBackupAgeLabel(loc.latestAgeSeconds)}`
                         : ""}
@@ -1080,7 +1260,7 @@ export function CoolifyFleetCard({ data }: { data: CoolifyFleetSummary }) {
         <div className="flex min-w-0 items-start gap-3">
           <span className="rounded-lg bg-sky-50 p-2 text-sky-600 dark:bg-sky-950/40 dark:text-sky-300" aria-hidden="true"><Cloud className="h-4 w-4" /></span>
           <div className="min-w-0">
-            <h3 id="coolify-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Coolify fleet</h3>
+            <h3 id="coolify-fleet-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-100">Coolify Fleet</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{summary}</p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Last checked <time suppressHydrationWarning dateTime={data.fetchedAt} title={data.fetchedAt}>{relativeTime(data.fetchedAt)}</time>
@@ -1221,9 +1401,19 @@ export default function OperationsOverview() {
         <div className="grid gap-3 lg:grid-cols-2">
           <MacHealthCard />
           <HostStatsCard data={hostMetrics} />
+          <SentryHealthCard />
+          {/* Same state the Zulip #alerts channel shows, read from the shared
+              alert ingress so the two cannot drift apart. */}
+          <FleetAlertsCard />
           <R2FleetCard data={data.r2Fleet} />
           <FleetBackupsCard data={data.fleetBackups} />
+          <B2AppUsageBreakdownCard />
           <ReceiptInboxCard data={data.receiptInbox} />
+          {/* Posted Expenses spans the full row: its table needs the width.
+              It self-fetches, like the quarantine list inside ReceiptInboxCard. */}
+          <div className="lg:col-span-2">
+            <PostedExpensesCard />
+          </div>
           <SocraticInfrastructureCard data={data.socraticInfrastructure} />
           <CongressInfrastructureCard data={data.congressInfrastructure} />
           <CoolifyFleetCard data={data.coolifyFleet} />

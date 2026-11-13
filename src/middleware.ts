@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, isCsrfSafeRequest, verifySessionToken } from "@/lib/auth";
+import { sentryConnectSrcOrigins } from "@/lib/sentry-options";
 import { datadogConnectSrcOrigins } from "@/lib/datadog-options";
 
 export const config = {
@@ -32,8 +33,13 @@ export const isPublicPath = (pathname: string) => {
     "/api/ingest",
     "/api/otlp",
     "/api/apns",
+    // Self-authenticates with the dedicated CodeCaps registration token or
+    // the existing scoped usage-ingest credential; no dashboard cookie.
+    "/api/codecaps/push",
     "/api/settings",
     "/api/budget-status",
+    // Self-authenticates (session OR USAGE_READ_TOKEN) for BotFleet skip-model.
+    "/api/quota-windows",
     "/api/health",
     "/api/ready",
     // Public OpenRouter money probe for a dedicated UptimeRobot keyword monitor
@@ -43,6 +49,8 @@ export const isPublicPath = (pathname: string) => {
     // Self-authenticates (session OR USAGE_READ_TOKEN) for iOS Client Monitor
     // host usage + Coolify app inventory. See src/app/api/server-metrics/route.ts.
     "/api/server-metrics",
+    // Fleet B2 storage + daily download / Class C breakdown (iOS + bearer).
+    "/api/b2-app-usage",
     // Same dual-auth pattern: per-platform status cards (hosting, edge,
     // storage, observability, developer, messaging, payments, secrets) for the
     // web Platforms page and the iOS Platforms tab.
@@ -56,6 +64,25 @@ export const isPublicPath = (pathname: string) => {
     // Agents overview aggregator (live agent runs, token counts, quota burn,
     // API-equivalent cost comparison). Self-authenticates via session or USAGE_READ_TOKEN.
     "/api/agents-overview",
+    // Per-turn AgentTurn listing for the Agents tab. Same dual-auth as
+    // agents-overview (session cookie or USAGE_READ_TOKEN).
+    "/api/agent-turns",
+    // Per-request AI performance (AiRequest, UM-1590). Same dual-auth.
+    "/api/ai-requests",
+    // Owner-recorded expense ledger. GET self-authenticates via dashboard
+    // session or USAGE_READ_TOKEN (expenses dashboard sync); POST keeps its
+    // own session/OWNER_EXPENSE_TOKEN check in the route.
+    // See src/app/api/owner-expenses/route.ts.
+    "/api/owner-expenses",
+    // Usage-events read model (dashboard telemetry + raw event reads).
+    // Self-authenticates via dashboard session or USAGE_READ_TOKEN, like
+    // /api/owner-expenses above — without this exclusion, bearer read
+    // tokens 401 at the session gate before the route's own auth runs.
+    // See src/app/api/usage-events/route.ts.
+    "/api/usage-events",
+    // Remaining-quota windows for BotFleet skip-model. Same dual-auth as
+    // budget-status / agents-overview.
+    "/api/quota-windows",
     // Unlisted Apple Calendar subscribe URL; the route checks BILLS_CALENDAR_TOKEN.
     "/api/bills.ics",
     // Public RUM/browser-log config.  Returns only public intake fields.
@@ -69,6 +96,13 @@ export const isPublicPath = (pathname: string) => {
   // tokens 401 at the session gate before the route's own auth runs.
   if (pathname === "/api/export/daily-rollups" || pathname === "/api/export/daily-rollups/") return true;
   if (pathname === "/api/workspace/export" || pathname === "/api/workspace/export/") return true;
+  // Self-authenticates via isUsageReadAuthorized (same pattern as the
+  // daily-rollups exclusion above) — without this, bearer read tokens 401 at
+  // the session gate before the route's own auth runs.
+  if (pathname === "/api/agent-model-mix" || pathname === "/api/agent-model-mix/") return true;
+  // Same self-auth pattern: /api/muse-code-burn verifies the dashboard
+  // session cookie or the USAGE_READ_TOKEN bearer itself.
+  if (pathname === "/api/muse-code-burn" || pathname === "/api/muse-code-burn/") return true;
   return false;
 };
 
@@ -114,7 +148,7 @@ export function middleware(request: NextRequest) {
   const cspHeader = buildContentSecurityPolicy(
     nonce,
     isProduction,
-    datadogConnectSrcOrigins()
+    [...datadogConnectSrcOrigins(), ...sentryConnectSrcOrigins()]
   );
 
   const requestHeaders = new Headers(request.headers);

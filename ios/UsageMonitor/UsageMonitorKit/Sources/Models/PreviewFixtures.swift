@@ -385,11 +385,11 @@ public extension PlatformStatusPayload {
                 category: .messaging,
                 configured: true,
                 state: .healthy,
-                headline: "Slack bot token is valid for Jay's Services. Posting as agent-sync-realtime.",
+                headline: "Slack bot token is valid for Jay's Services. Posting as Operator.",
                 metrics: [
                     Metric(label: "Workspace", value: "Jay's Services"),
                     Metric(label: "Workspace ID", value: "T0824ABCDEF"),
-                    Metric(label: "Bot Identity", value: "U0824GHIJKL (agent-sync-realtime)")
+                    Metric(label: "Bot Identity", value: "U0824GHIJKL (Operator)")
                 ],
                 requiredEnv: ["SLACK_BOT_TOKEN"]
             ),
@@ -472,5 +472,56 @@ public extension OperationsHealth {
             ]
         ),
         fetchedAt: "2026-08-25T09:00:00.000Z"
+    )
+}
+
+public extension QuotaWindowsResponse {
+    /// Illustrates every rendering branch of the Subscription Quotas card:
+    /// a near-cap Claude window, an exhausted Codex window, an Antigravity
+    /// window carrying the `via` caption, a healthy Grok window, and MiniMax
+    /// deliberately absent to exercise the "No quota report yet" row.
+    static let sample = QuotaWindowsResponse(
+        ok: true,
+        generatedAt: "2026-09-12T18:00:00.000Z",
+        windows: [
+            QuotaWindow(
+                id: "claude-5h",
+                provider: "claude",
+                label: "5h window",
+                remainingPercent: 18,
+                resetAt: "2026-09-12T21:30:00.000Z",
+                window: "5h",
+                status: .nearCap
+            ),
+            QuotaWindow(
+                id: "codex-7d",
+                provider: "codex",
+                label: "7d window",
+                remainingPercent: 0,
+                isExhausted: true,
+                resetAt: "2026-09-15T00:00:00.000Z",
+                window: "7d",
+                status: .exhausted
+            ),
+            QuotaWindow(
+                id: "antigravity-claude-opus",
+                provider: "google-antigravity",
+                label: "Claude Opus 4.6 (Thinking)",
+                remainingPercent: 62,
+                resetAt: "2026-09-13T04:00:00.000Z",
+                window: "24h",
+                status: .available,
+                via: "antigravity"
+            ),
+            QuotaWindow(
+                id: "grok-monthly",
+                provider: "grok",
+                label: "Monthly window",
+                remainingPercent: 91,
+                resetAt: "2026-10-01T00:00:00.000Z",
+                window: "monthly",
+                status: .available
+            ),
+        ]
     )
 }

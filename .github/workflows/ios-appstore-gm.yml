@@ -3,7 +3,7 @@ name: iOS App Store GM ship
 # Archive + upload on GitHub-hosted macos-26 (Tahoe GM + Xcode 26.6).
 # The owned Mac runner is macOS 27 beta; App Store review rejects those
 # binaries as INVALID_BINARY even when TestFlight accepts them.
-# Manual only — ships both Usage Client Monitor and Usage Local Monitor.
+# Manual only — ships both Usage Monitor Client and Usage Monitor Local.
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       IOS_TF_MIN_INTERVAL_SEC: "0"
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -42,17 +42,63 @@ jobs:
           esac
           echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
 
-      - name: Import signing + ASC key
+
+      # Identity stays on GitHub.  Apple/iOS signing material comes from Infisical prod.
+      - name: Load Infisical signing secrets
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-          IOS_DIST_P12_BASE64: ${{ secrets.IOS_DIST_P12_BASE64 }}
-          IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          set +o xtrace
+          set -euo pipefail
+          export INFISICAL_DISABLE_UPDATE_CHECK=true
+          if ! command -v infisical >/dev/null 2>&1; then
+            NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install infisical/get-cli/infisical
+          fi
+          command -v infisical >/dev/null 2>&1 || { echo "::error::Infisical CLI is not installed."; exit 1; }
+          if [ -z "${INFISICAL_PROJECT_ID:-}" ]; then
+            echo "::error::Missing INFISICAL_PROJECT_ID GitHub secret."; exit 1
+          fi
+          CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-${INFISICAL_CLIENT_ID:-}}"
+          CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-${INFISICAL_CLIENT_SECRET:-}}"
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::Missing Infisical machine identity."; exit 1
+          fi
+          TOKEN="$(
+            env -u INFISICAL_CLIENT_ID -u INFISICAL_CLIENT_SECRET -u INFISICAL_TOKEN \
+              INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CLIENT_ID" \
+              INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CLIENT_SECRET" \
+              infisical login --method=universal-auth --silent --plain --telemetry=false 2>/dev/null || true
+          )"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Infisical universal-auth login failed."; exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
+            val="$(
+              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+                --plain --silent --telemetry=false --expand=false \
+                --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ 2>/dev/null || true
+            )"
+            [ -n "$val" ] || continue
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                line="${line//%/%25}"; line="${line//$'\r'/%0D}"
+                printf '::add-mask::%s\n' "$line"
+              fi
+            done <<< "$val"
+            { echo "${name}<<INFISICAL_EOF"; printf '%s\n' "$val"; echo "INFISICAL_EOF"; } >> "$GITHUB_ENV"
+          done
+          unset TOKEN CLIENT_ID CLIENT_SECRET val line
+
+      - name: Import signing + ASC key
         run: bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
 
-      - name: Ship Usage Client Monitor from GM host
+      - name: Ship Usage Monitor Client from GM host
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight.sh" --force-ship
 
-      - name: Ship Usage Local Monitor from GM host
+      - name: Ship Usage Monitor Local from GM host
         run: bash "$GITHUB_WORKSPACE/scripts/ios-ship-testflight-local.sh" --force-ship

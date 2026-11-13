@@ -75,6 +75,14 @@ public actor APIClient {
         try await get("/api/subscriptions", authorization: .read)
     }
 
+    /// `GET /api/quota-windows` — latest remaining-percent quota windows per
+    /// provider (5h / 7d / 24h / monthly), bearer or dashboard-session
+    /// authorized like the other read routes. Powers the Overview
+    /// "Subscription Quotas" card.
+    public func fetchQuotaWindows() async throws -> QuotaWindowsResponse {
+        try await get("/api/quota-windows", authorization: .read)
+    }
+
     /// `GET /api/health` — public liveness probe.
     public func health() async throws -> ServerHealth {
         try await get("/api/health", authorization: .none)
@@ -95,6 +103,11 @@ public actor APIClient {
     /// Bearer read token or dashboard session.
     public func serverMetrics() async throws -> ServerMetrics {
         try await get("/api/server-metrics", authorization: .read, timeout: Self.operationsTimeout)
+    }
+
+    /// `GET /api/b2-app-usage` — fleet Backblaze B2 storage + daily usage breakdown.
+    public func b2AppUsage() async throws -> B2AppUsageBreakdown {
+        try await get("/api/b2-app-usage", authorization: .read, timeout: Self.operationsTimeout)
     }
 
     /// `GET /api/platform-status` — one status card per external platform the
@@ -120,8 +133,18 @@ public actor APIClient {
     /// `GET /api/agents-overview?window=` — AI coding agent telemetry, live run
     /// status, subscription quotas, and PAYG API-equivalent cost savings.
     /// Bearer read token or dashboard session.
+    ///
+    /// Window is a query item, not a path suffix.  `endpoint(path:)` uses
+    /// `appendingPathComponent`, which percent-encodes `?` (`%3F`).  Inlining
+    /// `?window=` produced `/api/agents-overview%3Fwindow=30d`, a Next.js 404
+    /// that the Agents tab surfaces as "Request failed".
     public func agentsOverview(window: String = "30d") async throws -> AgentsOverviewResponse {
-        try await get("/api/agents-overview?window=\(window)", authorization: .read, timeout: Self.operationsTimeout)
+        try await get(
+            "/api/agents-overview",
+            queryItems: [URLQueryItem(name: "window", value: window)],
+            authorization: .read,
+            timeout: Self.operationsTimeout
+        )
     }
 
     /// Validate the currently stored bearer token without accepting a dashboard
@@ -527,6 +550,23 @@ public actor APIClient {
         try await get(
             "/api/usage-events",
             queryItems: queryItems,
+            authorization: .session
+        )
+    }
+
+    /// `GET /api/export/daily-rollups` — the daily spend series behind the
+    /// Overview chart-range card for any selection other than "This month"
+    /// (which shows the month-to-date pace chart instead). Session-gated,
+    /// same as `usageEventsSummary`. `from`/`to` are inclusive UTC calendar
+    /// days (`yyyy-MM-dd`); the route rejects windows over 92 days, so
+    /// callers should pre-clamp (see `TimeframeOption.dailyRollupWindow`).
+    public func dailyRollups(from: String, to: String) async throws -> DailyRollupsResponse {
+        try await get(
+            "/api/export/daily-rollups",
+            queryItems: [
+                URLQueryItem(name: "from", value: from),
+                URLQueryItem(name: "to", value: to),
+            ],
             authorization: .session
         )
     }

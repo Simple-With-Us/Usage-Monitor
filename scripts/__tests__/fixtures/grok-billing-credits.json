@@ -1,0 +1,6 @@
+{
+  "tier": "supergrok",
+  "credits": { "used": 250, "limit": 1000 },
+  "limit_window_seconds": 604800,
+  "resetAt": "2026-09-15T07:00:00Z"
+}

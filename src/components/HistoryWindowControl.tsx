@@ -12,21 +12,26 @@ import {
   timeframeShortLabel,
 } from "@/hooks/useDashboardData";
 
-/** Primary rail: This month + rolling 7/30/90. */
+/** Primary rail: This month + 30d (1m) / 90d (3m) / 180d (6m) / 12m (365d). */
 const QUICK: Array<{ value: TimeframeOption; short: string; full: string }> = [
   {
     value: "month:current" as TimeframeOption,
     short: "This month",
     full: "This calendar month (UTC)",
   },
-  { value: "7d", short: "7d", full: "Past 7 days" },
-  { value: "30d", short: "30d", full: "Past 30 days" },
-  { value: "90d", short: "90d", full: "Past 90 days" },
+  { value: "30d", short: "30d", full: "Past 30 days (1 month)" },
+  { value: "90d", short: "90d", full: "Past 90 days (3 months)" },
+  { value: "180d", short: "180d", full: "Past 180 days (6 months)" },
+  { value: "365d", short: "12m", full: "Past 12 months (1 year)" },
 ];
 
 const MORE_ROLLING: Array<{ value: TimeframeOption; label: string }> = [
   { value: "1d", label: "Past 24 hours" },
-  { value: "180d", label: "Past 180 days" },
+  { value: "7d", label: "Past 7 days" },
+  { value: "30d", label: "Past 30 days (1 month)" },
+  { value: "90d", label: "Past 90 days (3 months)" },
+  { value: "180d", label: "Past 180 days (6 months)" },
+  { value: "365d", label: "Past 12 months (1 year)" },
   { value: "all", label: "All time" },
 ];
 

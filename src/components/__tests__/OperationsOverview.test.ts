@@ -8,6 +8,7 @@ import {
   markOperationsStale,
   ReceiptInboxCard,
   R2FleetCard,
+  socraticVectorStoreLine,
   SocraticInfrastructureCard,
 } from "@/components/OperationsOverview";
 
@@ -66,12 +67,34 @@ describe("OperationsOverview cards", () => {
         adminUrl: "https://admin.socratictrade.com/admin/server",
       },
     }));
-    expect(html).toContain("Socratic Trade infrastructure");
+    expect(html).toContain("Socratic Trade Infrastructure");
     expect(html).toContain("Unreachable");
     expect(html).toContain("scheduler unavailable");
     expect(html).toContain("uptime unknown");
     expect(html).not.toContain("0 GB");
     expect(html).not.toContain("0%");
+    // No live Qdrant/vector-store field reaches this payload when
+    // ragEmbedProvider is null — must not fabricate a status line for it.
+    expect(html).not.toContain("Vector store: Qdrant");
+  });
+
+  it("socraticVectorStoreLine never fabricates a Qdrant status and only reports real fields", () => {
+    // Pinecone is retired from this card (owner 2026-09-04) and there is no
+    // live Qdrant/vector-store health field in the ST payload — the old
+    // fallback literal "Vector store: Qdrant" reflected nothing real.
+    expect(socraticVectorStoreLine({ ragEmbedProvider: null, openrouterCreditsOk: null })).toBeNull();
+    expect(
+      socraticVectorStoreLine({ ragEmbedProvider: "openrouter", openrouterCreditsOk: null })
+    ).toBe("Embed openrouter");
+    expect(
+      socraticVectorStoreLine({ ragEmbedProvider: null, openrouterCreditsOk: true })
+    ).toBe("OpenRouter credits ok");
+    expect(
+      socraticVectorStoreLine({ ragEmbedProvider: null, openrouterCreditsOk: false })
+    ).toBe("OpenRouter credits low");
+    expect(
+      socraticVectorStoreLine({ ragEmbedProvider: "openrouter", openrouterCreditsOk: true })
+    ).toBe("Embed openrouter · OpenRouter credits ok");
   });
 
   it("shows Congress.Trade liveness without fabricating pipeline as degraded", () => {
@@ -130,6 +153,10 @@ describe("OperationsOverview cards", () => {
     expect(stHtml).toContain("recent restart");
     expect(stHtml).toContain("trading liveness degraded");
     expect(stHtml).toContain("data providers degraded");
+    // The card renders collapsed by default (detail section, which carries
+    // the embed/vector-store line, is not in this static markup) — the
+    // retired fake Qdrant fallback must never appear anywhere in the card.
+    expect(stHtml).not.toContain("Vector store: Qdrant");
 
     const fleetHtml = renderToStaticMarkup(createElement(CoolifyFleetCard, {
       data: {
@@ -177,7 +204,7 @@ describe("OperationsOverview cards", () => {
         fetchedAt: "2026-08-10T23:50:00.000Z",
       },
     }));
-    expect(fleetHtml).toContain("Coolify fleet");
+    expect(fleetHtml).toContain("Coolify Fleet");
     expect(fleetHtml).toContain("1 up");
     expect(fleetHtml).toContain("host.jays.services");
   });
@@ -351,7 +378,7 @@ describe("OperationsOverview cards", () => {
         ],
       },
     }));
-    expect(html).toContain("R2 free tier (fleet)");
+    expect(html).toContain("R2 Free Tier (Fleet)");
     expect(html).toContain("Usage Monitor");
     expect(html).toContain("Socratic Trade");
     expect(html).toContain("Congress.Trade");

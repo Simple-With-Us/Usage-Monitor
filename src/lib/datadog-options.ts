@@ -4,14 +4,15 @@
 // (`docs/DATADOG-INTEGRATION-GUIDE.md` and the host agent compose):
 // DD_API_KEY, DD_SITE, DD_ENV, DD_SERVICE, DD_AGENT_HOST,
 // DD_TRACE_AGENT_PORT, plus the public RUM twins NEXT_PUBLIC_DD_*.
-// Never invents secret values.  Incomplete configuration throws
-// (fail closed) instead of starting half-blind.
+// Never invents secret values.  A partial signal (some DD_* set, DD_SERVICE
+// missing) throws instead of starting half-blind;  a fully unconfigured deploy
+// stays dark unless DD_REQUIRE=1 asks for the fail-closed guard.
 
 export type EnvMap = Record<string, string | undefined>;
 
 export const DEFAULT_DD_SERVICE = "usage-monitor";
 export const DEFAULT_DD_SITE = "us5.datadoghq.com";
-export const DEFAULT_DD_ENV = "prod";
+export const DEFAULT_DD_ENV = "production";
 export const DEFAULT_DD_AGENT_HOST = "127.0.0.1";
 export const DEFAULT_DD_TRACE_AGENT_PORT = 8126;
 export const PRODUCTION_TRACE_SAMPLE_RATE = 0.2;
@@ -95,6 +96,15 @@ export type DatadogReadiness = {
 export function nonEmptyEnv(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/** Map Coolify/handoff `prod` onto Datadog `production` so dashboards do not split. */
+export function canonicalizeDatadogEnv(raw: string | undefined): string | undefined {
+  const trimmed = nonEmptyEnv(raw);
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower === "prod" || lower === "production") return "production";
+  return trimmed;
 }
 
 export function isTruthyEnv(raw: string | undefined): boolean {
@@ -217,7 +227,11 @@ export function resolveDatadogServerConfig(
   env: EnvMap = process.env
 ): DatadogServerConfig {
   const optedOut = isFalsyEnv(env.DD_TRACE_ENABLED);
-  const required = isProductionRuntime(env) && !optedOut;
+  // Datadog is opt-in:  no deployment is required to run it.  DD_REQUIRE=1
+  // restores the fail-closed guard for whoever wants it (fleet precedent:
+  // ContactLogo's DD_REQUIRE).  The Next.js build phase stays exempt:  a build
+  // is not a runtime, so DD_REQUIRE=1 must never abort `next build`.
+  const required = isTruthyEnv(env.DD_REQUIRE) && !optedOut && !isNextBuildPhase(env);
   const signaled = anySignal(env, SERVER_SIGNAL_KEYS);
   const fallbackSampleRate = isProductionRuntime(env)
     ? PRODUCTION_TRACE_SAMPLE_RATE
@@ -257,7 +271,7 @@ export function resolveDatadogServerConfig(
     enabled: true,
     required,
     service: nonEmptyEnv(env.DD_SERVICE) ?? DEFAULT_DD_SERVICE,
-    env: nonEmptyEnv(env.DD_ENV) ?? DEFAULT_DD_ENV,
+    env: canonicalizeDatadogEnv(env.DD_ENV) ?? DEFAULT_DD_ENV,
     version: resolveDatadogVersion(env),
     hostname: nonEmptyEnv(env.DD_AGENT_HOST) ?? DEFAULT_DD_AGENT_HOST,
     port: parseTraceAgentPort(env.DD_TRACE_AGENT_PORT, DEFAULT_DD_TRACE_AGENT_PORT),
@@ -317,8 +331,8 @@ export function resolveDatadogRumConfig(
       nonEmptyEnv(env.DD_SERVICE) ??
       DEFAULT_DD_SERVICE,
     env:
-      nonEmptyEnv(env.NEXT_PUBLIC_DD_ENV) ??
-      nonEmptyEnv(env.DD_ENV) ??
+      canonicalizeDatadogEnv(env.NEXT_PUBLIC_DD_ENV) ??
+      canonicalizeDatadogEnv(env.DD_ENV) ??
       DEFAULT_DD_ENV,
     version,
     sessionSampleRate: 100,
@@ -363,7 +377,9 @@ export function assertDatadogRuntimeConfig(env: EnvMap = process.env): {
  */
 export function getDatadogReadiness(env: EnvMap = process.env): DatadogReadiness {
   const required =
-    isProductionRuntime(env) && !isFalsyEnv(env.DD_TRACE_ENABLED);
+    isTruthyEnv(env.DD_REQUIRE) &&
+    !isFalsyEnv(env.DD_TRACE_ENABLED) &&
+    !isNextBuildPhase(env);
   try {
     const server = resolveDatadogServerConfig(env);
     const rum = resolveDatadogRumConfig(env);

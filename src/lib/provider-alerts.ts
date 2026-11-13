@@ -50,6 +50,10 @@ export const PROVIDER_ALERT_CODES = [
   "unused_subscription",
   "possible_duplicate_subscription",
   "price_change_detected",
+  // Catalog-runrate providers (Backblaze B2 storage, Hetzner catalog)
+  // publish an estimated MTD, not an invoice: surface it as an estimate,
+  // never as confirmed cash.
+  "catalog_estimate",
 ] as const;
 
 export type ProviderAlertCode = (typeof PROVIDER_ALERT_CODES)[number];
@@ -87,6 +91,8 @@ export interface UsageSnapshotForAlerts {
   totalRequests: number | null;
   credits: number | null;
   fetchedAt: Date | string;
+  /** Adapter costCoverageCaveat code, read from the snapshot's rawData. */
+  costCoverageCaveatCode?: string | null;
 }
 
 export type BudgetAlertTier = "ok" | "warning" | "exceeded";
@@ -218,7 +224,24 @@ export function buildProviderAlertState(
     input.fixedAccruedUsd ?? fixedMonthlyCost,
     now
   );
-  const billingMode = normalizeBillingMode(plan?.billingMode);
+  let billingMode = normalizeBillingMode(plan?.billingMode);
+
+  // Catalog-runrate cost (Backblaze B2 storage estimate, Hetzner catalog
+  // run-rate) is a pro-rated estimate, not an invoice. Never let it read as
+  // confirmed cash: label it and force the billing-mode to "estimated".
+  const catalogEstimate =
+    latestSnapshot?.costCoverageCaveatCode === "backblaze_storage_catalog_prorated" ||
+    latestSnapshot?.costCoverageCaveatCode === "backblaze_storage_estimate_partial" ||
+    latestSnapshot?.costCoverageCaveatCode === "hetzner_catalog_runrate_prorated";
+  if (catalogEstimate) {
+    billingMode = "estimated";
+    alerts.push({
+      code: "catalog_estimate",
+      severity: "info",
+      message:
+        "Catalog-priced estimate (pro-rated by month elapsed) — not an invoice.",
+    });
+  }
 
   if (!input.isActive) {
     return { alerts, estimatedMonthlyCostUsd, projectedEomUsd, billingMode };

@@ -75,7 +75,7 @@ function sentryProject(
   return {
     unresolvedCount: 0,
     hasMore: false,
-    issuesUrl: "https://sentry.io/organizations/jays-services/issues/",
+    issuesUrl: "https://sentry.io/organizations/simple-with-us/issues/",
     ...overrides,
   };
 }
@@ -83,7 +83,7 @@ function sentryProject(
 function sentrySummary(projects: SentryProjectHealth[]): SentryHealthSummary {
   return {
     configured: true,
-    org: "jays-services",
+    org: "simple-with-us",
     projects,
     fetchedAt: "2026-08-11T12:00:00.000Z",
   };
@@ -94,6 +94,8 @@ function clearObservabilityEnv() {
   vi.stubEnv("SENTRY_ORG", "");
   vi.stubEnv("UPTIMEROBOT_API_KEY", "");
   vi.stubEnv("PAGERDUTY_API_KEY", "");
+  vi.stubEnv("DD_API_KEY", "");
+  vi.stubEnv("DD_APP_KEY", "");
 }
 
 beforeEach(() => {
@@ -111,11 +113,12 @@ afterEach(() => {
 });
 
 describe("OBSERVABILITY_PROBES registry shape", () => {
-  it("exposes exactly the three observability platforms", () => {
+  it("exposes exactly the four observability platforms", () => {
     expect(OBSERVABILITY_PROBES.map((probe) => probe.id)).toEqual([
       "sentry",
       "uptimerobot",
       "pagerduty",
+      "datadog",
     ]);
     for (const probe of OBSERVABILITY_PROBES) {
       expect(probe.category).toBe("observability");
@@ -144,7 +147,7 @@ describe("sentry probe", () => {
 
   it("reports healthy when every tracked project has zero unresolved issues", async () => {
     vi.stubEnv("SENTRY_READ_TOKEN", "sntrys_test-token");
-    vi.stubEnv("SENTRY_ORG", "jays-services");
+    vi.stubEnv("SENTRY_ORG", "simple-with-us");
     fetchSentryHealthMock.mockResolvedValue(
       sentrySummary([
         sentryProject({
@@ -746,6 +749,42 @@ describe("pagerduty probe", () => {
       expect(result.metrics).toEqual([]);
       // No point paginating past a rejected key.
       expect(fetchJsonMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("datadog probe", () => {
+    function series(value: number) {
+      return jsonResponse(200, { status: "ok", series: [{ pointlist: [[1, value]] }] });
+    }
+
+    it("is configured only when both API and app keys are present", () => {
+      clearObservabilityEnv();
+      expect(probeFor("datadog").isConfigured()).toBe(false);
+      vi.stubEnv("DD_API_KEY", "dd-api");
+      expect(probeFor("datadog").isConfigured()).toBe(false);
+      vi.stubEnv("DD_APP_KEY", "dd-app");
+      expect(probeFor("datadog").isConfigured()).toBe(true);
+    });
+
+    it("reports healthy inside the 5-host Free cap", async () => {
+      vi.stubEnv("DD_API_KEY", "dd-api");
+      vi.stubEnv("DD_APP_KEY", "dd-app");
+      vi.stubEnv("DD_SITE", "us5.datadoghq.com");
+      servePages(series(2), series(8), series(12), series(40));
+      const result = await probeFor("datadog").probe();
+      expect(result.state).toBe("healthy");
+      expect(result.headline).toContain("5-host Free cap");
+      expect(result.metrics[0]?.value).toBe("2 hosts");
+    });
+
+    it("degrades when estimated hosts exceed the Free cap", async () => {
+      vi.stubEnv("DD_API_KEY", "dd-api");
+      vi.stubEnv("DD_APP_KEY", "dd-app");
+      servePages(series(6), series(20), series(1), series(1));
+      const result = await probeFor("datadog").probe();
+      expect(result.state).toBe("degraded");
+      expect(result.error).toBe("host_cap");
+      expect(result.headline).toContain("6 hosts");
     });
   });
 });

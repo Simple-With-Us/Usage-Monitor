@@ -420,4 +420,64 @@ describe("reconcileProviderUsage", () => {
     expect(rows[0].reportedCostUsd).toBeCloseTo(0.71, 10);
     expect(rows[0].verifiedCostUsd).toBe(0.71);
   });
+
+  it("calls a provider unverifiable when pushed events exist but none carry a cost", async () => {
+    // PagerDuty #104/#105: Congress.Trade pushes Stripe "usage" pings with
+    // costUsd: null (it tracks call volume, not spend). That gave
+    // reportedEventCount = 2 while reportedCostUsd stayed $0, so the OLD
+    // reportedEventCount === 0 guard did not catch it — it fell through to a
+    // real comparison, subtracted the genuine $0.45 bill from zero, and paged
+    // a "discrepancy" that no tolerance could absorb. This is the same bug
+    // class as the Twilio case above, just wearing a second costume.
+    const provider = await seedProvider("stripe", { totalCost: 0.45 });
+    await prisma.externalUsageEvent.createMany({
+      data: [
+        {
+          sourceApp: "congress-trade",
+          provider: "stripe",
+          metricType: "usage",
+          costUsd: null,
+          occurredAt: new Date(),
+        },
+        {
+          sourceApp: "congress-trade",
+          provider: "stripe",
+          metricType: "usage",
+          costUsd: null,
+          occurredAt: new Date(),
+        },
+      ],
+    });
+
+    await reconcileProviderUsage();
+
+    const row = await prisma.providerUsageReconciliation.findFirstOrThrow({
+      where: { providerId: provider.id },
+    });
+    expect(row.status).toBe("unverifiable");
+    // The raw event count still reflects reality (for display/debugging) —
+    // only the unverifiable gate itself is keyed on priced events.
+    expect(row.reportedEventCount).toBe(2);
+    expect(row.reportedCostUsd).toBe(0);
+    expect(row.deltaUsd).toBeNull();
+    expect(row.deltaRatio).toBeNull();
+    expect(row.verifiedCostUsd).toBeNull();
+  });
+
+  it("still reconciles ok when a provider genuinely has zero cost on both sides", async () => {
+    // Guards the companion case: an all-unpriced-events provider with a
+    // genuinely $0 bill must not be reclassified as a false "discrepancy" —
+    // covered above — but a provider with a real PRICED $0 event and a $0
+    // bill is a real, verified agreement and must stay "ok".
+    const provider = await seedProvider("openai", { totalCost: 0 });
+    await seedPushedUsage("openai", 0);
+
+    await reconcileProviderUsage();
+
+    const row = await prisma.providerUsageReconciliation.findFirstOrThrow({
+      where: { providerId: provider.id },
+    });
+    expect(row.status).toBe("ok");
+    expect(row.deltaUsd).toBe(0);
+  });
 });

@@ -5,9 +5,38 @@ export function isUsageSchedulerEnabled(
 }
 
 export async function register() {
-  // Datadog APM + log injection.  Fail closed on missing/partial keys in
-  // production runtime (not during `next build`).  Sentry stays DSN-gated
-  // and is not replaced.
+  // Infisical sole-source-of-truth: load app-level tunable knobs into the
+  // in-memory settings cache before anything else boots.  Non-fatal: with no
+  // universal-auth credentials (local dev, CI, build) it stays in env-fallback
+  // mode; a failed Infisical load degrades loudly to the deploy-time env sync.
+  // The import is dynamic (not a top-level static import) so the shared
+  // package never enters the edge-runtime (middleware) bundle.
+  // See INFISICAL.md and src/lib/app-settings.ts.
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { appSettings } = await import("@/lib/app-settings");
+    const { initializeInfisicalRuntimeSettings } = await import("@/lib/infisical-runtime-settings");
+    await initializeInfisicalRuntimeSettings(appSettings);
+    // On-demand refresh for operators: `kill -HUP <pid>` re-reads Infisical.
+    // The background timer (default 5 min) handles the steady state.
+    // A rejected refresh must not become an unhandled rejection (Node's
+    // default --unhandled-rejections=throw would kill the server on a
+    // transient Infisical outage): log it and keep serving the
+    // last-known-good cache, per the INFISICAL.md contract.
+    process.on("SIGHUP", () => {
+      void appSettings
+        .refresh()
+        .catch((error: unknown) =>
+          console.error(
+            "[app-settings] SIGHUP refresh failed; serving last-known-good cache:",
+            error instanceof Error ? error.message : String(error)
+          )
+        );
+    });
+  }
+
+  // Datadog APM + log injection.  Opt-in:  a deploy with no DD_* vars stays
+  // dark.  Fail closed on partial keys, or on missing keys when DD_REQUIRE=1
+  // (not during `next build`).  Sentry stays DSN-gated and is not replaced.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { resolveDatadogServerConfig } = await import("@/lib/datadog-options");
     const server = resolveDatadogServerConfig();
@@ -23,6 +52,9 @@ export async function register() {
   // so the edge runtime (middleware) is covered too.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     await import("./sentry.server.config");
+    // Removed @sentry/profiling-node integration (Seer finding USAGE-MONITOR-3)
+    // because loading the native addon synchronously blocked the event loop for 
+    // ~11 minutes at startup, stalling client component requests (e.g., /login).
   } else if (process.env.NEXT_RUNTIME === "edge") {
     await import("./sentry.edge.config");
   }
@@ -59,9 +91,9 @@ export async function register() {
   // mustKeepFunded flag that predated it, then records completion so it
   // never runs again. The owner remains free to turn Must keep funded back
   // on for any provider from the dashboard; this call is a no-op after its
-  // first successful pass. See src/lib/provider-funding-policy.ts.
+  // first successful pass. See src/lib/provider-funding-policy-cleanup.ts.
   const { clearLlmMustKeepFundedFlags } = await import(
-    "@/lib/provider-funding-policy"
+    "@/lib/provider-funding-policy-cleanup"
   );
   await clearLlmMustKeepFundedFlags();
 
@@ -89,10 +121,25 @@ export async function register() {
   // this box. Reducing that per-compute footprint (so warming is safe again)
   // is tracked as a follow-up. See @/lib/budget-status.
 
-  if (!isUsageSchedulerEnabled()) {
+  // USAGE_SCHEDULER_ENABLED is a tunable knob owned by the settings service
+  // (Infisical cache in production, process.env in env-fallback mode) and
+  // resolved through isSchedulerEnabled() — the same single source of truth
+  // /api/ready uses — so the two can never disagree about whether the
+  // scheduler should be running.  The evaluated gate is recorded: the
+  // scheduler start decision happens exactly once at boot while the knob
+  // itself is live-refreshable, so readiness must answer with the boot
+  // value, not the live one (see recordSchedulerGate).
+  const { isSchedulerEnabled, recordSchedulerGate } = await import(
+    "@/lib/runtime-health"
+  );
+  const schedulerEnabled = isSchedulerEnabled();
+  recordSchedulerGate(schedulerEnabled);
+  if (!schedulerEnabled) {
     console.warn(
       "[usage-scheduler] disabled by USAGE_SCHEDULER_ENABLED=false"
     );
+    const { logSchedulerOutcome } = await import("./lib/sentry-ops");
+    void logSchedulerOutcome("disabled", { reason: "USAGE_SCHEDULER_ENABLED=false" });
     return;
   }
   const { startUsagePollingScheduler } = await import("@/lib/usage-recorder");

@@ -1,42 +1,35 @@
 #!/usr/bin/env node
-// Local collector for Google Antigravity IDE session transcripts.
-//
-// Reads ${ANTIGRAVITY_BRAIN_HOME:-~/.gemini/antigravity/brain}/*/logs/transcript*.jsonl.
-// Extracts model overrides, reasoning effort, step tokens (prompts, planner responses, tool buffers).
-// Pushes estimated token events to Usage Monitor ingest. Not a billing API. Not cash.
-//
-// Usage:
-//   node scripts/antigravity-session-collector.mjs [--dry-run] [--debug] [--days N] [--since ISO]
-//
-// Env:
-//   USAGE_INGEST_TOKEN or ANTIGRAVITY_INGEST_TOKEN
-//   USAGE_MONITOR_INGEST_URL (default https://usage.jays.services/api/ingest/usage)
-//   ANTIGRAVITY_BRAIN_HOME (default ~/.gemini/antigravity/brain)
+// Sends exact Antigravity CLI status-line token snapshots to Usage Monitor.
+// The companion status-line sink stores only model and token counters; it
+// never stores prompts, transcript paths, workspace paths, email, or tools.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
+
 import {
-  ANTIGRAVITY_PRODUCER_ID,
+  ANTIGRAVITY_STATUSLINE_PRODUCER_ID,
   filterEventsSince,
-  parseAntigravityTranscriptJsonl,
+  parseAntigravityStatuslineJsonl,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
 import {
+  canAdvanceCollectorCheckpoint,
   expandHome,
-  parseCollectorArgs,
   readIfFresh,
-  sessionKeyFor,
-  walkFiles,
-} from "./lib/run-session-token-collector.mjs";
+  recordCollectorSuccess,
+  resolveCollectorArgs,
+  resolveCollectorToken,
+} from "./lib/antigravity-session-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
-const DEBUG = process.argv.includes("--debug");
-const PRODUCER_ID = process.env.ANTIGRAVITY_PRODUCER_ID || ANTIGRAVITY_PRODUCER_ID;
-const INGEST_URL =
-  process.env.USAGE_MONITOR_INGEST_URL ||
-  "https://usage.jays.services/api/ingest/usage";
+const PRODUCER_ID =
+  process.env.ANTIGRAVITY_STATUSLINE_PRODUCER_ID ||
+  ANTIGRAVITY_STATUSLINE_PRODUCER_ID;
+export const STATUSLINE_TOKEN_ENV_NAMES = ["ANTIGRAVITY_STATUSLINE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"];
+const INGEST_URL = process.env.USAGE_MONITOR_INGEST_URL || "https://usage.jays.services/api/ingest/usage";
 
 function log(message) {
   console.log(`[antigravity-session-collector] ${message}`);
@@ -48,42 +41,47 @@ function fail(message, code = 1) {
 }
 
 export async function collectAntigravitySessionEvents({
-  brainHome = expandHome(process.env.ANTIGRAVITY_BRAIN_HOME || join(homedir(), ".gemini", "antigravity", "brain")),
+  snapshotPath = expandHome(
+    process.env.ANTIGRAVITY_TELEMETRY_SNAPSHOT ||
+      join(homedir(), ".cache", "usage-monitor", "antigravity-statusline", "usage.jsonl"),
+  ),
   since,
+  scanStatus,
 } = {}) {
-  const files = await walkFiles(brainHome, { name: "transcript.jsonl" });
-  const events = [];
-  for (const file of files) {
-    const text = await readIfFresh(file);
-    if (!text) continue;
-    const parsed = parseAntigravityTranscriptJsonl(text, {
-      sessionKey: sessionKeyFor(brainHome, file),
-    });
-    events.push(...filterEventsSince(parsed, since));
-  }
-  return events;
+  const text = await readIfFresh(snapshotPath, {
+    onReadError: () => {
+      if (scanStatus) scanStatus.complete = false;
+    },
+  });
+  if (!text) return [];
+  return filterEventsSince(parseAntigravityStatuslineJsonl(text), since);
 }
 
 async function main() {
+  const passStartedAt = new Date();
   let args;
   try {
-    args = parseCollectorArgs(process.argv);
+    args = await resolveCollectorArgs(process.argv, PRODUCER_ID, { now: passStartedAt });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
-  const events = await collectAntigravitySessionEvents({ since: args.since });
-  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}`);
-  if (DEBUG) {
-    const models = new Set(events.map((e) => e.producerKeyRef).filter(Boolean));
-    log(`models: ${[...models].join(", ") || "(none)"}`);
-  }
+  const scanStatus = { complete: true };
+  const events = await collectAntigravitySessionEvents({
+    since: args.since,
+    scanStatus,
+  });
+  log(`parsed ${events.length} token event(s) since ${args.since.toISOString()}${args.resumedFromState ? " (incremental)" : ""}`);
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
     return;
   }
-  const token =
-    process.env.ANTIGRAVITY_INGEST_TOKEN?.trim() ||
-    process.env.USAGE_INGEST_TOKEN?.trim();
+  // ANTIGRAVITY_INGEST_TOKEN is scoped to the antigravity-cli producer, not
+  // this one, so it is deliberately not a candidate here.
+  const token = await resolveCollectorToken(STATUSLINE_TOKEN_ENV_NAMES);
   try {
     const ack = await postUsageBatches({
       events,
@@ -93,23 +91,16 @@ async function main() {
       dryRun: DRY || args.dryRun,
       log,
     });
-    log(
-      `done: received=${ack.received} persisted=${ack.persisted} rejected=${ack.rejected}${
-        ack.dryRun ? " (dry-run)" : ""
-      }`
-    );
+    log(`ingest ack: ${JSON.stringify({ received: ack.received, persisted: ack.persisted, rejected: ack.rejected, dryRun: ack.dryRun ?? false })}`);
+    if (ack.rejected > 0) fail(`Ingest reported rejections: ${ack.rejected}`);
+    if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
+      await recordCollectorSuccess(PRODUCER_ID, passStartedAt);
+    }
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
 }
 
-// Entrypoint detection compares the RESOLVED module URL, not a suffix.
-// `import.meta.url` percent-encodes the path while `process.argv[1]` does not,
-// so `.endsWith(process.argv[1])` is FALSE for any checkout whose path contains
-// a space (or #, ?, %) -- and this fleet has such paths. The failure is silent:
-// the CLI body is skipped, nothing is collected, and the process exits 0, so a
-// LaunchAgent reports success forever while telemetry quietly stops arriving.
-// This is the idiom the other collectors in scripts/ already use.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
 }

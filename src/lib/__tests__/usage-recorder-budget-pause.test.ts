@@ -19,7 +19,7 @@ const create = vi.fn();
 const fetchProviderUsage = vi.fn();
 const bootstrapStGeminiCredentialToInfisical = vi.fn();
 const syncProviderCredentialsFromInfisical = vi.fn();
-const ensureAgentSyncProviderSeeded = vi.fn();
+const ensureSimpleToolsProviderSeeded = vi.fn();
 const ensureRoicProviderSeeded = vi.fn();
 const ensureCloudflareFleetProvidersSeeded = vi.fn();
 
@@ -41,8 +41,8 @@ vi.mock("@/lib/adapters", () => ({
   fetchProviderUsage: (provider: unknown) => fetchProviderUsage(provider),
 }));
 
-vi.mock("@/lib/ensure-agent-sync-provider", () => ({
-  ensureAgentSyncProviderSeeded: () => ensureAgentSyncProviderSeeded(),
+vi.mock("@/lib/ensure-simple-tools-provider", () => ({
+  ensureSimpleToolsProviderSeeded: () => ensureSimpleToolsProviderSeeded(),
 }));
 
 vi.mock("@/lib/ensure-roic-provider", () => ({
@@ -98,8 +98,8 @@ describe("fetchAllDueProviders budget-breach pause skip", () => {
     create.mockResolvedValue({ id: "snap" });
     fetchProviderUsage.mockReset();
     fetchProviderUsage.mockResolvedValue(OK_USAGE);
-    ensureAgentSyncProviderSeeded.mockReset();
-    ensureAgentSyncProviderSeeded.mockResolvedValue(undefined);
+    ensureSimpleToolsProviderSeeded.mockReset();
+    ensureSimpleToolsProviderSeeded.mockResolvedValue(undefined);
     ensureRoicProviderSeeded.mockReset();
     ensureRoicProviderSeeded.mockResolvedValue(undefined);
     ensureCloudflareFleetProvidersSeeded.mockReset();

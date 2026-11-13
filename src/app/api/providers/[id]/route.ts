@@ -43,6 +43,7 @@ import {
   providerCredentialManagementForClient,
 } from "@/lib/managed-provider-credential";
 import { snapshotCostCoverageCaveat } from "@/lib/snapshot-sync-status";
+import { parseSentryCategoriesFromRawData } from "@/lib/sentry-usage-categories";
 import {
   authoritativeProviderBillingCredential,
   hashProviderBillingAccountId,
@@ -198,6 +199,13 @@ export async function GET(
   const costCoverageCaveat = snapshotCostCoverageCaveat(
     latestSnapshotWithRawData?.rawData ?? null
   );
+  const sentryCategories =
+    canonicalProviderKey(provider.name) === "sentry"
+      ? parseSentryCategoriesFromRawData(latestSnapshotWithRawData?.rawData ?? null)
+      : null;
+  const sentryUsage = sentryCategories
+    ? { byCategory: sentryCategories.byCategory, billingCost: false as const }
+    : null;
   // Display-only read-back of the §3c/§3d audit layer. Never feeds budgets,
   // alerts, or the max() spend logic; a failure here must not take down the
   // provider page, so it degrades to null.
@@ -305,6 +313,7 @@ export async function GET(
     // CostCoverageCaveat in adapters/helpers.ts for why these must not be
     // conflated.
     costCoverageCaveat,
+    sentryUsage,
     compliance,
     alerts,
     estimatedMonthlyCostUsd:

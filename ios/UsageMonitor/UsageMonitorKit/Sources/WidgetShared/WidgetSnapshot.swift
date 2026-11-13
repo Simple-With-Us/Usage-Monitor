@@ -361,6 +361,62 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         }
     }
 
+    /// Subscription quota windows from `GET /api/quota-windows` — the
+    /// remaining-percent view of Claude / Codex / Grok / MiniMax plan capacity.
+    /// `nil` means the app has never cached quota windows.  Distinct from
+    /// ``LlmSection``: that is *spend in a trailing window*, this is *how much
+    /// plan is left before a rate limit bites*.
+    public struct QuotaSection: Codable, Equatable, Sendable {
+        public var generatedAt: Date
+        public var windows: [Window]
+
+        public init(generatedAt: Date, windows: [Window]) {
+            self.generatedAt = generatedAt
+            self.windows = windows
+        }
+
+        public struct Window: Codable, Equatable, Sendable, Identifiable {
+            public var id: String
+            public var providerId: String
+            public var providerLabel: String
+            public var label: String
+            /// 0...1 fraction **remaining**, `nil` when the server reported the
+            /// window without a number. Never invented from `isExhausted`.
+            public var remainingFraction: Double?
+            public var isExhausted: Bool
+            public var isNearCap: Bool
+            public var resetAt: Date?
+            /// Human window cadence ("5h", "7d", "monthly") when the server
+            /// supplies one.
+            public var window: String?
+            public var via: String?
+
+            public init(
+                id: String,
+                providerId: String,
+                providerLabel: String,
+                label: String,
+                remainingFraction: Double? = nil,
+                isExhausted: Bool = false,
+                isNearCap: Bool = false,
+                resetAt: Date? = nil,
+                window: String? = nil,
+                via: String? = nil
+            ) {
+                self.id = id
+                self.providerId = providerId
+                self.providerLabel = providerLabel
+                self.label = label
+                self.remainingFraction = remainingFraction
+                self.isExhausted = isExhausted
+                self.isNearCap = isNearCap
+                self.resetAt = resetAt
+                self.window = window
+                self.via = via
+            }
+        }
+    }
+
     public var generatedAt: Date
     public var month: String
     /// Account-wide (provider-scoped) month-to-date totals.
@@ -385,6 +441,9 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public var mac: MacSection?
     /// Active alerts.  `nil` means budget-status has never been cached.
     public var alerts: AlertsSection?
+    /// Subscription plan capacity.  `nil` means quota windows have never been
+    /// cached.
+    public var quotas: QuotaSection?
 
     public init(
         generatedAt: Date,
@@ -401,7 +460,8 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         servers: ServerSection? = nil,
         spenders: [Meter] = [],
         mac: MacSection? = nil,
-        alerts: AlertsSection? = nil
+        alerts: AlertsSection? = nil,
+        quotas: QuotaSection? = nil
     ) {
         self.generatedAt = generatedAt
         self.month = month
@@ -418,12 +478,13 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         self.spenders = spenders
         self.mac = mac
         self.alerts = alerts
+        self.quotas = quotas
     }
 
     private enum CodingKeys: String, CodingKey {
         case generatedAt, month, totalSpentUsd, totalBudgetUsd, projectedEomUsd
         case percentUsed, overBudget, warning, topMeters, projects, llm, servers
-        case spenders, mac, alerts
+        case spenders, mac, alerts, quotas
     }
 
     public init(from decoder: Decoder) throws {
@@ -438,22 +499,24 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         warning = try c.decode(Bool.self, forKey: .warning)
         topMeters = try c.decode([Meter].self, forKey: .topMeters)
         // Backward-compatible: older snapshots omit projects / llm / servers /
-        // spenders / mac / alerts.
+        // spenders / mac / alerts / quotas.
         projects = try c.decodeIfPresent([Meter].self, forKey: .projects) ?? []
         llm = try c.decodeIfPresent(LlmSection.self, forKey: .llm)
         servers = try c.decodeIfPresent(ServerSection.self, forKey: .servers)
         spenders = try c.decodeIfPresent([Meter].self, forKey: .spenders) ?? []
         mac = try c.decodeIfPresent(MacSection.self, forKey: .mac)
         alerts = try c.decodeIfPresent(AlertsSection.self, forKey: .alerts)
+        quotas = try c.decodeIfPresent(QuotaSection.self, forKey: .quotas)
     }
 
-    /// Keep LLM / server / Mac cache when a budget-only write lands.
+    /// Keep LLM / server / Mac / quota cache when a budget-only write lands.
     public func mergingPreservedSections(from existing: WidgetSnapshot) -> WidgetSnapshot {
         var next = self
         if next.llm == nil { next.llm = existing.llm }
         if next.servers == nil { next.servers = existing.servers }
         if next.mac == nil { next.mac = existing.mac }
         if next.alerts == nil { next.alerts = existing.alerts }
+        if next.quotas == nil { next.quotas = existing.quotas }
         return next
     }
 
@@ -483,6 +546,12 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public func replacingMac(_ mac: MacSection?) -> WidgetSnapshot {
         var next = self
         next.mac = mac
+        return next
+    }
+
+    public func replacingQuotas(_ quotas: QuotaSection?) -> WidgetSnapshot {
+        var next = self
+        next.quotas = quotas
         return next
     }
 

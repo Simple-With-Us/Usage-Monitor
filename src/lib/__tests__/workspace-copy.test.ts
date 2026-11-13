@@ -61,6 +61,9 @@ describe("workspace copy", () => {
     expect(serialized).not.toContain("sk-admin-secret");
     expect(serialized).not.toContain("encrypted-envelope");
     expect(payload.format).toBe("usage-monitor-local-export");
+    expect(payload.copyInstructions).toMatch(/Import Package/);
+    expect(payload.copyInstructions).toMatch(/no bundle key/i);
+    expect(payload.note).toMatch(/no bundle key/i);
     expect(payload.projects[0]).toMatchObject({
       id: project.id,
       name: "DealDex",

@@ -38,10 +38,14 @@ describe("middleware matcher — /api/budget-status exclusion (regression for th
       "/api/ready",
       "/api/openrouter-credits",
       "/api/server-metrics",
+      "/api/b2-app-usage",
       "/api/cron",
       "/api/auth/login",
       "/api/bills.ics",
       "/api/datadog-public-config",
+      "/api/quota-windows",
+      "/api/agents-overview",
+      "/api/agent-turns",
       // App Store Connect privacy/support URLs (public legal pages)
       "/privacy",
       "/privacy-policy",
@@ -127,6 +131,23 @@ describe("middleware matcher — /api/export/daily-rollups exclusion (bearer rea
     expect(isSessionGated("/api/export/other")).toBe(true);
     expect(isSessionGated("/api/export/daily-rollups-foo")).toBe(true);
     expect(isSessionGated("/api/export/daily-rollupsfoo")).toBe(true);
+  });
+});
+
+describe("middleware matcher — /api/usage-events exclusion (bearer <redacted> access)", () => {
+  it("does NOT session-gate /api/usage-events, so the route's own token check runs", () => {
+    // Regression for the prod 401 bug: the route self-authenticates via
+    // isUsageReadAuthorized (session cookie OR USAGE_READ_TOKEN), but without
+    // this exclusion the session gate 401'd the expense poster's bearer
+    // snapshot reads before the route's own auth could run.
+    expect(isSessionGated("/api/usage-events")).toBe(false);
+    expect(isSessionGated("/api/usage-events/")).toBe(false);
+    expect(isSessionGated("/api/usage-events/anything")).toBe(false);
+  });
+
+  it("still session-gates prefix-collision paths (anchoring holds)", () => {
+    expect(isSessionGated("/api/usage-events-foo")).toBe(true);
+    expect(isSessionGated("/api/usage-eventsfoo")).toBe(true);
   });
 });
 

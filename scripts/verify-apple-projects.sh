@@ -47,7 +47,7 @@ check(!safariHandler.includes("inputItems"), "Safari native handler must not ins
 check(!safariHandler.includes("os_log"), "Safari native handler must not log browser messages");
 NODE
 
-if [[ "${APPLE_STRUCTURE_ONLY:-0}" == "1" ]] || ! command -v xcodebuild >/dev/null 2>&1; then
+if [[ "${APPLE_STRUCTURE_ONLY:-0}" == "1" ]] || ! command -v xcodebuild >/dev/null 2>&1 || ! xcrun simctl list runtimes 2>/dev/null | grep -qi "iOS"; then
   echo "Apple project structure verified; native builds skipped on this runner."
   exit 0
 fi

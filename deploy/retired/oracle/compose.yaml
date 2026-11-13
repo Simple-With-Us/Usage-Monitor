@@ -1,0 +1,57 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: usage-monitor:${USAGE_MONITOR_REVISION:-local}
+    env_file:
+      # Synced from Infisical into tmpfs by usage-monitor-env-sync (see
+      # deploy/oracle/README.md "Runtime env: Infisical is the source of truth").
+      - /run/usage-monitor/usage-monitor.env
+    environment:
+      DATABASE_URL: file:/data/prod.db
+      GIT_COMMIT_SHA: ${USAGE_MONITOR_REVISION:-unknown}
+      # Replica heartbeat side-channel consumed by /api/ready; written by
+      # usage-monitor-replica-status on the host (see compose.production.yaml).
+      LITESTREAM_REPLICA_STATUS_PATH: /data/.litestream-replica-status.json
+      PORT: "3000"
+    volumes:
+      - /data:/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 4g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    environment:
+      USAGE_MONITOR_HOSTNAME: ${USAGE_MONITOR_HOSTNAME:-usage.jays.services}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    networks:
+      - internal
+
+networks:
+  internal:
+
+volumes:
+  caddy_data:
+  caddy_config:

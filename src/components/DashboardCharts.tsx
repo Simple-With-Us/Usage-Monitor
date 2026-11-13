@@ -12,6 +12,13 @@ import {
 import { useTheme } from "next-themes";
 import { formatCurrency } from "@/lib/format";
 import SpendBurnChart, { SPEND_BURN_ACCENT } from "@/components/SpendBurnChart";
+import SpendHistoryChart from "@/components/SpendHistoryChart";
+import type { DailySpendSeriesPoint, ExternalUsageGroup } from "@/components/ExternalTelemetryPanel";
+import {
+  historyRangeLabel,
+  isCurrentCalendarMonth,
+  type TimeframeOption,
+} from "@/hooks/useDashboardData";
 
 export interface ChartFamilySlice {
   displayName: string;
@@ -41,6 +48,26 @@ export function shapeFamilyProjectedBreakdown(
   return { slices, excludedIncomplete };
 }
 
+/**
+ * Actual spend-by-provider for the selected chart range (not a projection).
+ * Fed by the range-scoped `/api/usage-events` groups, keyed on the resolved
+ * display name so the same provider's rows merge into one slice.
+ */
+export function shapeRangeSpendBreakdown(
+  groups: ExternalUsageGroup[] | undefined | null
+): { slices: FamilyBreakdownSlice[] } {
+  const rows = groups ?? [];
+  const byName = new Map<string, number>();
+  for (const group of rows) {
+    if (!(group.totalCostUsd > 0)) continue;
+    const name = group.matchedProvider?.displayName || group.provider;
+    byName.set(name, (byName.get(name) ?? 0) + group.totalCostUsd);
+  }
+  const slices = Array.from(byName.entries()).map(([name, value]) => ({ name, value }));
+  slices.sort((a, b) => b.value - a.value);
+  return { slices };
+}
+
 interface DashboardChartsProps {
   families?: ChartFamilySlice[];
   /** @deprecated use families */
@@ -48,6 +75,18 @@ interface DashboardChartsProps {
   spentUsd?: number;
   projectedEomUsd?: number;
   monthlyBudgetUsd?: number | null;
+  /** Selected chart/history range. Drives which burn-chart mode renders —
+   * MTD pace projection for the current calendar month, actual daily
+   * history for everything else. Omit to keep the legacy MTD-only view. */
+  timeframe?: TimeframeOption;
+  /** Range-scoped daily cost series (from usageSummary.dailySeries), used
+   * when timeframe is not the current calendar month. */
+  dailySeries?: DailySpendSeriesPoint[];
+  /** Range-scoped provider spend groups (from usageSummary.groups), used for
+   * the pie breakdown when timeframe is not the current calendar month. */
+  groups?: ExternalUsageGroup[];
+  /** True while the range-scoped fetch is in flight. */
+  rangeLoading?: boolean;
 }
 
 const COLORS = [
@@ -67,31 +106,58 @@ export default function DashboardCharts({
   spentUsd,
   projectedEomUsd,
   monthlyBudgetUsd,
+  timeframe,
+  dailySeries,
+  groups,
+  rangeLoading,
 }: DashboardChartsProps) {
   const { resolvedTheme } = useTheme();
-  const { slices, excludedIncomplete } = useMemo(
+  // No timeframe prop → legacy MTD-only callers keep exactly today's view.
+  // Otherwise: current calendar month keeps the MTD pace projection (per the
+  // product rule — budgets/pace are always MTD); any other range shows
+  // actual daily history for that range instead of a projection.
+  const isCurrentMonth = timeframe == null || isCurrentCalendarMonth(timeframe);
+  const rangeLabel = timeframe ? historyRangeLabel(timeframe) : "";
+
+  const { slices: familySlices, excludedIncomplete } = useMemo(
     () => shapeFamilyProjectedBreakdown(families ?? providers),
     [families, providers]
   );
+  const { slices: rangeSlices } = useMemo(
+    () => shapeRangeSpendBreakdown(groups),
+    [groups]
+  );
+  const slices = isCurrentMonth ? familySlices : rangeSlices;
+  const pieTitle = isCurrentMonth ? "Projected Cost Breakdown" : "Spend by Provider";
+  const pieCaption = isCurrentMonth
+    ? `Exact family projections only${
+        excludedIncomplete > 0 ? ` · ${excludedIncomplete} incomplete/ambiguous excluded` : ""
+      }`
+    : rangeLabel;
 
   return (
     <div className="space-y-6">
-      <SpendBurnChart
-        spentUsd={spentUsd}
-        projectedEomUsd={projectedEomUsd}
-        monthlyBudgetUsd={monthlyBudgetUsd}
-      />
+      {isCurrentMonth ? (
+        <SpendBurnChart
+          spentUsd={spentUsd}
+          projectedEomUsd={projectedEomUsd}
+          monthlyBudgetUsd={monthlyBudgetUsd}
+        />
+      ) : (
+        <SpendHistoryChart
+          dailySeries={dailySeries}
+          loading={!!rangeLoading}
+          rangeLabel={rangeLabel}
+        />
+      )}
 
       {slices.length > 0 && (
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
           <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            Projected cost breakdown
+            {pieTitle}
           </h3>
           <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-            Exact family projections only
-            {excludedIncomplete > 0
-              ? ` · ${excludedIncomplete} incomplete/ambiguous excluded`
-              : ""}
+            {pieCaption}
           </p>
           <div className="mt-3 h-56">
             <ResponsiveContainer width="100%" height="100%" minWidth={0} debounce={50}>

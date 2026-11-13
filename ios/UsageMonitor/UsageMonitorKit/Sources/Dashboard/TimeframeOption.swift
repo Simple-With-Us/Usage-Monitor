@@ -28,6 +28,7 @@ public enum TimeframeOption: Hashable, Sendable {
         case .rolling(let d) where d == 30:  return "Past 30 days"
         case .rolling(let d) where d == 90:  return "Past 90 days"
         case .rolling(let d) where d == 180: return "Past 180 days"
+        case .rolling(let d) where d == 365: return "Past 12 months"
         case .rolling:                        return "All time"
         case .calendarMonth(let y, let m):
             if self == .currentMonth { return "This month" }

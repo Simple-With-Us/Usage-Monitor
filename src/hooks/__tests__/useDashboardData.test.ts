@@ -115,12 +115,13 @@ describe("dashboard load watchdog contract", () => {
 });
 
 describe("timeframeToDays", () => {
-  it("maps 1d, 7d, 30d, 90d, 180d, and all correctly", () => {
+  it("maps 1d, 7d, 30d, 90d, 180d, 365d, and all correctly", () => {
     expect(timeframeToDays("1d")).toBe(1);
     expect(timeframeToDays("7d")).toBe(7);
     expect(timeframeToDays("30d")).toBe(30);
     expect(timeframeToDays("90d")).toBe(90);
     expect(timeframeToDays("180d")).toBe(180);
+    expect(timeframeToDays("365d")).toBe(365);
     expect(timeframeToDays("all")).toBe(3650);
   });
 });
@@ -130,6 +131,8 @@ describe("history range labels (honest to selection)", () => {
     expect(historyRangeLabel("7d")).toBe("Past 7 days");
     expect(historyRangeLabel("30d")).toBe("Past 30 days");
     expect(historyRangeLabel("90d")).toBe("Past 90 days");
+    expect(historyRangeLabel("180d")).toBe("Past 180 days");
+    expect(historyRangeLabel("365d")).toBe("Past 12 months");
     expect(historyRangeLabel("1d")).toBe("Past 24 hours");
     expect(historyRangeLabel("all")).toBe("All time");
   });
@@ -139,11 +142,13 @@ describe("history range labels (honest to selection)", () => {
     expect(isCurrentCalendarMonth(current)).toBe(true);
     expect(historyRangeLabel(current)).toBe("This month");
     expect(isPrimaryHistoryChip(current)).toBe(true);
+    expect(isPrimaryHistoryChip("365d")).toBe(true);
     expect(isPrimaryHistoryChip("1d")).toBe(false);
   });
 
   it("keeps MTD spend label independent of rolling selection", () => {
     expect(mtdSpendLabel().length).toBeGreaterThan(3);
+    expect(timeframeShortLabel("365d")).toBe("12m");
     expect(timeframeShortLabel("all")).toBe("All");
   });
 });

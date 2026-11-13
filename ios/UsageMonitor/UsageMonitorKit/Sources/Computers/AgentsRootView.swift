@@ -1,16 +1,21 @@
 import SwiftUI
 import AppCore
+import Dashboard
 import DesignSystem
 import Models
 import Networking
 
 /// Root of the **Agents** lane (tab `.agents`).
 ///
-/// AI Coding Agent telemetry, live Mac process execution, 5-hour quota burn,
-/// and PAYG API-equivalent cost comparison.
+/// Agent Bar–aligned subscription quota windows (shared UM `/api/quota-windows`
+/// data) plus AI coding-agent telemetry for a fixed 30-day overview window.
+/// Intentionally no 5h/24h/7d/30d/All lookback strip — those pills were not
+/// Agent Bar UX and the baked `?window=` client path 404'd.
 public struct AgentsRootView: View {
     @Environment(AppEnvironment.self) private var env: AppEnvironment?
     @State private var store: AgentsStore
+    /// Same Agent Bar → UM quota-windows feed the Overview card uses.
+    @State private var quotaWindowsStore = QuotaWindowsStore()
 
     public init() {
         _store = State(initialValue: AgentsStore())
@@ -23,7 +28,18 @@ public struct AgentsRootView: View {
     public var body: some View {
         NavigationStack {
             List {
-                windowSelector
+                // Agent Bar parity: live subscription quota windows (shared
+                // `/api/quota-windows` data), not the odd 5h/24h/7d/30d/All
+                // lookback strip that only drove agents-overview.
+                Section {
+                    SubscriptionQuotasCard(
+                        store: quotaWindowsStore,
+                        onOpenSettings: { env?.selectTab?(.settings) }
+                    )
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowBackground(Color.clear)
+                }
+
                 content
             }
             .listStyle(.insetGrouped)
@@ -31,34 +47,18 @@ public struct AgentsRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 guard let env else { return }
-                await store.refresh(using: env.apiClient)
+                async let overview: Void = store.refresh(using: env.apiClient)
+                async let quotas: Void = quotaWindowsStore.refresh(using: env.apiClient)
+                _ = await (overview, quotas)
             }
         }
         .task(id: env?.accessIdentityRevision) {
             guard let env else { return }
             store.reset()
-            await store.loadIfNeeded(using: env.apiClient)
-        }
-    }
-
-    @ViewBuilder
-    private var windowSelector: some View {
-        Section {
-            Picker("Window", selection: Binding(
-                get: { store.window },
-                set: { newWindow in
-                    guard let env else { return }
-                    Task { await store.setWindow(newWindow, using: env.apiClient) }
-                }
-            )) {
-                Text("5h").tag("5h")
-                Text("24h").tag("24h")
-                Text("7d").tag("7d")
-                Text("30d").tag("30d")
-                Text("All").tag("all")
-            }
-            .pickerStyle(.segmented)
-            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            quotaWindowsStore.reset()
+            async let overview: Void = store.loadIfNeeded(using: env.apiClient)
+            async let quotas: Void = quotaWindowsStore.loadIfNeeded(using: env.apiClient)
+            _ = await (overview, quotas)
         }
     }
 
@@ -139,9 +139,18 @@ public struct AgentsRootView: View {
             let tokensStr = formatTokens(data.summary.totalTokens)
             LabeledContent("Total Tokens", value: tokensStr)
                 .copyableRow(label: "Total Tokens", value: tokensStr)
+            if data.summary.telemetryIncomplete == true {
+                Text(data.summary.telemetryIncompleteNote ?? "Some tools are not reporting usage.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.warning)
+                    .copyableRow(
+                        label: "Telemetry Accuracy",
+                        value: data.summary.telemetryIncompleteNote ?? "Some tools are not reporting usage."
+                    )
+            }
             let paygStr = formatCurrency(data.summary.totalApiEquivalentCostUsd)
-            LabeledContent("PAYG Value", value: paygStr)
-                .copyableRow(label: "PAYG Value", value: paygStr)
+            LabeledContent("List Price", value: paygStr)
+                .copyableRow(label: "List Price", value: paygStr)
             let savingsStr = "+\(formatCurrency(data.summary.totalNetSavingsUsd))"
             LabeledContent("Net Savings") {
                 Text(savingsStr)
@@ -152,7 +161,9 @@ public struct AgentsRootView: View {
         } header: {
             Text("Fleet Summary · \(data.windowLabel)")
         } footer: {
-            Text("API Equivalent compares token volume with direct LiteLLM catalog list rates.")
+            Text(data.summary.telemetryIncomplete == true
+                 ? "Token totals omit tools that are not reporting usage.\u{00A0} This is not zero use."
+                 : "List price compares token volume with public rates.")
         }
     }
 
@@ -192,23 +203,49 @@ public struct AgentsRootView: View {
                         )
                     }
                     .copyableRow(label: "\(platform.name) Status", value: statusStr)
-                    let seatStr = "$\(Int(platform.monthlySeatCostUsd))/mo"
+                    let seatName = platform.seatPlanName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let seatStr = seatName.isEmpty
+                        ? platform.seatCostDisplay
+                        : "\(seatName) · \(platform.seatCostDisplay)"
                     LabeledContent("Seat Cost", value: seatStr)
                         .copyableRow(label: "\(platform.name) Seat Cost", value: seatStr)
-                    let pTokensStr = formatTokens(platform.totalTokens)
+                    if let billed = platform.billedMonthlySeatCostUsd,
+                       billed + 0.5 < (platform.listMonthlySeatCostUsd ?? platform.monthlySeatCostUsd) {
+                        let billedStr = "$\(Int(billed.rounded()))/mo billed"
+                        LabeledContent("Billed This Month", value: billedStr)
+                            .copyableRow(label: "\(platform.name) Billed Seat", value: billedStr)
+                    }
+                    if let seatNote = platform.seatCostNote, !seatNote.isEmpty {
+                        Text(seatNote)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.secondaryText)
+                    }
+                    if !platform.reportsUsage {
+                        StatusBadge(
+                            platform.telemetryAccuracyLabel ?? "not reported",
+                            status: .warning,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        Text(platform.telemetryAccuracyNote ?? "Usage is not reported.  This is not zero usage.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.warning)
+                    }
+                    let pTokensStr = platform.reportsUsage ? formatTokens(platform.totalTokens) : "not reported"
                     LabeledContent("Tokens Processed", value: pTokensStr)
                         .copyableRow(label: "\(platform.name) Tokens", value: pTokensStr)
-                    let pPaygStr = formatCurrency(platform.estimatedCostUsd)
-                    LabeledContent("PAYG Value", value: pPaygStr)
-                        .copyableRow(label: "\(platform.name) PAYG Value", value: pPaygStr)
-                    let pSavingsStr = "+\(formatCurrency(platform.netSavingsUsd))"
+                    let pPaygStr = platform.reportsUsage ? formatCurrency(platform.estimatedCostUsd) : "not reported"
+                    LabeledContent("List Price", value: pPaygStr)
+                        .copyableRow(label: "\(platform.name) List Price", value: pPaygStr)
+                    let pSavingsStr = platform.reportsUsage
+                        ? "+\(formatCurrency(platform.netSavingsUsd))"
+                        : "not reported"
                     LabeledContent("Net Savings") {
                         Text(pSavingsStr)
-                            .foregroundStyle(Theme.Colors.success)
+                            .foregroundStyle(platform.reportsUsage ? Theme.Colors.success : Theme.Colors.warning)
                     }
                     .copyableRow(label: "\(platform.name) Net Savings", value: pSavingsStr)
 
-                    if !platform.modelsUsed.isEmpty {
+                    if platform.reportsUsage && !platform.modelsUsed.isEmpty {
                         ForEach(platform.modelsUsed) { model in
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack {
@@ -235,7 +272,7 @@ public struct AgentsRootView: View {
                             .foregroundStyle(Theme.Colors.secondaryText)
                     }
                 } footer: {
-                    Text("ℹ️ \(platform.dataCapability)")
+                    Text(platform.telemetryAccuracyNote ?? platform.dataCapability)
                 }
             }
         }

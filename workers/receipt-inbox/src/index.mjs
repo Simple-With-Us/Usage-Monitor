@@ -9,10 +9,19 @@ import {
   classifyReceipt,
   enrichClassification,
 } from "./classify.mjs";
+import { BudgetExceeded, createBudget, guardOff, guardOffResponse } from "./budget-guard.mjs";
 
 const MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
 const MAX_DAILY_MESSAGES = 100;
 const MAX_DAILY_BYTES = 100 * 1024 * 1024;
+// The public MX may use only part of the day's intake, so the secret no-forward
+// path (one batch measured at 40 messages) always keeps the rest.  One sender
+// domain gets a smaller slice of the public part.  That slice stops one looping or
+// runaway sender, not someone rotating domains; the public cap is what bounds cost.
+const MAX_DAILY_PUBLIC_MESSAGES = 60;
+const MAX_DAILY_PUBLIC_BYTES = 60 * 1024 * 1024;
+const MAX_DAILY_SENDER_MESSAGES = 20;
+const MAX_DAILY_SENDER_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_SUPPORTED_ATTACHMENT_BYTES = 6 * 1024 * 1024;
@@ -22,6 +31,21 @@ const PENDING_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_EXPIRY_CLEANUP_ITEMS = 100;
 const LIFECYCLE_AUDIT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const LIFECYCLE_AUDIT_RETRY_MS = 15 * 60 * 1000;
+// Matches the auditor's cron, "17 */12 * * *".  index.test.mjs pins the two together.
+const AUDITOR_CRON_PERIOD_MS = 12 * 60 * 60 * 1000;
+const AUDITOR_CRON_OFFSET_MS = 17 * 60 * 1000;
+const AUDITOR_CRON_SKEW_MS = 60 * 1000;
+const CLEANUP_BACKLOG_ALARM_MS = 30 * 1000;
+const STALE_CLEANUP_BACKLOG_MS = 24 * 60 * 60 * 1000;
+// Measured on stored evidence: first-pass mail has at most 7 Received headers,
+// and each trip around the fallback mailbox adds about 5.
+const MAX_RECEIVED_HEADERS = 8;
+const MAX_RECEIVED_SCAN_CHARS = 64 * 1024;
+const RECEIVED_STAMP = /;\s*(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3}\s+\d{2,4}/g;
+const CLOUDFLARE_PASS = /\bby\s+cloudflare-email\.[a-z]+\b/gi;
+const MIN_LOOP_CLOUDFLARE_PASSES = 2;
+export const HOP_HEADER = "X-Receipt-Inbox-Hop";
+const READINESS_PROBE_KEY = "readiness-probe";
 const RECEIPT_ID_PATTERN = /^[0-9a-f]{64}$/;
 const RETENTION_ACK = "receipt-evidence-lifecycle-configured-v1";
 const VALID_STATUSES = new Set(["needs_review", "reviewed", "ignored"]);
@@ -31,6 +55,14 @@ const SUPPORTED_ATTACHMENT_TYPES = new Set([
   "image/jpeg",
   "image/png",
 ]);
+
+// An event makes at most one put (email) or one read (/health, evidence download),
+// so a second one in the same event is a bug to stop, not traffic to allow.
+export const budget = createBudget({
+  worker: "usage-monitor-receipt-inbox",
+  perInvocation: { r2Put: 1, r2Read: 1 },
+  perMinute: { r2Put: 60, r2Read: 120 },
+});
 
 function utf8(value) {
   return new TextEncoder().encode(value);
@@ -165,6 +197,21 @@ export function isDedicatedReceiptAddress(value) {
   return isReceiptInboxAddress(value);
 }
 
+// Optional no-forward intake: when the recipient's local-part matches the
+// configured RECEIPT_NO_FORWARD_LOCAL_PART (a Worker secret, never logged),
+// the message is filed without fallback forwarding. This is the path for
+// agent-forwarded originals, where the forwarder already holds a copy and a
+// forwarded duplicate would only add noise to the owner's mailbox. The value
+// is env-configured so the reserved local-part never appears in the repo.
+export function isNoForwardRecipient(value, noForwardLocalPart) {
+  if (typeof value !== "string" || typeof noForwardLocalPart !== "string") return false;
+  const configured = noForwardLocalPart.trim().toLowerCase();
+  if (!configured) return false;
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return false;
+  return value.slice(0, at).trim().toLowerCase() === configured;
+}
+
 function evidenceKey(id) {
   return `evidence/${id}.eml`;
 }
@@ -207,7 +254,62 @@ async function indexRequest(env, path, init) {
   return response;
 }
 
+// A copy this Worker already forwarded, coming back from the fallback mailbox.
+// A relay may strip the marker, so the Received count is the second detector.
+export function mailLoopReason(headers) {
+  if (typeof headers?.get !== "function") return null;
+  if (headers.get(HOP_HEADER) != null) return "hop_marker";
+  // Headers joins repeats with ", " and every Received date holds a comma, so
+  // count the "; <date>" stamp each Received header ends with.
+  const received = String(headers.get("received") ?? "").slice(0, MAX_RECEIVED_SCAN_CHARS);
+  if ((received.match(RECEIVED_STAMP)?.length ?? 0) <= MAX_RECEIVED_HEADERS) return null;
+  // A drop is silent and final, so a long chain alone is not enough: a corporate
+  // relay can add many hops on a first delivery.  A loop copy has also crossed
+  // Cloudflare at least twice.  On stored mail, every first delivery shows one pass.
+  if ((received.match(CLOUDFLARE_PASS)?.length ?? 0) >= MIN_LOOP_CLOUDFLARE_PASSES) return "received_count";
+  console.warn(JSON.stringify({ event: "receipt_long_received_chain" }));
+  return null;
+}
+
+function forwardToFallback(message, env) {
+  return message.forward(env.RECEIPT_FALLBACK_ADDRESS, new Headers({ [HOP_HEADER]: "1" }));
+}
+
+// Fixed words only: relay and provider error text can carry addresses.
+function forwardFailureKind(error) {
+  const text = error instanceof Error ? error.message : "";
+  if (/\bCS\d{2}\b/.test(text)) return "relay_policy";
+  if (/\bhops?\b/i.test(text)) return "hop_limit";
+  if (/verif/i.test(text)) return "destination_unverified";
+  if (/\b(?:spf|dkim|dmarc|authenticat)/i.test(text)) return "sender_unauthenticated";
+  return "other";
+}
+
+function logForwardFailure(error, paused) {
+  console.error(JSON.stringify({ event: "receipt_fallback_forward_failed", paused, kind: forwardFailureKind(error) }));
+}
+
+// Guard off means no Durable Object, R2 or parsing.  Keep the mail in the fallback
+// mailbox instead of bouncing it, including no-forward mail, because nothing else
+// here will store it.  Reject only when no copy can be kept, so the sender knows.
+async function forwardWhileGuardOff(message, env) {
+  if (
+    typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
+    && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
+    && typeof message.forward === "function"
+  ) {
+    try {
+      await forwardToFallback(message, env);
+      return;
+    } catch (error) {
+      logForwardFailure(error, true);
+    }
+  }
+  message.setReject("Receipt inbox is paused; please retry later");
+}
+
 export async function handleEmail(message, env, _ctx) {
+  const run = budget.invocation();
   // Accept any *@receipts.jays.services recipient (short or high-entropy).
   // RECEIPT_INBOX_ADDRESS remains a configured identity on that domain used
   // for readiness/health; it is no longer the sole accepted To: address.
@@ -219,14 +321,28 @@ export async function handleEmail(message, env, _ctx) {
     message.setReject("Unknown receipt mailbox");
     return;
   }
+  // Dropped without a reject: a bounce would go back around the same loop.
+  const loopReason = mailLoopReason(message.headers);
+  if (loopReason) {
+    console.warn(JSON.stringify({ event: "receipt_mail_loop_dropped", reason: loopReason }));
+    return;
+  }
+  if (guardOff(env)) {
+    await forwardWhileGuardOff(message, env);
+    return;
+  }
   if (env.RECEIPT_INBOX_RETENTION_ACK !== RETENTION_ACK) {
     message.setReject("Receipt evidence retention is not configured");
     return;
   }
+  // No-forward intake (agent-forwarded originals) files without fallback
+  // forwarding, so it never needs the fallback destination configured.
+  const noForward = isNoForwardRecipient(message.to, env.RECEIPT_NO_FORWARD_LOCAL_PART);
   if (
-    typeof env.RECEIPT_FALLBACK_ADDRESS !== "string"
-    || !/^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
-    || typeof message.forward !== "function"
+    !noForward
+    && (typeof env.RECEIPT_FALLBACK_ADDRESS !== "string"
+      || !/^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
+      || typeof message.forward !== "function")
   ) {
     message.setReject("Receipt fallback is not configured");
     return;
@@ -245,9 +361,10 @@ export async function handleEmail(message, env, _ctx) {
   const admission = await indexRequest(env, "/admit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bytes: message.rawSize }),
+    body: JSON.stringify({ bytes: message.rawSize, senderDomain: senderDomain(message.from), noForward }),
   }).then((response) => response.json());
   if (admission.result === "quota_exceeded") {
+    console.warn(JSON.stringify({ event: "receipt_quota_exceeded", scope: admission.scope }));
     message.setReject("Receipt inbox daily intake limit reached");
     return;
   }
@@ -257,12 +374,28 @@ export async function handleEmail(message, env, _ctx) {
 
   // Cloudflare does not promise automatic retries for Email Worker exceptions.
   // Preserve every admitted original at a verified private destination before
-  // parsing, R2, or lifecycle checks can fail.
-  await message.forward(env.RECEIPT_FALLBACK_ADDRESS);
+  // parsing, R2, or lifecycle checks can fail. No-forward intake skips this:
+  // the forwarder already holds the original and is the backstop if storage
+  // fails below.
+  let forwardedToFallback = false;
+  if (!noForward) {
+    try {
+      await forwardToFallback(message, env);
+      forwardedToFallback = true;
+    } catch (error) {
+      // Relay rejections (e.g. iCloud CS01, hop limits) must not fail intake:
+      // admission already succeeded and this Worker still holds the original.
+      logForwardFailure(error, false);
+    }
+  }
 
   const ready = await readiness(env);
   if (!ready.ready) {
-    throw new Error("Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback");
+    throw new Error(noForward
+      ? "Receipt inbox storage or lifecycle readiness is unavailable"
+      : forwardedToFallback
+        ? "Receipt inbox storage or lifecycle readiness is unavailable; original forwarded to fallback"
+        : "Receipt inbox storage or lifecycle readiness is unavailable");
   }
 
   const raw = await new Response(message.raw).arrayBuffer();
@@ -310,6 +443,7 @@ export async function handleEmail(message, env, _ctx) {
     receivedAt,
     senderDomain: senderDomain(message.from),
     senderAuthentication: senderAuthentication(),
+    forwardedToFallback,
     rawSizeBytes: raw.byteLength,
     attachmentCount: attachments.attachmentCount,
     supportedAttachmentCount: attachments.supportedAttachmentCount,
@@ -348,7 +482,15 @@ export async function handleEmail(message, env, _ctx) {
   if (typeof targetId !== "string" || !RECEIPT_ID_PATTERN.test(targetId)) {
     throw new Error("Receipt index returned an invalid reservation ID");
   }
-  await storeAndCommitEvidence(env, targetId, raw);
+  try {
+    await storeAndCommitEvidence(env, targetId, raw, run);
+  } catch (error) {
+    if (!(error instanceof BudgetExceeded)) throw error;
+    // Throwing would invite redelivery.  The reservation is already released, and a
+    // forwarded copy is already safe; otherwise tell the sender.
+    if (!forwardedToFallback) message.setReject("Receipt inbox storage budget reached; please retry later");
+    return;
+  }
   // Classification is review metadata only.  *@receipts.jays.services accepts
   // any local-part on a public MX, Ignore only flips Durable Object status,
   // and the dashboard form still records cash.  Auto-POSTing
@@ -357,14 +499,38 @@ export async function handleEmail(message, env, _ctx) {
   return { id: targetId };
 }
 
-export async function storeAndCommitEvidence(env, id, raw) {
-  await env.RECEIPTS_BUCKET.put(evidenceKey(id), raw, {
-    httpMetadata: { contentType: "message/rfc822" },
-  });
+// Nothing was stored, so give the reservation back: a pending group marker would
+// otherwise answer "busy" to a resend with the same attachment for up to a day.
+async function releaseReservation(env, id) {
+  try {
+    await indexRequest(env, `/release/${id}`, { method: "POST" });
+  } catch {
+    // The original failure is the one to report, and the row still expires by itself.
+  }
+}
+
+export async function storeAndCommitEvidence(env, id, raw, run = budget.invocation()) {
+  try {
+    run.spend("r2Put");
+    await env.RECEIPTS_BUCKET.put(evidenceKey(id), raw, {
+      httpMetadata: { contentType: "message/rfc822" },
+    });
+  } catch (error) {
+    await releaseReservation(env, id);
+    throw error;
+  }
   await indexRequest(env, `/commit/${id}`, { method: "POST" });
 }
 
 async function hasValidConfiguration(env) {
+  // A deployment is valid with a fallback address (normal intake forwards
+  // before storing) or with no-forward intake configured (file-only).  The
+  // per-recipient gate in handleEmail still rejects normal recipients when
+  // no fallback is configured.
+  const fallbackValid = typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
+    && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS);
+  const noForwardConfigured = typeof env.RECEIPT_NO_FORWARD_LOCAL_PART === "string"
+    && env.RECEIPT_NO_FORWARD_LOCAL_PART.trim() !== "";
   const structurallyValid = isReceiptInboxAddress(env.RECEIPT_INBOX_ADDRESS)
     && typeof env.RECEIPT_INBOX_IDENTITY_KEY === "string"
     && env.RECEIPT_INBOX_IDENTITY_KEY.length >= 32
@@ -372,8 +538,7 @@ async function hasValidConfiguration(env) {
     && env.RECEIPT_INBOX_READ_TOKEN.length >= 32
     && typeof env.RECEIPT_INBOX_EVIDENCE_TOKEN === "string"
     && env.RECEIPT_INBOX_EVIDENCE_TOKEN.length >= 32
-    && typeof env.RECEIPT_FALLBACK_ADDRESS === "string"
-    && /^[^@\s]+@[^@\s]+$/.test(env.RECEIPT_FALLBACK_ADDRESS)
+    && (fallbackValid || noForwardConfigured)
     && typeof env.LIFECYCLE_AUDITOR?.fetch === "function"
     && env.RECEIPT_INBOX_RETENTION_ACK === RETENTION_ACK;
   if (!structurallyValid) return false;
@@ -388,17 +553,22 @@ async function hasValidConfiguration(env) {
   return tokensDistinct;
 }
 
-async function readiness(env) {
+// Email needs no R2 probe: its put proves R2, a probe could not cover the moment
+// before that put, and a failed put releases its reservation.  /health uses a head on
+// a fixed key: Class B, and a missing object returns null and still proves the binding.
+async function readiness(env, { probe = null } = {}) {
   if (!(await hasValidConfiguration(env))) return { ready: false, reason: "invalid_configuration" };
   try {
     const lifecycle = await ensureLifecycleAudit(env);
     if (!lifecycle.ok) return { ready: false, reason: "lifecycle_unverified" };
-    await Promise.all([
-      env.RECEIPTS_BUCKET.list({ prefix: "evidence/", limit: 1 }),
-      indexRequest(env, "/ready", { method: "GET" }),
-    ]);
+    if (probe) {
+      probe.spend("r2Read");
+      await env.RECEIPTS_BUCKET.head(READINESS_PROBE_KEY);
+    }
+    await indexRequest(env, "/ready", { method: "GET" });
     return { ready: true };
-  } catch {
+  } catch (error) {
+    if (error instanceof BudgetExceeded) throw error;
     return { ready: false, reason: "storage_unavailable" };
   }
 }
@@ -431,14 +601,21 @@ async function fetchBoundedJson(response, maxBytes = 64 * 1024) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+// A malformed auditor answer must never read as a fresh, verified audit.
+function auditorResult(body) {
+  if (typeof body?.ok !== "boolean" || !Number.isFinite(body?.checkedAt) || body.checkedAt <= 0) {
+    throw new Error("invalid_audit");
+  }
+  return { ok: body.ok, checkedAt: body.checkedAt };
+}
+
 async function auditLifecycle(env) {
   try {
     const response = await env.LIFECYCLE_AUDITOR.fetch("https://receipt-lifecycle-auditor.internal/audit", {
       method: "POST",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await fetchBoundedJson(response);
-    return { ok: body?.ok === true, checkedAt: Number(body?.checkedAt) || Date.now() };
+    return auditorResult(await fetchBoundedJson(response));
   } catch {
     return { ok: false, checkedAt: Date.now() };
   }
@@ -449,13 +626,24 @@ async function readAuditorStatus(env) {
     method: "GET",
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const body = await fetchBoundedJson(response);
-  if (typeof body?.ok !== "boolean" || !Number.isFinite(body?.checkedAt)) throw new Error("invalid_audit");
-  return { ok: body.ok, checkedAt: body.checkedAt };
+  return auditorResult(await fetchBoundedJson(response));
+}
+
+// The auditor's stored result changes only on its cron or a forced audit, so an ok
+// result taken since the latest cron slot cannot be improved by reading it again.
+// That is at most 12 hours of trust, and an off-cron audit cannot stretch it.
+// A not-ok result is always re-read.
+export function auditorReadIsRedundant(status, now = Date.now()) {
+  if (status?.ok !== true) return false;
+  const checkedAt = Number(status.checkedAt || 0);
+  const latestCron = Math.floor((now - AUDITOR_CRON_OFFSET_MS) / AUDITOR_CRON_PERIOD_MS)
+    * AUDITOR_CRON_PERIOD_MS + AUDITOR_CRON_OFFSET_MS;
+  return checkedAt <= now && checkedAt >= latestCron - AUDITOR_CRON_SKEW_MS;
 }
 
 async function ensureLifecycleAudit(env, force = false) {
   let status = await indexRequest(env, "/lifecycle-audit", { method: "GET" }).then((response) => response.json());
+  if (!force && auditorReadIsRedundant(status)) return status;
   try {
     const scheduled = await readAuditorStatus(env);
     if (scheduled.checkedAt > Number(status.checkedAt || 0)) {
@@ -483,6 +671,18 @@ async function ensureLifecycleAudit(env, force = false) {
 }
 
 export async function handleFetch(request, env) {
+  if (guardOff(env)) return guardOffResponse();
+  try {
+    return await routeFetch(request, env, budget.invocation());
+  } catch (error) {
+    if (!(error instanceof BudgetExceeded)) throw error;
+    const response = json({ error: "Rate limited" }, 429);
+    response.headers.set("Retry-After", "60");
+    return response;
+  }
+}
+
+async function routeFetch(request, env, run) {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
     if (
@@ -490,7 +690,7 @@ export async function handleFetch(request, env) {
       || env.RECEIPT_INBOX_READ_TOKEN.length < 32
       || !await safeTokenEqual(bearerToken(request), env.RECEIPT_INBOX_READ_TOKEN)
     ) return json({ error: "Unauthorized" }, 401);
-    const result = await readiness(env);
+    const result = await readiness(env, { probe: run });
     return json({ ok: result.ready, status: result.ready ? "ready" : "unavailable", ...(result.reason ? { reason: result.reason } : {}) }, result.ready ? 200 : 503);
   }
 
@@ -504,6 +704,7 @@ export async function handleFetch(request, env) {
     const id = evidenceMatch[1];
     const availability = await indexStub(env).fetch(`https://receipt-index.internal/evidence/${id}`);
     if (!availability.ok) return json({ error: "Not found" }, 404);
+    run.spend("r2Read");
     const object = await env.RECEIPTS_BUCKET.get(evidenceKey(id));
     if (!object) return json({ error: "Not found" }, 404);
     return new Response(object.body, {
@@ -555,17 +756,51 @@ function timestampKey(value) {
   return String(Math.max(0, Math.floor(value))).padStart(13, "0");
 }
 
+// Returns which limit refuses this message, or null to admit it.  Records written
+// before the sub-limits existed count entirely as public.
+function admissionRefusal(daily, bytes, sender, noForward) {
+  if (daily.count >= MAX_DAILY_MESSAGES || daily.bytes + bytes > MAX_DAILY_BYTES) return "daily";
+  if (noForward) return null;
+  if (
+    (daily.publicCount ?? daily.count) >= MAX_DAILY_PUBLIC_MESSAGES
+    || (daily.publicBytes ?? daily.bytes) + bytes > MAX_DAILY_PUBLIC_BYTES
+  ) return "public";
+  if (sender.count >= MAX_DAILY_SENDER_MESSAGES || sender.bytes + bytes > MAX_DAILY_SENDER_BYTES) return "sender";
+  return null;
+}
+
+function dailySender(daily, domain) {
+  return daily.senders && Object.hasOwn(daily.senders, domain) ? daily.senders[domain] : { count: 0, bytes: 0 };
+}
+
+async function deletePending(storage, id, metadata, expiryKey) {
+  const exactKey = `dedupe:${id}`;
+  const exact = await storage.get(exactKey);
+  const groupKey = metadata.groupId ? `group:${metadata.groupId}` : null;
+  const group = groupKey ? await storage.get(groupKey) : null;
+  await storage.delete([
+    expiryKey,
+    `pending:${id}`,
+    ...(exact?.status === "pending" && exact.id === id ? [exactKey] : []),
+    ...(groupKey && group?.status === "pending" && group.id === id ? [groupKey] : []),
+  ]);
+}
+
 export class ReceiptInboxIndex {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request) {
     const cleanupBacklog = await this.cleanupExpired(Date.now());
     await this.scheduleNextAlarm(cleanupBacklog);
+    // Expired rows are already hidden from every read, so a backlog the alarm is
+    // still draining is not an outage.  Only one a day old fails readiness.
+    const staleBacklog = cleanupBacklog && await this.hasStaleBacklog(Date.now());
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/ready") {
-      if (cleanupBacklog) return json({ ready: false, reason: "cleanup_backlog" }, 503);
+      if (staleBacklog) return json({ ready: false, reason: "cleanup_backlog" }, 503);
       await this.state.storage.get("counter:needs_review");
       return json({ ready: true });
     }
@@ -589,22 +824,35 @@ export class ReceiptInboxIndex {
       if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > MAX_MESSAGE_BYTES) {
         return json({ error: "invalid admission" }, 400);
       }
+      const noForward = body.noForward === true;
+      const domain = typeof body.senderDomain === "string" ? body.senderDomain : "unknown";
       const now = Date.now();
       const day = new Date(now).toISOString().slice(0, 10);
       const dailyKey = `daily:${day}`;
       const result = await this.state.storage.transaction(async (storage) => {
         const daily = await storage.get(dailyKey) || { count: 0, bytes: 0 };
-        if (daily.count >= MAX_DAILY_MESSAGES || daily.bytes + bytes > MAX_DAILY_BYTES) {
-          return { result: "quota_exceeded" };
-        }
+        const sender = dailySender(daily, domain);
+        const refusal = admissionRefusal(daily, bytes, sender, noForward);
+        if (refusal) return { result: "quota_exceeded", scope: refusal };
+        const publicCount = daily.publicCount ?? daily.count;
+        const publicBytes = daily.publicBytes ?? daily.bytes;
         const dailyExpiresAt = Date.parse(`${day}T00:00:00.000Z`) + 2 * 24 * 60 * 60 * 1000;
         await storage.put({
-          [dailyKey]: { count: daily.count + 1, bytes: daily.bytes + bytes },
+          [dailyKey]: {
+            count: daily.count + 1,
+            bytes: daily.bytes + bytes,
+            publicCount: noForward ? publicCount : publicCount + 1,
+            publicBytes: noForward ? publicBytes : publicBytes + bytes,
+            // Bounded: only admitted public mail adds a domain, at most 60 a day.
+            senders: noForward
+              ? daily.senders
+              : { ...daily.senders, [domain]: { count: sender.count + 1, bytes: sender.bytes + bytes } },
+          },
           [`daily-expire:${timestampKey(dailyExpiresAt)}:${day}`]: day,
         });
         return { result: "admitted" };
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json(result);
     }
 
@@ -629,8 +877,26 @@ export class ReceiptInboxIndex {
         });
         return { result: "reserved", id: metadata.id, resumed: false };
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json(result);
+    }
+
+    const releaseMatch = /^\/release\/([0-9a-f]{64})$/.exec(url.pathname);
+    if (request.method === "POST" && releaseMatch) {
+      const id = releaseMatch[1];
+      const result = await this.state.storage.transaction(async (storage) => {
+        const metadata = await storage.get(`pending:${id}`);
+        if (!metadata) return "not_found";
+        await deletePending(
+          storage,
+          id,
+          metadata,
+          `pending-expire:${timestampKey(Date.parse(metadata.receivedAt) + PENDING_RETENTION_MS)}:${id}`,
+        );
+        return "released";
+      });
+      await this.scheduleNextAlarm(cleanupBacklog);
+      return json({ result });
     }
 
     const commitMatch = /^\/commit\/([0-9a-f]{64})$/.exec(url.pathname);
@@ -658,7 +924,7 @@ export class ReceiptInboxIndex {
         ]);
         return "committed";
       });
-      await this.scheduleNextAlarm(false);
+      await this.scheduleNextAlarm(cleanupBacklog);
       return json({ result }, result === "not_found" ? 404 : 200);
     }
 
@@ -700,7 +966,7 @@ export class ReceiptInboxIndex {
     }
 
     if (request.method === "GET" && url.pathname === "/summary") {
-      if (cleanupBacklog) return json({ error: "cleanup_backlog" }, 503);
+      if (staleBacklog) return json({ error: "cleanup_backlog" }, 503);
       const listed = await this.state.storage.list({ prefix: "inbox:needs_review:", limit: MAX_SUMMARY_ITEMS });
       const items = [...listed.values()]
         .filter((item) => Date.parse(item.receivedAt) + RETENTION_MS > Date.now())
@@ -724,6 +990,7 @@ export class ReceiptInboxIndex {
         expenseDate: item.expenseDate || null,
         dueDate: item.dueDate || null,
         classificationAction: item.classificationAction || null,
+        forwardedToFallback: item.forwardedToFallback !== false,
         }));
       return json({
         configured: true,
@@ -766,9 +1033,17 @@ export class ReceiptInboxIndex {
     return listed.size > 0;
   }
 
+  async hasStaleBacklog(now) {
+    const staleBefore = now - STALE_CLEANUP_BACKLOG_MS;
+    const stale = await Promise.all(
+      ["pending-expire:", "expire:", "daily-expire:"].map((prefix) => this.hasExpired(prefix, staleBefore)),
+    );
+    return stale.includes(true);
+  }
+
   async scheduleNextAlarm(cleanupBacklog) {
     if (cleanupBacklog) {
-      await this.state.storage.setAlarm(Date.now() + 1_000);
+      await this.state.storage.setAlarm(Date.now() + CLEANUP_BACKLOG_ALARM_MS);
       return;
     }
     const candidates = [];
@@ -783,6 +1058,9 @@ export class ReceiptInboxIndex {
   }
 
   async alarm() {
+    // No reschedule while paused: the next Durable Object request after the guard
+    // clears schedules cleanup again.
+    if (guardOff(this.env)) return;
     const backlog = await this.cleanupExpired(Date.now());
     await this.scheduleNextAlarm(backlog);
   }
@@ -801,16 +1079,7 @@ export class ReceiptInboxIndex {
           await storage.delete(expiryKey);
           return;
         }
-        const exactKey = `dedupe:${id}`;
-        const exact = await storage.get(exactKey);
-        const groupKey = metadata.groupId ? `group:${metadata.groupId}` : null;
-        const group = groupKey ? await storage.get(groupKey) : null;
-        await storage.delete([
-          expiryKey,
-          pendingKey,
-          ...(exact?.status === "pending" && exact.id === id ? [exactKey] : []),
-          ...(groupKey && group?.status === "pending" && group.id === id ? [groupKey] : []),
-        ]);
+        await deletePending(storage, id, metadata, expiryKey);
       });
     }
   }

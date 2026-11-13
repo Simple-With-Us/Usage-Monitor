@@ -32,13 +32,6 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/ABSOLUTE/PATH/TO/infisical</string>
-    <string>run</string>
-    <string>--projectId</string>
-    <string>YOUR_UM_PROJECT_ID</string>
-    <string>--env</string>
-    <string>prod</string>
-    <string>--</string>
     <string>/ABSOLUTE/PATH/TO/node</string>
     <string>/ABSOLUTE/PATH/TO/Usage-Monitor/scripts/antigravity-usage-collector.mjs</string>
   </array>

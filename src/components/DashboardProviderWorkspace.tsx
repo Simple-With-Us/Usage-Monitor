@@ -1142,7 +1142,7 @@ export default function DashboardProviderWorkspace({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-700 sm:px-6">
         <div>
           <h2 id="provider-workspace-heading" className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            Provider workspace
+            Provider Workspace
           </h2>
           <p className="mt-1 max-w-3xl text-xs text-gray-500 dark:text-gray-400">
             {families.length} provider families, {providers.length} configured accounts, {subscriptions.length} tracked services. Select a family to show account and service details.

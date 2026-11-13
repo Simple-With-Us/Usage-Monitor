@@ -20,6 +20,8 @@ const prismaMock = vi.hoisted(() => {
       deleteMany: vi.fn(),
       count: vi.fn(),
     },
+    agentTurn: { updateMany: vi.fn(), deleteMany: vi.fn() },
+    aiRequest: { deleteMany: vi.fn() },
     $executeRawUnsafe: vi.fn(),
   };
   client.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
@@ -33,7 +35,12 @@ const prismaMock = vi.hoisted(() => {
   return client;
 });
 
+const tombstoneCountMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
+vi.mock("@/lib/sqlite-tombstone-count", () => ({
+  countExternalUsageEventTombstones: tombstoneCountMock,
+}));
 
 import {
   getExternalEventRawCutoff,
@@ -64,7 +71,10 @@ describe("usage-retention wrapper", () => {
     prismaMock.__transactionDepth = 0;
     // Wave I / E6 rehash runs first in retention; empty by default.
     prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
-    prismaMock.externalUsageEventTombstone.count.mockResolvedValue(0);
+    tombstoneCountMock.mockResolvedValue(0);
+    prismaMock.agentTurn.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.agentTurn.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.aiRequest.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   afterEach(() => {
@@ -99,6 +109,9 @@ describe("usage-retention wrapper", () => {
 
   it("keeps exclusive full-database compaction disabled unless explicitly enabled", () => {
     expect(isAutomaticVacuumEnabled({})).toBe(false);
+    expect(
+      isAutomaticVacuumEnabled({ DATA_RETENTION_ENABLE_VACUUM: "true", LITESTREAM_ACTIVE: "true" })
+    ).toBe(false);
     expect(
       isAutomaticVacuumEnabled({ DATA_RETENTION_ENABLE_VACUUM: "true" })
     ).toBe(true);
@@ -264,7 +277,13 @@ describe("usage-retention wrapper", () => {
     );
     expect(prismaMock.externalUsageEvent.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { occurredAt: { lt: new Date("2026-04-05T12:00:00.000Z") } },
+        where: {
+          occurredAt: { lt: new Date("2026-04-05T12:00:00.000Z") },
+          // Owner-recorded expenses are a permanent ledger and are excluded
+          // from prune selection (see retention-integration.test.ts for the
+          // end-to-end proof that an old owner expense survives).
+          sourceApp: { not: "owner-recorded-expense" },
+        },
       })
     );
     expect(prismaMock.usageSnapshotDailyRollup.upsert).toHaveBeenCalledTimes(1);
@@ -301,5 +320,149 @@ describe("usage-retention wrapper", () => {
       "PRAGMA wal_checkpoint(TRUNCATE)"
     );
     expect(prismaMock.$executeRawUnsafe).toHaveBeenNthCalledWith(3, "VACUUM");
+  });
+
+  it("retries a transient P1008 on the external-event rollup upsert instead of failing the batch", async () => {
+    prismaMock.provider.findMany.mockResolvedValue([]);
+    prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([
+      {
+        id: "evt-timeout-1",
+        idempotencyKey: "evt-timeout-1",
+        sourceApp: "socratic-trade",
+        environment: "prod",
+        provider: "anthropic",
+        service: "claude-code",
+        label: "model",
+        keyRef: "gpt-5.5",
+        billingMode: "estimated",
+        metricType: "usage",
+        quantity: 10,
+        unit: "token",
+        costUsd: 1,
+        requests: 1,
+        credits: 0,
+        limit: 1000,
+        limitWindow: "month",
+        tier: "pro",
+        confidence: "estimated",
+        projectId: null,
+        occurredAt: new Date("2026-04-01T03:00:00.000Z"),
+      },
+    ]);
+    prismaMock.externalUsageEventDailyRollup.findUnique.mockResolvedValue(null);
+    prismaMock.externalUsageEventDailyRollup.upsert
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Operation has timed out"), {
+          code: "P1008",
+          meta: { modelName: "ExternalUsageEventDailyRollup" },
+        })
+      )
+      .mockResolvedValue({});
+    prismaMock.externalUsageEventTombstone.upsert.mockResolvedValue({});
+    prismaMock.externalUsageEvent.deleteMany.mockResolvedValue({ count: 1 });
+
+    const result = await runUsageRetention(new Date("2026-07-04T12:00:00.000Z"));
+
+    expect(result.externalUsageEvents).toEqual({
+      scanned: 1,
+      pruned: 1,
+      rollupsTouched: 1,
+      tombstonesWritten: 1,
+    });
+    expect(prismaMock.externalUsageEventDailyRollup.upsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a persistent P1008 fatal after bounded retries", async () => {
+    prismaMock.provider.findMany.mockResolvedValue([]);
+    prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([
+      {
+        id: "evt-timeout-2",
+        idempotencyKey: "evt-timeout-2",
+        sourceApp: "socratic-trade",
+        environment: "prod",
+        provider: "anthropic",
+        service: "claude-code",
+        label: "model",
+        keyRef: "gpt-5.5",
+        billingMode: "estimated",
+        metricType: "usage",
+        quantity: 10,
+        unit: "token",
+        costUsd: 1,
+        requests: 1,
+        credits: 0,
+        limit: 1000,
+        limitWindow: "month",
+        tier: "pro",
+        confidence: "estimated",
+        projectId: null,
+        occurredAt: new Date("2026-04-01T03:00:00.000Z"),
+      },
+    ]);
+    prismaMock.externalUsageEventDailyRollup.findUnique.mockResolvedValue(null);
+    prismaMock.externalUsageEventDailyRollup.upsert.mockRejectedValue(
+      Object.assign(new Error("Operation has timed out"), {
+        code: "P1008",
+        meta: { modelName: "ExternalUsageEventDailyRollup" },
+      })
+    );
+
+    await expect(
+      runUsageRetention(new Date("2026-07-04T12:00:00.000Z"))
+    ).rejects.toMatchObject({ code: "P1008" });
+    expect(prismaMock.externalUsageEventDailyRollup.upsert).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not consume the scheduled retention interval when a run throws a transient write error", async () => {
+    vi.resetModules();
+    const fresh = await import("../usage-retention");
+    prismaMock.provider.findMany.mockResolvedValue([]);
+    prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEventDailyRollup.findMany.mockRejectedValueOnce(
+      Object.assign(new Error("Operation has timed out"), { code: "P1008" })
+    );
+
+    await expect(
+      fresh.runScheduledDataRetentionMaintenance(new Date("2026-07-04T12:00:00.000Z"))
+    ).rejects.toMatchObject({ code: "P1008" });
+
+    prismaMock.externalUsageEventDailyRollup.findMany.mockResolvedValue([]);
+    const retried = await fresh.runScheduledDataRetentionMaintenance(
+      new Date("2026-07-04T12:15:00.000Z")
+    );
+    expect(retried).toMatchObject({
+      externalUsageEvents: { scanned: 0, pruned: 0 },
+    });
+
+    const skipped = await fresh.runScheduledDataRetentionMaintenance(
+      new Date("2026-07-04T12:30:00.000Z")
+    );
+    expect(skipped).toEqual({ skipped: true, reason: "interval" });
+  });
+
+  it("keeps the scheduled retention interval when a run throws a non-transient error", async () => {
+    vi.resetModules();
+    const fresh = await import("../usage-retention");
+    prismaMock.provider.findMany.mockResolvedValue([]);
+    prismaMock.usageSnapshot.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEvent.findMany.mockResolvedValue([]);
+    prismaMock.externalUsageEventDailyRollup.findMany.mockRejectedValueOnce(
+      new Error("rehash failed")
+    );
+
+    await expect(
+      fresh.runScheduledDataRetentionMaintenance(new Date("2026-07-04T12:00:00.000Z"))
+    ).rejects.toThrow("rehash failed");
+
+    // A persistent breakage stays throttled to the retention interval
+    // instead of re-running -- and aborting the rest of the maintenance
+    // tick -- every 15 minutes.
+    const throttled = await fresh.runScheduledDataRetentionMaintenance(
+      new Date("2026-07-04T12:15:00.000Z")
+    );
+    expect(throttled).toEqual({ skipped: true, reason: "interval" });
   });
 });

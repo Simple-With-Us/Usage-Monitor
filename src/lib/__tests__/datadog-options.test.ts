@@ -29,12 +29,18 @@ describe("datadog-options", () => {
     expect(rum.enabled).toBe(false);
   });
 
-  it("fails closed in production runtime when DD_SERVICE is missing", () => {
+  it("stays dark in production runtime when no Datadog vars are set", () => {
+    const server = resolveDatadogServerConfig({ NODE_ENV: "production" });
+    expect(server.enabled).toBe(false);
+    expect(server.required).toBe(false);
+  });
+
+  it("fails closed when DD_REQUIRE=1 and DD_SERVICE is missing", () => {
     expect(() =>
-      resolveDatadogServerConfig({ NODE_ENV: "production" })
+      resolveDatadogServerConfig({ NODE_ENV: "production", DD_REQUIRE: "1" })
     ).toThrow(DatadogConfigError);
     try {
-      resolveDatadogServerConfig({ NODE_ENV: "production" });
+      resolveDatadogServerConfig({ NODE_ENV: "production", DD_REQUIRE: "1" });
     } catch (error) {
       expect(error).toBeInstanceOf(DatadogConfigError);
       expect((error as DatadogConfigError).missing).toEqual(["DD_SERVICE"]);
@@ -46,6 +52,16 @@ describe("datadog-options", () => {
     const server = resolveDatadogServerConfig({
       NODE_ENV: "production",
       NEXT_PHASE: "phase-production-build",
+    });
+    expect(server.enabled).toBe(false);
+    expect(server.required).toBe(false);
+  });
+
+  it("keeps the build phase exempt even with DD_REQUIRE=1", () => {
+    const server = resolveDatadogServerConfig({
+      NODE_ENV: "production",
+      NEXT_PHASE: "phase-production-build",
+      DD_REQUIRE: "1",
     });
     expect(server.enabled).toBe(false);
     expect(server.required).toBe(false);
@@ -71,9 +87,9 @@ describe("datadog-options", () => {
     });
     expect(server).toMatchObject({
       enabled: true,
-      required: true,
+      required: false,
       service: "usage-monitor",
-      env: "prod",
+      env: "production",
       site: "us5.datadoghq.com",
       hostname: "172.17.0.1",
       port: 8126,
@@ -82,6 +98,17 @@ describe("datadog-options", () => {
       logInjection: true,
       runtimeMetrics: true,
     });
+  });
+
+  it("canonicalizes Coolify DD_ENV=prod to production", () => {
+    const server = resolveDatadogServerConfig({
+      NODE_ENV: "production",
+      DD_SERVICE: "usage-monitor",
+      DD_ENV: "prod",
+      DD_SITE: "us5.datadoghq.com",
+      DD_AGENT_HOST: "127.0.0.1",
+    });
+    expect(server.env).toBe("production");
   });
 
   it("honors an explicit throwaway opt-out even in production", () => {
@@ -191,6 +218,7 @@ describe("datadog-options", () => {
   it("reports secret-free readiness and never echoes key values", () => {
     const ready = getDatadogReadiness({
       NODE_ENV: "production",
+      DD_REQUIRE: "1",
       DD_API_KEY: "super-secret-api-key-value",
       DD_AGENT_HOST: "127.0.0.1",
     });

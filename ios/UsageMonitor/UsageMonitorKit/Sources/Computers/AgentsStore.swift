@@ -4,7 +4,9 @@ import Models
 import Networking
 import AppCore
 
-/// Owns the Agents tab. Reads `GET /api/agents-overview?window=` (bearer or session).
+/// Owns the Agents tab. Reads `GET /api/agents-overview` for a fixed 30-day
+/// window (bearer or session). Lookback pills were removed — Coding Agents
+/// shows Agent Bar quota windows via `QuotaWindowsStore` instead.
 @MainActor
 @Observable
 final class AgentsStore {

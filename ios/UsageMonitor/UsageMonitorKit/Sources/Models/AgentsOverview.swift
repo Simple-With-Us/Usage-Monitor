@@ -9,6 +9,9 @@ public struct AgentsSummary: Codable, Hashable, Sendable {
     public var totalNetSavingsUsd: Double
     public var savingsMultiplier: Double
     public var topModel: String?
+    public var telemetryIncomplete: Bool?
+    public var telemetryIncompleteNote: String?
+    public var unreliablePlatformIds: [String]?
 
     public init(
         activeAgentCount: Int,
@@ -18,7 +21,10 @@ public struct AgentsSummary: Codable, Hashable, Sendable {
         totalSubscriptionCostUsd: Double,
         totalNetSavingsUsd: Double,
         savingsMultiplier: Double,
-        topModel: String? = nil
+        topModel: String? = nil,
+        telemetryIncomplete: Bool? = nil,
+        telemetryIncompleteNote: String? = nil,
+        unreliablePlatformIds: [String]? = nil
     ) {
         self.activeAgentCount = activeAgentCount
         self.totalAgentCount = totalAgentCount
@@ -28,6 +34,9 @@ public struct AgentsSummary: Codable, Hashable, Sendable {
         self.totalNetSavingsUsd = totalNetSavingsUsd
         self.savingsMultiplier = savingsMultiplier
         self.topModel = topModel
+        self.telemetryIncomplete = telemetryIncomplete
+        self.telemetryIncompleteNote = telemetryIncompleteNote
+        self.unreliablePlatformIds = unreliablePlatformIds
     }
 }
 
@@ -75,6 +84,18 @@ public struct AgentPlatformStatus: Codable, Hashable, Sendable, Identifiable {
     public var fidelityTier: String
     public var notes: String
     public var monthlySeatCostUsd: Double
+    public var billedMonthlySeatCostUsd: Double?
+    public var seatPlanName: String?
+    public var seatPlanNote: String?
+    public var seatPlanSource: String?
+    public var listMonthlySeatCostUsd: Double?
+    public var bundledOffsetUsd: Double?
+    public var bundledOffsetLabel: String?
+    public var seatCostNote: String?
+    public var telemetryAccuracy: String?
+    public var telemetryAccuracyLabel: String?
+    public var telemetryAccuracyNote: String?
+    public var usageIsReliable: Bool?
     public var totalTokens: Int
     public var inputTokens: Int
     public var outputTokens: Int
@@ -96,6 +117,18 @@ public struct AgentPlatformStatus: Codable, Hashable, Sendable, Identifiable {
         fidelityTier: String,
         notes: String,
         monthlySeatCostUsd: Double,
+        billedMonthlySeatCostUsd: Double? = nil,
+        seatPlanName: String? = nil,
+        seatPlanNote: String? = nil,
+        seatPlanSource: String? = nil,
+        listMonthlySeatCostUsd: Double? = nil,
+        bundledOffsetUsd: Double? = nil,
+        bundledOffsetLabel: String? = nil,
+        seatCostNote: String? = nil,
+        telemetryAccuracy: String? = nil,
+        telemetryAccuracyLabel: String? = nil,
+        telemetryAccuracyNote: String? = nil,
+        usageIsReliable: Bool? = nil,
         totalTokens: Int,
         inputTokens: Int,
         outputTokens: Int,
@@ -116,6 +149,18 @@ public struct AgentPlatformStatus: Codable, Hashable, Sendable, Identifiable {
         self.fidelityTier = fidelityTier
         self.notes = notes
         self.monthlySeatCostUsd = monthlySeatCostUsd
+        self.billedMonthlySeatCostUsd = billedMonthlySeatCostUsd
+        self.seatPlanName = seatPlanName
+        self.seatPlanNote = seatPlanNote
+        self.seatPlanSource = seatPlanSource
+        self.listMonthlySeatCostUsd = listMonthlySeatCostUsd
+        self.bundledOffsetUsd = bundledOffsetUsd
+        self.bundledOffsetLabel = bundledOffsetLabel
+        self.seatCostNote = seatCostNote
+        self.telemetryAccuracy = telemetryAccuracy
+        self.telemetryAccuracyLabel = telemetryAccuracyLabel
+        self.telemetryAccuracyNote = telemetryAccuracyNote
+        self.usageIsReliable = usageIsReliable
         self.totalTokens = totalTokens
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
@@ -126,6 +171,18 @@ public struct AgentPlatformStatus: Codable, Hashable, Sendable, Identifiable {
         self.estimatedCostUsd = estimatedCostUsd
         self.netSavingsUsd = netSavingsUsd
         self.modelsUsed = modelsUsed
+    }
+
+    /// Missing feeds must not be shown as zero usage.  Older payloads omit the flag.
+    public var reportsUsage: Bool { usageIsReliable ?? true }
+
+    public var seatCostDisplay: String {
+        if monthlySeatCostUsd <= 0 { return "Not billed" }
+        let net = Int(monthlySeatCostUsd.rounded())
+        if let bundled = bundledOffsetUsd, bundled > 0 {
+            return "$\(net)/mo net"
+        }
+        return "$\(net)/mo"
     }
 }
 
@@ -197,7 +254,10 @@ public struct AgentsOverviewResponse: Codable, Hashable, Sendable {
             totalSubscriptionCostUsd: 60.00,
             totalNetSavingsUsd: 88.50,
             savingsMultiplier: 2.48,
-            topModel: "claude-3-7-sonnet"
+            topModel: "claude-3-7-sonnet",
+            telemetryIncomplete: true,
+            telemetryIncompleteNote: "Token totals omit Cursor because that seat is not reporting usage.",
+            unreliablePlatformIds: ["cursor"]
         ),
         burn5h: Burn5hSummary(
             tokens5h: 1_250_000,
@@ -215,7 +275,9 @@ public struct AgentsOverviewResponse: Codable, Hashable, Sendable {
                 dataCapability: "Full OTLP Telemetry & Ingest",
                 fidelityTier: "full_telemetry",
                 notes: "Detailed token and cost analytics via OTLP metrics stream.",
-                monthlySeatCostUsd: 20.0,
+                monthlySeatCostUsd: 200.0,
+                billedMonthlySeatCostUsd: 200.0,
+                seatPlanName: "Claude Max 20x",
                 totalTokens: 28_400_000,
                 inputTokens: 18_200_000,
                 outputTokens: 4_200_000,
@@ -236,23 +298,24 @@ public struct AgentsOverviewResponse: Codable, Hashable, Sendable {
                 provider: "Cursor / Anysphere",
                 isRunningOnMac: true,
                 macStatus: "Active on Mac",
-                dataCapability: "Live Process & Ingest Attribution",
-                fidelityTier: "pushed_ingest",
-                notes: "Usage attributed via project telemetry ingest stream.",
+                dataCapability: "Live process detection. Token telemetry is not available.",
+                fidelityTier: "process_only",
+                notes: "Cursor does not expose a local token ledger.",
                 monthlySeatCostUsd: 20.0,
-                totalTokens: 8_200_000,
-                inputTokens: 6_000_000,
-                outputTokens: 2_200_000,
+                telemetryAccuracy: "unavailable",
+                telemetryAccuracyLabel: "not reported",
+                telemetryAccuracyNote: "Cursor does not expose a local token ledger.  Process status is live.  Usage is not reported.",
+                usageIsReliable: false,
+                totalTokens: 0,
+                inputTokens: 0,
+                outputTokens: 0,
                 cacheReadTokens: 0,
                 cacheCreationTokens: 0,
-                apiEquivalentCostUsd: 24.60,
-                reportedCostUsd: 24.60,
-                estimatedCostUsd: 24.60,
-                netSavingsUsd: 4.60,
-                modelsUsed: [
-                    AgentModelUsed(model: "claude-3-7-sonnet", tokens: 6_200_000, percentOfPlatform: 75.6, apiEquivalentCostUsd: 19.80),
-                    AgentModelUsed(model: "gpt-4o", tokens: 2_000_000, percentOfPlatform: 24.4, apiEquivalentCostUsd: 4.80)
-                ]
+                apiEquivalentCostUsd: 0,
+                reportedCostUsd: 0,
+                estimatedCostUsd: 0,
+                netSavingsUsd: 0,
+                modelsUsed: []
             ),
             AgentPlatformStatus(
                 id: "grok",
@@ -263,7 +326,10 @@ public struct AgentsOverviewResponse: Codable, Hashable, Sendable {
                 dataCapability: "Live Process & Pushed Telemetry",
                 fidelityTier: "pushed_ingest",
                 notes: "Token telemetry captured via xAI push adapter.",
-                monthlySeatCostUsd: 20.0,
+                monthlySeatCostUsd: 300.0,
+                billedMonthlySeatCostUsd: 100.0,
+                seatPlanName: "SuperGrok Heavy",
+                seatPlanNote: "Promo billed $100 for one more month.  List price is $300.",
                 totalTokens: 5_900_000,
                 inputTokens: 4_500_000,
                 outputTokens: 1_400_000,

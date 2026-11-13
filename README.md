@@ -1,18 +1,10 @@
 # Usage Monitor
 
-Tracks API usage and cost across providers via **poller snapshots**, **pushed telemetry**, and **Claude Code OTLP metrics**, with **per-project cost attribution** and **recurring-subscription tracking**.
+Usage Monitor brings usage, cost, and subscription information into one dashboard.  It combines supported provider snapshots, telemetry sent by other apps, and OTLP metrics, with project attribution where that information is available.
 
-**Production:** [usage.jays.services](https://usage.jays.services) on Coolify (see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`).  Cloudflare proxies public TLS for that hostname; it is not the application host.  Oracle Cloud and Render are retired (historical scripts in `deploy/oracle/`; Render rollback notes in `deploy/render/RETIRED-rollback.md`).
+[App overview](https://simplewithus.com/usage-client/) · [Hosted dashboard](https://usage.jays.services) · [Local Monitor](https://simplewithus.com/usage-local/)
 
-## GitHub About
-
-Keep the public repository About aligned with production.  Do not add provider counts or vendor lists.
-
-| Field | Value |
-|--------|--------|
-| Homepage | `https://usage.jays.services` |
-| Description | Tracks API usage and cost via poller snapshots, pushed telemetry, and OTLP metrics. Production: usage.jays.services |
-| Topics | none |
+The hosted dashboard requires access.  **Client Monitor** connects to a configured Usage Monitor server; **Local Monitor** provides an on-device workspace.  The app pages list the available builds and setup options.
 
 ## Key endpoints
 
@@ -30,12 +22,12 @@ Keep the public repository About aligned with production.  Do not add provider c
 
 ## Per-project attribution & subscriptions
 
-- **Per-project cost:** tag usage with a project so spend rolls up per project. Claude Code:
+- **Per-project cost:** tag usage with a project so spend rolls up per project.  Claude Code:
   `OTEL_RESOURCE_ATTRIBUTES=project=<name>` (per-repo via direnv). Other apps: a top-level `project`
-  field on the ingest contract. Names resolve case-insensitively to a `Project`; create the Project
+  field on the ingest contract.  Names resolve case-insensitively to a `Project`; create the Project
   (with a budget) in Settings → Projects.
 - **Subscriptions:** track recurring fixed fees (e.g. a Claude plan) with an interval and renewal
-  date in Settings → Subscriptions. A maintenance job materializes each billing period's fee as a
+  date in Settings → Subscriptions.  A maintenance job materializes each billing period's fee as a
   usage event, so subscriptions count toward provider and project budgets automatically.
 
 ## Quick start
@@ -48,7 +40,7 @@ npm run dev -- --turbopack
 ```
 
 The webpack `next dev` path is affected by an upstream instrumentation-bundling
-bug in this project. Turbopack is required for local development; production
+bug in this project.  Turbopack is required for local development; production
 `next build` / `next start` are unaffected.
 
 ## Verify
@@ -60,13 +52,13 @@ npm run verify
 `verify` runs lint, TypeScript, unit/integration tests, the real SQLite safe-
 migration reproduction, transaction-consistent pre-migration backup and
 retention tests, startup/backup configuration tests, and a production Next.js
-build. CI uses the same pinned Node version from `.node-version`.
+build.  CI uses the same pinned Node version from `.node-version`.
 
 ## Tech stack
 
 - **Next.js** (App Router) — web framework
-- **Prisma** (SQLite) — ORM + database (`/data/prod.db` on the production block volume)
-- **Hetzner NBG1 / Coolify** — production host (see `DEPLOY.md`)
+- **Prisma** (SQLite) — ORM + database
+- **Coolify** — deployment tooling (see `DEPLOY.md`)
 - **Cloudflare** — public HTTPS proxy for `usage.jays.services`; also hosts the optional receipt-inbox Worker
 - **Backblaze B2** — Litestream replica; Cloudflare R2 is weekly archive only
 - **Sentry** — error monitoring (Sentry Health card)
@@ -74,7 +66,7 @@ build. CI uses the same pinned Node version from `.node-version`.
 ## Docs
 
 - **[AGENTS.md](AGENTS.md)** — agent-facing guide (schema, auth, ingest flows, env vars)
-- **[DEPLOY.md](DEPLOY.md)** — Production runbook (see private `fleet-ops:ATTACK-MAP.md`); Render notes retired to `deploy/render/RETIRED-rollback.md`
+- **[DEPLOY.md](DEPLOY.md)** — deployment runbook
 - **[docs/litestream.md](docs/litestream.md)** — backup and restore runbook
 - **[docs/release-maintenance.md](docs/release-maintenance.md)** — why one-time
   data repairs/seeds remain explicit and what safe marker automation requires
