@@ -783,7 +783,7 @@ human reads, it gets the gap.
 
 Canonical: `/Users/jay/apps/FLEET-PROTOCOL.md` § Two spaces and `/Users/jay/apps/FLEET-UI-COPY.md`.
 
-**HOW to emit it (owner ruling 2026-10-23, the same on every surface):**  between sentences, write a real U+00A0 (no-break space) followed by a normal space.  This covers chat replies using the three exceptions below, Zulip, GitHub PR and issue text, Linear, commit messages, repo docs, UI copy, skills and agent instructions.
+**HOW to emit it (owner ruling 2026-10-23, the same on every surface):**  between sentences, write a real U+00A0 (no-break space) followed by a normal space.  This covers Zulip, GitHub PR and issue text, Linear, commit messages, repo docs, UI copy, skills and agent instructions.
 
 - Only chat replies in Claude Code's Code tab, MiniMax Code's chat pane, and Z Code's chat pane use the `&nbsp;` entity plus a normal space; all other human-readable surfaces, including Apple Notes, use real U+00A0 plus a normal space.
 - Two plain ASCII spaces are not enough.  Rendered surfaces (Zulip, GitHub, Linear, HTML, Markdown chat panes) collapse them to one.
