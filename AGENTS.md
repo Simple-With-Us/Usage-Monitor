@@ -682,18 +682,6 @@ Sitting and watching PRs or polling CI in a loop wastes valuable agent tokens, c
 4. **Merge & Deploy Promptly**: As soon as checks pass and the unit is verified, merge the PR to `main` (auto-deploying to production).
 5. **No Idle-Watching Loops**: Never run `sleep` loops, polling timers, or idle watch loops waiting for a PR.  Conclude the turn cleanly or work on actionable tasks.
 
-## Never wait and watch for PRs to merge / Idle-polling forbidden (Owner ruling 2026-09-01 — ALL seats)
-
-**Never passively wait, watch, or loop-poll for PRs to merge or CI checks to pass.**
-Sitting and watching PRs or polling CI in a loop wastes valuable agent tokens, context window, time, and money/quota.  Almost invariably, when PRs are left to sit, they get blocked by merge conflicts, outdated branches, failing CI checks, or unaddressed review comments.
-
-**Binding rules:**
-1. **Actively Drive PRs to Completion**: Proactively inspect mergeability, conflicts, CI checks, and review comments.
-2. **Resolve Conflicts & Outdated Branches Immediately**: If a branch is outdated or has merge conflicts with `main`, merge/rebase `main` into the branch, resolve conflicts locally, verify tests/build pass, and push immediately.
-3. **Resolve Review Comments & CI Failures Directly**: Fix failing checks or review comments at the root cause and push updates.
-4. **Merge & Deploy Promptly**: As soon as checks pass and the unit is verified, merge the PR to `main` (auto-deploying to production).
-5. **No Idle-Watching Loops**: Never run `sleep` loops, polling timers, or idle watch loops waiting for a PR.  Conclude the turn cleanly or work on actionable tasks.
-
 **A PR that is not merging is waiting on an ACTION, not on time.**  Diagnose which one and
 fix it — every cause is something you act on yourself:
 
@@ -721,7 +709,7 @@ not blind-resolve to force a merge.
 only thing you would do this turn is check whether something finished, do other useful work
 or end your turn.  A turn whose entire output is "still running" is pure quota burn.
 
-Canonical: `/Users/jay/apps/AGENT-SYNC.md` § Never idle-watch a PR.
+Canonical: `/Users/jay/apps/FLEET-PROTOCOL.md` § Never idle-watch a PR.
 
 ## Fleet docs (start here)
 
