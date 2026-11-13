@@ -680,7 +680,7 @@ Sitting and watching PRs or polling CI in a loop wastes valuable agent tokens, c
 2. **Resolve Conflicts & Outdated Branches Immediately**: If a branch is outdated or has merge conflicts with `main`, merge/rebase `main` into the branch, resolve conflicts locally, verify tests/build pass, and push immediately.
 3. **Resolve Review Comments & CI Failures Directly**: Fix failing checks or review comments at the root cause and push updates.
 4. **Merge & Deploy Promptly**: As soon as checks pass and the unit is verified, merge the PR to `main` (auto-deploying to production).
-5. **No Idle-Watching Loops**: Never run `sleep` loops, polling timers, or idle watch loops waiting for a PR.  Conclude the turn cleanly or work on actionable tasks.
+5. **No Idle-Watching Loops**: Never run `sleep` loops, polling timers, or idle watch loops waiting for a PR.  Conclude the turn cleanly or work on actionable tasks.  The one exception is the single bounded `gh pr checks <n> --watch` described below: it ends on its own, and when it ends you diagnose and act — you never start another wait.
 
 **A PR that is not merging is waiting on an ACTION, not on time.**  Diagnose which one and
 fix it — every cause is something you act on yourself:
