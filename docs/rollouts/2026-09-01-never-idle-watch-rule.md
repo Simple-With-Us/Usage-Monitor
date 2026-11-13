@@ -27,23 +27,26 @@ Docs/rules only.  No app code, no schema, no deploy.
   did not yet cover:
   - a symptom → diagnosis → action table (unresolved threads, conflict, failing check,
     never-dispatched check, auto-merge never armed);
-  - **arm auto-merge at PR-open** (`gh pr merge <n> --squash --auto`);
-  - the **bounded wait** carve-out — one `gh pr checks <n> --watch` is legal, an
-    open-ended `sleep` loop is not, and when a bounded wait ends unmerged you diagnose
-    rather than start a second one;
+  - **arm auto-merge once its preconditions hold** (non-draft, no hold label or
+    title, fleet reviewer approval of the current HEAD; `gh pr merge <n> --squash --auto`);
+  - the **bounded wait** carve-out — one five-minute-capped
+    `timeout --kill-after=5s 300 gh pr checks <n> --watch` is legal, an open-ended
+    `sleep` loop is not, and when a bounded wait ends unmerged you diagnose rather
+    than start a second one;
   - review-bot thread triage discipline (fix real findings, reply with a specific
     technical reason on the rest, then resolve; never blind-resolve);
   - background jobs — end the turn rather than narrate "standing by";
-  - a cross-reference to the canonical AGENT-SYNC section.
-- `STATUS.md` — snapshot entry.
-- `docs/EFFORT-LOG.md` — effort row (mirrored to `/Users/jay/apps/API-USAGE-MONITOR-EFFORT-LOG.md`).
+  - a closing line naming this section itself as canonical (the fleet protocol
+    manual does not repeat repo working rules).
 - `docs/rollouts/2026-09-01-never-idle-watch-rule.md` — this note.
 
 Outside this repo, the same rule in each file's own voice:
 
-- `/Users/jay/apps/AGENT-SYNC.md` — canonical `## Never idle-watch a PR` section after
-  `## Merge requirements`; mirrored into `/Users/jay/Code/ai-fleet-coordinator/AGENT-SYNC.md`
-  by PR so the tracked GitHub copy does not drift.
+- `/Users/jay/apps/AGENT-SYNC.md` (since retired; the file is now
+  `FLEET-PROTOCOL.md`) — at the time, a canonical `## Never idle-watch a PR`
+  section after `## Merge requirements`.  The current protocol manual no longer
+  repeats repo working rules, so the live home of this rule is each repo's
+  `AGENTS.md` — including this one.
 - `/Users/jay/.claude/CLAUDE.md` — stanza beside "Always commit + land finished work".
 - `Socratic.Trade` and `Congress.Trade` `AGENTS.md`.
 
@@ -52,11 +55,13 @@ Outside this repo, the same rule in each file's own voice:
 - **Adopt verbatim rather than rewrite.**  Replacing the peer's wording with my own would
   have clobbered their text and, once they eventually commit their tree, produced either a
   conflict or two near-identical sections.  Keeping rules 1–5 byte-identical means their
-  pending local diff becomes a no-op subset of what is now on `main`.
+  pending local diff becomes a subset of what is now on `main`.
 - **Owner's integration tree left untouched.**  Fleet rules forbid working in
   `/Users/jay/Code/Usage-Monitor`; this landed from an isolated worktree on
   `claude/never-idle-watch-rule`.  The owner's tree still shows its uncommitted
-  `AGENTS.md` edit — after pulling, that diff resolves against identical content.
+  `AGENTS.md` edit; a pull there will refuse to overwrite the locally modified
+  file, so the remedy is to discard the stale local edit
+  (`git restore AGENTS.md`) — its content is already on `main` — and then pull.
 - **Extended rather than left alone.**  The existing text banned idle-polling but did not
   say what to do instead beyond "inspect", and did not carve out the bounded wait.  A rule
   that only prohibits leaves an agent with no legal way to wait when it genuinely must;
@@ -81,4 +86,6 @@ None.  Sibling changes land on their own paths: two live files edited in place, 
 PRs, plus the ai-fleet-coordinator mirror.
 
 Worth flagging for whoever holds the owner's integration tree: `git status` there will
-still show ` M AGENTS.md` until it is pulled or reset — the content is now on `main`.
+still show ` M AGENTS.md` until the stale local edit is discarded
+(`git restore AGENTS.md`) — a pull alone will refuse to overwrite it, and the
+content is already on `main`.
