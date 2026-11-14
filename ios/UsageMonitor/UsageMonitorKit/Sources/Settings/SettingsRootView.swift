@@ -242,11 +242,17 @@ private struct WidgetSnapshotSection: View {
         guard let diagnostics else {
             return "Widgets read the snapshot this app writes into the shared app group."
         }
-        if diagnostics.clientFileRejected || diagnostics.localFileRejected {
-            return "A snapshot file exists but failed validation, so the widgets cannot read it."
-        }
         if diagnostics.source == nil {
+            if diagnostics.clientFileRejected || diagnostics.localFileRejected {
+                return "A snapshot file exists but failed validation, so the widgets cannot read it."
+            }
             return "No snapshot has been written yet. Refresh the app, then check again."
+        }
+        if diagnostics.clientFileRejected {
+            return "The Client snapshot file failed validation, but the widgets are reading the valid Local snapshot."
+        }
+        if diagnostics.localFileRejected {
+            return "The Local snapshot file failed validation, but the widgets are reading the valid Client snapshot."
         }
         return "Widgets read this snapshot from the shared app group."
     }
