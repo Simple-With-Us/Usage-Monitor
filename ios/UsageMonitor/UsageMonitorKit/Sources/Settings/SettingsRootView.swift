@@ -176,8 +176,8 @@ private struct SecuritySection: View {
 /// `WidgetSnapshotDiagnostics` was built for: it separates "the app group is
 /// not provisioned on this install" (the container is unavailable, so the
 /// app's writes fall back to storage the widget can never see — no refresh
-/// or reinstall fixes that) from "no snapshot has been written yet" (a
-/// refresh writes one).
+/// or reinstall fixes that), "a snapshot file exists but failed validation",
+/// and "no snapshot has been written yet" (a refresh writes one).
 private struct WidgetSnapshotSection: View {
     @State private var diagnostics: WidgetSnapshotDiagnostics?
 
@@ -186,8 +186,11 @@ private struct WidgetSnapshotSection: View {
             LabeledContent("Shared Storage", value: storageValue)
             LabeledContent("Snapshot Source", value: sourceValue)
             LabeledContent("Snapshot Age", value: ageValue)
-            if diagnostics?.clientFileRejected == true || diagnostics?.localFileRejected == true {
-                LabeledContent("Snapshot File", value: "Rejected (schema or size)")
+            if diagnostics?.clientFileRejected == true {
+                LabeledContent("Client Snapshot File", value: "Rejected (schema or size)")
+            }
+            if diagnostics?.localFileRejected == true {
+                LabeledContent("Local Snapshot File", value: "Rejected (decode failure)")
             }
         } header: {
             Text("Widgets")
@@ -195,13 +198,24 @@ private struct WidgetSnapshotSection: View {
             Text(footerText)
         }
         .task {
-            diagnostics = WidgetSnapshotResolver.shared.readDetailed().diagnostics
+            // readDetailed() does synchronous file I/O and can wait on the
+            // snapshot write lock; keep it off the main actor.
+            diagnostics = await Task.detached(priority: .utility) {
+                WidgetSnapshotResolver.shared.readDetailed().diagnostics
+            }.value
         }
     }
 
+    /// Availability from the resolver's live check, not the value latched
+    /// into `diagnostics`: the resolver captures its container URL once, so
+    /// a transient failure at first touch would otherwise stick for the
+    /// life of the process.
+    private var groupUnavailable: Bool {
+        WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    }
+
     private var storageValue: String {
-        guard let diagnostics else { return "Checking…" }
-        return diagnostics.containerAvailable ? "Available" : "Unavailable on this install"
+        groupUnavailable ? "Unavailable on this install" : "Available"
     }
 
     private var sourceValue: String {
@@ -222,11 +236,14 @@ private struct WidgetSnapshotSection: View {
     }
 
     private var footerText: String {
+        if groupUnavailable {
+            return "The app group is not provisioned for this install, so the snapshot never reaches the widgets. The group has to be enabled for the app in the developer portal; refreshing and reinstalling cannot change provisioning."
+        }
         guard let diagnostics else {
             return "Widgets read the snapshot this app writes into the shared app group."
         }
-        if !diagnostics.containerAvailable {
-            return "The app group is not provisioned for this install, so the snapshot never reaches the widgets. The group has to be enabled for the app in the developer portal; refreshing and reinstalling cannot change provisioning."
+        if diagnostics.clientFileRejected || diagnostics.localFileRejected {
+            return "A snapshot file exists but failed validation, so the widgets cannot read it."
         }
         if diagnostics.source == nil {
             return "No snapshot has been written yet. Refresh the app, then check again."
