@@ -2,6 +2,7 @@ import SwiftUI
 import AppCore
 import DesignSystem
 import Networking
+import WidgetShared
 
 /// The **Settings** feature root (owned by the Settings lane).
 ///
@@ -48,6 +49,7 @@ public struct SettingsRootView: View {
                     NotificationsSection()
                     AppearanceSection(settings: env.settings)
                     SecuritySection(settings: env.settings)
+                    WidgetSnapshotSection()
                     AboutSection(host: model.resolvedHostDisplay)
                 }
                 .navigationTitle(AppTab.settings.title)
@@ -164,6 +166,72 @@ private struct SecuritySection: View {
 
     private var lockTitle: String {
         biometry.isAvailable ? "Require \(biometry.label)" : "Require passcode"
+    }
+}
+
+// MARK: - Widget snapshot diagnostics
+
+/// Live readout of the app-group widget snapshot, taken from the same
+/// resolver the widget extension reads. This is the surface
+/// `WidgetSnapshotDiagnostics` was built for: it separates "the app group is
+/// not provisioned on this install" (the container is unavailable, so the
+/// app's writes fall back to storage the widget can never see — no refresh
+/// or reinstall fixes that) from "no snapshot has been written yet" (a
+/// refresh writes one).
+private struct WidgetSnapshotSection: View {
+    @State private var diagnostics: WidgetSnapshotDiagnostics?
+
+    var body: some View {
+        Section {
+            LabeledContent("Shared Storage", value: storageValue)
+            LabeledContent("Snapshot Source", value: sourceValue)
+            LabeledContent("Snapshot Age", value: ageValue)
+            if diagnostics?.clientFileRejected == true || diagnostics?.localFileRejected == true {
+                LabeledContent("Snapshot File", value: "Rejected (schema or size)")
+            }
+        } header: {
+            Text("Widgets")
+        } footer: {
+            Text(footerText)
+        }
+        .task {
+            diagnostics = WidgetSnapshotResolver.shared.readDetailed().diagnostics
+        }
+    }
+
+    private var storageValue: String {
+        guard let diagnostics else { return "Checking…" }
+        return diagnostics.containerAvailable ? "Available" : "Unavailable on this install"
+    }
+
+    private var sourceValue: String {
+        guard let diagnostics else { return "Checking…" }
+        switch diagnostics.source {
+        case .client: return "This app"
+        case .local: return "Usage Monitor Local"
+        case nil: return "None written"
+        }
+    }
+
+    private var ageValue: String {
+        guard let age = diagnostics?.ageSeconds else { return "—" }
+        if age < 90 { return "Under a minute" }
+        if age < 3600 { return "\(Int(age / 60)) min" }
+        if age < 86400 { return "\(Int(age / 3600)) hr" }
+        return "\(Int(age / 86400)) days"
+    }
+
+    private var footerText: String {
+        guard let diagnostics else {
+            return "Widgets read the snapshot this app writes into the shared app group."
+        }
+        if !diagnostics.containerAvailable {
+            return "The app group is not provisioned for this install, so the snapshot never reaches the widgets. The group has to be enabled for the app in the developer portal; refreshing and reinstalling cannot change provisioning."
+        }
+        if diagnostics.source == nil {
+            return "No snapshot has been written yet. Refresh the app, then check again."
+        }
+        return "Widgets read this snapshot from the shared app group."
     }
 }
 
