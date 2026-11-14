@@ -62,9 +62,12 @@ public struct WidgetSnapshotResolver {
     public let containerURL: URL?
     private let store: SharedStore
 
-    public init(containerURL: URL? = AppGroup.containerURL) {
+    public init(
+        containerURL: URL? = AppGroup.containerURL,
+        defaults: UserDefaults = AppGroup.defaults
+    ) {
         self.containerURL = containerURL
-        self.store = SharedStore(containerURL: containerURL)
+        self.store = SharedStore(containerURL: containerURL, defaults: defaults)
     }
 
     /// Production instance used by the widget extension and both apps.
