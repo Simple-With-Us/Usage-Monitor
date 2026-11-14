@@ -183,6 +183,9 @@ final class WidgetSnapshotResolverTests: XCTestCase {
     /// the read — otherwise it can never fire and the state is
     /// indistinguishable from "never written".
     func testCorruptClientFileReportsRejection() throws {
+        // The resolver's store also reads the shared defaults suite, so a
+        // leftover envelope there would mask the corrupt file entirely.
+        AppGroup.defaults.removeObject(forKey: "widget-snapshot-v2")
         try Data("not-json".utf8).write(
             to: directory.appendingPathComponent(WidgetSnapshotResolver.clientFileName),
             options: .atomic
