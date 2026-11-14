@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Volumes/External/Lanes/Usage-Monitor/claude-um-1469-collectors/.codex/hooks/block-xcode-project-writes.py'",
+            "statusMessage": "Blocking Xcode project file writes"
+          }
+        ]
+      }
+    ]
+  }
+}
