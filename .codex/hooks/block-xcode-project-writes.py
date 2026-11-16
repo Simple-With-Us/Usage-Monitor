@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Block agent Edit/Write on Xcode-managed project files.
 
-Claude Code PreToolUse hook: reads the tool-input JSON on stdin.
-Exit 0 = allow.  Exit 2 = block (Claude convention).
+Codex/Claude PreToolUse hook: reads the tool-input JSON on stdin.
+Exit 0 = allow.  Exit 2 = block, including unknown/malformed edit input.
 
 Also accepts a file path as argv[1] for tests and other seats.
 """
@@ -13,7 +13,7 @@ import re
 import sys
 
 BLOCK_RE = re.compile(
-    r"(?:\.pbxproj$|\.xcworkspace$|\.xib$|\.storyboard$|\.entitlements$"
+    r"(?:\.pbxproj$|\.xcodeproj$|\.xcworkspace$|\.xib$|\.storyboard$|\.entitlements$"
     r"|xcodeproj/|xcworkspace/)",
     re.IGNORECASE,
 )
@@ -32,23 +32,42 @@ def is_blocked(path: str) -> bool:
     return bool(BLOCK_RE.search(path.replace("\\", "/")))
 
 
-def path_from_stdin(raw: str) -> str:
-    if not raw.strip():
-        return ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return ""
+def paths_from_stdin(raw: str) -> list[str]:
+    """Return every edit/rename path, or fail closed on an unknown payload."""
+    data = json.loads(raw)
     if not isinstance(data, dict):
-        return ""
-    tool_input = data.get("tool_input") or data.get("toolInput") or {}
+        raise ValueError("hook payload must be an object")
+    tool_input = data.get("tool_input", data.get("toolInput"))
     if not isinstance(tool_input, dict):
-        return ""
+        raise ValueError("missing edit input")
+    # Native Codex apply_patch carries one patch, potentially touching many
+    # files. Prefer it over any incidental file_path field in the envelope.
+    if "command" in tool_input:
+        command = tool_input["command"]
+        if not isinstance(command, str):
+            raise ValueError("patch command must be text")
+        lines = command.strip().splitlines()
+        if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
+            raise ValueError("unknown patch format")
+        paths: list[str] = []
+        prefixes = ("*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: ")
+        for line in lines[1:-1]:
+            prefix = next((p for p in prefixes if line.startswith(p)), None)
+            if prefix:
+                path = line[len(prefix):].strip()
+                if not path or "\x00" in path:
+                    raise ValueError("empty patch path")
+                paths.append(path)
+            elif line.startswith("*** ") and line != "*** End of File":
+                raise ValueError("unknown patch directive")
+        if not paths:
+            raise ValueError("patch has no edit paths")
+        return paths
     for key in ("file_path", "filePath", "path"):
         value = tool_input.get(key)
-        if isinstance(value, str):
-            return value
-    return ""
+        if isinstance(value, str) and value.strip() and "\x00" not in value:
+            return [value.strip()]
+    raise ValueError("missing edit path")
 
 
 def main(argv: list[str]) -> int:
@@ -61,13 +80,17 @@ def main(argv: list[str]) -> int:
         assert not is_blocked("Package.swift")
         return 0
 
-    path = ""
-    if len(argv) > 1:
-        path = argv[1]
-    else:
-        path = path_from_stdin(sys.stdin.read())
-
-    if is_blocked(path):
+    try:
+        if len(argv) == 2 and argv[1].strip():
+            paths = [argv[1].strip()]
+        elif len(argv) == 1:
+            paths = paths_from_stdin(sys.stdin.read())
+        else:
+            raise ValueError("expected one path or hook JSON")
+    except (ValueError, TypeError):
+        print("BLOCKED: Cannot determine every edit path from hook input.", file=sys.stderr)
+        return 2
+    if any(is_blocked(path) for path in paths):
         print(BLOCK_MSG, file=sys.stderr)
         return 2
     return 0

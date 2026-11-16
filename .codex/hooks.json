@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 '/Volumes/External/Lanes/Usage-Monitor/claude-um-1469-collectors/.codex/hooks/block-xcode-project-writes.py'",
+            "command": "root=$(git rev-parse --show-toplevel) && python3 \"$root/.codex/hooks/block-xcode-project-writes.py\" || { rc=$?; [ \"$rc\" -eq 2 ] || printf \"%s\\n\" \"Xcode guard could not run; refusing edit.\" >&2; exit 2; }",
             "statusMessage": "Blocking Xcode project file writes"
           }
         ]
