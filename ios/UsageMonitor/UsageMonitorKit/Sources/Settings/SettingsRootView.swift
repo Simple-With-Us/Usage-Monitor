@@ -2,6 +2,7 @@ import SwiftUI
 import AppCore
 import DesignSystem
 import Networking
+import WidgetShared
 
 /// The **Settings** feature root (owned by the Settings lane).
 ///
@@ -48,6 +49,7 @@ public struct SettingsRootView: View {
                     NotificationsSection()
                     AppearanceSection(settings: env.settings)
                     SecuritySection(settings: env.settings)
+                    WidgetSnapshotSection()
                     AboutSection(host: model.resolvedHostDisplay)
                 }
                 .navigationTitle(AppTab.settings.title)
@@ -164,6 +166,95 @@ private struct SecuritySection: View {
 
     private var lockTitle: String {
         biometry.isAvailable ? "Require \(biometry.label)" : "Require passcode"
+    }
+}
+
+// MARK: - Widget snapshot diagnostics
+
+/// Live readout of the app-group widget snapshot, taken from the same
+/// resolver the widget extension reads. This is the surface
+/// `WidgetSnapshotDiagnostics` was built for: it separates "the app group is
+/// not provisioned on this install" (the container is unavailable, so the
+/// app's writes fall back to storage the widget can never see — no refresh
+/// or reinstall fixes that), "a snapshot file exists but failed validation",
+/// and "no snapshot has been written yet" (a refresh writes one).
+private struct WidgetSnapshotSection: View {
+    @State private var diagnostics: WidgetSnapshotDiagnostics?
+
+    var body: some View {
+        Section {
+            LabeledContent("Shared Storage", value: storageValue)
+            LabeledContent("Snapshot Source", value: sourceValue)
+            LabeledContent("Snapshot Age", value: ageValue)
+            if diagnostics?.clientFileRejected == true {
+                LabeledContent("Client Snapshot File", value: "Rejected (schema or size)")
+            }
+            if diagnostics?.localFileRejected == true {
+                LabeledContent("Local Snapshot File", value: "Rejected (decode failure)")
+            }
+        } header: {
+            Text("Widgets")
+        } footer: {
+            Text(footerText)
+        }
+        .task {
+            // readDetailed() does synchronous file I/O and can wait on the
+            // snapshot write lock; keep it off the main actor.
+            diagnostics = await Task.detached(priority: .utility) {
+                WidgetSnapshotResolver.shared.readDetailed().diagnostics
+            }.value
+        }
+    }
+
+    /// Availability from the resolver's live check, not the value latched
+    /// into `diagnostics`: the resolver captures its container URL once, so
+    /// a transient failure at first touch would otherwise stick for the
+    /// life of the process.
+    private var groupUnavailable: Bool {
+        WidgetSnapshotResolver.shared.isAppGroupUnavailable
+    }
+
+    private var storageValue: String {
+        groupUnavailable ? "Unavailable on this install" : "Available"
+    }
+
+    private var sourceValue: String {
+        guard let diagnostics else { return "Checking…" }
+        switch diagnostics.source {
+        case .client: return "This app"
+        case .local: return "Usage Monitor Local"
+        case nil: return "None written"
+        }
+    }
+
+    private var ageValue: String {
+        guard let age = diagnostics?.ageSeconds else { return "—" }
+        if age < 90 { return "Under a minute" }
+        if age < 3600 { return "\(Int(age / 60)) min" }
+        if age < 86400 { return "\(Int(age / 3600)) hr" }
+        return "\(Int(age / 86400)) days"
+    }
+
+    private var footerText: String {
+        if groupUnavailable {
+            return "The app group is not provisioned for this install, so the snapshot never reaches the widgets. The group has to be enabled for the app in the developer portal; refreshing and reinstalling cannot change provisioning."
+        }
+        guard let diagnostics else {
+            return "Widgets read the snapshot this app writes into the shared app group."
+        }
+        if diagnostics.source == nil {
+            if diagnostics.clientFileRejected || diagnostics.localFileRejected {
+                return "A snapshot file exists but failed validation, so the widgets cannot read it."
+            }
+            return "No snapshot has been written yet. Refresh the app, then check again."
+        }
+        if diagnostics.clientFileRejected {
+            return "The Client snapshot file failed validation, but the widgets are reading the valid Local snapshot."
+        }
+        if diagnostics.localFileRejected {
+            return "The Local snapshot file failed validation, but the widgets are reading the valid Client snapshot."
+        }
+        return "Widgets read this snapshot from the shared app group."
     }
 }
 
