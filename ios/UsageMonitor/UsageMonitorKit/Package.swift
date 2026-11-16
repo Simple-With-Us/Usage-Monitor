@@ -81,7 +81,7 @@ let package = Package(
         ),
         .target(
             name: "Settings",
-            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "PushScaffold"]
+            dependencies: ["AppCore", "DesignSystem", "Networking", "Models", "PushScaffold", "WidgetShared"]
         ),
 
         // ---- Integrations (one target each) -----------------------------

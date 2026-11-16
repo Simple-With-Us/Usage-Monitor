@@ -178,6 +178,31 @@ final class WidgetSnapshotResolverTests: XCTestCase {
         XCTAssertTrue(read.diagnostics.localFileRejected)
     }
 
+    /// A corrupt Client payload is deleted by SharedStore while it is read,
+    /// so the rejection flag has to come from the file's existence before
+    /// the read — otherwise it can never fire and the state is
+    /// indistinguishable from "never written".
+    func testCorruptClientFileReportsRejection() throws {
+        // The resolver's store also reads the defaults suite, so a leftover
+        // envelope there would mask the corrupt file entirely. Give the test
+        // a private suite instead of mutating the shared app-group one.
+        let isolatedResolver = WidgetSnapshotResolver(
+            containerURL: directory,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        try Data("not-json".utf8).write(
+            to: directory.appendingPathComponent(WidgetSnapshotResolver.clientFileName),
+            options: .atomic
+        )
+
+        let read = isolatedResolver.readDetailed()
+
+        XCTAssertNil(read.snapshot)
+        XCTAssertNil(read.diagnostics.source)
+        XCTAssertTrue(read.diagnostics.clientFileRejected)
+        XCTAssertFalse(read.diagnostics.localFileRejected)
+    }
+
     /// The Local writer's date encoding is `deferredToDate`, not `.iso8601`.
     /// If this ever decodes to a wrong-but-plausible date, the age maths and
     /// the stale badge would quietly lie, so assert the round trip exactly.
