@@ -93,6 +93,17 @@ describe("GET /api/quota-windows", () => {
     expect(mocks.findRecentAlerts).toHaveBeenCalledOnce();
   });
 
+  it("returns empty expected Kimi and ZCode provider groups by default", async () => {
+    process.env.USAGE_READ_TOKEN = READ_TOKEN;
+    const response = await GET(request({ authorization: `Bearer ${READ_TOKEN}` }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    for (const [provider, providerLabel] of [["moonshot", "Kimi"], ["zcode", "ZCode"]]) {
+      const group = body.providerGroups.find((entry: { provider: string }) => entry.provider === provider);
+      expect(group).toMatchObject({ providerLabel, expected: true, windows: [] });
+    }
+  });
+
   it("projects bounded recent CodeCaps alerts without changing quota fields", async () => {
     process.env.USAGE_READ_TOKEN = READ_TOKEN;
     const sourceInstanceId = "6a875ea5-28c8-4b80-8d24-2c383da87a65";

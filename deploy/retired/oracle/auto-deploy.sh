@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 027
 
-readonly REPOSITORY_URL="https://github.com/jaywedgeworth22/Usage-Monitor.git"
+readonly REPOSITORY_URL="https://github.com/Simple-With-Us/Usage-Monitor.git"
 readonly HOST_ENV="/etc/usage-monitor/host.env"
 readonly PAUSE_FILE="/etc/usage-monitor/auto-deploy.paused"
 readonly STATE_DIR="/var/lib/usage-monitor-deploy"

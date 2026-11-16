@@ -1,6 +1,6 @@
 # Oracle A1 deployment (RETIRED — see RETIRED.md at the top of this directory)
 
-> **2026-08-07:** Production Usage Monitor runs on the Coolify fleet host (see private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md`). SSH:
+> **2026-08-07:** Production Usage Monitor runs on the Coolify fleet host (see private `Simple-With-Us/fleet-ops:ATTACK-MAP.md`). SSH:
 > `ssh coolify`. See `/Users/jay/apps/COOLIFY.md`.
 >
 > **Do not install the `usage-monitor-auto-deploy.timer` from the install

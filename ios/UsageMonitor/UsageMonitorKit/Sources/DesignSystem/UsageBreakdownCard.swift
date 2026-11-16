@@ -112,6 +112,7 @@ public struct UsageBreakdownCard: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 130)
+                .tint(Theme.Colors.accent)
                 .accessibilityLabel("Chart presentation style")
             }
         }

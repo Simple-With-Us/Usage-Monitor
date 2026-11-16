@@ -101,6 +101,10 @@ function clearInfisicalCredEnv() {
   for (const name of [
     "INFISICAL_CLIENT_ID",
     "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_UM_CLIENT_ID",
+    "INFISICAL_UM_CLIENT_SECRET",
+    "INFISICAL_UM_READ_TOKEN",
+    "INFISICAL_TOKEN",
     "INFISICAL_AUTOMATION_CLIENT_ID",
     "INFISICAL_AUTOMATION_CLIENT_SECRET",
   ]) {
@@ -149,6 +153,49 @@ describe("resolveInfisicalEnvironment (prod only)", () => {
 });
 
 describe("app-settings (Infisical SOT tunable knobs)", () => {
+  it("prefers the complete UM machine-identity pair over a complete generic pair", async () => {
+    const { fetchImpl, calls } = makeMockFetch();
+    const savedProjectId = process.env.INFISICAL_UM_PROJECT_ID;
+    process.env.INFISICAL_UM_PROJECT_ID = "mock-um-project-id";
+    process.env.INFISICAL_UM_CLIENT_ID = "um-client-id";
+    process.env.INFISICAL_UM_CLIENT_SECRET = "um-client-secret";
+    process.env.INFISICAL_CLIENT_ID = "generic-client-id";
+    process.env.INFISICAL_CLIENT_SECRET = "generic-client-secret";
+
+    try {
+      await appSettings.init({ fetchImpl: fetchImpl as typeof fetch, refreshIntervalMs: 0 });
+
+      const login = calls.find((call) => call.url.includes("/universal-auth/login"));
+      expect(login?.body).toMatchObject({ clientId: "um-client-id", clientSecret: "um-client-secret" });
+    } finally {
+      if (savedProjectId === undefined) delete process.env.INFISICAL_UM_PROJECT_ID;
+      else process.env.INFISICAL_UM_PROJECT_ID = savedProjectId;
+    }
+  });
+
+  it("does not fall back to or mix generic credentials when a UM pair is partial", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("network must not be touched with an incomplete UM pair");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const savedProjectId = process.env.INFISICAL_UM_PROJECT_ID;
+    process.env.INFISICAL_UM_PROJECT_ID = "mock-um-project-id";
+    process.env.INFISICAL_UM_CLIENT_ID = "um-client-id";
+    process.env.INFISICAL_CLIENT_ID = "generic-client-id";
+    process.env.INFISICAL_CLIENT_SECRET = "generic-client-secret";
+
+    try {
+      await appSettings.init({ fetchImpl: fetchImpl as typeof fetch, refreshIntervalMs: 0 });
+      expect(appSettings.isInfisicalMode).toBe(false);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("running in env-fallback mode"));
+    } finally {
+      warn.mockRestore();
+      if (savedProjectId === undefined) delete process.env.INFISICAL_UM_PROJECT_ID;
+      else process.env.INFISICAL_UM_PROJECT_ID = savedProjectId;
+    }
+  });
+
   it("init loads the full secret set into the in-memory cache", async () => {
     const { fetchImpl, calls } = makeMockFetch();
     await appSettings.init(infisicalInitBase(fetchImpl as typeof fetch));

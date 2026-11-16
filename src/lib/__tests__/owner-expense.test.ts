@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   duplicateMatchReason,
   isDuplicateOwnerExpense,
+  ownerExpenseCategory,
   ownerExpenseIdempotencyKey,
   parseOwnerExpenseInput,
 } from "../owner-expense";
@@ -186,5 +187,24 @@ describe("isDuplicateOwnerExpense", () => {
       expect(reason).toContain("$213.20");
       expect(reason).toContain("2026-10-06");
     }
+  });
+});
+
+describe("ownerExpenseCategory (UM-1659)", () => {
+  it("reads the Tech / Other notes convention", () => {
+    expect(ownerExpenseCategory("Category: Tech. API credits.")).toBe("Tech");
+    expect(ownerExpenseCategory("Category: Other. Gift cards.")).toBe("Other");
+    expect(ownerExpenseCategory("category: tech")).toBe("Tech");
+  });
+
+  it("maps the older Personal spelling onto Other", () => {
+    expect(ownerExpenseCategory("Category: Personal. Curbside order.")).toBe("Other");
+  });
+
+  it("returns null without the prefix", () => {
+    expect(ownerExpenseCategory("Tech purchase, no prefix")).toBeNull();
+    expect(ownerExpenseCategory("")).toBeNull();
+    expect(ownerExpenseCategory(undefined)).toBeNull();
+    expect(ownerExpenseCategory(null)).toBeNull();
   });
 });

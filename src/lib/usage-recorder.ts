@@ -242,10 +242,11 @@ export function isProviderFetchTickDegraded(
 ): boolean {
   const attempted = result.successes + result.failures;
   if (attempted === 0) return false; // nothing attempted (all skipped) - no signal either way
-  // Total-outage fast path: everything attempted failed. Kept as an explicit
-  // check (not just relying on the ratio below) so a complete outage is
-  // always caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is ever
-  // misconfigured above its intended 0-1 range.
+  // Everything attempted failed, so the tick is degraded. Kept as an explicit
+  // check (not just relying on the ratio below) so a complete miss is always
+  // caught even if PROVIDER_FETCH_DEGRADED_FAILURE_RATIO is misconfigured.
+  // Fleet paging and the readiness fast path use isBroadProviderFetchOutage,
+  // which does not treat one failure beside a skip set as an outage.
   if (result.successes === 0 && result.failures > 0) return true;
   return result.failures / attempted >= resolveProviderFetchDegradedFailureRatio();
 }

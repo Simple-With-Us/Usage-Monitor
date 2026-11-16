@@ -24,11 +24,15 @@ export const LAUNCHER_METADATA_KEY = "agent.launcher";
 /** The orchestrator's own thread or session id, when the child knows it. */
 export const LAUNCHER_SESSION_METADATA_KEY = "agent.launcher.session";
 
+/** Non-authoritative configured workspace match; never launch or billing proof. */
+export const BOTFLEET_WORKSPACE_HINT_METADATA_KEY = "workspace.botfleetHint";
+
 export const CORRELATION_METADATA_KEYS: readonly string[] = [
   SESSION_ID_METADATA_KEY,
   CALL_ID_METADATA_KEY,
   LAUNCHER_METADATA_KEY,
   LAUNCHER_SESSION_METADATA_KEY,
+  BOTFLEET_WORKSPACE_HINT_METADATA_KEY,
 ];
 
 function metadataRecord(value: unknown): Record<string, unknown> | null {

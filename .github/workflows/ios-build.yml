@@ -16,8 +16,8 @@ name: iOS build (Mac runner)
 #
 # Deliberately unsigned (CODE_SIGNING_ALLOWED=NO) and no archive/upload —
 # TestFlight shipping stays in the fleet ship script, which has its own guard.
-# Scope: the iOS app only; the Safari-extension project can be added as a
-# second step once it matters.
+# Scope: UsageMonitor (Client) and LocalUsageMonitor unsigned compiles; the
+# Safari-extension project can be added once it matters.
 
 on:
   pull_request:
@@ -84,6 +84,21 @@ jobs:
               -scheme UsageMonitor \
               -destination 'generic/platform=iOS' \
               -derivedDataPath "${RUNNER_TEMP}/um-ios-${GITHUB_RUN_ID}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              ENABLE_PREVIEWS=NO \
+              COMPILER_INDEX_STORE_ENABLE=NO
+          }
+          build || { sleep 20; build; }
+
+      - name: Build LocalUsageMonitor (generic iOS device, unsigned)
+        run: |
+          build() {
+            xcodebuild build \
+              -project ios/UsageMonitor/UsageMonitor.xcodeproj \
+              -scheme LocalUsageMonitor \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath "${RUNNER_TEMP}/um-ios-local-${GITHUB_RUN_ID}" \
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               ENABLE_PREVIEWS=NO \

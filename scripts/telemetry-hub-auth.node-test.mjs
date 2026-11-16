@@ -117,7 +117,7 @@ test("native and CLI drains preserve numeric wire aliases through authenticated 
     const identity = { producerId: "openai-codex", producerInstanceId: "test-host" };
     const cli = tokenEventsFromBreakdown({ producerId: "openai-codex", provider: "openai", service: "codex", sessionKey: "private", occurredAtIso: "2026-10-30T12:00:00Z", model: "test", extraId: "source", breakdown: { input: 4, output: 2 }, extraMetadata: { reasoningTokens: 1 }, collectorCallId: "source-call" });
     const root = await enqueueCollectorSentry(cli, identity, config);
-    await enqueueCollectorSentryTelemetry([{ eventId: "e".repeat(64), ts: "2026-10-30T12:00:01Z", kind: "span", platform: "botfleet", operation: "botfleet.turn", tokens: { input: 5, reasoning: 3 }, context: { tokens: 123 }, promptText: "PRIVATE_CONTENT" }], identity, config);
+    await enqueueCollectorSentryTelemetry([{ eventId: "e".repeat(64), ts: "2026-10-30T12:00:01Z", kind: "span", platform: "botfleet", operation: "botfleet.turn", durationMs: 0, tokens: { input: 5, reasoning: 3 }, context: { tokens: 123 }, promptText: "PRIVATE_CONTENT" }], identity, config);
     const cliLog = tokenEventsFromBreakdown({ producerId: "openai-codex", provider: "openai", service: "codex", sessionKey: "private", occurredAtIso: "2026-10-30T12:00:02Z", model: "test", extraId: "source-log", breakdown: { output: 9 }, extraMetadata: { reasoningTokens: 7 } });
     await enqueueCollectorSentry(cliLog, identity, config);
     await enqueueCollectorSentryTelemetry([{ eventId: "f".repeat(64), ts: "2026-10-30T12:00:03Z", kind: "log", platform: "botfleet", operation: "botfleet.turn", tokens: { reasoning: 5 }, context: { tokens: 11 } }], identity, config);
@@ -138,12 +138,13 @@ test("native and CLI drains preserve numeric wire aliases through authenticated 
     const output = buildTracesEnvelope(receiverEvents.filter((event) => event.kind === "span").map((event) => scrubInternalEvent(projectHubTelemetry(event))));
     const spans = output.resourceSpans[0].scopeSpans[0].spans;
     const counts = spans.map((span) => span.attributes.find((a) => a.key === "gen_ai.usage.reasoning_count")?.value.stringValue).sort();
-    assert.deepEqual(counts, ["1", "3"]);
+    assert.deepEqual(counts, ["3"]);
     assert.ok(spans.some((span) => span.attributes.some((a) => a.key === "context.used" && a.value.stringValue === "123")));
     assert.ok(!JSON.stringify(output).includes("PRIVATE_CONTENT"));
     const logOutput = buildLogsEnvelope(receiverEvents.filter((event) => event.kind === "log").map((event) => scrubInternalEvent(projectHubTelemetry(event))));
     const logs = logOutput.resourceLogs[0].scopeLogs[0].logRecords;
-    assert.deepEqual(logs.map((record) => record.attributes.find((a) => a.key === "gen_ai.usage.reasoning_count")?.value.stringValue).sort(), ["5", "7"]);
+    assert.deepEqual(logs.map((record) => record.attributes.find((a) => a.key === "gen_ai.usage.reasoning_count")?.value.stringValue).sort(), ["1", "5", "7"]);
+    assert.ok(logs.every((record) => !record.attributes.some((a) => a.key === "duration_ms")));
     assert.ok(logs.some((record) => record.attributes.some((a) => a.key === "context.used" && a.value.stringValue === "11")));
     assert.ok(!JSON.stringify(logOutput).includes("PRIVATE_CONTENT"));
   } finally { await receiver.close(); await rm(stateRoot, { recursive: true, force: true }); }

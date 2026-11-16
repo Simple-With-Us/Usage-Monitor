@@ -7,7 +7,10 @@ export const RECEIPT_KINDS = ["subscription", "prepaid", "usage", "one_time"];
 export const CALENDAR_SORTS = ["subscription", "prepaid", "usage", "dev-expense"];
 
 const CARD = /\b(?:\d[ -]*?){13,19}\b/g;
-const EMAIL = /\b\S+@\S+\b/g;
+// Bounded quantifiers: unbounded \S+ is quadratic on long dotted tokens from a public MX.
+const EMAIL = /\b\S{1,254}@\S{1,254}\b/g;
+const MAX_SUBJECT_SCAN_CHARS = 1024;
+const MAX_TEXT_SCAN_CHARS = 8000;
 const AMOUNT = /(?:USD|US\$|\$)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+\.[0-9]{2})/gi;
 
 const CANCELLED_NO_RENEW = [
@@ -24,7 +27,7 @@ export function redactSecrets(value) {
 }
 
 export function boundedSubject(value, max = 180) {
-  const cleaned = redactSecrets(String(value || ""))
+  const cleaned = redactSecrets(String(value || "").slice(0, MAX_SUBJECT_SCAN_CHARS))
     .replace(/\s+/g, " ")
     .trim();
   return cleaned.slice(0, max);
@@ -140,7 +143,8 @@ export function classifyReceipt({
   dueDate = null,
 } = {}) {
   const cleanSubject = boundedSubject(subject);
-  const cleanText = redactSecrets(String(text || "")).slice(0, 8000);
+  // Cap before the regexes run.  cleanText is never persisted or sent to an LLM.
+  const cleanText = redactSecrets(String(text || "").slice(0, MAX_TEXT_SCAN_CHARS));
   const ignore = ignoreReason(cleanSubject);
   const receivedDate = isoDate(receivedAt) || isoDate(new Date());
   const due = isoDate(dueDate);

@@ -15,6 +15,7 @@
 // DSN-gated by SENTRY_FLEET_DSN; absent = no-op.
 
 import { isCursorAdminPollerEnabled } from "@/lib/cursor-admin-config";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
 export const SENTRY_CRON_MONITOR_SLUG = "usage-monitor-scheduler";
 
@@ -176,10 +177,17 @@ export async function logSchedulerDegraded(
       ([, value]) => value !== undefined && value !== null
     )
   ) as Record<string, string | number | boolean>;
-  const zeroSuccessOutage =
-    cleanAttrs.successes === 0 &&
-    typeof cleanAttrs.failures === "number" &&
-    cleanAttrs.failures > 0;
+  const successes =
+    typeof cleanAttrs.successes === "number" ? cleanAttrs.successes : 0;
+  const failures =
+    typeof cleanAttrs.failures === "number" ? cleanAttrs.failures : 0;
+  const skipped =
+    typeof cleanAttrs.skipped === "number" ? cleanAttrs.skipped : undefined;
+  const zeroSuccessOutage = isBroadProviderFetchOutage({
+    successes,
+    failures,
+    skipped,
+  });
   try {
     const mod = await loadSentry();
     if (!mod) return;
@@ -190,8 +198,9 @@ export async function logSchedulerDegraded(
   } catch {
     // Sparse Sentry logs are best-effort.
   }
-  // Total poll outage pages via fleet-infra on the first tick; partial
-  // degradation still waits for the consecutive-tick latch (UM-1373).
+  // A broad poll outage pages via fleet-infra on the first tick; partial
+  // degradation, and a single provider failing while the rest were skipped,
+  // still wait for the consecutive-tick latch (UM-1373, UM-1673).
   if (!zeroSuccessOutage) return;
   try {
     const { recordFleetInfraMetric } = await import("@/lib/sentry-fleet");

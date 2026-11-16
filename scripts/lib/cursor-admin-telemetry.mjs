@@ -385,6 +385,116 @@ function dayOf(row) {
 }
 
 /**
+ * How a daily-usage row is attributed.
+ *
+ * The daily feed gives one row per user per day, with row-wide counters and a
+ * single `mostUsedModel`.  That field names the DOMINANT model of the row, not
+ * every request in it, so a row can never be attributed more specifically than
+ * its dominant model supports.
+ *
+ * The rule therefore never claims a provider the row does not support:
+ *
+ *   * A row that names no model is `unknown`.
+ *   * A row whose dominant model is a Grok Bot model, and which carries none
+ *     of Cursor's own editor counters, is `grok-bot`:  the whole row is agent
+ *     usage, and that agent usage is Grok Bot's.
+ *   * A row whose dominant model is a Grok Bot model and which also carries
+ *     Cursor's own editor counters is `mixed`:  the row holds both, and the
+ *     feed gives no way to split it.
+ *   * Any other dominant model is `cursor`.
+ *
+ * A mixed or unknown row keeps its own provider key rather than being folded
+ * into Cursor or into Grok Bot, so it stays visible in the ledger as what it
+ * is.  The source never changes:  the service and the producer id stay
+ * `cursor-admin-api`, and only the attributed provider moves.
+ *
+ * Overlapping Grok feeds, and the precedence between them.  The native Mac
+ * reader reports Grok Bot's weekly allowance (a remaining percentage derived
+ * from `usagePercent`) under the provider `grok-bot` with the id
+ * `local-mac:grok-bot:weekly`.  This feed reports daily request counts under
+ * the same provider with the service `cursor-admin-api` and the label
+ * `daily-usage`.  Those are different measures over different windows:  the
+ * allowance answers how much is left, the request count answers how much was
+ * used.  Neither is summed into the other, neither overrides the other, and a
+ * row this feed attributes to Grok Bot is never published as Cursor usage.
+ */
+export const CURSOR_ADMIN_ATTRIBUTIONS = Object.freeze({
+  CURSOR: "cursor",
+  GROK_BOT: "grok-bot",
+  MIXED: "mixed",
+  UNKNOWN: "unknown",
+});
+
+/** The provider key for a row whose usage spans Cursor's surfaces and Grok Bot. */
+export const CURSOR_ADMIN_MIXED_PROVIDER = "cursor-admin-mixed";
+/** The provider key for a row that names no model at all. */
+export const CURSOR_ADMIN_UNKNOWN_PROVIDER = "cursor-admin-unknown";
+
+/** The Grok Bot model names the admin feed reports. */
+const GROK_BOT_MODEL_PATTERN = /\bgrok-bot\b/i;
+
+/**
+ * The counters that belong to Cursor's own editor and chat surfaces.
+ *
+ * The agent counter is NOT here:  an agent request is Cursor's own agent when
+ * the row's dominant model is a Cursor-hosted model, and Grok Bot's when the
+ * row's dominant model names Grok Bot.  The editor and chat counters are
+ * Cursor's either way, which is what makes their presence alongside a
+ * Grok-dominant model proof that a row holds more than one thing.
+ */
+const CURSOR_NATIVE_COUNTERS = [
+  "composerRequests",
+  "chatRequests",
+  "cmdkUsages",
+  "bugbotUsages",
+];
+
+/**
+ * What a daily-usage row is attributed to.
+ *
+ * @returns {{attribution: string, provider: string, model: string | null, basis: string}}
+ */
+export function attributeDailyUsageRow(row) {
+  const model = isRecord(row) ? nonEmptyString(row.mostUsedModel) : null;
+  if (!model) {
+    return {
+      attribution: CURSOR_ADMIN_ATTRIBUTIONS.UNKNOWN,
+      provider: CURSOR_ADMIN_UNKNOWN_PROVIDER,
+      model: null,
+      basis: "the row names no model",
+    };
+  }
+  if (!GROK_BOT_MODEL_PATTERN.test(model)) {
+    return {
+      attribution: CURSOR_ADMIN_ATTRIBUTIONS.CURSOR,
+      provider: CURSOR_ADMIN_PROVIDER,
+      model,
+      basis: "the row's dominant model is a Cursor-hosted model",
+    };
+  }
+  const cursorNative = CURSOR_NATIVE_COUNTERS.reduce(
+    (sum, key) => sum + countOf(isRecord(row) ? row[key] : 0),
+    0,
+  );
+  if (cursorNative > 0) {
+    return {
+      attribution: CURSOR_ADMIN_ATTRIBUTIONS.MIXED,
+      provider: CURSOR_ADMIN_MIXED_PROVIDER,
+      model,
+      basis:
+        "the row's dominant model is Grok Bot and the row also carries Cursor's own surfaces, " +
+        "which the feed gives no way to split",
+    };
+  }
+  return {
+    attribution: CURSOR_ADMIN_ATTRIBUTIONS.GROK_BOT,
+    provider: CURSOR_ADMIN_ATTRIBUTIONS.GROK_BOT,
+    model,
+    basis: "the row's dominant model is Grok Bot and the row carries only agent usage",
+  };
+}
+
+/**
  * One event per day per user.
  *
  * metricType `usage` with unit `request` is the shared contract's generic
@@ -403,7 +513,15 @@ export function buildDailyUsageEvent(row, { now = Date.now() } = {}) {
   // either would freeze the stored row at its first value and quarantine a
   // conflicting event on every pass after that.
   if (!isSettledPeriod(dayStartMs + 86_400_000, now)) return null;
-  const model = nonEmptyString(row.mostUsedModel);
+  // The attribution comes from the row itself, and the provider follows it.
+  // The event id does NOT carry the attribution:  the id stays one row per day
+  // per user, so a row that is published twice is one stored row rather than
+  // two.  The attribution is derived from the same settled fields the
+  // counters come from, so it drifts exactly when the counters drift, and the
+  // settle window above is what keeps both of them stable.  Nothing has been
+  // published by this producer yet, so there is no stored row to re-key.
+  const attribution = attributeDailyUsageRow(row);
+  const model = attribution.model;
   const requestCount = DAILY_REQUEST_COUNTERS.reduce(
     (sum, key) => sum + countOf(row[key]),
     0,
@@ -411,6 +529,8 @@ export function buildDailyUsageEvent(row, { now = Date.now() } = {}) {
   const metadata = {
     day: day.date,
     source: CURSOR_ADMIN_SERVICE,
+    attribution: attribution.attribution,
+    attributionBasis: attribution.basis,
   };
   for (const key of [...DAILY_REQUEST_COUNTERS, ...DAILY_EXTRA_COUNTERS]) {
     metadata[key] = countOf(row[key]);
@@ -423,7 +543,7 @@ export function buildDailyUsageEvent(row, { now = Date.now() } = {}) {
       userKeyOf(row),
       "requests",
     ]),
-    provider: CURSOR_ADMIN_PROVIDER,
+    provider: attribution.provider,
     service: CURSOR_ADMIN_SERVICE,
     label: "daily-usage",
     ...(model ? { producerKeyRef: model } : {}),

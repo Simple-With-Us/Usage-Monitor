@@ -295,10 +295,9 @@ export default function ApiEquivalentCostCard() {
       })}
       <div className="px-6 py-3 bg-gray-50/50 dark:bg-gray-900/20 border-t border-gray-100 dark:border-gray-700">
         <p className="text-[10px] text-gray-500 dark:text-gray-400">
-          Estimates use the bundled LiteLLM catalog plus xAI list prices refreshed {snapshotDate}.
-          {SENTENCE_GAP}Includes exact Antigravity CLI status-line counters, Claude Code OTLP,
-          Codex CLI, Grok Build, Copilot CLI, and DeepSeek Harness sessions.
-          {SENTENCE_GAP}Excludes end-user production app traffic (routed through OpenRouter).
+          Estimates use public list prices refreshed {snapshotDate}.
+          {SENTENCE_GAP}This includes Antigravity, Claude Code, Codex, Grok, Copilot, and DeepSeek sessions.
+          {SENTENCE_GAP}It leaves out end-user app traffic.
           {data.totals.unpricedModelCount > 0
             ? `${SENTENCE_GAP}${data.totals.unpricedModelCount} incompletely priced model${data.totals.unpricedModelCount === 1 ? "" : "s"} under-count derivation.`
             : ""}

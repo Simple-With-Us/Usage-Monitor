@@ -7,17 +7,18 @@ name: Mac Release (Sparkle)
 # it after CodeCaps).
 #
 # Secrets (names only; no value is ever printed):
-#   MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD  The Developer ID Application
-#       certificate for team CC8UTF7ATG.  Read at runtime from Fleet Secrets
-#       (Fleet-OPS Infisical project, prod, /mac-certs/) via a dedicated step
-#       using the org secrets INFISICAL_FLEET_OPS_PROJECT_ID and the
-#       universal-auth pair; same-named repository secrets are the synced-copy
-#       fallback.
+#   MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD  Developer ID Application
+#       certificate for team CC8UTF7ATG, read at runtime from Fleet-OPS
+#       project 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5 (prod, /mac-certs) via
+#       INFISICAL_UM_MAC_CERTS_READ_TOKEN; same-named repository secrets remain
+#       the certificate fallback
 #   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  The App Store Connect API key that
 #       ios-ship.yml already uses; notarytool signs in with it.  Canonical in
 #       Fleet Secrets /asc/; same-named repository secrets as the fallback.
-#   SPARKLE_ED_PRIVATE_KEY  The EdDSA key that signs each update archive,
-#       same-named repository secret as the fallback.
+#   SPARKLE_ED_PRIVATE_KEY  EdDSA key for each update archive, read from
+#       Usage-Monitor project 86e35e51-91bc-4dfd-a045-4484726b9c40 (prod, /)
+#       with INFISICAL_UM_MAC_RELEASE_READ_TOKEN; the same-named repository
+#       secret remains the fallback
 # With any of them missing the job still builds the bundle and verifies its
 # signature, then skips publishing with a notice that names what is missing.
 
@@ -77,10 +78,9 @@ jobs:
         uses: ./.github/actions/infisical-secrets
         with:
           names: MAC_CERT_P12_BASE64 MAC_CERT_PASSWORD
-          project-id: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID }}
+          project-id: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
           secret-path: /mac-certs
-          client-id: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID || secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET || secrets.INFISICAL_CLIENT_SECRET }}
+          token: ${{ secrets.INFISICAL_UM_MAC_CERTS_READ_TOKEN }}
         env:
           GH_FALLBACK_MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           GH_FALLBACK_MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
@@ -90,9 +90,9 @@ jobs:
         uses: ./.github/actions/infisical-secrets
         with:
           names: SPARKLE_ED_PRIVATE_KEY SENTRY_AUTH_TOKEN
-          project-id: ${{ secrets.INFISICAL_PROJECT_ID }}
-          client-id: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID || secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET || secrets.INFISICAL_CLIENT_SECRET }}
+          project-id: 86e35e51-91bc-4dfd-a045-4484726b9c40
+          secret-path: /
+          token: ${{ secrets.INFISICAL_UM_MAC_RELEASE_READ_TOKEN }}
         env:
           GH_FALLBACK_SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           GH_FALLBACK_SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}

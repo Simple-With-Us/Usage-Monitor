@@ -69,7 +69,7 @@ import {
   GROK_PRODUCER_ID,
   postUsageBatches,
 } from "./lib/session-token-collectors.mjs";
-import { expandHome, resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { expandHome, resolveCollectorToken } from "./lib/subscription-quota-run-session-token-collector.mjs";
 import { planTypeFromCodexAuth } from "./lib/codex-observed-plan.mjs";
 import { buildQuotaEvent } from "./lib/quota-event.mjs";
 import {
@@ -621,7 +621,7 @@ async function main() {
       const definition = PROVIDERS[result.providerKey];
       // Each provider posts as its own producerId, and a scoped ingest token
       // only authorizes its own producer, so resolve one token per producer.
-      const token = resolveCollectorToken(ingestTokenEnvNames(definition));
+      const token = await resolveCollectorToken(ingestTokenEnvNames(definition));
       try {
         const ack = await postUsageBatches({
           events: result.events,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Production entrypoint wrapper:
-#   - When Infisical universal-auth bootstrap credentials are present, inject
+#   - When explicit app machine-identity or service-token credentials are present, inject
 #     secrets from the usage-monitor Infisical project and then start.
 #   - Otherwise run start-with-litestream.sh with the process environment as-is
 #     (Docker Compose env_file materialization path).
@@ -10,12 +10,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 has_bootstrap=false
-if [[ -n "${INFISICAL_AUTOMATION_CLIENT_ID:-${INFISICAL_UM_CLIENT_ID:-${INFISICAL_CLIENT_ID:-}}}" &&
-  -n "${INFISICAL_AUTOMATION_CLIENT_SECRET:-${INFISICAL_UM_CLIENT_SECRET:-${INFISICAL_CLIENT_SECRET:-}}}" ]]; then
+if [[ -n "${INFISICAL_UM_READ_TOKEN:-${INFISICAL_TOKEN:-}}" ||
+  -n "${INFISICAL_CLIENT_ID:-}${INFISICAL_CLIENT_SECRET:-}${INFISICAL_UM_CLIENT_ID:-}${INFISICAL_UM_CLIENT_SECRET:-}" ]]; then
   has_bootstrap=true
 fi
 
-if [[ "${has_bootstrap}" == "true" ]] && command -v infisical >/dev/null 2>&1; then
+if [[ "${has_bootstrap}" == "true" ]]; then
+  if ! command -v infisical >/dev/null 2>&1; then
+    echo "[start-with-infisical] configured Infisical bootstrap requires the CLI" >&2
+    exit 127
+  fi
   export INFISICAL_ENV="${INFISICAL_ENV:-prod}"
   # Project UUID is an address, not a credential. Coolify no longer stores
   # INFISICAL_UM_PROJECT_ID (#1211 deleted it from the app env). #1315

@@ -12,16 +12,19 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import packageJson from "../../package.json";
 import type { CloudflareLegacyHandoffStatus } from "@/lib/external-billing-subscription-adoption";
 import { appSettings } from "@/lib/app-settings";
+import { isBroadProviderFetchOutage } from "@/lib/provider-fetch-outage";
 
-/** Total provider-poll outage: every attempted poll failed (skipped excluded). */
+export { isBroadProviderFetchOutage };
+
+/** Total provider-poll outage: every attempted poll failed, and the miss is broad. */
 export function isZeroSuccessProviderFetchOutage(
   lastRun: Pick<
     SchedulerRunSummary,
-    "successes" | "failures" | "providerFetchDegraded"
+    "successes" | "failures" | "skipped" | "providerFetchDegraded"
   > | null
 ): boolean {
   if (!lastRun?.providerFetchDegraded) return false;
-  return lastRun.successes === 0 && lastRun.failures > 0;
+  return isBroadProviderFetchOutage(lastRun);
 }
 
 export interface SchedulerRunSummary {
@@ -275,9 +278,11 @@ export function getSchedulerReadiness(now = new Date()): SchedulerReadiness {
   const zeroSuccessOutage = isZeroSuccessProviderFetchOutage(
     scheduler.lastRun
   );
-  // Partial poll degradation still needs a sustained streak before latching;
-  // a total outage (0 successes, >0 failures) surfaces on the first tick so
+  // Partial poll degradation still needs a sustained streak before latching.
+  // A broad outage (every attempt failed, and more than one provider was
+  // attempted, or nothing was skipped) surfaces on the first tick so
   // paging/readinessReason do not wait three 15-minute ticks (UM-1373).
+  // One failure beside a skip set is that provider, not this outage.
   const providerFetchDegraded =
     scheduler.consecutiveProviderFetchDegradedTicks >= degradedTickThreshold ||
     zeroSuccessOutage;

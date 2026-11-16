@@ -96,6 +96,17 @@ describe("exact single-call billing receipts", () => {
     expect((await dropEventsCoveredByBotFleet(events, enabledEnv)).skippedBotFleetCovered).toBe(1);
   });
 
+  it("never grants coverage from a workspace hint even with an exact signed receipt", async () => {
+    findMany.mockResolvedValue([await receipt()]);
+    const event = child({ "workspace.botfleetHint": "configured-root" });
+    delete event.metadata!["agent.launcher"];
+    const events = [event];
+    const result = await dropEventsCoveredByBotFleet(events, enabledEnv);
+    expect(result.events).toBe(events);
+    expect(result.skippedBotFleetCovered).toBe(0);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
   it("uses only indexed receipt keys and keeps input and unrelated calls", async () => {
     findMany.mockResolvedValue([await receipt()]);
     const events = [child(), { ...child(), quantity: 3, metadata: { ...child().metadata, tokenType: "cacheRead" } },

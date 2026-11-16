@@ -50,7 +50,7 @@ import {
   resolveCollectorToken,
   BOTFLEET_LAUNCHER_METADATA,
   isBotFleetSessionPath,
-} from "./lib/run-session-token-collector.mjs";
+} from "./lib/minimax-runtime-run-session-token-collector.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const DEBUG = process.argv.includes("--debug");
@@ -241,7 +241,7 @@ async function main() {
     }
     return;
   }
-  const token = resolveCollectorToken(["MINIMAX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["MINIMAX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   let ingestUrl;
   try {
     ingestUrl = resolveIngestUrl();

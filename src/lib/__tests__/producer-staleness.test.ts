@@ -44,6 +44,15 @@ describe("PRODUCER_STREAM_RULES", () => {
     expect(find("opencode")?.maxAgeHours).toBe(96);
   });
 
+  it("watches the Kimi and ZCode local token streams with a long idle allowance", () => {
+    for (const sourceApp of ["kimi-code", "zcode"]) {
+      expect(find(sourceApp)).toMatchObject({
+        maxAgeHours: 120,
+        requiresTokens: true,
+      });
+    }
+  });
+
   it("does not fire on the longest quiet gaps measured in prod", () => {
     // deepseek-dsh: Sep 9 to Sep 13 was ~108h, Oct 6 to Oct 9 ~88h.
     const dsh = find("deepseek-dsh")!;
@@ -79,6 +88,8 @@ describe("PRODUCER_STREAM_RULES", () => {
       "opencode",
       "botfleet",
       "minimax-code",
+      "kimi-code",
+      "zcode",
     ]) {
       expect(find(app)?.requiresTokens).toBe(true);
     }

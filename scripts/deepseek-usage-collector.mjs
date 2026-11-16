@@ -26,6 +26,8 @@ import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
+import { flushCollectorSentry } from "./lib/collector-sentry-bridge.mjs";
+
 import {
   DEEPSEEK_PRODUCER_ID,
   DSH_LEGACY_PRODUCER_INSTANCE_ID,
@@ -164,6 +166,8 @@ async function main() {
     log(`models: ${[...models].join(", ") || "(none)"}`);
   }
   if (events.length === 0) {
+    await flushCollectorSentry({ producerId: PRODUCER_ID, dryRun: DRY || args.dryRun, log });
+    await flushCollectorSentry({ producerId: PRODUCER_ID, producerInstanceId: DSH_LEGACY_PRODUCER_INSTANCE_ID, dryRun: DRY || args.dryRun, log });
     log("nothing to send");
     if (!DRY && canAdvanceCollectorCheckpoint(args, { scanComplete: scanStatus.complete })) {
       await recordCollectorSuccess(PRODUCER_ID, passStartedAt);

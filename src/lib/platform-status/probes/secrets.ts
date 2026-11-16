@@ -15,6 +15,8 @@
  */
 
 import { resolveProdInfisicalEnvironment } from "../../infisical-environment";
+import { resolveInfisicalConnection, hasStoredInfisicalConnections, isInfisicalConnectionDisabled, type InfisicalConnection, type InfisicalSource } from "../../infisical-connections";
+import { authorizeInfisical, InfisicalAuthError } from "../../infisical-auth";
 import {
   asArray,
   asRecord,
@@ -26,6 +28,7 @@ import {
   upstreamFailure,
 } from "../probe-helpers";
 import type { PlatformMetric, PlatformProbe, PlatformProbeResult } from "../types";
+import { unconfiguredResult } from "../types";
 
 /** Same default host `infisical-provider-sync` uses. */
 const DEFAULT_BASE_URL = "https://app.infisical.com";
@@ -33,11 +36,9 @@ const DEFAULT_BASE_URL = "https://app.infisical.com";
 const ALLOWED_HOSTS = new Set(["app.infisical.com", "us.infisical.com", "eu.infisical.com"]);
 const DEFAULT_SECRET_PATH = "/";
 
-/** Fleet-wide fallback identity — set alone, it enables every scope below. */
-const AUTOMATION_CLIENT_ID_ENV = "INFISICAL_AUTOMATION_CLIENT_ID";
-const AUTOMATION_CLIENT_SECRET_ENV = "INFISICAL_AUTOMATION_CLIENT_SECRET";
 
 interface ScopeDefinition {
+  source: InfisicalSource;
   /** Project display name, used verbatim as the metric label. */
   label: string;
   clientIdEnv: string;
@@ -54,6 +55,7 @@ interface ScopeDefinition {
  */
 const SCOPES: readonly ScopeDefinition[] = [
   {
+    source: "st",
     label: "SocraticTrade.com",
     clientIdEnv: "INFISICAL_ST_CLIENT_ID",
     clientSecretEnv: "INFISICAL_ST_CLIENT_SECRET",
@@ -62,6 +64,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_ST_PROJECT_ID || "",
   },
   {
+    source: "ct",
     label: "Congress.Trade",
     clientIdEnv: "INFISICAL_CT_CLIENT_ID",
     clientSecretEnv: "INFISICAL_CT_CLIENT_SECRET",
@@ -70,6 +73,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_CT_PROJECT_ID || "",
   },
   {
+    source: "shared",
     label: "Shared",
     clientIdEnv: "INFISICAL_SHARED_CLIENT_ID",
     clientSecretEnv: "INFISICAL_SHARED_CLIENT_SECRET",
@@ -78,6 +82,7 @@ const SCOPES: readonly ScopeDefinition[] = [
     defaultProjectId: process.env.INFISICAL_SHARED_PROJECT_ID || "",
   },
   {
+    source: "um",
     label: "Usage-Monitor",
     clientIdEnv: "INFISICAL_UM_CLIENT_ID",
     clientSecretEnv: "INFISICAL_UM_CLIENT_SECRET",
@@ -88,6 +93,7 @@ const SCOPES: readonly ScopeDefinition[] = [
 ] as const;
 
 interface ResolvedScope {
+  connection?: InfisicalConnection;
   label: string;
   clientId: string;
   clientSecret: string;
@@ -101,24 +107,26 @@ interface ResolvedScopes {
   incomplete: number;
 }
 
-/**
- * Env presence only — pure, synchronous, never throws.  A scope counts when
- * both halves resolve, either from its own pair or the automation fallback.
- */
-function resolveScopes(): ResolvedScopes {
+/** Resolve saved connections or explicit project credentials; never a fleet fallback. */
+async function resolveScopes(): Promise<ResolvedScopes> {
   const ready: ResolvedScope[] = [];
   let incomplete = 0;
 
   for (const scope of SCOPES) {
-    const clientId = envValue(scope.clientIdEnv, AUTOMATION_CLIENT_ID_ENV);
-    const clientSecret = envValue(scope.clientSecretEnv, AUTOMATION_CLIENT_SECRET_ENV);
-    if (clientId && clientSecret) {
+    let connection: InfisicalConnection | null;
+    try { connection = await resolveInfisicalConnection(scope.source); }
+    catch { incomplete += 1; continue; }
+    if (isInfisicalConnectionDisabled(scope.source)) continue;
+    const clientId = connection?.clientId ?? envValue(scope.clientIdEnv);
+    const clientSecret = connection?.clientSecret ?? envValue(scope.clientSecretEnv);
+    if (connection && (clientId && clientSecret || connection.mode === "service-tokens")) {
       ready.push({
+        connection,
         label: scope.label,
-        clientId,
-        clientSecret,
-        projectId: envValue(scope.projectIdEnv) ?? scope.defaultProjectId,
-        secretPath: envValue(scope.pathEnv) ?? DEFAULT_SECRET_PATH,
+        clientId: clientId ?? "",
+        clientSecret: clientSecret ?? "",
+        projectId: connection.projectId,
+        secretPath: connection.secretPath,
       });
     } else if (clientId || clientSecret) {
       incomplete += 1;
@@ -149,7 +157,7 @@ function allowedBaseUrl(): string | null {
 }
 
 type ScopeOutcome =
-  | { kind: "ok"; label: string; secrets: number }
+  | { kind: "ok"; label: string; secrets: number | null }
   | { kind: "http"; label: string; status: number }
   | { kind: "invalid"; label: string }
   | { kind: "error"; label: string; error: unknown };
@@ -164,6 +172,10 @@ async function readScope(
   environment: string
 ): Promise<ScopeOutcome> {
   try {
+    if (scope.connection?.mode === "service-tokens") {
+      await authorizeInfisical(scope.connection, scope.secretPath, "read", { baseUrl });
+      return { kind: "ok", label: scope.label, secrets: null };
+    }
     const login = await requestJson(
       `${baseUrl}/api/v1/auth/universal-auth/login`,
       {
@@ -204,15 +216,18 @@ async function readScope(
     if (!body || !Array.isArray(body.secrets)) return { kind: "invalid", label: scope.label };
     return { kind: "ok", label: scope.label, secrets: asArray(body.secrets).length };
   } catch (error) {
+    if (error instanceof InfisicalAuthError && /^http_\d+$/.test(error.code)) return { kind: "http", label: scope.label, status: Number(error.code.slice(5)) };
     return { kind: "error", label: scope.label, error };
   }
 }
 
 function isConfigured(): boolean {
-  return resolveScopes().ready.length > 0;
+  return hasStoredInfisicalConnections() || SCOPES.some((scope) => !isInfisicalConnectionDisabled(scope.source) && Boolean(envValue(scope.clientIdEnv) && envValue(scope.clientSecretEnv) || envValue(`${scope.clientIdEnv.replace(/_CLIENT_ID$/, "")}_READ_TOKEN`)));
 }
 
 async function probe(): Promise<PlatformProbeResult> {
+  const { ready, incomplete } = await resolveScopes();
+  if (ready.length === 0 && incomplete === 0) return unconfiguredResult();
   const baseUrl = allowedBaseUrl();
   if (!baseUrl) {
     return {
@@ -224,12 +239,11 @@ async function probe(): Promise<PlatformProbeResult> {
     };
   }
 
-  const { ready, incomplete } = resolveScopes();
   if (ready.length === 0) {
     return {
       state: "degraded",
       headline:
-        "No Infisical machine identity is fully configured.  Each identity needs a client id and a client secret.",
+        "No Infisical connection is fully configured.  Configure project credentials in Settings.",
       metrics: [],
       error: "incomplete_credentials",
     };
@@ -300,7 +314,7 @@ async function probe(): Promise<PlatformProbeResult> {
     const names = troubled.map((outcome) => outcome.label).join(", ");
     const metrics: PlatformMetric[] = [
       ...authenticated.map((outcome) =>
-        metric(outcome.label, formatCount(outcome.secrets, "secret"))
+        metric(outcome.label, outcome.secrets === null ? "Scope verified" : formatCount(outcome.secrets, "secret"))
       ),
       ...troubled.map((outcome) =>
         metric(
@@ -320,10 +334,10 @@ async function probe(): Promise<PlatformProbeResult> {
     };
   }
   const empty = authenticated.filter((outcome) => outcome.secrets === 0);
-  const total = authenticated.reduce((sum, outcome) => sum + outcome.secrets, 0);
+  const total = authenticated.reduce((sum, outcome) => sum + (outcome.secrets ?? 0), 0);
 
   const metrics: PlatformMetric[] = authenticated.map((outcome) =>
-    metric(outcome.label, formatCount(outcome.secrets, "secret"))
+    metric(outcome.label, outcome.secrets === null ? "Scope verified" : formatCount(outcome.secrets, "secret"))
   );
   if (incomplete > 0) {
     metrics.push(
@@ -356,7 +370,9 @@ async function probe(): Promise<PlatformProbeResult> {
 
   return {
     state: "healthy",
-    headline: `${formatCount(authenticated.length, "machine identity", "machine identities")} authenticated.  ${formatCount(total, "secret")} visible in ${environment}.`,
+    headline: authenticated.some((outcome) => outcome.secrets === null)
+      ? `${formatCount(authenticated.length, "connection")} verified for ${environment}.`
+      : `${formatCount(authenticated.length, "machine identity", "machine identities")} authenticated.  ${formatCount(total, "secret")} visible in ${environment}.`,
     metrics,
   };
 }
@@ -366,9 +382,8 @@ export const SECRETS_PROBES: readonly PlatformProbe[] = [
     id: "infisical",
     name: "Infisical",
     category: "secrets",
-    // The automation pair alone enables every scope; the per-project
-    // INFISICAL_<SCOPE>_CLIENT_ID / _CLIENT_SECRET pairs override it.
-    requiredEnv: [AUTOMATION_CLIENT_ID_ENV, AUTOMATION_CLIENT_SECRET_ENV],
+    // Saved or explicit project credentials enable each independent scope.
+    requiredEnv: [],
     consoleUrl: "https://app.infisical.com",
     isConfigured,
     probe,

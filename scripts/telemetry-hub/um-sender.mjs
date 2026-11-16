@@ -34,7 +34,83 @@
 // the pushed channel would count it twice.  The gate is the same policy the
 // monitor applies to its own generic gen_ai mapper.
 
-import { fleetSecretsGetAsync } from "../lib/fleet-secrets.mjs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
+
+// Consumer-local direct read. Candidate folder order is inherited from the
+// retired JS caller; runtime binding/reference continuity remains unqualified.
+//
+// Absence contract (aligned with the collector-side scoped read and with
+// this resolver's memoize-a-miss design):
+//   - No scoped binding resolves as absent (null), never a throw: a hub
+//     without a UM token (e.g. a Sentry-only hub) keeps running, and the
+//     environment remains the only token source.
+//   - A folder that answers cleanly with empty output confirms absence.
+//     A confirmed miss in any folder wins over a failure in another: a
+//     least-privilege binding may cover only one of the two folders and
+//     fail (403) on the other, which must not turn absence into a throw.
+//   - Only when every folder fails without a clean answer is the first
+//     failure thrown, so a broken binding or auth failure is never
+//     memoized as a miss.
+// Both folders are probed in parallel and raced: the first non-empty
+// answer wins and aborts the loser, so a fast hit never waits out a
+// hung sibling probe, a hung probe can never starve the other folder,
+// and the worst case stays one 15-second timeout instead of two
+// sequential ones.
+async function readSenderIngestToken(env) {
+  const project = env.INFISICAL_FLEET_OPS_PROJECT_ID?.trim();
+  if (!env.INFISICAL_TOKEN?.trim() || !project) {
+    return null;
+  }
+  const childEnv = { ...env, INFISICAL_DOMAIN: "https://app.infisical.com" };
+  for (const key of ["INFISICAL_API_URL", "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID",
+    "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_CLIENT_ID",
+    "INFISICAL_CLIENT_SECRET", "INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN", "TOKEN"]) delete childEnv[key];
+  let failure;
+  let confirmedMiss = false;
+  const folders = ["/", "/global-api-keys"];
+  const controllers = folders.map(() => new AbortController());
+  const value = await new Promise((resolve) => {
+    let settled = 0;
+    const settle = () => { if (++settled === folders.length) resolve(null); };
+    folders.forEach((folder, i) => {
+      execFileAsync(env.INFISICAL_BIN || "infisical",
+        ["secrets", "get", "USAGE_INGEST_TOKEN", "--plain", "--silent",
+         "--telemetry=false", "--expand=false", "--env=prod", `--path=${folder}`,
+         `--projectId=${project}`],
+        { encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv, signal: controllers[i].signal })
+        .then(({ stdout }) => {
+          const trimmed = stdout.trim();
+          if (trimmed) {
+            controllers.forEach((controller, j) => { if (j !== i) controller.abort(); });
+            resolve(trimmed);
+          } else {
+            confirmedMiss = true;
+            settle();
+          }
+        })
+        .catch((err) => {
+          // An aborted loser is not a failure; the race already resolved.
+          if (err?.code === "ABORT_ERR" || err?.name === "AbortError") { settle(); return; }
+          // No child message, stderr, stdout or cause may enter a logged error.
+          const sig = ["SIGKILL", "SIGTERM", "SIGINT", "SIGHUP"].includes(err.signal) ? err.signal : "unknown";
+          const diag = err.code === "ETIMEDOUT" ? `deadline-killed(${sig})`
+            : err.signal ? `signal(${sig})`
+            : ["ENOENT", "EACCES", "EPERM", "ENOTDIR"].includes(err.code) ? `spawn(${err.code})`
+            : Number.isInteger(err.code) && err.code >= 0 && err.code <= 255 ? `status(${err.code})`
+            : "status(unknown)";
+          failure ??= new Error(`UM sender Infisical read failed (${diag})`);
+          settle();
+        });
+    });
+  });
+  if (value) return value;
+  if (confirmedMiss) return null;
+  if (failure) throw failure;
+  return null;
+}
+
 
 import { NULL_LOGGER } from "./internal-event.mjs";
 
@@ -286,21 +362,17 @@ export async function deliverWithIsolation(events, post, { onQuarantine } = {}) 
  * Resolve the UM ingest token at send time.
  *
  * The environment wins, so a LaunchAgent can be configured without the
- * secret CLI.  Otherwise the token is read from the Mac-side fleet secret
- * store.  The value is held in memory only and is never written to disk.
+ * secret CLI.  Otherwise the token is read directly from Infisical using this
+ * consumer's scoped binding.  The value is held in memory only and is never written to disk.
  *
- * The secret store keeps a miss in its own cache for the life of the
- * process, so the store cache is not used here: a secret that appears
- * later, or a token that is rotated, has to be seen by a running hub.  The
- * memo above is the only cache: the helper process is spawned at most once
- * per minute instead of once per delivery pass, and a miss is memoized as
- * well, so a hub without the secret does not spawn the helper every ten
- * seconds either.
+ * This resolver memoizes a confirmed value or miss for 60 seconds. It does
+ * not memoize failures. A running hub sees rotations after the memo expires;
+ * a transient failure preserves its last good token and is retried next pass.
  */
 export function createTokenResolver({
   env = process.env,
   now = () => Date.now(),
-  getSecret = fleetSecretsGetAsync,
+  getSecret = () => readSenderIngestToken(env),
 } = {}) {
   let memo = { value: undefined, at: 0 };
   return async function resolveToken() {
@@ -310,16 +382,9 @@ export function createTokenResolver({
     if (stamp - memo.at < TOKEN_MEMO_MS) return memo.value;
     let value;
     try {
-      //  The store cache is NOT used here.  It keeps a miss forever, so a
-      //  secret that appears later, or a token that is rotated, would
-      //  never be seen again by a running hub.  The memo above keeps the
-      //  helper process to one call per minute instead of one per pass.
-      //  The async twin is used so a slow or hung helper cannot block the
-      //  event loop of the hub, which also serves the OTLP receiver.  The
-      //  lookup is strict: an absent key reads as missing, but a transient
-      //  failure (fetch/auth failure, timeout, missing binary) throws with
-      //  its cause instead of reading as missing, so it is retried on the
-      //  next pass rather than memoized as absent.
+      // Async direct read keeps the OTLP event loop live. Confirmed absence
+      // (including no scoped binding) returns null; auth/fetch/spawn
+      // failures with no clean folder answer throw sanitized errors.
       value = await getSecret("USAGE_INGEST_TOKEN", { strict: true });
     } catch (error) {
       //  A transient lookup failure keeps the last good token, so a hub that

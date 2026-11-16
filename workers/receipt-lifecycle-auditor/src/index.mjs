@@ -1,4 +1,5 @@
 import { validateReceiptLifecycleRules } from "../../receipt-lifecycle.mjs";
+import { guardOff, guardOffResponse } from "./budget-guard.mjs";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const AUDIT_TIMEOUT_MS = 8_000;
@@ -132,6 +133,7 @@ export class LifecycleAuditState {
 }
 
 async function handleFetch(request, env) {
+  if (guardOff(env)) return guardOffResponse();
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/status") {
     const response = await auditStateStub(env).fetch(`https://receipt-lifecycle-auditor.internal${AUDIT_STATE_PATH}`);
@@ -152,6 +154,7 @@ async function handleFetch(request, env) {
 }
 
 async function handleScheduled(_controller, env, context) {
+  if (guardOff(env)) return;
   context.waitUntil(auditAndPersist(env));
 }
 

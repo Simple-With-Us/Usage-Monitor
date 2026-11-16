@@ -64,12 +64,94 @@ export const OwnerExpenseErrorSchema = z.object({
 /** POST /api/owner-expenses/quarantine success response. */
 export const QuarantineResolveResponseSchema = z.object({
   status: z.enum(["posted", "discarded"]),
-  record: z.object({ persisted: z.number() }).optional(),
+  record: z
+    .object({ persisted: z.number(), tombstoned: z.boolean().optional() })
+    .optional(),
 });
 
 /** POST /api/owner-expenses response (201/200 recorded, 202 held). */
 export const RecordOwnerExpenseResponseSchema = z.object({
   persisted: z.number(),
   quarantined: z.boolean().optional(),
+  tombstoned: z.boolean().optional(),
   matchReason: z.string().optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Posted Expenses management (UM-1659): GET list, DELETE, PATCH, audit.
+// ---------------------------------------------------------------------------
+
+/** One posted owner expense, as returned by GET /api/owner-expenses. */
+export const PostedExpenseSchema = z.object({
+  idempotencyKey: z.string(),
+  vendor: z.string(),
+  amountUsd: z.number().nullable(),
+  occurredAt: z.string(),
+  kind: z.string(),
+  label: z.string().nullable(),
+  notes: z.string().optional(),
+  confidence: z.string(),
+  receiptInboxId: z.string().optional(),
+  dueDate: z.string().optional(),
+  nextDueDate: z.string().optional(),
+  calendarSort: z.string().optional(),
+  cancelledNoRenew: z.boolean(),
+  category: z.enum(["Tech", "Other"]).nullable(),
+});
+
+export type PostedExpense = z.infer<typeof PostedExpenseSchema>;
+
+export const OwnerExpenseTotalsSchema = z.object({
+  count: z.number(),
+  totalUsd: z.number(),
+  byCategory: z.object({
+    Tech: z.number(),
+    Other: z.number(),
+    uncategorized: z.number(),
+  }),
+  counts: z.object({
+    Tech: z.number(),
+    Other: z.number(),
+    uncategorized: z.number(),
+  }),
+});
+
+/** GET /api/owner-expenses response (management params present). */
+export const PostedExpensesResponseSchema = z.object({
+  expenses: z.array(PostedExpenseSchema),
+  nextCursor: z.string().nullable(),
+  hasMore: z.boolean(),
+  totals: OwnerExpenseTotalsSchema.optional(),
+});
+
+/** DELETE /api/owner-expenses response. */
+export const DeleteOwnerExpensesResponseSchema = z.object({
+  requested: z.number(),
+  deleted: z.number(),
+  tombstoned: z.number(),
+  notFound: z.array(z.string()),
+});
+
+/** PATCH /api/owner-expenses response. */
+export const EditOwnerExpenseResponseSchema = z.object({
+  expense: PostedExpenseSchema,
+  rekeyed: z.boolean(),
+});
+
+/** One entry of GET /api/owner-expenses/audit. */
+export const OwnerExpenseAuditEntrySchema = z.object({
+  id: z.string(),
+  idempotencyKey: z.string(),
+  action: z.string(),
+  before: PostedExpenseSchema,
+  after: PostedExpenseSchema.nullable(),
+  resultingKey: z.string().nullable(),
+  createdAt: z.string(),
+});
+
+export type OwnerExpenseAuditEntry = z.infer<typeof OwnerExpenseAuditEntrySchema>;
+
+/** GET /api/owner-expenses/audit response. */
+export const OwnerExpenseAuditListSchema = z.object({
+  entries: z.array(OwnerExpenseAuditEntrySchema),
 });

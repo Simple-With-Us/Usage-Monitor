@@ -241,9 +241,7 @@ export default function LlmBurnCard() {
       )}
       <div className="px-6 py-3 border-t border-gray-100 dark:border-gray-700">
         <p className="text-[10px] text-gray-500 dark:text-gray-400">
-          Estimates are analytics-only API-equivalent figures (producer-reported or token × LiteLLM
-          catalog refreshed {snapshotDate}), excluded from cash spend. Pace compares month-to-date
-          estimate against the prorated monthly budget; projection is linear
+          For comparison only.{"\u00A0 "}The figure uses the reported cost when one exists, otherwise a public list price refreshed {snapshotDate}.{"\u00A0 "}It is not part of cash spend.{"\u00A0 "}Pace compares the month so far with the budget for this point in the month.{"\u00A0 "}The month-end figure is a straight-line estimate
           {data.quietProviders.length > 0
             ? ` · quiet this window: ${data.quietProviders
                 .slice(0, 4)

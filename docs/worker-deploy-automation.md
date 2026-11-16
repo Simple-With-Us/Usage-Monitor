@@ -1,31 +1,142 @@
 # Mapped Worker deploy automation
 
 Default off: set WORKER_DEPLOY_ENABLED=true only after credentials, exact-version
-receipts, and functional probes are reviewed.  No secrets are rotated by this
-workflow.  CLOUDFLARE_FLEET_API_TOKEN is the existing scoped deploy credential;
-Access-protected probes use WORKER_HEALTH_ACCESS_CLIENT_ID/SECRET.  Receipt inbox
-also needs its existing read token and lifecycle audit token.  Do not widen access
-or publish private receipt data to satisfy a probe.
+receipts, and functional probes are reviewed, and the inbox's Workers Builds trigger is
+disconnected (see below).  No secrets are rotated by this
+workflow.  CLOUDFLARE_FLEET_API_TOKEN is the existing scoped deploy credential, and
+it also needs Account Analytics Read for the telemetry probe.  Receipt inbox also
+needs its existing read token and lifecycle audit token.  Do not widen access or
+publish private receipt data to satisfy a probe.
 
 The job tests current main, serializes deployments, rechecks main immediately
 before mutation, tags the Worker version with the exact SHA, verifies 100%
-production routing to that version, then runs the functional probe.  Wrangler
-uses --keep-vars and --strict.  Existing schema, bindings and migrations remain
-owned by each Worker's reviewed configuration.  A half-hour drain catches merges
-made with bot tokens.  Already-live revisions still get a health check.
+production routing to that version, then runs the functional probe.  Wrangler
+uses --keep-vars and --strict, except right after a script API change (see below).
+Existing schema, bindings and migrations remain owned by each Worker's reviewed
+configuration.  A half-hour drain catches merges made with bot tokens.
+Already-live revisions still get a health check.
 
-The pre-deploy probe fails closed: if the live Worker is unhealthy, or the probe
-credentials do not work, the job stops before any upload.  Fix-forward for a
-Worker that is already broken is a manual deploy or rollback, not this job.
+The pre-deploy HTTP probe fails closed: if the live Worker is unhealthy, or the probe
+credentials do not work, the job stops before any upload.  A telemetry target only has
+to prove its read works before an upload, because that probe looks back a whole day.  Fix-forward for a
+Worker whose HTTP probe already fails is a manual deploy, not this job.
 
-Incomplete targets deliberately excluded from the matrix: usage-monitor-receipt-lifecycle-auditor.  Their private
-or absent health routes need an approved probe before automation can be enabled.
-No public health bypass is introduced.  Ambiguous start-jays-services,
-fleet-share-api and BotFleet broker are not included.  No iOS workflow is changed.
+A rollback does not hold on its own.  The live tag then differs from main, so the next
+half-hourly run redeploys main.  Before rolling back, set WORKER_DEPLOY_ENABLED to false
+or revert the commit on main.
+
+## Targets and order
+
+The matrix runs usage-monitor-receipt-lifecycle-auditor, then expenses-jays-services,
+then usage-monitor-receipt-inbox.  The auditor goes first because the inbox reads it
+over a service binding.  The inbox also refuses to deploy while the auditor is behind
+on Worker-relevant paths, so a failed auditor run holds the inbox back.  Ambiguous
+start-jays-services, fleet-share-api and BotFleet broker are not included.  No iOS
+workflow is changed.
+
+## Disconnect Workers Builds first
+
+The order above and the GUARD-TRIPPED refusal below hold for this job only.
+usage-monitor-receipt-inbox also has a Workers Builds trigger on `main` (AGENTS.md,
+"Receipt email inbox and operations health", and workers/receipt-inbox/README.md, "Git
+repository (Workers Builds)").  Cloudflare documents that every push to that branch runs
+the deploy command.  That path runs neither check, so it could land the inbox ahead of the
+auditor or redeploy a stopped inbox.
+
+Before setting WORKER_DEPLOY_ENABLED, disconnect it: in the dashboard, open the Worker, then
+Settings, Builds, Disconnect.  Cloudflare documents that existing deployments keep serving
+traffic after a disconnect.  Then correct the two documents named above, and in the README
+replace the paragraph on connecting the auditor to Git with a pointer to this job, because
+following it would make a second unguarded path.
+
+The trigger can change at any time, so read it again just before setting the variable.  The
+Builds API's triggers list for the Worker should come back empty for all three Workers.  Reading it needs a
+token with Workers CI Read, which the deploy credential is not required to have.
+
+Read on November 4, 2026, the trigger still exists and names the repository's old owner.
+Its last build was at 7:43 PM on October 1, with no build for the 283 commits on `main`
+since.  So it looks dormant, probably because the repository moved (an inference, not
+checked), and a repaired connection would start deploying again.  Dormant is not removed.
+The auditor and expenses have no trigger.
+
+## Probes
+
+A target with `health` is called over HTTP.  The inbox uses this, with its read token.
+
+A target with `"probe": "telemetry"` is checked from Cloudflare's invocation analytics
+and takes no Worker request, D1 row or Access credential.  It fails on any failed
+invocation of the live version in the last day, and on no invocations at all in that
+window, so one failure leaves the run red until it ages out or a new version ships.  Straight after an upload the second half is skipped, because the new version has
+not met a cron yet; the next half-hourly run applies both.  A failed read of the
+analytics fails closed and the next run tries again.  That covers a rate limit, an answer
+with null data, and an answer with no account, which can mean the token lacks Account
+Analytics Read.  An empty row list is a real answer, so only the no-invocations rule judges it.
+
+A target may set `tolerated_exceptions`.  Expenses sets 12, half of the 24 syncs in the
+window once PR 1902 moves its cron from every 15 minutes to hourly, because once that PR makes
+its scheduled handler rethrow, an upstream failure counts as a thrown invocation.  The audit counted about 40 of those in 7 days, so with no allowance the
+half-hourly run would be red most of the time and a real failure would not stand out.  Up to
+12 thrown invocations pass while the live version also has successes, and the run logs the
+count.  A version that has only thrown still fails, as does any CPU, resource or internal
+failure, so hitting a limit stays red at once.  A complete sync outage goes red after about 13
+hours on that hourly cron.  The cost of a failing sync is capped by that Worker's own guards, not by this probe.
+
+The auditor has no route, so it uses telemetry.  Expenses uses it too.  Its old probe,
+GET /api/expenses, could not pass: that hostname's Access app has no service-auth policy,
+so a runner would get the login page.  The call would also have fetched the whole
+financial list and used about 500 D1 rows every half hour.  No Access policy has to change
+and WORKER_HEALTH_ACCESS_CLIENT_ID/SECRET are no longer passed.
+
+The limit of telemetry: it sees exceptions, not a run that fails and returns normally.
+The expenses scheduled handler catches its own errors until Usage-Monitor PR 1902 lands, so
+a failed sync reads as success before then.  The auditor catches its own audit errors too, so its
+telemetry only shows that the cron ran.  The audit result itself is covered by the inbox
+/health probe, which answers lifecycle_unverified when the audit is not good.
+
+## Stopped Workers and rotated secrets
+
+The job refuses a Worker whose live deployment or release carries a message starting
+GUARD-TRIPPED, both at the start and again just before upload, because a redeploy would
+undo the account watchdog's stop.  Re-arming is manual.  The refusal fails the run, so a
+stopped Worker shows red every half hour until someone re-arms it.
+
+A secret change makes a new untagged version of the same code, so the receipt walks back
+through secret-only versions to the last tagged one.  It stops at any other untagged
+version, and also when the tagged version found is not the one deployed before the secret
+change (after a rollback, or an upload never deployed).  The job then deploys once, which
+restores the tag.  A settings or limits
+PATCH is one of those: Cloudflare records it as an upload with a new script hash, so it
+cannot be told apart from a code upload.
+
+Wrangler 4.156 aborts under --strict in CI when a Worker was last changed through the
+script API, and a settings PATCH counts as that.  The job drops --strict for that one
+case, and the next deploy clears the state.  Any other last source, including a dashboard
+edit, keeps --strict.
+
+## Limits and registry check
+
+scripts/check-worker-guards.py fails a pull request when a wrangler config is not in
+scripts/worker-targets.json, a registry entry has no valid `guard` (status of `auto`,
+`gated`, `frozen` or `retire`, plus ceilings), a limit is over its ceiling, or a config
+has no explicit head_sampling_rate.  This is the local form of the fleet check; it does
+not check preview_urls or scan for unguarded binding calls.
+
+Wrangler sends limits only when the config has them, so a config without them could drop
+the live limits; whether Cloudflare keeps them in that case has not been checked.  So the
+deploy job runs the check with --require-limits and stops first.  `limits_pending` lets a
+pull request pass while the limits land in that Worker's config, and it must be removed
+once they have.  It never excuses a value over the ceiling, and it is ignored by the deploy
+job.  Some ceilings are paid-plan values: the documented Free maximums are 50 subrequests
+and 10 ms of CPU, expenses is at 200 subrequests and every CPU ceiling is above 10 ms, so a move
+to Free needs a config and ceiling change first.  The inbox ceiling is 500 ms because 200 ms stopped PDF
+mail from roughly 6.5 MiB, and intake is capped at 100 messages and 100 MiB a day (60 of each for
+public senders once PR 1903 lands), so the cost is small.
+
+## Credentials
 
 CI reads the scoped Cloudflare token from Infisical through the existing
 automation identity; its location is recorded in the private operations
-inventory maintained outside this public repository.  Repository bootstrap names:
-INFISICAL_AUTOMATION_CLIENT_ID and INFISICAL_AUTOMATION_CLIENT_SECRET.  Provisioning
+inventory maintained outside this public repository.  Repository bootstrap names:
+INFISICAL_AUTOMATION_CLIENT_ID and INFISICAL_AUTOMATION_CLIENT_SECRET.  Provisioning
 those CI bootstrap secrets is a separate approved setup step; activation remains
 off until cutover.

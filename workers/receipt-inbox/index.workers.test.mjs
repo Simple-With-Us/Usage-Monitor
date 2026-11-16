@@ -42,11 +42,76 @@ describe("receipt inbox Durable Object in workerd", () => {
 
   it("serializes concurrent reservations at the 100-message daily ceiling", async () => {
     const results = await Promise.all(Array.from({ length: 101 }, async (_, number) => {
-      const response = await request("/admit", "POST", { bytes: number + 1 });
+      const response = await request("/admit", "POST", { bytes: number + 1, noForward: true });
       return response.json();
     }));
     expect(results.filter((result) => result.result === "admitted")).toHaveLength(100);
     expect(results.filter((result) => result.result === "quota_exceeded")).toHaveLength(1);
+  });
+
+  it("serializes concurrent admissions at the per-sender limit", async () => {
+    const results = await Promise.all(Array.from({ length: 25 }, async () => {
+      const response = await request("/admit", "POST", { bytes: 1, senderDomain: "spam.example" });
+      return response.json();
+    }));
+    expect(results.filter((result) => result.result === "admitted")).toHaveLength(20);
+    expect(results.filter((result) => result.scope === "sender")).toHaveLength(5);
+  });
+
+  it("stays ready during a recent cleanup backlog and backs the alarm off", async () => {
+    const recent = String(Date.now() - 60_000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 250; number += 1) {
+        entries[`pending-expire:${recent}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const before = Date.now();
+    expect((await request("/ready")).status).toBe(200);
+    expect((await request("/summary")).status).toBe(200);
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect((await state.storage.list({ prefix: "pending-expire:" })).size).toBeGreaterThan(0);
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(before + 25_000);
+    });
+  });
+
+  it("keeps the backlog alarm backed off after a write request", async () => {
+    const recent = String(Date.now() - 60_000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 450; number += 1) {
+        entries[`pending-expire:${recent}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const before = Date.now();
+    expect((await (await request("/admit", "POST", { bytes: 1, senderDomain: "vendor.example" })).json()).result).toBe("admitted");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(before + 25_000);
+    });
+  });
+
+  it("fails readiness and summary only when the backlog is over a day old", async () => {
+    const stale = String(Date.now() - 25 * 60 * 60 * 1000).padStart(13, "0");
+    await runInDurableObject(stub(), async (_instance, state) => {
+      const entries = {};
+      for (let number = 0; number < 450; number += 1) {
+        entries[`pending-expire:${stale}:${number.toString(16).padStart(64, "0")}`] = number.toString(16).padStart(64, "0");
+      }
+      await state.storage.put(entries);
+    });
+    const ready = await request("/ready");
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({ reason: "cleanup_backlog" });
+    expect((await request("/summary")).status).toBe(503);
+  });
+
+  it("heads a missing fixed key on /health against real R2", async () => {
+    const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
+      headers: { Authorization: `Bearer ${env.RECEIPT_INBOX_READ_TOKEN}` },
+    }), env);
+    expect(response.status).toBe(200);
   });
 
   it("lists committed receipts newest first and never lists pending reservations", async () => {
@@ -112,6 +177,20 @@ describe("receipt inbox Durable Object in workerd", () => {
     expect(await env.RECEIPTS_BUCKET.get(`evidence/${item.id}.eml`)).not.toBeNull();
   });
 
+  it("releases a reservation in one real transaction, freeing its group marker", async () => {
+    const item = { ...metadata(50), groupId: "e".repeat(64) };
+    await request("/reserve", "POST", item);
+    expect(await request(`/release/${item.id}`, "POST").then((response) => response.json())).toEqual({ result: "released" });
+    await runInDurableObject(stub(), async (_instance, state) => {
+      expect(await state.storage.get(`pending:${item.id}`)).toBeUndefined();
+      expect(await state.storage.get(`dedupe:${item.id}`)).toBeUndefined();
+      expect(await state.storage.get(`group:${item.groupId}`)).toBeUndefined();
+      expect((await state.storage.list({ prefix: "pending-expire:" })).size).toBe(0);
+    });
+    const second = { ...metadata(51), groupId: item.groupId };
+    expect(await request("/reserve", "POST", second).then((response) => response.json())).toMatchObject({ result: "reserved" });
+  });
+
   it("never lets a different wrapper take over a pending attachment-group reservation", async () => {
     const first = { ...metadata(40), groupId: "f".repeat(64) };
     const second = { ...metadata(41), groupId: first.groupId };
@@ -175,7 +254,7 @@ describe("receipt inbox Durable Object in workerd", () => {
       await state.storage.put("lifecycle:audit", { ok: true, checkedAt: staleCheckedAt });
     });
     const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
-      headers: { Authorization: `Bearer ${"r".repeat(32)}` },
+      headers: { Authorization: `Bearer ${env.RECEIPT_INBOX_READ_TOKEN}` },
     }), env);
     expect(response.status).toBe(200);
     await runInDurableObject(stub(), async (_instance, state) => {

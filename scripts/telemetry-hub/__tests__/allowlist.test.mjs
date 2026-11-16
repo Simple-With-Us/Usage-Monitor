@@ -99,6 +99,18 @@ describe("the sentry allowlist", () => {
     }
   });
 
+  it("drops optional producer severityText while retaining numeric severity (S1)", () => {
+    for (const severityText of ["INFO", "ERROR", "synthetic private message", "a.b-c_d 123", "x".repeat(32), "", "x".repeat(33)]) {
+      const record = { severityText, severityNumber: 17, attributes: [stringAttr("gen_ai.system", "opencode")], body: { stringValue: "raw body" } };
+      const scrubbed = scrubLogRecord(record);
+      assert.equal(Object.hasOwn(scrubbed, "severityText"), false);
+      assert.equal(scrubbed.severityNumber, 17);
+      assert.match(scrubbed.body.stringValue, /gen_ai\.system=opencode/);
+      assert.equal(scrubbed.body.stringValue.includes("raw body"), false);
+      assert.equal(record.severityText, severityText);
+    }
+  });
+
   it("rebuilds a log body instead of forwarding it (case 3)", () => {
     const record = {
       timeUnixNano: "1700000000000000000",

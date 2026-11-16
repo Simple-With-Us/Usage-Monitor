@@ -23,8 +23,10 @@
  * Safety contract — nothing is deleted until a replacement is PROVEN good:
  *   1. Consistent snapshot via SQLite's Online Backup API (no writer downtime).
  *   2. Local PRAGMA integrity_check.
- *   3. gzip, then upload with a real signed payload hash (a truncated body is
- *      rejected by R2 rather than silently stored).
+ *   3. gzip, then upload as an S3 multipart upload — every part signed with a
+ *      real payload hash (a truncated part is rejected by R2 rather than
+ *      silently stored) and retried on its own, so one dropped connection
+ *      costs one ~64 MB part, not the whole ~1.5 GB transfer.
  *   4. Download the object back, re-hash it, decompress it, and run
  *      integrity_check on the DECOMPRESSED copy. That is a genuine weekly
  *      restore drill, not a "the PUT returned 200" check.
@@ -41,7 +43,6 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -258,6 +259,201 @@ function writeStatus(statusPath, payload) {
   }
 }
 
+/**
+ * Multipart upload. The single-PUT upload this replaces died mid-transfer
+ * twice on 2026-11-07 with `S3 PUT transport failed (UND_ERR_SOCKET)` after
+ * several minutes: one dropped connection voided a ~1.5 GB transfer that had
+ * to restart from byte zero. Parts bound the blast radius — each is signed
+ * with its own payload hash and retried up to 3 times, and only an
+ * unrecoverable part aborts the upload (AbortMultipartUpload, so no orphan
+ * parts linger against the bucket's storage). The completed object is
+ * indistinguishable from a single-PUT one: the metadata rides on
+ * CreateMultipartUpload, and the download-back verification in runArchive
+ * still proves the stored bytes match the local hash before anything prunes.
+ */
+const MULTIPART_PART_BYTES = 64 * 1024 * 1024;
+const MULTIPART_MAX_PART_ATTEMPTS = 3;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function xmlEscape(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Streaming SHA-256 + byte count of a file, without loading it into memory. */
+async function hashFile(path) {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+    bytes += chunk.length;
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+/** Read exactly `length` bytes starting at `start` — one part's worth. */
+async function readFileRange(path, start, length) {
+  if (length === 0) return Buffer.alloc(0);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of createReadStream(path, { start, end: start + length - 1 })) {
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  if (total !== length) {
+    throw new Error(`short read on ${path}: wanted ${length} bytes at offset ${start}, got ${total}`);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Every failure of the multipart sequence must classify as `upload_failed`.
+ * Part failures already do — the signer reports them as `S3 PUT ...`, which
+ * `classifyFailure` maps. Create/complete failures arrive as `S3 POST ...`;
+ * re-prefix those so the status file keeps the reason vocabulary the
+ * single-PUT upload produced.
+ */
+function asUploadError(error, phase) {
+  if (typeof error?.message === "string" && error.message.startsWith("S3 PUT")) return error;
+  return new Error(`S3 PUT multipart ${phase} failed: ${error?.message ?? String(error)}`);
+}
+
+async function uploadPartWithRetry({ creds, bucket, key, uploadId, partNumber, body, fetchImpl }) {
+  let lastError;
+  for (let attempt = 1; attempt <= MULTIPART_MAX_PART_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await s3Request({
+        method: "PUT",
+        creds,
+        bucket,
+        key,
+        query: { partNumber: String(partNumber), uploadId },
+        body,
+        fetchImpl,
+      });
+      const etag = response.headers?.get?.("etag");
+      if (!etag) throw new Error(`S3 PUT part ${partNumber} response carried no ETag`);
+      return etag;
+    } catch (error) {
+      lastError = error;
+      if (attempt < MULTIPART_MAX_PART_ATTEMPTS) {
+        log(`part ${partNumber} attempt ${attempt} failed (${error.message}); retrying`);
+        await sleep(500 * attempt);
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function abortMultipartUpload({ creds, bucket, key, uploadId, fetchImpl }) {
+  try {
+    await s3Request({
+      method: "DELETE",
+      creds,
+      bucket,
+      key,
+      query: { uploadId },
+      expectStatuses: [200, 204, 404],
+      fetchImpl,
+    });
+  } catch (error) {
+    // Best effort: a stranded upload costs a little storage until the bucket
+    // lifecycle reaps it, but masking the real upload failure would cost the
+    // diagnosis, so the original error is the one that propagates.
+    log(`WARNING: could not abort multipart upload ${uploadId}: ${error.message}`);
+  }
+}
+
+export async function uploadMultipart({
+  creds,
+  bucket,
+  key,
+  filePath,
+  fileBytes,
+  headers = {},
+  fetchImpl,
+  partBytes = MULTIPART_PART_BYTES,
+}) {
+  // Fail fast on nonsense geometry: partBytes 0 makes partCount Infinity and
+  // the part loop below would issue empty PUTs forever instead of failing.
+  if (!Number.isSafeInteger(fileBytes) || fileBytes < 0) {
+    throw new Error(`uploadMultipart fileBytes must be a non-negative integer, got ${fileBytes}`);
+  }
+  if (!Number.isSafeInteger(partBytes) || partBytes <= 0) {
+    throw new Error(`uploadMultipart partBytes must be a positive integer, got ${partBytes}`);
+  }
+  let uploadId;
+  try {
+    const createResponse = await s3Request({
+      method: "POST",
+      creds,
+      bucket,
+      key,
+      query: { uploads: "" },
+      headers,
+      fetchImpl,
+    });
+    const createXml = await createResponse.text();
+    uploadId = /<UploadId>([\s\S]*?)<\/UploadId>/.exec(createXml)?.[1];
+    if (!uploadId) throw new Error("CreateMultipartUpload response carried no UploadId");
+  } catch (error) {
+    throw asUploadError(error, "create");
+  }
+
+  try {
+    const partCount = Math.max(1, Math.ceil(fileBytes / partBytes));
+    log(`multipart upload ${uploadId}: ${partCount} part(s) of up to ${partBytes} bytes`);
+    const parts = [];
+    for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
+      const start = (partNumber - 1) * partBytes;
+      const body = await readFileRange(filePath, start, Math.min(partBytes, fileBytes - start));
+      const etag = await uploadPartWithRetry({
+        creds,
+        bucket,
+        key,
+        uploadId,
+        partNumber,
+        body,
+        fetchImpl,
+      });
+      parts.push({ partNumber, etag });
+    }
+    const completeBody =
+      `<?xml version="1.0" encoding="UTF-8"?>\n<CompleteMultipartUpload>` +
+      parts
+        .map(
+          (part) =>
+            `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>${xmlEscape(part.etag)}</ETag></Part>`
+        )
+        .join("") +
+      `</CompleteMultipartUpload>`;
+    const completeResponse = await s3Request({
+      method: "POST",
+      creds,
+      bucket,
+      key,
+      query: { uploadId },
+      body: completeBody,
+      headers: { "content-type": "application/xml" },
+      fetchImpl,
+    });
+    const completeXml = await completeResponse.text();
+    // S3 answers a failed completion with HTTP 200 and an <Error> body, and
+    // R2 inherits the quirk. Without this check a failed completion reads as
+    // success and the verification GET 404s with a misleading reason.
+    if (completeXml.includes("<Error>")) {
+      const code = /<Code>([\s\S]*?)<\/Code>/.exec(completeXml)?.[1] ?? "unknown";
+      throw new Error(`CompleteMultipartUpload returned an error body (code ${code})`);
+    }
+    return { uploadId, partCount };
+  } catch (error) {
+    await abortMultipartUpload({ creds, bucket, key, uploadId, fetchImpl });
+    throw asUploadError(error, "upload");
+  }
+}
+
 export async function runArchive({ env = process.env, argv = [], fetchImpl } = {}) {
   const options = parseArgs(argv);
   const config = resolveArchiveConfig(env, { keep: options.keep });
@@ -313,15 +509,15 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     // read after this. Drop it rather than carry a second full-size copy
     // through the rest of the run on a volume with a free-space floor.
     rmSync(snapshotPath, { force: true });
-    // Read once, then derive size, hash, and the upload body from those exact
-    // bytes. A stat-then-hash-then-read sequence is a genuine TOCTOU race: the
-    // file could change between steps and we would advertise a hash that does
-    // not describe what we actually uploaded.
-    const compressedBuffer = readFileSync(compressedPath);
-    // The upload body now lives in memory; the on-disk copy is redundant.
-    rmSync(compressedPath, { force: true });
-    const compressedBytes = compressedBuffer.length;
-    const localHash = createHash("sha256").update(compressedBuffer).digest("hex");
+    // Hash the gzip in one streaming pass, then read upload parts back from
+    // the same file. The old design read the whole gzip into memory so the
+    // advertised hash provably described the uploaded bytes; that guarantee
+    // now comes from where the file lives (this run's private work dir —
+    // nothing else can write to it) plus the download-back verification
+    // below, which still refuses to prune anything unless the stored object
+    // re-hashes to exactly this value. What changes is only the memory: the
+    // gzip is ~1.5 GB and no longer has to fit in a Buffer to be uploaded.
+    const { bytes: compressedBytes, sha256: localHash } = await hashFile(compressedPath);
     log(`compressed to ${compressedBytes} bytes (sha256 ${localHash.slice(0, 12)}...)`);
 
     const key = archiveKeyFor(config.prefix, startedAt);
@@ -332,12 +528,12 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
     }
 
     log(`uploading ${key}`);
-    await s3Request({
-      method: "PUT",
+    await uploadMultipart({
       creds: config.creds,
       bucket: config.bucket,
       key,
-      body: compressedBuffer,
+      filePath: compressedPath,
+      fileBytes: compressedBytes,
       headers: {
         "content-type": "application/gzip",
         // Survives independently of this script so a human can verify by hand.
@@ -347,6 +543,9 @@ export async function runArchive({ env = process.env, argv = [], fetchImpl } = {
       },
       fetchImpl,
     });
+    // The upload is complete; the on-disk gzip is redundant from here, and
+    // the verification download below needs the room more.
+    rmSync(compressedPath, { force: true });
 
     // ---- Verification: prove the remote object restores, not just that it exists.
     log("verifying uploaded object (download, re-hash, decompress, integrity_check)");

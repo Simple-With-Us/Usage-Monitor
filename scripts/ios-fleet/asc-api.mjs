@@ -689,6 +689,143 @@ async function setWhatToTest({ api, buildId, appId, marketing }) {
     : `release-notes: POST failed HTTP ${res.status}`);
 }
 
+// Attach one processed build to every existing external beta group, then
+// submit it for Beta App Review when that is the only thing left.  Reads the
+// group's builds before any write.  A second call with the same build is a
+// no-op.  Never creates a group and never invites a tester: an app with no
+// external group is reported and left unchanged.
+export async function assignBuildToExternalGroups({ api, appId, buildVersion, marketingVersion, log = () => {} }) {
+  const note = (message) => log(`external-beta: ${message}`);
+  const empty = { assigned: [], already: [], submitted: false };
+  const groupsRes = await api(
+    "GET",
+    `/v1/apps/${appId}/betaGroups?limit=200&fields[betaGroups]=name,isInternalGroup,publicLinkEnabled`
+  );
+  if (!groupsRes.ok) {
+    return { ok: false, reason: "groups-unreadable", error: ascErrorText(groupsRes), ...empty };
+  }
+  const external = ascRows(groupsRes).filter((group) => group.attributes.isInternalGroup === false);
+  if (external.length === 0) {
+    note("no external groups; not creating any and not inviting testers");
+    return { ok: true, reason: "no-external-groups", ...empty };
+  }
+
+  let query = `/v1/builds?filter[app]=${encodeURIComponent(appId)}&filter[version]=${encodeURIComponent(buildVersion)}&limit=5`;
+  if (marketingVersion) {
+    query += `&filter[preReleaseVersion.version]=${encodeURIComponent(marketingVersion)}`;
+  }
+  const buildRes = await api("GET", query);
+  if (!buildRes.ok) {
+    return { ok: false, reason: "build-unreadable", error: ascErrorText(buildRes), ...empty };
+  }
+  const builds = ascRows(buildRes);
+  if (builds.length !== 1) {
+    note(builds.length === 0
+      ? `build ${buildVersion} not found; nothing assigned`
+      : `${builds.length} builds match ${buildVersion}; refusing to guess`);
+    return { ok: false, reason: builds.length === 0 ? "build-missing" : "build-ambiguous", ...empty };
+  }
+  const build = builds[0];
+  const label = build.attributes.version || buildVersion;
+  if (build.attributes.processingState !== "VALID") {
+    note(`build ${label} processingState=${build.attributes.processingState || "unknown"}; not assigning yet`);
+    return {
+      ok: false,
+      reason: "build-not-valid",
+      processingState: build.attributes.processingState || null,
+      ...empty
+    };
+  }
+
+  const listBuilds = (groupId) => ascAllRows({
+    api,
+    url: `/v1/betaGroups/${groupId}/builds?limit=200&fields[builds]=version,processingState`
+  });
+  const assigned = [];
+  const already = [];
+  const failed = [];
+  for (const group of external) {
+    const name = group.attributes.name || group.id;
+    const members = await listBuilds(group.id);
+    if (!members.ok) {
+      failed.push({ groupId: group.id, name, error: members.error });
+      note(`could not read builds in "${name}" (${members.error})`);
+      continue;
+    }
+    if (members.rows.some((row) => row.id === build.id)) {
+      already.push({ groupId: group.id, name });
+      note(`build ${label} already in "${name}"`);
+      continue;
+    }
+    const link = await api(
+      "POST",
+      `/v1/betaGroups/${group.id}/relationships/builds`,
+      JSON.stringify({ data: [{ type: "builds", id: build.id }] })
+    );
+    if (link.ok || link.status === 204) {
+      assigned.push({ groupId: group.id, name });
+      note(`assigned build ${label} to "${name}"`);
+      continue;
+    }
+    if (link.status === 409) {
+      const again = await listBuilds(group.id);
+      if (again.ok && again.rows.some((row) => row.id === build.id)) {
+        already.push({ groupId: group.id, name });
+        note(`build ${label} already in "${name}" after a conflicting write`);
+        continue;
+      }
+    }
+    const error = ascErrorText(link);
+    failed.push({ groupId: group.id, name, error });
+    note(`could not assign build ${label} to "${name}" (${error})`);
+  }
+
+  let submitted = false;
+  let submitError = null;
+  let externalBuildState = null;
+  if (failed.length === 0) {
+    const detail = await api("GET", `/v1/builds/${build.id}/buildBetaDetail`);
+    if (!detail.ok) {
+      submitError = ascErrorText(detail);
+      note(`could not read buildBetaDetail (${submitError}); Beta App Review submission skipped`);
+    } else {
+      externalBuildState = detail.parsed?.data?.attributes?.externalBuildState || "unknown";
+      if (externalBuildState === "READY_FOR_BETA_SUBMISSION") {
+        const sub = await api("POST", "/v1/betaAppReviewSubmissions", JSON.stringify({
+          data: {
+            type: "betaAppReviewSubmissions",
+            relationships: { build: { data: { type: "builds", id: build.id } } }
+          }
+        }));
+        if (sub.ok) {
+          submitted = true;
+          note(`submitted build ${label} for Beta App Review`);
+        } else if (sub.status === 409) {
+          note(`build ${label} already has a Beta App Review submission`);
+        } else {
+          submitError = ascErrorText(sub);
+          note(`Beta App Review submission failed (${submitError})`);
+        }
+      } else {
+        note(`externalBuildState=${externalBuildState}; no new Beta App Review submission`);
+      }
+    }
+  }
+
+  const ok = failed.length === 0 && !submitError;
+  return {
+    ok,
+    reason: ok ? "done" : "partial",
+    buildId: build.id,
+    assigned,
+    already,
+    failed,
+    submitted,
+    submitError,
+    externalBuildState
+  };
+}
+
 async function main() {
   const cred = resolveCredential();
   if (cred.error) {
@@ -715,6 +852,7 @@ async function main() {
     console.error("       node asc-api.mjs ensure-tf-ready <bundleId> <buildVersion> [marketingVersion] [appleId]");
     console.error("       node asc-api.mjs ensure-appstore-profiles <path-to-appstore-profiles.json>");
     console.error("       node asc-api.mjs ensure-standing-testers <appleId> [buildVersion]   (emails from ASC_STANDING_TESTERS)");
+    console.error("       node asc-api.mjs assign-external-beta <appleId> <buildVersion> [marketingVersion]");
     console.error("       node asc-api.mjs latest-build-seq <bundleId> <prefix> [platform] [appleId]");
     console.error("       node asc-api.mjs latest-marketing-patch <bundleId> <prefix> [platform=IOS]");
     console.error("       node asc-api.mjs build-floor <bundleId> <version> [platform=IOS]");
@@ -1559,6 +1697,33 @@ async function main() {
       console.error(`ensure-appstore-profiles: created profile name=${profileName} bundle=${bundleId}`);
     }
     process.exit(0);
+  }
+
+  // assign-external-beta <appleId> <buildVersion> [marketingVersion]
+  //
+  // The standing-tester sync bails before it can attach a build when
+  // ASC_STANDING_TESTERS is empty.  This command is the attach itself: every
+  // existing external group, read then write, no new group and no invite.
+  // Exit 0 when the build is on those groups (or there are none).  Exit 3
+  // when a read or write failed.  Exit 2 on usage.  The ship logs a warning
+  // and does not fail the upload.
+  if (method === "assign-external-beta") {
+    const appId = String(path || "").trim();
+    const buildVersion = String(body || "").trim();
+    const marketingVersion = String(arg4 || "").trim();
+    if (!/^\d+$/.test(appId) || !buildVersion) {
+      console.error("assign-external-beta: usage: node asc-api.mjs assign-external-beta <appleId> <buildVersion> [marketingVersion]");
+      process.exit(2);
+    }
+    const result = await assignBuildToExternalGroups({
+      api,
+      appId,
+      buildVersion,
+      marketingVersion,
+      log: (message) => console.error(message)
+    });
+    console.log(JSON.stringify(result));
+    process.exit(result.ok ? 0 : 3);
   }
 
   // ensure-standing-testers <appleId> [buildVersion]

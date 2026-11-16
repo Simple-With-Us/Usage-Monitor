@@ -67,7 +67,7 @@ export const SENTRY_ATTRIBUTE_ALLOWLIST = Object.freeze([
   "service.version",
 ]);
 
-const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "xai", "meta", "groq", "together_ai", "openrouter"]);
+const AI_VENDORS = new Set(["openai", "anthropic", "google", "aws.bedrock", "azure.ai.openai", "mistral_ai", "cohere", "deepseek", "minimax", "moonshot", "zcode", "xai", "meta", "groq", "together_ai", "openrouter"]);
 export function knownAiVendor(value) {
   return typeof value === "string" && AI_VENDORS.has(value.toLowerCase()) ? value.toLowerCase() : undefined;
 }
@@ -376,8 +376,8 @@ export function scrubSpan(span, options) {
  * Scrub ONE OTLP log record.
  *
  * The body is rebuilt from the allowlisted attributes (S6); the producer's
- * raw body is never forwarded.  `severityText` is kept only when it looks
- * like a short level name.
+ * raw body is never forwarded. Producer severityText is optional free text,
+ * so drop it under S1; severityNumber preserves the numeric level.
  */
 export function scrubLogRecord(record, options) {
   if (!isPlainObject(record)) return null;
@@ -394,9 +394,8 @@ export function scrubLogRecord(record, options) {
     const severity = Number(record.severityNumber);
     if (Number.isFinite(severity)) out.severityNumber = severity;
   }
-  if (typeof record.severityText === "string" && /^[A-Za-z0-9_. -]{1,32}$/.test(record.severityText)) {
-    out.severityText = record.severityText;
-  }
+  // Character and length bounds cannot prove that producer text is a level.
+  // Never forward it, even when it happens to look like a standard level name.
   if (typeof record.traceId === "string") out.traceId = record.traceId;
   if (typeof record.spanId === "string") out.spanId = record.spanId;
   return out;

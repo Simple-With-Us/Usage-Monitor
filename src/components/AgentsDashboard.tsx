@@ -147,9 +147,9 @@ export function AgentsDashboard() {
           <span>Coding Agents</span>
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Live Mac process status, token telemetry when a seat reports it, and PAYG API-equivalent cost.
-          {SENTENCE_GAP}Subscription quota windows match Agent Bar (shared UM data).
-          {SENTENCE_GAP}Seats without accurate telemetry say so instead of showing zero usage.
+          Live status on this Mac, token counts when a tool reports them, and list-price equivalent cost.
+          {SENTENCE_GAP}Subscription quotas match the menu bar app.
+          {SENTENCE_GAP}Tools without accurate counts say so instead of showing zero usage.
         </p>
       </div>
 
@@ -217,7 +217,7 @@ export function AgentsDashboard() {
               </div>
               <div className="mt-1 text-xs text-muted-foreground truncate">
                 {data.summary.telemetryIncomplete
-                  ? "Incomplete — some seats are not reporting"
+                  ? `Incomplete.${SENTENCE_GAP}Some tools are not reporting`
                   : (
                     <>
                       Top Model:{" "}
@@ -232,8 +232,8 @@ export function AgentsDashboard() {
             {/* API Equivalent Value */}
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-muted-foreground">PAYG API Equivalent</span>
-                <span className="text-[11px] text-muted-foreground">LiteLLM Catalog</span>
+                <span className="text-xs font-medium text-muted-foreground">List Price</span>
+                <span className="text-[11px] text-muted-foreground">Public rates</span>
               </div>
               <div className="mt-2 text-2xl font-bold text-foreground">
                 {formatKnownCost(
@@ -242,7 +242,7 @@ export function AgentsDashboard() {
                 )}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
-                Billed seats this window: {formatCurrency(data.summary.totalSubscriptionCostUsd)}
+                Subscription cost this window: {formatCurrency(data.summary.totalSubscriptionCostUsd)}
               </div>
             </div>
 
@@ -275,7 +275,7 @@ export function AgentsDashboard() {
                   <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
                   <h3 className="text-sm font-semibold text-foreground">Trailing 5-Hour Rolling Activity & Burn</h3>
                 </div>
-                <span className="text-xs text-muted-foreground">ccusage block standard</span>
+                <span className="text-xs text-muted-foreground">5-hour window</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-border/50 text-center">
                 <div>
@@ -301,11 +301,11 @@ export function AgentsDashboard() {
           {/* Agent Platforms Grid */}
           <div>
             <h2 className="text-base font-bold text-foreground mb-3 flex items-center justify-between">
-              <span>Agentic Coding Platforms</span>
+              <span>Coding Tools</span>
               <span className="text-xs font-normal text-muted-foreground">
                 {data.summary.telemetryIncomplete
-                  ? "Usage numbers are omitted when telemetry is not accurate"
-                  : `Showing live status and telemetry for all ${data.platforms.length} seats`}
+                  ? "Usage numbers are omitted when the counts are not accurate"
+                  : `Live status for all ${data.platforms.length} tools`}
               </span>
             </h2>
 
@@ -351,12 +351,12 @@ export function AgentsDashboard() {
                       </div>
 
                       {/* Stats Overview */}
-                      {!platform.usageIsReliable ? (
+                      {!platform.usageIsReliable || platform.telemetryAccuracy === "partial" ? (
                         <div
                           role="status"
                           className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
                         >
-                          <span className="font-semibold">not reported.</span>
+                          <span className="font-semibold">{platform.telemetryAccuracyLabel}.</span>
                           {SENTENCE_GAP}
                           {withSentenceGaps(platform.telemetryAccuracyNote)}
                         </div>
@@ -370,7 +370,7 @@ export function AgentsDashboard() {
                           </div>
                         </div>
                         <div>
-                          <div className="text-[10px] text-muted-foreground">PAYG Value</div>
+                          <div className="text-[10px] text-muted-foreground">List Price</div>
                           <div className="font-bold text-foreground mt-0.5">
                             {platform.usageIsReliable
                               ? formatKnownCost(
@@ -437,7 +437,7 @@ export function AgentsDashboard() {
                       </span>
                       <span
                         className={`capitalize font-mono text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
-                          platform.usageIsReliable
+                          platform.usageIsReliable && platform.telemetryAccuracy !== "partial"
                             ? "bg-muted/60"
                             : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
                         }`}
@@ -458,7 +458,7 @@ export function AgentsDashboard() {
             <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
               <h2 className="text-base font-bold text-foreground mb-1">Request Performance</h2>
               <p className="text-xs text-muted-foreground mb-3">
-                Per model call, last 7 days.{SENTENCE_GAP}Reported is the harness&apos;s own PAYG-equivalent cost.{SENTENCE_GAP}Estimated is computed here from tokens at list prices for requests with no reported cost.
+                Per model call, last 7 days.{SENTENCE_GAP}Reported is the tool&apos;s own list-price cost.{SENTENCE_GAP}Estimated is computed here from tokens at list prices for requests with no reported cost.
               </p>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
@@ -471,7 +471,7 @@ export function AgentsDashboard() {
                       <th className="pb-2 font-medium text-right">TTFT p50 / p95</th>
                       <th className="pb-2 font-medium text-right">Tokens/s p50</th>
                       <th className="pb-2 font-medium text-right">Cache Hit</th>
-                      <th className="pb-2 font-medium text-right">PAYG Equivalent</th>
+                      <th className="pb-2 font-medium text-right">List Price</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/50 font-mono">

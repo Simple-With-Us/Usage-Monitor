@@ -15,8 +15,8 @@ import { useTheme } from "next-themes";
 import { Monitor, Moon, Search, Sun } from "lucide-react";
 import { setStoredDisplayDensity, useDisplayDensity } from "@/lib/display-density";
 import CommandPalette from "@/components/CommandPalette";
-
-type NavLink = { href: string; label: string };
+import { splitNavLinks, type NavLink } from "@/components/nav-link-split";
+import { useNavViewportTier } from "@/components/use-nav-viewport-tier";
 
 const PRIMARY_LINKS: NavLink[] = [
   { href: "/", label: "Overview" },
@@ -31,6 +31,7 @@ const PRIMARY_LINKS: NavLink[] = [
 ];
 
 const SECONDARY_LINKS: NavLink[] = [
+  { href: "/learn-more", label: "Learn More" },
   { href: "/attribution", label: "Keys & Apps" },
   { href: "/cost-by-session", label: "Cost by Session" },
 ];
@@ -74,6 +75,7 @@ export default function Nav() {
 
   const { theme, setTheme } = useTheme();
   const density = useDisplayDensity();
+  const navTier = useNavViewportTier();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -85,6 +87,13 @@ export default function Nav() {
     setMoreOpen(false);
     setPrefsOpen(false);
   }, [pathname]);
+
+  // At xl every link is inline and MoreMenu unmounts (no overflow links), but
+  // moreOpen lives here and would survive: reset it so the dropdown does not
+  // reappear already open when the viewport narrows back below xl.
+  useEffect(() => {
+    if (navTier === "xl") setMoreOpen(false);
+  }, [navTier]);
 
   useEffect(() => {
     if (!moreOpen && !prefsOpen) return;
@@ -123,14 +132,12 @@ export default function Nav() {
 
   const mobileLinks = [...PRIMARY_LINKS, ...SECONDARY_LINKS];
 
-  // Primary links that fit the bar; remainder (+ secondary) go under More only
-  // when there is real overflow. At xl+ everything fits inline — no More.
-  // lg: first 5 primary; md: first 4 primary.
-  const mainLinksXl = [...PRIMARY_LINKS, ...SECONDARY_LINKS];
-  const mainLinksLg = PRIMARY_LINKS.slice(0, 5);
-  const overflowLinksLg = [...PRIMARY_LINKS.slice(5), ...SECONDARY_LINKS];
-  const mainLinksMd = PRIMARY_LINKS.slice(0, 4);
-  const overflowLinksMd = [...PRIMARY_LINKS.slice(4), ...SECONDARY_LINKS];
+  const tierForSplit = navTier ?? "md";
+  const { main: desktopMainLinks, overflow: desktopOverflowLinks } = splitNavLinks(
+    PRIMARY_LINKS,
+    SECONDARY_LINKS,
+    tierForSplit
+  );
 
   return (
     <>
@@ -162,86 +169,38 @@ export default function Nav() {
               </span>
             </Link>
 
-            {/* Desktop / tablet nav — hide below md; use overflow-x if tight */}
-            <div className="hidden min-w-0 flex-1 items-center md:flex">
-              <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                {/* md–lg: fewer inline links */}
-                <div className="flex items-center gap-0.5 lg:hidden">
-                  {mainLinksMd.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                  <MoreMenu
-                    moreRef={moreRef}
-                    moreOpen={moreOpen}
-                    setMoreOpen={setMoreOpen}
-                    secondaryActive={overflowLinksMd.some((l) => isLinkActive(pathname, l.href))}
-                    links={overflowLinksMd}
-                    pathname={pathname}
-                  />
-                </div>
-                {/* lg–xl: 5 links + overflow (primary tail + secondary) */}
-                <div className="hidden items-center gap-0.5 lg:flex xl:hidden">
-                  {mainLinksLg.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                  <MoreMenu
-                    moreRef={moreRef}
-                    moreOpen={moreOpen}
-                    setMoreOpen={setMoreOpen}
-                    secondaryActive={overflowLinksLg.some((l) => isLinkActive(pathname, l.href))}
-                    links={overflowLinksLg}
-                    pathname={pathname}
-                  />
-                </div>
-                {/* xl+: all primary + secondary inline — no More (nothing overflows) */}
-                <div className="hidden items-center gap-0.5 xl:flex">
-                  {mainLinksXl.map((link) => {
-                    const isActive = isLinkActive(pathname, link.href);
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        aria-current={isActive ? "page" : undefined}
-                        className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors ${
-                          isActive
-                            ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
-                            : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
-                </div>
+            {/* Desktop / tablet nav — one link row + one More; scroll clips links only */}
+            <div className="hidden min-w-0 flex-1 items-center gap-0.5 md:flex">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {desktopMainLinks.map((link) => {
+                  const isActive = isLinkActive(pathname, link.href);
+                  return (
+                    <Link
+                      key={link.href}
+                      href={link.href}
+                      aria-current={isActive ? "page" : undefined}
+                      className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap rounded-md px-2 text-sm font-medium transition-colors lg:px-2.5 ${
+                        isActive
+                          ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
+                          : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                      }`}
+                    >
+                      {link.label}
+                    </Link>
+                  );
+                })}
               </div>
+              {desktopOverflowLinks.length > 0 && (
+                <MoreMenu
+                  moreRef={moreRef}
+                  moreOpen={moreOpen}
+                  setMoreOpen={setMoreOpen}
+                  onToggle={() => setPrefsOpen(false)}
+                  secondaryActive={desktopOverflowLinks.some((l) => isLinkActive(pathname, l.href))}
+                  links={desktopOverflowLinks}
+                  pathname={pathname}
+                />
+              )}
             </div>
 
             {/* Right tools: never shrink; compact chrome on narrow desktop */}
@@ -249,11 +208,14 @@ export default function Nav() {
               <button
                 type="button"
                 onClick={() => setCommandOpen(true)}
-                aria-label="Open command palette"
+                aria-label="Open command palette (⌘K)"
                 title="Command palette (⌘K)"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-accent xl:h-11 xl:w-auto xl:px-2.5 xl:py-2 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
                 <Search size={16} aria-hidden="true" />
+                <span className="hidden text-xs font-medium text-gray-500 xl:inline dark:text-gray-400">
+                  ⌘K
+                </span>
               </button>
 
               {mounted && (
@@ -266,7 +228,7 @@ export default function Nav() {
                       setPrefsOpen((v) => !v);
                       setMoreOpen(false);
                     }}
-                    className={`inline-flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                    className={`inline-flex h-11 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
                       prefsOpen
                         ? "border-gray-300 bg-gray-100 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
                         : "border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
@@ -374,7 +336,7 @@ export default function Nav() {
                 type="button"
                 onClick={handleLogout}
                 disabled={logoutPending}
-                className="shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                className="inline-flex min-h-11 shrink-0 items-center whitespace-nowrap rounded-md px-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
               >
                 {logoutPending ? "…" : "Log Out"}
               </button>
@@ -532,6 +494,7 @@ function MoreMenu({
   moreRef,
   moreOpen,
   setMoreOpen,
+  onToggle,
   secondaryActive,
   links,
   pathname,
@@ -539,6 +502,7 @@ function MoreMenu({
   moreRef: RefObject<HTMLDivElement | null>;
   moreOpen: boolean;
   setMoreOpen: Dispatch<SetStateAction<boolean>>;
+  onToggle?: () => void;
   secondaryActive: boolean;
   links: NavLink[];
   pathname: string;
@@ -550,8 +514,11 @@ function MoreMenu({
         type="button"
         aria-expanded={moreOpen}
         aria-haspopup="menu"
-        onClick={() => setMoreOpen((v) => !v)}
-        className={`whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors lg:px-2.5 ${
+        onClick={() => {
+          onToggle?.();
+          setMoreOpen((v) => !v);
+        }}
+        className={`inline-flex min-h-11 items-center whitespace-nowrap rounded-md px-2 text-sm font-medium transition-colors lg:px-2.5 ${
           secondaryActive || moreOpen
             ? "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
             : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
@@ -576,7 +543,7 @@ function MoreMenu({
                 href={link.href}
                 onClick={() => setMoreOpen(false)}
                 aria-current={isActive ? "page" : undefined}
-                className={`block px-3 py-2 text-sm ${
+                className={`flex min-h-11 items-center px-3 text-sm ${
                   isActive
                     ? "bg-gray-100 font-medium text-gray-900 dark:bg-gray-800 dark:text-gray-100"
                     : "text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"

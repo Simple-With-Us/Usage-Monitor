@@ -12,7 +12,7 @@
 | Concern | Where it lives | Note |
 |---|---|---|
 | Canonical runbook | [`../DEPLOY.md`](../DEPLOY.md) | Sole-source-of-truth runbook for the Hetzner box. |
-| Fleet ops map | `/Users/jay/apps/COOLIFY.md` and the private `jaywedgeworth22/fleet-ops:ATTACK-MAP.md` | Host IP, Tailscale mesh, container UUIDs. |
+| Fleet ops map | `/Users/jay/apps/COOLIFY.md` and the private `Simple-With-Us/fleet-ops:ATTACK-MAP.md` | Host IP, Tailscale mesh, container UUIDs. |
 | Litestream replica heartbeat | [`coolify/usage-monitor-replica-status.{service,timer}`](coolify/) | Installed on the Hetzner box, not Oracle. |
 | Deploy gate | GitHub Actions `verify` + `gitleaks` + `Analyze JavaScript and TypeScript` (`.github/workflows/ci.yml`) | Replaces the Oracle auto-deploy timer — there is **no per-minute GitHub poller** on Hetzner; Coolify + GitHub App auto-deploy does the merge-and-restart. |
 | Infisical env sync | Installed on the Hetzner box from `coolify/usage-monitor-env-sync.{service,timer}` (added in this PR — see PR description) | Oracle's `deploy/oracle/infisical-env-sync.sh` script is the reference implementation, not the live binary on the Hetzner box. |

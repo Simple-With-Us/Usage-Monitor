@@ -138,7 +138,7 @@ export function renderDashboard(expenses, asOf, totalCount) {
 <body>
 <main>
   <h1>Expenses</h1>
-  <p class="sub">Last 6 months, rolling.  The ledger keeps every expense going back; this view shows the most recent half year.  Data syncs from spend tracking every 15 minutes.</p>
+  <p class="sub">Last 6 months, rolling.  The ledger keeps every expense going back; this view shows the most recent half year.  Data syncs from spend tracking every hour.</p>
   <div class="filters" role="group" aria-label="Category filter">
 ${filters}
   </div>

@@ -1,3 +1,11 @@
+## Current (2026-11-03 CODEX — Codex Workspace Hints Candidate)
+
+The held draft candidate adds only a non-authoritative configured-root workspace hint to Codex telemetry, preserving all rows and measurements without claiming launch provenance or expanding exclusion.
+
+The shared collector suite, 57 receiver/OTLP/replay tests, targeted ESLint, TypeScript and diff hygiene pass.  Publication and independent review are the next steps; no collector installation or runtime activation is included.
+
+Rollout: `docs/rollouts/2026-11-03-codex-workspace-hints.md`.
+
 ## Current (2026-10-30 CODEX — Repository Report Library)
 
 `docs/reports/README.md` is the entry point for saved reports, audits, reviews and research.  Historical files retain their original paths and links.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The central document collector and placement are tracked in AFC-580.

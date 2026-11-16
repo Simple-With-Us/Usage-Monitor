@@ -7,7 +7,40 @@ import { fileURLToPath } from 'node:url';
 export const CONFIG = Object.freeze({"project": "usage-monitor", "health": "https://usage.jays.services/api/health", "repositoryId": "1284098482", "repository": "Simple-With-Us/Usage-Monitor"});
 const API = 'https://sentry.io/api/0/organizations/simple-with-us/';
 const SHA = /^[0-9a-f]{40}$/;
+const ORIGIN_IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/;
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
+
+async function readProductionHealth(url, { fetchImpl = fetch, spawn = spawnSync } = {}) {
+  const origin = process.env.PRODUCTION_ORIGIN_IPV4?.trim();
+  const parsed = new URL(url);
+  if (origin && ORIGIN_IPV4.test(origin)) {
+    const result = spawn('curl', [
+      '-fsS', '--max-time', '15',
+      '-H', 'Cache-Control: no-cache, no-store',
+      '-H', 'Pragma: no-cache',
+      '-H', 'Accept: application/json',
+      '--resolve', `${parsed.hostname}:443:${origin}`,
+      parsed.toString(),
+    ], { encoding: 'utf8', timeout: 20000 });
+    if (result.error || result.status !== 0) {
+      throw new Error(`Production health returned HTTP ${result.status === 22 ? 503 : result.status ?? 'unavailable'}`);
+    }
+    try {
+      return { body: JSON.parse(result.stdout), age: 0, cfCacheStatus: '' };
+    } catch {
+      throw new Error('Production health request or JSON parsing failed');
+    }
+  }
+  const response = await fetchImpl(parsed, { redirect: 'error', cache: 'no-store',
+    headers: { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache', Accept: 'application/json' },
+    signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`Production health returned HTTP ${response.status}`);
+  return {
+    body: await response.json(),
+    age: Number(response.headers.get('age') || 0),
+    cfCacheStatus: response.headers.get('cf-cache-status') || '',
+  };
+}
 
 export function readIdentity(body) {
   if (body?.ok !== true) throw new Error('Production health is not ready');
@@ -27,12 +60,12 @@ export function gitAncestry(ancestor, descendant, spawn = spawnSync) {
 
 export async function observeProduction({ expected, fetchImpl = fetch, sleep = pause,
   isAncestor = gitAncestry, refreshMain = () => execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { stdio: 'ignore', timeout: 30000 }),
-  attempts = 135, intervalMs = 20000, now = Date.now } = {}) {
+  attempts = 180, intervalMs = 20000, now = Date.now } = {}) {
   if (!SHA.test(expected || '')) throw new Error('Expected CI revision must be a full SHA');
   // Coolify can lag GitHub merge by well over the old 25-minute window
-  // (Sentry Deploy 38160197337 timed out waiting for 7f03155). 45 minutes
-  // still fails closed if production never picks up the revision.
-  const deadline = now() + 45 * 60 * 1000;
+  // (Sentry Deploy 38160197337 timed out waiting for 7f03155). Keep attempts
+  // aligned with the deadline so the loop can use the full window (20s cadence).
+  const deadline = now() + 60 * 60 * 1000;
   let prior = null;
   let reason = 'No healthy live revision observed';
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -52,14 +85,11 @@ export async function observeProduction({ expected, fetchImpl = fetch, sleep = p
     try {
       const url = new URL(CONFIG.health);
       url.searchParams.set('sentry-deploy-probe', `${now()}-${attempt}`);
-      const response = await fetchImpl(url, { redirect: 'error', cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache, no-store', Pragma: 'no-cache', Accept: 'application/json' },
-        signal: AbortSignal.timeout(15000) });
-      if (!response.ok) throw new Error(`Production health returned HTTP ${response.status}`);
-      if (Number(response.headers.get('age') || 0) > 0 || /^(HIT|STALE|UPDATING)$/i.test(response.headers.get('cf-cache-status') || '')) {
+      const { body, age, cfCacheStatus } = await readProductionHealth(url, { fetchImpl });
+      if (age > 0 || /^(HIT|STALE|UPDATING)$/i.test(cfCacheStatus)) {
         throw new Error('Production health response was cached');
       }
-      const observed = readIdentity(await response.json());
+      const observed = readIdentity(body);
       if (!isAncestor(observed, 'refs/remotes/origin/main')) throw new Error('Observed revision is not on main');
       if (!isAncestor(expected, observed)) throw new Error('Production has not deployed this CI revision or a successor');
       // Two independent uncached observations reduce rollout/routing race false positives.

@@ -1,10 +1,10 @@
 name: Infisical secrets
 description: >-
-  Fetch named secrets from Infisical (universal-auth), mask them, and export
+  Fetch named secrets from Infisical with a scoped service token, mask them, and export
   them into $GITHUB_ENV -- falling back to a same-named GH_FALLBACK_<NAME>
   step env var and warning (or failing, for a name listed in `required`)
   when a name stays empty everywhere.  Wraps scripts/infisical-fetch.mjs, a
-  dependency-free Node script, instead of the Infisical CLI: the CLI's only
+  Node script using a pinned Zod schema, instead of the Infisical CLI: the CLI's only
   install path (`brew install infisical/get-cli/infisical`) is macOS-only,
   and this action also runs on windows-latest and ubuntu-24.04.
   Values are never printed except immediately after the `::add-mask::`
@@ -42,11 +42,8 @@ inputs:
     description: Infisical secret path.
     required: false
     default: /
-  client-id:
-    description: Universal-auth machine identity client id.
-    required: true
-  client-secret:
-    description: Universal-auth machine identity client secret.
+  token:
+    description: Scoped service token for this Infisical project and use case.
     required: true
   site-url:
     description: Infisical site URL.
@@ -56,6 +53,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install pinned Infisical fetch dependency
+      shell: bash
+      run: |
+        env -i PATH="$PATH" HOME="$HOME" RUNNER_TEMP="$RUNNER_TEMP" \
+          npm install --prefix "$GITHUB_WORKSPACE/.." \
+            --no-save --package-lock=false --ignore-scripts --no-audit --no-fund zod@4.6.6
+
     # A GH_FALLBACK_<NAME> value for each requested name is passed by the
     # calling step's own `env:` block -- not an input here, since the set of
     # names differs per caller and Actions has no way to declare "one input
@@ -69,7 +73,6 @@ runs:
         INFISICAL_PROJECT_ID: ${{ inputs.project-id }}
         INFISICAL_ENVIRONMENT: ${{ inputs.environment }}
         INFISICAL_SECRET_PATH: ${{ inputs.secret-path }}
-        INFISICAL_CLIENT_ID: ${{ inputs.client-id }}
-        INFISICAL_CLIENT_SECRET: ${{ inputs.client-secret }}
+        INFISICAL_TOKEN: ${{ inputs.token }}
         INFISICAL_SITE_URL: ${{ inputs.site-url }}
       run: node "$GITHUB_ACTION_PATH/../../../scripts/infisical-fetch.mjs"

@@ -9,7 +9,7 @@ final class AntigravityQuotaGroupsTests: XCTestCase {
         let groups = AntigravityQuotaGroups.normalize(reports, includeMissing: true)
         XCTAssertEqual(groups.count, 4)
         XCTAssertEqual(groups.map(\.remainingPercent), [80, 25, 40, 10])
-        XCTAssertEqual(groups.map(\.label), ["Gemini Models · 5-hour", "Gemini Models · Weekly", "Third-Party Models · 5-hour", "Third-Party Models · Weekly"])
+        XCTAssertEqual(groups.map(\.label), ["Gemini · 5-Hour", "Gemini · Weekly", "Third-Party · 5-Hour", "Third-Party · Weekly"])
         XCTAssertTrue(groups.allSatisfy { $0.modelId == nil && $0.absoluteLimit == nil })
         XCTAssertEqual(AntigravityQuotaGroups.normalize(groups, includeMissing: true), groups)
     }
