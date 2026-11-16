@@ -62,9 +62,12 @@ public struct WidgetSnapshotResolver {
     public let containerURL: URL?
     private let store: SharedStore
 
-    public init(containerURL: URL? = AppGroup.containerURL) {
+    public init(
+        containerURL: URL? = AppGroup.containerURL,
+        defaults: UserDefaults = AppGroup.defaults
+    ) {
         self.containerURL = containerURL
-        self.store = SharedStore(containerURL: containerURL)
+        self.store = SharedStore(containerURL: containerURL, defaults: defaults)
     }
 
     /// Production instance used by the widget extension and both apps.
@@ -96,6 +99,13 @@ public struct WidgetSnapshotResolver {
             )
         }
 
+        // Existence is captured before the reads: SharedStore deletes a
+        // client file that fails validation while reading it, so checking
+        // afterwards would never see the file and the rejection flag could
+        // never fire.
+        let clientFileExisted = fileExists(Self.clientFileName)
+        let localFileExisted = fileExists(Self.localFileName)
+
         let client = store.read()
         let local = readLocalSnapshot()
 
@@ -122,8 +132,8 @@ public struct WidgetSnapshotResolver {
                 source: source,
                 generatedAt: chosen?.generatedAt,
                 ageSeconds: chosen.map { now.timeIntervalSince($0.generatedAt) },
-                clientFileRejected: client == nil && fileExists(Self.clientFileName),
-                localFileRejected: local == nil && fileExists(Self.localFileName)
+                clientFileRejected: client == nil && clientFileExisted,
+                localFileRejected: local == nil && localFileExisted
             )
         )
     }
