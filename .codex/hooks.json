@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=$(git rev-parse --show-toplevel) && python3 \"$root/.codex/hooks/block-xcode-project-writes.py\" || { rc=$?; [ \"$rc\" -eq 2 ] || printf \"%s\\n\" \"Xcode guard could not run; refusing edit.\" >&2; exit 2; }",
+            "command": "root=$(git rev-parse --show-toplevel) || { printf \"%s\\n\" \"Xcode guard could not resolve the repository; refusing edit.\" >&2; exit 2; }; hook=\"$root/.codex/hooks/block-xcode-project-writes.py\"; if [ ! -f \"$hook\" ]; then printf \"%s\\n\" \"Xcode guard script is missing; refusing edit.\" >&2; exit 2; fi; python3 \"$hook\"; rc=$?; case \"$rc\" in 0|2) exit \"$rc\" ;; *) printf \"%s\\n\" \"Xcode guard could not run; refusing edit.\" >&2; exit 2 ;; esac",
             "statusMessage": "Blocking Xcode project file writes"
           }
         ]

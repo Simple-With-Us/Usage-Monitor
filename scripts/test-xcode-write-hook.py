@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / '.codex/hooks/block-xcode-project-writes.py'
@@ -48,6 +49,16 @@ class XcodeGuardTests(unittest.TestCase):
         self.assertIn('Do not hand-edit', result.stderr)
         result = subprocess.run(['bash', '-c', command], cwd=ROOT / 'scripts', input=json.dumps({'tool_input': {'file_path': 'A.swift'}}), text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_guard_has_explicit_diagnostic_and_blocks(self):
+        command = json.loads((ROOT / '.codex/hooks.json').read_text())['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        with tempfile.TemporaryDirectory() as folder:
+            subprocess.run(['git', 'init', '-q', folder], check=True)
+            result = subprocess.run(['bash', '-c', command], cwd=folder, input='{}', text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('guard script is missing', result.stderr)
+        self.assertIn('test:xcode-write-hook', json.loads((ROOT / 'package.json').read_text())['scripts']['verify'])
+        self.assertIn('run: npm run test:xcode-write-hook', (ROOT / '.github/workflows/ci.yml').read_text())
 
 if __name__ == '__main__':
     unittest.main()
