@@ -42,8 +42,6 @@ if not token:
 request = urllib.request.Request(routing["base_url"] + "/services/" + service["uuid"], headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
 with opener.open(request, timeout=25) as response:
     current = json.load(response)
-compose = yaml.safe_load(current.get("docker_compose") or current.get("docker_compose_raw"))
-unit = compose["services"]["telemetry-hub"]
 raw_value = current.get('docker_compose_raw')
 if not isinstance(raw_value, str) or not raw_value:
     raise SystemExit('Original raw compose is unavailable; preserve the service')
@@ -56,6 +54,11 @@ if not isinstance(raw_compose, dict):
 if not isinstance(raw_compose, dict) or set(raw_compose.get('services', {})) != {'telemetry-hub'}:
     raise SystemExit('Original raw compose service membership changed')
 raw_unit = raw_compose['services']['telemetry-hub']
+compose_value = current.get("docker_compose")
+compose = yaml.safe_load(compose_value) if isinstance(compose_value, str) and compose_value else raw_compose
+if not isinstance(compose, dict) or "services" not in compose:
+    raise SystemExit('Current compose shape is unsupported')
+unit = compose["services"]["telemetry-hub"]
 if os.environ.get('UM1651_RAW_SHAPE_ONLY') == '1':
     raw_env = raw_unit.get('environment', {})
     if isinstance(raw_env, list): raw_env = dict(item.split('=', 1) for item in raw_env if '=' in item)

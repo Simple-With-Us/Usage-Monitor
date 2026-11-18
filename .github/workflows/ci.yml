@@ -232,6 +232,9 @@ jobs:
       # Coverage-instrumented run of the same suite `npm test` executes; the
       # thresholds in vitest.config.ts (ratcheted to measured reality) make
       # this step fail on a genuine coverage regression.
+      - name: Install Python test dependencies
+        run: python3 -m pip install --break-system-packages pyyaml
+
       - name: Test (with coverage gate)
         run: npm run test:coverage
 

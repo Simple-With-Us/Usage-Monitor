@@ -10,7 +10,7 @@ tokens=json.loads(env['COLLECTOR_TELEMETRY_HUB_TOKENS_JSON'])
 env['COLLECTOR_TELEMETRY_HUB_TOKENS_JSON']=json.dumps({'claude-code':tokens['claude-code']},separators=(',',':'))
 env['UM_CLAUDE_CATCHUP_MODE']=mode
 if mode=='apply' and len(env.get('UM_CLAUDE_CATCHUP_APPROVED_PLAN_SHA256',''))!=64:raise SystemExit('Exact approved plan digest required')
-code=pathlib.Path('/tmp/um1646-sentry-historic-20261103/claude-historic-24h.mjs').read_text()
+code=pathlib.Path(__file__).with_name('.um1646-claude-historic24h.mjs').read_text()
 result=subprocess.run([job['ProgramArguments'][0],'--input-type=module'],input=code,text=True,capture_output=True,env=env,timeout=180)
 if result.returncode:raise SystemExit('Catch-up guard failed; no source or configuration values printed')
 rows=[json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]

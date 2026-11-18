@@ -43,11 +43,23 @@ const config=collectorSentryConfig(process.env,identity.producerId);
 assert.equal(config?.destination,'hub');
 const deliveryConfiguration={destination:config.destination,endpoint:config.endpoint,stateRoot:config.stateRoot};
 const deliveryConfigDigest=hash(JSON.stringify(deliveryConfiguration));
+const validateApprovedPlan=value=>{
+  assert.ok(value&&typeof value==='object'&&!Array.isArray(value),'approved plan must be a JSON object');
+  const pick={};
+  for(const key of ['commit','sourceHashDigest','identityDigest','deliveryConfigDigest','lower','upper']){
+    assert.ok(typeof value[key]==='string','approved plan string field missing: '+key);
+    pick[key]=value[key];
+  }
+  assert.match(pick.commit,/^[a-f0-9]{40}$/,'approved plan commit shape');
+  for(const key of ['sourceHashDigest','identityDigest','deliveryConfigDigest'])assert.match(pick[key],/^[a-f0-9]{64}$/,'approved plan digest shape: '+key);
+  assert.ok(Number.isFinite(Date.parse(pick.lower))&&Number.isFinite(Date.parse(pick.upper)),'approved plan dates must parse');
+  return pick;
+};
 let approved,planBytes;
 if(mode==='apply'){
   planBytes=await readFile(planFile);
   assert.equal(hash(planBytes),process.env.UM_CLAUDE_CATCHUP_APPROVED_PLAN_SHA256);
-  approved=JSON.parse(planBytes);
+  approved=validateApprovedPlan(JSON.parse(planBytes));
   assert.equal(approved.commit,commit);
   assert.equal(approved.sourceHashDigest,hash(JSON.stringify(sourceHashes)));
   assert.equal(approved.identityDigest,hash(JSON.stringify(identity)));

@@ -47,8 +47,8 @@
     "audit:provider-duplicates": "node scripts/audit-provider-duplicates.mjs",
     "audit:subscription-links": "node scripts/audit-subscription-links.mjs",
     "ensure:subscription-link-index": "node scripts/ensure-subscription-link-unique-index.mjs",
-    "test": "vitest run && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard",
-    "test:coverage": "vitest run --coverage && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard",
+    "test": "vitest run && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard && npm run test:um1646-python",
+    "test:coverage": "vitest run --coverage && npm run test:infisical-fetch && npm run test:alert-timestamps && npm run test:budget-guard && npm run test:um1646-python",
     "test:budget-guard": "node --test \"workers/**/budget-guard.test.mjs\"",
     "test:infisical-fetch": "node --test scripts/infisical-fetch.node-test.mjs scripts/infisical-fetch-expand.node-test.mjs scripts/infisical-run.node-test.mjs scripts/collector-injector.node-test.mjs",
     "test:alert-timestamps": "node --test scripts/normalize-alert-timestamps.node-test.mjs",
@@ -73,7 +73,8 @@
     "test:audit-ci": "node scripts/test-audit-ci.mjs",
     "test:sentry-ci-report": "python3 scripts/test-sentry-ci-report.py",
     "verify": "npm run test:node-runtime && npm run test:sentry-ci-report && npm run test:security-ancestry && npm run lint && npm run typecheck && npm test && npm run test:receipt-inbox-worker && npm run test:expenses-worker && npm run test:migrate-safe && npm run test:sqlite-backup && npm run test:backup-concurrent-startup && npm run test:r2-archive && npm run test:startup-config && npm run test:oracle-deploy && npm run test:apple-projects && npm run test:antigravity-collector && npm run test:session-token-collectors && npm run test:collector-runtime && npm run test:cf-token-map && npm run test:replica-status-probe && npm run test:quota-wrapper && npm run test:audit-ci && npm run build",
-    "test:security-ancestry": "python3 scripts/telemetry-hub/test_audit_security_ancestry.py"
+    "test:security-ancestry": "python3 scripts/telemetry-hub/test_audit_security_ancestry.py",
+    "test:um1646-python": "python3 test_child_config_local_cas.py && python3 test_um1646_inventory_update_fixture.py && python3 test_upgrade_reviewed_hub.py"
   },
   "dependencies": {
     "@datadog/browser-logs": "^7.15.0",
