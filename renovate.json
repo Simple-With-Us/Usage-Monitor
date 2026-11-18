@@ -1,38 +1,113 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": [
+    "config:recommended"
+  ],
   "dependencyDashboard": true,
   "minimumReleaseAge": "5 days",
   "packageRules": [
     {
       "description": "Keep Node updates within the supported package engine and runtime major.",
-      "matchPackageNames": ["node"],
+      "matchPackageNames": [
+        "node"
+      ],
       "allowedVersions": ">=24 <25"
     },
     {
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
       "groupName": "non-major dependencies",
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true
     },
     {
-      "matchUpdateTypes": ["major"],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "automerge": false,
-      "labels": ["dependencies", "major"]
+      "labels": [
+        "dependencies",
+        "major"
+      ]
     },
     {
       "description": "typescript devDep is the TS 6 API alias for eslint; compiler is @typescript/native (TS 7).",
-      "matchManagers": ["npm"],
-      "matchDepNames": ["typescript"],
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepNames": [
+        "typescript"
+      ],
       "enabled": false
     },
     {
       "description": "Prisma CLI and client must move together; Prisma 7 also needs prisma.config.ts and a driver adapter, so the major stays a manual migration.",
-      "matchUpdateTypes": ["major"],
-      "matchPackageNames": ["prisma", "@prisma/client"],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "matchPackageNames": [
+        "prisma",
+        "@prisma/client"
+      ],
       "groupName": "prisma"
+    },
+    {
+      "description": "Major updates come once a month as their own PRs and never automerge.  Dependency Dashboard approval is not used because every fleet repo has GitHub issues turned off, so Renovate has no dashboard to approve from and majors would vanish silently.  Repos keep their own major labels, holds and PR text.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "schedule": [
+        "before 6am on the first day of the month"
+      ],
+      "automerge": false,
+      "addLabels": [
+        "major"
+      ]
+    },
+    {
+      "description": "Keep the npm <12 constraint above in place.  npm 12 defaults allow-remote to none, and `npm install --package-lock-only` (what Renovate runs for lockfiles) then refuses registry tarballs of packages with bundleDependencies, such as @tailwindcss/oxide-wasm32-wasi, with EALLOWREMOTE (npm/cli#9800, still open on npm 12.2.1).  Drop the constraint and this rule once a fixed npm 12 ships.",
+      "matchManagers": [
+        "renovate-config"
+      ],
+      "matchDepTypes": [
+        "tool-constraint"
+      ],
+      "enabled": false
     }
   ],
-  "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security"
+    ],
+    "minimumReleaseAge": null,
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "timezone": "America/Chicago",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "updateNotScheduled": false,
+  "prConcurrentLimit": 2,
+  "prHourlyLimit": 2,
+  "rebaseWhen": "conflicted",
+  "labels": [
+    "dependencies"
+  ],
+  "constraints": {
+    "npm": "<12"
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on the first day of the month"
+    ],
+    "automerge": true
+  }
 }
