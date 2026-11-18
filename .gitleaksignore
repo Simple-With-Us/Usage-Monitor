@@ -27,3 +27,15 @@
 # 131005389954 (Security on main at ed409d65) reported these fingerprints.
 6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:85
 6a25fe0a848ff39227d78c7ad14ce030404a5888:src/app/api/key-attribution/__tests__/route.test.ts:generic-api-key:100
+
+# False-positive: .um1646-child-pair-plan.json was a UM-1646 deployment plan
+# manifest; the matched values are SHA-256 module hashes (installed/hashes
+# map keyed by file path, plus code/*Sha256 fields), not credentials.
+# sentry-access-token matched because two hash keys contain "sentry";
+# generic-api-key matched the 64-hex entropy.  The file is deleted at main
+# tip; these findings survive only in history at commit 2ec155692fa9.
+2ec155692fa91b960fcdca32b9f4c152772d659b:.um1646-child-pair-plan.json:sentry-access-token:9
+2ec155692fa91b960fcdca32b9f4c152772d659b:.um1646-child-pair-plan.json:generic-api-key:10
+2ec155692fa91b960fcdca32b9f4c152772d659b:.um1646-child-pair-plan.json:generic-api-key:12
+2ec155692fa91b960fcdca32b9f4c152772d659b:.um1646-child-pair-plan.json:generic-api-key:13
+2ec155692fa91b960fcdca32b9f4c152772d659b:.um1646-child-pair-plan.json:sentry-access-token:19
