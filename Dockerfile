@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.28
+# syntax=docker/dockerfile:1.29
 FROM node:24.22.3-bookworm-slim AS build
 
 # python3 + make + g++ are required by the builder stage only.  better-sqlite3
