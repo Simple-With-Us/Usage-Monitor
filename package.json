@@ -86,7 +86,7 @@
     "@sentry/nextjs": "^11.3.0",
     "dd-trace": "^6.19.0",
     "lucide-react": "^1.50.0",
-    "next": "16.4.5",
+    "next": "16.4.6",
     "next-themes": "^0.4.6",
     "postal-mime": "^4.0.8",
     "protobufjs": "^8.8.0",
@@ -120,7 +120,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0",
-    "wrangler": "4.158.0"
+    "wrangler": "4.160.1"
   },
   "overrides": {
     "minimatch": "^11.0.0",
