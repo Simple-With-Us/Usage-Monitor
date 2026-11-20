@@ -87,7 +87,8 @@
     "minimumReleaseAge": null,
     "schedule": [
       "at any time"
-    ]
+    ],
+    "internalChecksFilter": "none"
   },
   "timezone": "America/Chicago",
   "schedule": [
