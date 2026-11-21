@@ -1,0 +1,26 @@
+--- fleet-backups.before
++++ fleet-backups.proposed
+@@ -1,8 +1,6 @@
+-# Jay 2026-10-31: local retention is ONE copy per app (KEEP_COUNT=1 on all lanes).
+-# KEEP_DAYS raised to 3650 so the age prune can never delete the sole copy if
+-# backups stall; the count prune governs. B2 retention unchanged (3 dailies +
+-# 2 weeklies, 14-day max). Newest set of each app is also mirrored hourly to
+-# /backups on the root drive by fleet-backup-mirror.sh (/etc/cron.d/fleet-backup-mirror).
++# Local dumps retain two days: ST 4, CT 4, UM 2 complete snapshots.
++# B2 retention unchanged: 3 dailies + 2 weeklies, 14-day maximum.
++# Root-drive mirror status requires separate verification; this config does not install it.
+ SHELL=/bin/bash
+ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ # Jay 2026-10-30 schedule + retention (all three apps):
+@@ -18,8 +16,8 @@
+ # pruning stay on UTC stamps (date -u ...Z), so the host TZ does not affect them.
+ #   Weekly UM verify: Sat 11:30pm CT (was Sun 04:30 UTC).
+ # Separate locks per lane.
+-30 6,19 * * * root flock -n /var/lock/fleet-sqlite-backup-st.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-st.inner.lock FLEET_BACKUP_APPS=socratic FLEET_BACKUP_KEEP_DAYS=3650 FLEET_BACKUP_KEEP_COUNT=1 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-st.log 2>&1
+-0 6,20 * * * root flock -n /var/lock/fleet-sqlite-backup-ct.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-ct.inner.lock FLEET_BACKUP_APPS=congress FLEET_BACKUP_KEEP_DAYS=3650 FLEET_BACKUP_KEEP_COUNT=1 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-ct.log 2>&1
+-30 20 * * * root flock -n /var/lock/fleet-sqlite-backup-um.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-um.inner.lock FLEET_BACKUP_APPS=usage-monitor FLEET_BACKUP_KEEP_DAYS=3650 FLEET_BACKUP_KEEP_COUNT=1 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-um.log 2>&1
++30 6,19 * * * root flock -n /var/lock/fleet-sqlite-backup-st.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-st.inner.lock FLEET_BACKUP_APPS=socratic FLEET_BACKUP_KEEP_DAYS=2 FLEET_BACKUP_KEEP_COUNT=4 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-st.log 2>&1
++0 6,20 * * * root flock -n /var/lock/fleet-sqlite-backup-ct.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-ct.inner.lock FLEET_BACKUP_APPS=congress FLEET_BACKUP_KEEP_DAYS=2 FLEET_BACKUP_KEEP_COUNT=4 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-ct.log 2>&1
++30 20 * * * root flock -n /var/lock/fleet-sqlite-backup-um.lock -c "FLEET_BACKUP_LOCKFILE=/var/lock/fleet-sqlite-backup-um.inner.lock FLEET_BACKUP_APPS=usage-monitor FLEET_BACKUP_KEEP_DAYS=2 FLEET_BACKUP_KEEP_COUNT=2 B2_KEEP_DAILY=3 B2_KEEP_WEEKLY=2 B2_MAX_AGE_DAYS=14 /usr/local/sbin/fleet-sqlite-backup.sh" >> /var/log/fleet-backup/cron-sqlite-um.log 2>&1
+ */15 * * * * root /usr/local/sbin/fleet-health-verify.sh >> /var/log/fleet-backup/cron-health.log 2>&1
+ 30 23 * * 6 root FLEET_BACKUP_VERIFY_APPS=usage-monitor /usr/local/sbin/fleet-backup-verify-weekly.sh >> /var/log/fleet-backup/cron-weekly.log 2>&1

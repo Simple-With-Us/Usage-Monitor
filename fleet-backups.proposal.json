@@ -1,0 +1,30 @@
+{
+  "installedSha256": "80e056fb71ae47abe25be83221fcbb8ae7930a28a4ee732c981fdb9aac545baf",
+  "beforeSha256": "80e056fb71ae47abe25be83221fcbb8ae7930a28a4ee732c981fdb9aac545baf",
+  "proposedSha256": "0a27216aca86938ccf3a6a8b0cf2bb5f0f2e3188dd3ad6b3d934eac21237fc88",
+  "rowSyntax": "bash -n passed for every executable cron row",
+  "unchanged": "All cron schedules, locks, remote flags, health row, and weekly verify row preserved",
+  "rows": [
+    {
+      "app": "socratic",
+      "schedule": "30 6,19 * * *",
+      "keepDays": 2,
+      "keepCount": 4
+    },
+    {
+      "app": "congress",
+      "schedule": "0 6,20 * * *",
+      "keepDays": 2,
+      "keepCount": 4
+    },
+    {
+      "app": "usage-monitor",
+      "schedule": "30 20 * * *",
+      "keepDays": 2,
+      "keepCount": 2
+    }
+  ],
+  "applied": false,
+  "decision": "Rejected and superseded by the owner's November 3 direct decision to keep all current settings",
+  "publishOrApply": false
+}

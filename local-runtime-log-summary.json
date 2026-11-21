@@ -1,0 +1,52 @@
+{
+  "scope": "Existing local container logs, last 90 minutes and maximum 2500 lines; Go/JSON WARN/ERROR and bounded keyword counts",
+  "lineCount": 654,
+  "syntaxCounts": {
+    "go_level_records": 573
+  },
+  "levelCounts": {},
+  "keywordCounts": {
+    "error": 2,
+    "warn": 0,
+    "archive_failed": 0,
+    "download_cap_exceeded": 0,
+    "upload_cap_exceeded": 0,
+    "storage cap exceeded": 0,
+    "checksum mismatch": 0
+  },
+  "genericErrorKeywordContext": [
+    {
+      "severity": "no_go_level",
+      "termClasses": [
+        "litestream"
+      ],
+      "allowlistedWords": [
+        "errors",
+        "litestream",
+        "migration"
+      ],
+      "looksLikeDuListing": false
+    },
+    {
+      "severity": "no_go_level",
+      "termClasses": [],
+      "allowlistedWords": [
+        "error"
+      ],
+      "looksLikeDuListing": false
+    }
+  ],
+  "categoryCounts": {},
+  "lastTimestamps": {},
+  "r2ExistingStatus": {
+    "ok": false,
+    "reason": "archive_failed",
+    "checkedAt": "2026-11-01T04:14:36.401Z",
+    "fieldNames": [
+      "checkedAt",
+      "ok",
+      "reason"
+    ],
+    "errorClasses": []
+  }
+}
