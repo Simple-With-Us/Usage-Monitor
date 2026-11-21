@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 /**
- * Offline gate: audit-ci.jsonc must allowlist GHSA-vfj7-8cjw-p6xm (braces, dev-only paths)
- * and audit-ci must pass at high severity.  Mirrors .github/workflows/ci.yml audit step.
+ * Offline gate: audit-ci.jsonc must allowlist the unfixable picomatch advisory
+ * (GHSA-fc5q-39xc-vjpf) and audit-ci must pass at high severity.  Mirrors
+ * .github/workflows/ci.yml audit step.  Parses JSONC so a comment mention of
+ * a withdrawn GHSA cannot satisfy the allowlist assertion.
  */
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const configPath = "audit-ci.jsonc";
-const requiredGhsa = "GHSA-vfj7-8cjw-p6xm";
-const config = readFileSync(configPath, "utf8");
+const requiredGhsa = "GHSA-fc5q-39xc-vjpf";
+const raw = readFileSync(configPath, "utf8");
+const jsonc = raw
+  .split("\n")
+  .map((line) => (line.trim().startsWith("//") ? "" : line))
+  .join("\n");
+const config = JSON.parse(jsonc);
+const allowlist = config.allowlist;
 
-if (!config.includes(requiredGhsa)) {
-  console.error(`${configPath} must allowlist ${requiredGhsa}`);
+if (!Array.isArray(allowlist) || !allowlist.includes(requiredGhsa)) {
+  console.error(`${configPath} allowlist must contain ${requiredGhsa}`);
   process.exit(1);
 }
-if (!/"high"\s*:\s*true/.test(config)) {
+if (config.high !== true) {
   console.error(`${configPath} must set "high": true`);
   process.exit(1);
 }
