@@ -217,6 +217,9 @@ jobs:
       - name: Check Node runtime parity
         run: npm run test:node-runtime
 
+      - name: Test Xcode write hook
+        run: npm run test:xcode-write-hook
+
       - name: Install dependencies
         run: npm ci
 
