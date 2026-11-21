@@ -10,6 +10,7 @@ import {
   encryptPayload,
   EXCLUDED_PROVIDERS,
   PROVIDER_SOURCES,
+  runCli as runBundleCli,
 } from "../../../scripts/local-keys-bundle.mjs";
 
 const SCRIPT_PATH = path.resolve(__dirname, "../../../scripts/local-keys-bundle.mjs");
@@ -41,11 +42,16 @@ const TEST_ITERATIONS = 100000;
 let tempDirectory: string;
 let passphraseFile: string;
 let secretsFile: string;
+let trapDirectory: string;
+let readerMarker: string;
 
-function runCli(args: string[]) {
+function runCli(args: string[], syncedEnv: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, [SCRIPT_PATH, ...args], {
-    encoding: "utf8",
+    encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 128 * 1024,
+    env: { HOME: tempDirectory, PATH: trapDirectory, FIXTURE_READER_MARKER: readerMarker, ...syncedEnv },
   });
+  if (result.error || result.signal || result.status === null) throw new Error("Bundle fixture child failed to complete");
+  expect(fs.existsSync(readerMarker)).toBe(false);
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -62,6 +68,12 @@ function expectNoSecretValues(text: string) {
 
 beforeAll(() => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "local-keys-bundle-test-"));
+  trapDirectory = path.join(tempDirectory, ".local", "bin");
+  fs.mkdirSync(trapDirectory, { recursive: true });
+  readerMarker = path.join(tempDirectory, "reader-invoked");
+  for (const name of ["fleet-secrets", "infisical", "security"]) {
+    fs.writeFileSync(path.join(trapDirectory, name), '#!/bin/sh\nprintf invoked >> "$FIXTURE_READER_MARKER"\nexit 99\n', { mode: 0o700 });
+  }
   passphraseFile = path.join(tempDirectory, "passphrase.txt");
   fs.writeFileSync(passphraseFile, `${ROUND_TRIP_PASSPHRASE}\n`, { mode: 0o600 });
   secretsFile = path.join(tempDirectory, "fixture-secrets");
@@ -264,5 +276,79 @@ describe("local-keys-bundle mapping table", () => {
       ].sort()
     );
     expect(new Set(mapped).size).toBe(mapped.length);
+  });
+});
+
+describe("local-keys-bundle synced environment", () => {
+  it("lists only catalog key presence, including empty values, without reading values", () => {
+    const result = runCli(["list"], { OPENAI_ADMIN_KEY: "", UNRELATED_FIXTURE_SECRET: "fixture-unrelated-value" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toMatch(/openai\s+OPENAI_ADMIN_KEY\s+Present/);
+    expect(result.stdout).toMatch(/openrouter\s+OPENROUTER_ADMIN_KEY\s+Absent/);
+    expect(result.combined).not.toContain("UNRELATED_FIXTURE_SECRET");
+    expect(result.combined).not.toContain("fixture-unrelated-value");
+
+    const savedEnv = process.env;
+    const savedLog = console.log;
+    const lines: string[] = [];
+    try {
+      process.env = Object.defineProperty({}, "OPENAI_ADMIN_KEY", {
+        enumerable: true, get() { throw new Error("list must never read a provider value"); },
+      });
+      console.log = (...data: unknown[]) => { lines.push(data.map(String).join(" ")); };
+      expect(runBundleCli(["list"])).toBe(0);
+    } finally {
+      process.env = savedEnv;
+      console.log = savedLog;
+    }
+    expect(lines.join("\n")).toMatch(/openai\s+OPENAI_ADMIN_KEY\s+Present/);
+  });
+
+  it("builds and verifies only the fixed catalog's synced values with private output", () => {
+    const outPath = path.join(tempDirectory, "synced.umkeys");
+    const result = runCli(["build", "--passphrase-file", passphraseFile, "--out", outPath, "--iterations", String(TEST_ITERATIONS)], {
+      OPENROUTER_ADMIN_KEY: FAKE_OPENROUTER,
+      XAI_MANAGEMENT_KEY: FAKE_XAI, XAI_TEAM_ID: FAKE_XAI_TEAM,
+      BACKBLAZE_MASTER_KEY_ID: FAKE_B2_KEY_ID, BACKBLAZE_MASTER_APPLICATION_KEY: FAKE_B2_APP_KEY,
+      UNRELATED_FIXTURE_SECRET: "fixture-unrelated-value",
+      INFISICAL_TOKEN: "st.fixture-bootstrap", INFISICAL_UM_CLIENT_SECRET: "fixture-retired-value",
+    });
+    expect(result.status).toBe(0);
+    expectNoSecretValues(result.combined);
+    expect(result.combined).not.toContain("fixture-unrelated-value");
+    expect(result.combined).not.toContain("fixture-retired-value");
+    expect(fs.statSync(outPath).mode & 0o777).toBe(0o600);
+    const payload = decryptEnvelope(JSON.parse(fs.readFileSync(outPath, "utf8")), ROUND_TRIP_PASSPHRASE);
+    expect(payload.secrets).toEqual([
+      { provider: "openrouter", apiKey: FAKE_OPENROUTER },
+      { provider: "xai", apiKey: FAKE_XAI, teamId: FAKE_XAI_TEAM },
+      { provider: "backblaze", apiKey: `${FAKE_B2_KEY_ID}:${FAKE_B2_APP_KEY}` },
+    ]);
+    expect(runCli(["verify", "--passphrase-file", passphraseFile, outPath]).status).toBe(0);
+  });
+
+  it("refuses an absent or partial catalog without a reader call or partial output", () => {
+    const cases: Array<Record<string, string>> = [{}, { XAI_MANAGEMENT_KEY: FAKE_XAI }, { BACKBLAZE_MASTER_KEY_ID: FAKE_B2_KEY_ID }];
+    for (const [index, env] of cases.entries()) {
+      const outPath = path.join(tempDirectory, `absent-${index}.umkeys`);
+      const result = runCli(["build", "--passphrase-file", passphraseFile, "--out", outPath, "--iterations", String(TEST_ITERATIONS)], env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("No provider keys found to bundle");
+      expectNoSecretValues(result.combined);
+      expect(fs.existsSync(outPath)).toBe(false);
+    }
+    const listed = runCli(["list"], { XAI_MANAGEMENT_KEY: FAKE_XAI });
+    expect(listed.stdout).toContain("Partial (XAI_MANAGEMENT_KEY is set but XAI_TEAM_ID is missing)");
+    expect(fs.readdirSync(tempDirectory).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("keeps explicit fixture-file precedence over synced values", () => {
+    const outPath = path.join(tempDirectory, "fixture-precedence.umkeys");
+    const result = runCli(["build", "--passphrase-file", passphraseFile, "--out", outPath, "--providers", "openrouter", "--secrets-file", secretsFile, "--iterations", String(TEST_ITERATIONS)], {
+      OPENROUTER_ADMIN_KEY: "fixture-env-must-not-win",
+    });
+    expect(result.status).toBe(0);
+    const payload = decryptEnvelope(JSON.parse(fs.readFileSync(outPath, "utf8")), ROUND_TRIP_PASSPHRASE);
+    expect(payload.secrets).toEqual([{ provider: "openrouter", apiKey: FAKE_OPENROUTER }]);
   });
 });

@@ -6,29 +6,19 @@
 set -euo pipefail
 
 INGEST_URL="${INGEST_URL:-https://usage.jays.services/api/ingest/mac-heartbeat}"
-FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-/Users/jay/.local/bin/fleet-secrets}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
 # refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
 #
-# OPS-818:  the retired flat key file is no longer read.  A name missing from
-# the environment comes from `fleet-secrets get` (root, then the
-# /global-api-keys folder);  the value is captured, never echoed.
-read_secret() {
-  [[ -x "$FLEET_SECRETS_BIN" ]] || return 0
-  "$FLEET_SECRETS_BIN" get "$1" --path / 2>/dev/null \
-    || "$FLEET_SECRETS_BIN" get "$1" --path /global-api-keys 2>/dev/null \
-    || true
-}
+# Accept only explicitly injected Infisical-synced values for this consumer.
+# The legacy environment alias does not establish a producer-scoped grant.
 
 TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_secret MAC_HEARTBEAT_INGEST_TOKEN)"
-[[ -n "$TOKEN" ]] || TOKEN="${USAGE_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_secret USAGE_INGEST_TOKEN)"
+[[ "$TOKEN" =~ [^[:space:]] ]] || TOKEN="${USAGE_INGEST_TOKEN:-}"
 
-if [[ -z "$TOKEN" ]]; then
-  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or fleet-secrets" >&2
+if ! [[ "$TOKEN" =~ [^[:space:]] ]]; then
+  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN required in the Infisical-synced environment" >&2
   exit 1
 fi
 

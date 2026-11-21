@@ -4,7 +4,7 @@
   Scheduled exact Kimi Code turn telemetry.  Install from the detached
   collector runtime after replacing every absolute-path and hub-host placeholder.
 
-  Provide a scoped custody file; never put secret values in this plist.
+  Provide a scoped service-token custody file; never put secret values in this plist.
 -->
 <plist version="1.0">
 <dict>
@@ -15,7 +15,7 @@
     <string>/ABSOLUTE/PATH/TO/node</string>
     <string>/ABSOLUTE/PATH/TO/COLLECTORS/scripts/collector-injector.mjs</string>
     <string>kimi</string>
-    <string>AUTH_MODE</string>
+    <string>service-token</string>
     <string>/ABSOLUTE/PATH/TO/CUSTODY.json</string>
   </array>
   <key>EnvironmentVariables</key>

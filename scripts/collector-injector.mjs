@@ -14,7 +14,7 @@ const PROFILES = Object.freeze({
 const SETTINGS = ["HOME", "PATH", "TMPDIR", "LANG", "TZ", "USAGE_MACHINE_ID", "USAGE_MONITOR_INGEST_URL", "COLLECTOR_SENTRY_ENABLED", "COLLECTOR_TELEMETRY_HUB_ENDPOINT", "COLLECTOR_SENTRY_STATE_DIR"];
 const PROFILE_SETTINGS = { kimi: ["KIMI_CODE_HOME"], zcode: ["ZCODE_DB", "ZCODE_DATA_BASE_DIR"], "muse-code": [] };
 
-function custody(path, mode) {
+function custody(path) {
   if (!isAbsolute(path)) throw new Error("invalid_custody");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -29,7 +29,7 @@ function custody(path, mode) {
     }
     if (bytes > 16384) throw new Error("invalid_custody");
     const raw = buffer.subarray(0, bytes).toString("utf8");
-    if (mode === "service-token" && raw.startsWith("st.")) {
+    if (raw.startsWith("st.")) {
       // Existing service-token custody stores raw ASCII, optionally ending in
       // one newline.  Accept it without rewriting the shared custody file.
       const token = raw.endsWith("\r\n") ? raw.slice(0, -2) : raw.endsWith("\n") ? raw.slice(0, -1) : raw;
@@ -37,7 +37,7 @@ function custody(path, mode) {
       return { token };
     }
     const data = JSON.parse(raw);
-    const keys = mode === "service-token" ? ["token"] : ["clientId", "clientSecret"];
+    const keys = ["token"];
     if (!data || Array.isArray(data) || typeof data !== "object" || Object.keys(data).sort().join() !== keys.sort().join() || keys.some((key) => typeof data[key] !== "string" || !data[key].trim() || data[key] !== data[key].trim())) throw new Error("invalid_custody");
     // Restrict custody to a flat object with literal field names, rejecting
     // duplicate keys that JSON.parse would otherwise silently overwrite.
@@ -67,22 +67,14 @@ async function requestJson(url, init, fetchImpl) {
 }
 
 export async function prepareCollector({ profile, mode, path, env = process.env, fetchImpl = fetch, origin = "https://app.infisical.com" }) {
-  if (!Object.hasOwn(PROFILES, profile) || !["service-token", "machine-identity"].includes(mode) || typeof path !== "string") throw new Error("invalid_arguments");
+  if (!Object.hasOwn(PROFILES, profile) || mode !== "service-token" || typeof path !== "string") throw new Error("invalid_arguments");
   if (env.USAGE_MONITOR_INGEST_URL !== undefined && env.USAGE_MONITOR_INGEST_URL !== "https://usage.jays.services/api/ingest/usage") throw new Error("invalid_ingest_url");
   if (Object.keys(env).some((key) => key.startsWith("INFISICAL_") && env[key])) throw new Error("ambiguous_auth");
   const url = new URL(origin);
   if (url.protocol !== "https:" || !["app.infisical.com", "us.infisical.com", "eu.infisical.com"].includes(url.hostname) || url.username || url.password || url.port || url.search || url.hash || !["", "/"].includes(url.pathname)) throw new Error("invalid_origin");
-  const auth = custody(path, mode);
-  let token;
-  if (mode === "service-token") {
-    token = auth.token;
-    if (!token.startsWith("st.")) throw new Error("invalid_service_token");
-    await verifyServiceToken({ token, projectId: PROJECT, paths: ["/telemetry"], permissions: ["read"], baseUrl: url.origin, fetchImpl });
-  } else {
-    const login = await requestJson(`${url.origin}/api/v1/auth/universal-auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(auth) }, fetchImpl);
-    if (!login || typeof login.accessToken !== "string" || !login.accessToken.trim() || login.accessToken !== login.accessToken.trim() || login.accessToken.startsWith("st.")) throw new Error("invalid_login");
-    token = login.accessToken;
-  }
+  const { token } = custody(path);
+  if (!token.startsWith("st.")) throw new Error("invalid_service_token");
+  await verifyServiceToken({ token, projectId: PROJECT, paths: ["/telemetry"], permissions: ["read"], baseUrl: url.origin, fetchImpl });
   const query = new URLSearchParams({ workspaceId: PROJECT, environment: "prod", secretPath: "/telemetry", viewSecretValue: "true", expandSecretReferences: "false", include_imports: "false", recursive: "false" });
   const body = await requestJson(`${url.origin}/api/v3/secrets/raw?${query}`, { headers: { authorization: `Bearer ${token}` } }, fetchImpl);
   if (!body || !Array.isArray(body.secrets)) throw new Error("invalid_secrets");
