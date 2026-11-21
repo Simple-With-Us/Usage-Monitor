@@ -46,9 +46,13 @@ let trapDirectory: string;
 let readerMarker: string;
 
 function runCli(args: string[], syncedEnv: Record<string, string> = {}) {
+  const childEnv: NodeJS.ProcessEnv = {
+    HOME: tempDirectory, PATH: trapDirectory, FIXTURE_READER_MARKER: readerMarker,
+    ...syncedEnv, NODE_ENV: "test", VITEST: "true",
+  };
   const result = spawnSync(process.execPath, [SCRIPT_PATH, ...args], {
     encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 128 * 1024,
-    env: { HOME: tempDirectory, PATH: trapDirectory, FIXTURE_READER_MARKER: readerMarker, ...syncedEnv },
+    env: childEnv,
   });
   if (result.error || result.signal || result.status === null) throw new Error("Bundle fixture child failed to complete");
   expect(fs.existsSync(readerMarker)).toBe(false);
@@ -283,6 +287,8 @@ describe("local-keys-bundle synced environment", () => {
   it("lists only catalog key presence, including empty values, without reading values", () => {
     const result = runCli(["list"], { OPENAI_ADMIN_KEY: "", UNRELATED_FIXTURE_SECRET: "fixture-unrelated-value" });
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Name Presence");
+    expect(result.stdout).toContain("Present means the name exists; it does not verify a usable value.");
     expect(result.stdout).toMatch(/openai\s+OPENAI_ADMIN_KEY\s+Present/);
     expect(result.stdout).toMatch(/openrouter\s+OPENROUTER_ADMIN_KEY\s+Absent/);
     expect(result.combined).not.toContain("UNRELATED_FIXTURE_SECRET");
@@ -292,7 +298,8 @@ describe("local-keys-bundle synced environment", () => {
     const savedLog = console.log;
     const lines: string[] = [];
     try {
-      process.env = Object.defineProperty({}, "OPENAI_ADMIN_KEY", {
+      const presenceEnv: NodeJS.ProcessEnv = { NODE_ENV: "test", VITEST: "true" };
+      process.env = Object.defineProperty(presenceEnv, "OPENAI_ADMIN_KEY", {
         enumerable: true, get() { throw new Error("list must never read a provider value"); },
       });
       console.log = (...data: unknown[]) => { lines.push(data.map(String).join(" ")); };
@@ -308,6 +315,7 @@ describe("local-keys-bundle synced environment", () => {
     const outPath = path.join(tempDirectory, "synced.umkeys");
     const result = runCli(["build", "--passphrase-file", passphraseFile, "--out", outPath, "--iterations", String(TEST_ITERATIONS)], {
       OPENROUTER_ADMIN_KEY: FAKE_OPENROUTER,
+      OPENAI_ADMIN_KEY: "", ANTHROPIC_ADMIN_KEY: " \t ",
       XAI_MANAGEMENT_KEY: FAKE_XAI, XAI_TEAM_ID: FAKE_XAI_TEAM,
       BACKBLAZE_MASTER_KEY_ID: FAKE_B2_KEY_ID, BACKBLAZE_MASTER_APPLICATION_KEY: FAKE_B2_APP_KEY,
       UNRELATED_FIXTURE_SECRET: "fixture-unrelated-value",
@@ -317,8 +325,15 @@ describe("local-keys-bundle synced environment", () => {
     expectNoSecretValues(result.combined);
     expect(result.combined).not.toContain("fixture-unrelated-value");
     expect(result.combined).not.toContain("fixture-retired-value");
-    expect(fs.statSync(outPath).mode & 0o777).toBe(0o600);
-    const payload = decryptEnvelope(JSON.parse(fs.readFileSync(outPath, "utf8")), ROUND_TRIP_PASSPHRASE);
+    const descriptor = fs.openSync(outPath, "r");
+    let envelopeText: string;
+    try {
+      expect(fs.fstatSync(descriptor).mode & 0o777).toBe(0o600);
+      envelopeText = fs.readFileSync(descriptor, "utf8");
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const payload = decryptEnvelope(JSON.parse(envelopeText), ROUND_TRIP_PASSPHRASE);
     expect(payload.secrets).toEqual([
       { provider: "openrouter", apiKey: FAKE_OPENROUTER },
       { provider: "xai", apiKey: FAKE_XAI, teamId: FAKE_XAI_TEAM },
@@ -351,4 +366,18 @@ describe("local-keys-bundle synced environment", () => {
     const payload = decryptEnvelope(JSON.parse(fs.readFileSync(outPath, "utf8")), ROUND_TRIP_PASSPHRASE);
     expect(payload.secrets).toEqual([{ provider: "openrouter", apiKey: FAKE_OPENROUTER }]);
   });
+
+  for (const [label, value] of Object.entries({ empty: "", whitespace: " \t\n " })) {
+    it(`refuses ${label} provider values without writing a bundle`, () => {
+      const outPath = path.join(tempDirectory, `blank-${label}.umkeys`);
+      const result = runCli(["build", "--passphrase-file", passphraseFile, "--out", outPath, "--iterations", String(TEST_ITERATIONS)], {
+        OPENAI_ADMIN_KEY: value,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("No provider keys found to bundle");
+      expectNoSecretValues(result.combined);
+      expect(fs.existsSync(outPath)).toBe(false);
+      expect(fs.readdirSync(tempDirectory).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    });
+  }
 });

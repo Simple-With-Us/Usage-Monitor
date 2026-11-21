@@ -19,7 +19,7 @@
  *   - The passphrase comes from --passphrase-file (chmod 600), never argv.
  *
  * Subcommands:
- *   list                       Print the provider -> source-env table and presence.
+ *   list                       Print provider source-name presence, without checking usable values.
  *   build  --passphrase-file <path> --out <path.umkeys>
  *          [--providers a,b,c] [--config <local-export.json>]
  *          [--secrets-file <path>] [--iterations <n>]
@@ -377,8 +377,9 @@ function cmdList(args) {
   const sourceWidth = Math.max(10, ...rows.map((row) => row.source.length));
   console.log("Local Keys Bundle — Provider Sources");
   console.log(`Secrets source: ${secretsPath ?? "Infisical-synced environment"} (names checked, values never printed)`);
+  console.log("Present means the name exists; it does not verify a usable value.");
   console.log("");
-  console.log(`  ${"Provider".padEnd(providerWidth)}  ${"Source Env".padEnd(sourceWidth)}  Status`);
+  console.log(`  ${"Provider".padEnd(providerWidth)}  ${"Source Env".padEnd(sourceWidth)}  Name Presence`);
   for (const row of rows) {
     console.log(`  ${row.provider.padEnd(providerWidth)}  ${row.source.padEnd(sourceWidth)}  ${row.status}`);
   }
