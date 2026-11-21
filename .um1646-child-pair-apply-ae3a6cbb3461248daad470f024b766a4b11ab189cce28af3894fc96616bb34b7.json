@@ -1,0 +1,77 @@
+{
+  "backup": {
+    "backup": "created_and_verified",
+    "sha256": "7e7f8408962c84ca3925536a6da5f3cffe2a49615b23bc0c25592964c17792de"
+  },
+  "localAfter": {
+    "desiredValueSha256": {
+      "BOTFLEET_WORKSPACES_DIRS": "f5099a13db2d688fadbb916ae270f1b0ed6a758b8b05dc99fa8f4601550bf77e",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "c3f9990ffa4c45c50c16fad923e748412451e4dbb0af64e835635d22b2b715f2"
+    },
+    "fileIdentity": {
+      "bytes": 1023,
+      "device": 2049,
+      "inode": 262355,
+      "mtimeNs": 1793714056530732994
+    },
+    "keys": {
+      "BOTFLEET_WORKSPACES_DIRS": "equal",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "equal"
+    },
+    "mode": "0600",
+    "ownerGid": 1001,
+    "ownerUid": 1001,
+    "sourceSha256": "fdf864f67f7788448e6169c12ec915b7d2f78ad9ee8617c05df1152f48366188"
+  },
+  "localBefore": {
+    "desiredValueSha256": {
+      "BOTFLEET_WORKSPACES_DIRS": "f5099a13db2d688fadbb916ae270f1b0ed6a758b8b05dc99fa8f4601550bf77e",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "c3f9990ffa4c45c50c16fad923e748412451e4dbb0af64e835635d22b2b715f2"
+    },
+    "fileIdentity": {
+      "bytes": 832,
+      "device": 2049,
+      "inode": 274578,
+      "mtimeNs": 1793403562519636205
+    },
+    "keys": {
+      "BOTFLEET_WORKSPACES_DIRS": "absent",
+      "OPENCODE_ADDITIONAL_DBS_JSON": "absent"
+    },
+    "mode": "0600",
+    "ownerGid": 1001,
+    "ownerUid": 1001,
+    "sourceSha256": "7e7f8408962c84ca3925536a6da5f3cffe2a49615b23bc0c25592964c17792de"
+  },
+  "localResult": {
+    "sha256": "fdf864f67f7788448e6169c12ec915b7d2f78ad9ee8617c05df1152f48366188",
+    "status": "applied_and_verified"
+  },
+  "phase": "complete",
+  "releaseMessageId": 637193996,
+  "remote": {
+    "claimSha256": "57ee2e4825f71ef78afd0d6a6e94897980b033161950bc7584cd9d0a8e4ae172",
+    "keys": {
+      "BOTFLEET_SERVER_WORKSPACES_DIRS": {
+        "attempted": true,
+        "confirmedCreated": true,
+        "plannedState": "absent",
+        "postHttpStatus": 200,
+        "readbackVerified": true,
+        "status": "verified_equal"
+      },
+      "OPENCODE_SERVER_ADDITIONAL_DBS_JSON": {
+        "attempted": true,
+        "confirmedCreated": true,
+        "plannedState": "absent",
+        "postHttpStatus": 200,
+        "readbackVerified": true,
+        "status": "verified_equal"
+      }
+    },
+    "ok": true,
+    "sourceOfTruthComplete": true
+  },
+  "rootPlanSha256": "ae3a6cbb3461248daad470f024b766a4b11ab189cce28af3894fc96616bb34b7",
+  "unrelatedBytesPreserved": true
+}

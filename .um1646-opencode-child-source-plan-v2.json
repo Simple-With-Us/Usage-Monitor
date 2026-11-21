@@ -1,0 +1,55 @@
+{
+  "applyAvailable": false,
+  "bindings": [
+    {
+      "currentState": "absent",
+      "currentValueSha256": null,
+      "desiredValueSha256": "c3f9990ffa4c45c50c16fad923e748412451e4dbb0af64e835635d22b2b715f2",
+      "runtimeKey": "OPENCODE_ADDITIONAL_DBS_JSON",
+      "sourceKey": "OPENCODE_SERVER_ADDITIONAL_DBS_JSON"
+    },
+    {
+      "currentState": "absent",
+      "currentValueSha256": null,
+      "desiredValueSha256": "f5099a13db2d688fadbb916ae270f1b0ed6a758b8b05dc99fa8f4601550bf77e",
+      "runtimeKey": "BOTFLEET_WORKSPACES_DIRS",
+      "sourceKey": "BOTFLEET_SERVER_WORKSPACES_DIRS"
+    }
+  ],
+  "collectorGuard": {
+    "botfleetRuntimeKey": "BOTFLEET_WORKSPACES_DIRS",
+    "opencodeRuntimeKey": "OPENCODE_ADDITIONAL_DBS_JSON",
+    "reviewedCommit": "ca19ad6ab8e98b5ac506d75d15b72dd0b9cd9015",
+    "runtimeInstallationRechecked": false
+  },
+  "configurationMutation": false,
+  "credentialAccess": false,
+  "currentStateEvidence": "local runtime snapshot only; Infisical remains unverified",
+  "destination": {
+    "compareAndSwap": {
+      "keys": [
+        "OPENCODE_SERVER_ADDITIONAL_DBS_JSON",
+        "BOTFLEET_SERVER_WORKSPACES_DIRS"
+      ],
+      "mustBeAbsentBeforeWrite": true,
+      "required": true
+    },
+    "currentState": "not-verified-from-Infisical",
+    "environment": "prod",
+    "secretPath": "/telemetry"
+  },
+  "mode": "plan-only",
+  "schema": "usage-monitor-collector-config-plan-v1",
+  "source": {
+    "kind": "approved-local-runtime-snapshot",
+    "modeOctal": "0600",
+    "nofollowOpen": true,
+    "ownerMatchesCurrentUser": true,
+    "regularFile": true,
+    "sourceSha256": "7e7f8408962c84ca3925536a6da5f3cffe2a49615b23bc0c25592964c17792de",
+    "stableDuringRead": true
+  },
+  "sourceOfTruthRoute": "HELD_NOT_IMPLEMENTED",
+  "supersedes": ".um1646-opencode-child-source-plan.json",
+  "supersedesReason": "Earlier planner checked source-key names in the runtime snapshot; this version checks the runtime-key names."
+}

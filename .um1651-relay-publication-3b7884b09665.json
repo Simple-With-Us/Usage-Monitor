@@ -1,0 +1,1 @@
+{"result": {"content": [{"type": "text", "text": "{\"branch\":\"codex/um1646-sentry-partial-ack\",\"commit\":\"5a101cd4476aac39c3050f9974e69dd16270d64c\",\"files\":4}"}], "structuredContent": {"branch": "codex/um1646-sentry-partial-ack", "commit": "5a101cd4476aac39c3050f9974e69dd16270d64c", "files": 4}}, "jsonrpc": "2.0", "id": 2}

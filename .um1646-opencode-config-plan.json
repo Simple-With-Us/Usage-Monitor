@@ -1,0 +1,9 @@
+{
+  "additionalDatabaseCount": 1,
+  "alreadyConfigured": false,
+  "primarySourcePreserved": true,
+  "setting": "OPENCODE_ADDITIONAL_DBS_JSON",
+  "sourceOfTruthKey": "OPENCODE_SERVER_ADDITIONAL_DBS_JSON",
+  "sourceSha256": "7e7f8408962c84ca3925536a6da5f3cffe2a49615b23bc0c25592964c17792de",
+  "valueSha256": "c3f9990ffa4c45c50c16fad923e748412451e4dbb0af64e835635d22b2b715f2"
+}

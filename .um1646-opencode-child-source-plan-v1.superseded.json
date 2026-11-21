@@ -1,0 +1,6 @@
+{
+  "priorPlan": ".um1646-opencode-child-source-plan.json",
+  "reason": "Earlier planner checked source-key names in the runtime snapshot; this version checks the runtime-key names.",
+  "status": "superseded",
+  "supersededBy": ".um1646-opencode-child-source-plan-v2.json"
+}
