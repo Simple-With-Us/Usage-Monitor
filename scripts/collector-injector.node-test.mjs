@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -26,6 +26,7 @@ function fakeFetch(profile, meta = metadata, rows = pairs[profile].map((secretKe
 }
 test("all profiles use exact scope and isolated child environments", async (t) => {
   const { path } = fixture(t);
+  const original = readFileSync(path);
   for (const profile of Object.keys(pairs)) {
     const fake = fakeFetch(profile);
     const result = await prepareCollector({ profile, mode: "service-token", path, env: { HOME: "/home/test", NODE_OPTIONS: "sentinel", USAGE_INGEST_TOKEN: "sentinel", COLLECTOR_TELEMETRY_HUB_TOKEN: "sentinel" }, fetchImpl: fake.fetchImpl });
@@ -35,6 +36,8 @@ test("all profiles use exact scope and isolated child environments", async (t) =
     for (const [key, value] of Object.entries({ workspaceId: project, environment: "prod", secretPath: "/telemetry", include_imports: "false", recursive: "false", expandSecretReferences: "false" })) assert.equal(query.get(key), value);
     assert.equal(fake.calls[0].options.redirect, "error");
     assert.equal(fake.calls[1].options.redirect, "error");
+    for (const call of fake.calls) assert.equal(call.options.headers.authorization, "Bearer st.sentinel");
+    assert.ok(readFileSync(path).equals(original));
   }
 });
 test("scope violations fail before fetching secrets", async (t) => {
@@ -68,7 +71,7 @@ test("raw custody preserves metadata verification before secret lookup", async (
   await assert.rejects(prepareCollector({ profile: "kimi", mode: "service-token", path, env: {}, fetchImpl: fake.fetchImpl }), /service_token_verification_failed/);
   assert.equal(fake.calls.length, 1);
 });
-test("malformed raw custody and raw machine-identity custody fail before network", async (t) => {
+test("malformed raw custody fails before network", async (t) => {
   const { path, dir } = fixture(t);
   let calls = 0;
   const fetchImpl = async () => { calls++; throw new Error("network must not run"); };
@@ -78,7 +81,6 @@ test("malformed raw custody and raw machine-identity custody fail before network
     await assert.rejects(run());
   }
   writeFileSync(path, "st.raw-sentinel");
-  await assert.rejects(run("machine-identity"));
   chmodSync(path, 0o644); await assert.rejects(run()); chmodSync(path, 0o600);
   const link = join(dir, "raw-link"); symlinkSync(path, link); await assert.rejects(run("service-token", link));
   writeFileSync(path, '{"token":"st.raw-sentinel","extra":"value"}'); await assert.rejects(run());
@@ -87,7 +89,8 @@ test("malformed raw custody and raw machine-identity custody fail before network
 test("raw custody failures disclose neither custody bytes nor path", (t) => {
   const { path } = fixture(t);
   writeFileSync(path, "st.raw-sentinel\ninvalid");
-  const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "service-token", path], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "service-token", path], { encoding: "utf8", env: { PATH: process.env.PATH }, timeout: 15000, killSignal: "SIGKILL" });
+  assert.ifError(result.error);
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr.trim(), "Collector credential injection failed.");
@@ -143,7 +146,8 @@ test("templates select the injector and failures never print custody values", (t
   for (const profile of ["kimi", "zcode"]) {
     const template = readFileSync(new URL(`./com.jays.${profile}-usage-collector.plist.example`, import.meta.url), "utf8");
     assert.match(template, /collector-injector\.mjs/); assert.ok(template.includes(`<string>${profile}</string>`));
-    assert.match(template, /<string>AUTH_MODE<\/string>/);
+    assert.match(template, /<string>service-token<\/string>/);
+    assert.equal(template.includes("AUTH_MODE"), false);
     assert.equal(template.includes("sentinel"), false);
   }
   const museCodeTemplate = readFileSync(new URL("./com.jays.muse-code-usage-collector.plist.example", import.meta.url), "utf8");
@@ -151,7 +155,8 @@ test("templates select the injector and failures never print custody values", (t
   assert.equal(museCodeTemplate.includes("collector-injector"), false);
   assert.equal(museCodeTemplate.includes("AUTH_MODE"), false);
   assert.equal(museCodeTemplate.includes("sentinel"), false);
-  const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "invalid", path], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, [new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "invalid", path], { encoding: "utf8", env: { PATH: process.env.PATH }, timeout: 15000, killSignal: "SIGKILL" });
+  assert.ifError(result.error);
   assert.notEqual(result.status, 0); assert.equal((result.stdout + result.stderr).includes("sentinel"), false);
 });
 test("malformed, duplicate, missing and unexpanded values fail closed", async (t) => {
@@ -166,11 +171,34 @@ test("network, redirect and oversized responses fail closed", async (t) => {
   const { path } = fixture(t);
   for (const fetchImpl of [async () => { throw new Error("network"); }, async () => new Response(null, { status: 302, headers: { location: "https://elsewhere.invalid" } }), async () => new Response("x".repeat(140000))]) await assert.rejects(prepareCollector({ profile: "kimi", mode: "service-token", path, env: {}, fetchImpl }));
 });
-test("machine identity logs in with explicit custody and strict lookup never calls fleet secrets", async (t) => {
-  const { path } = fixture(t, { clientId: "app-id", clientSecret: "sentinel" });
+test("machine identity refuses before custody, network or child launch", async (t) => {
+  const { dir } = fixture(t);
+  const path = join(dir, "nonexistent-custody.json");
   let calls = 0;
-  const fetchImpl = async (url, options) => { calls++; assert.equal(options.redirect, "error"); return response(calls === 1 ? { accessToken: "machine-bearer" } : { secrets: pairs.kimi.map((secretKey) => ({ secretKey, secretValue: "value" })) }); };
-  const result = await prepareCollector({ profile: "kimi", mode: "machine-identity", path, env: {}, fetchImpl });
+  const fetchImpl = async () => { calls++; throw new Error("network must not run"); };
+  for (const profile of Object.keys(pairs)) {
+    await assert.rejects(prepareCollector({ profile, mode: "machine-identity", path, env: {}, fetchImpl }), /^Error: invalid_arguments$/);
+  }
+  assert.equal(calls, 0);
+  assert.equal(existsSync(path), false);
+  const marker = join(dir, "forbidden-operation");
+  const hook = join(dir, "refusal-traps.mjs");
+  writeFileSync(hook, `import fs from 'node:fs'; import cp from 'node:child_process'; import { syncBuiltinESMExports } from 'node:module';
+const fail = () => { fs.writeFileSync(process.env.TEST_MARKER, 'forbidden'); throw new Error('forbidden'); };
+const open = fs.openSync; fs.openSync = (path, ...args) => path === process.env.TEST_CUSTODY ? fail() : open(path, ...args);
+cp.spawn = fail; globalThis.fetch = fail; syncBuiltinESMExports();\n`);
+  const result = spawnSync(process.execPath, ["--import", hook, new URL("./collector-injector.mjs", import.meta.url).pathname, "kimi", "machine-identity", path], { encoding: "utf8", env: { PATH: process.env.PATH, TEST_MARKER: marker, TEST_CUSTODY: path }, timeout: 15000, killSignal: "SIGKILL" });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Collector credential injection failed.");
+  assert.equal(existsSync(marker), false);
+  assert.equal((result.stdout + result.stderr).includes(path), false);
+});
+test("service-token injection keeps strict lookup without calling fleet secrets", async (t) => {
+  const { path } = fixture(t);
+  const fake = fakeFetch("kimi");
+  const result = await prepareCollector({ profile: "kimi", mode: "service-token", path, env: {}, fetchImpl: fake.fetchImpl });
   assert.equal(result.env.COLLECTOR_STRICT_INJECTED_SECRETS, "1");
   const lookup = () => { throw new Error("fleet-secrets called"); };
   assert.equal(resolveCollectorToken(["MISSING"], { env: result.env, fleetSecretsGet: lookup }), null);

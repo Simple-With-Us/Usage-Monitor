@@ -41,3 +41,6 @@ coverage/
 test-results/
 playwright-report/
 playwright/.auth/
+
+# Infisical CLI workspace address (project id) — local only
+.infisical.json

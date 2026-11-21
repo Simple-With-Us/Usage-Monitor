@@ -38,7 +38,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { postUsageBatches } from "./lib/session-token-collectors.mjs";
-import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
+import { resolveCollectorToken } from "./lib/muse-code-run-session-token-collector.mjs";
 import { buildQuotaEvent, clampPercent, toIsoTimestamp } from "./lib/quota-event.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -408,10 +408,10 @@ export async function collectMuseCode({
 }
 
 async function main() {
-  const token = resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+  const token = await resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
   if (!token && !DRY_RUN) {
     log(
-      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`.",
+      "Missing MUSE_CODE_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is injected or this collector's scoped Infisical token is available in the login Keychain.",
     );
     process.exit(1);
   }
