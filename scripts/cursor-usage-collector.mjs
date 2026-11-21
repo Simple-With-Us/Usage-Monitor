@@ -32,13 +32,11 @@
 //   node scripts/cursor-usage-collector.mjs [--dry-run] [--debug] [--days N] [--end YYYY-MM-DD]
 //
 // Env:
-//   CURSOR_ADMIN_API_KEY   Cursor Admin API key.  Read from the environment
-//                           first, then from Infisical through `fleet-secrets
-//                           get CURSOR_ADMIN_API_KEY`.  Never logged, never
-//                           written to disk, never put on a command line.
-//   USAGE_INGEST_TOKEN     UM ingest token.  Same env-then-fleet-secrets
-//                           resolution.  Read from the environment first, then
-//                           from Infisical.
+//   CURSOR_ADMIN_API_KEY   Cursor Admin API key synced from Infisical into
+//                           the environment.  No local credential fallback;
+//                           never logged, written to disk or put on argv.
+//   USAGE_INGEST_TOKEN     UM ingest token, resolved by the shared collector
+//                           resolver after CURSOR_ADMIN_INGEST_TOKEN.
 //   USAGE_MONITOR_INGEST_URL  full ingest URL
 //                           (default https://usage.jays.services/api/ingest/usage)
 //   USAGE_MONITOR_BASE_URL    base URL (default https://usage.jays.services);
@@ -52,7 +50,6 @@ import { pathToFileURL } from "node:url";
 
 import { postUsageBatches } from "./lib/session-token-collectors.mjs";
 import { resolveCollectorToken } from "./lib/run-session-token-collector.mjs";
-import { fleetSecretsGet } from "./lib/fleet-secrets.mjs";
 import {
   CURSOR_ADMIN_MAX_WINDOW_DAYS,
   CURSOR_ADMIN_PRODUCER_ID,
@@ -79,12 +76,9 @@ export function ingestUrl(env = process.env) {
   return `${base.replace(/\/+$/, "")}/api/ingest/usage`;
 }
 
-/** The Cursor Admin API key: environment first, then Infisical. */
+/** The Cursor Admin API key transported in the Infisical-synced environment. */
 export function resolveCursorAdminApiKey(env = process.env) {
-  const fromEnv = env.CURSOR_ADMIN_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromInfisical = fleetSecretsGet("CURSOR_ADMIN_API_KEY");
-  return typeof fromInfisical === "string" ? fromInfisical.trim() : null;
+  return env.CURSOR_ADMIN_API_KEY?.trim() || null;
 }
 
 /** Parse the CLI flags.  No secret ever arrives through argv. */
