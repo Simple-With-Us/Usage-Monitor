@@ -6,29 +6,33 @@
 set -euo pipefail
 
 INGEST_URL="${INGEST_URL:-https://usage.jays.services/api/ingest/mac-heartbeat}"
-FLEET_SECRETS_BIN="${FLEET_SECRETS_BIN:-/Users/jay/.local/bin/fleet-secrets}"
+KEYCHAIN_SERVICE="infisical-service-token"
+KEYCHAIN_ACCOUNT="${HEARTBEAT_KEYCHAIN_ACCOUNT:-mac-host-heartbeat-read}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
 # refused once USAGE_INGEST_REQUIRE_SCOPED_TOKENS=true.
 #
-# OPS-818:  the retired flat key file is no longer read.  A name missing from
-# the environment comes from `fleet-secrets get` (root, then the
-# /global-api-keys folder);  the value is captured, never echoed.
-read_secret() {
-  [[ -x "$FLEET_SECRETS_BIN" ]] || return 0
-  "$FLEET_SECRETS_BIN" get "$1" --path / 2>/dev/null \
-    || "$FLEET_SECRETS_BIN" get "$1" --path /global-api-keys 2>/dev/null \
-    || true
+# OPS-818:  the retired flat key file is no longer read.
+# 2026-11-21:  the `fleet-secrets` CLI is retired and no longer on PATH, so
+# its read path is gone.  A name missing from the environment is read from
+# the owner's login keychain (service `infisical-service-token`, account
+# `mac-host-heartbeat-read`, stored per the service-tokens skill with
+# `-T /usr/bin/security` so headless reads work);  the value is captured,
+# never echoed.  The read needs the keychain unlocked — while the session is
+# locked this exits 1 with the message below and the next launchd pass heals
+# itself once the owner logs back in.
+read_keychain_secret() {
+  security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null || true
 }
 
 TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_secret MAC_HEARTBEAT_INGEST_TOKEN)"
+[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "$KEYCHAIN_ACCOUNT")"
 [[ -n "$TOKEN" ]] || TOKEN="${USAGE_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_secret USAGE_INGEST_TOKEN)"
+[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "USAGE_INGEST_TOKEN")"
 
 if [[ -z "$TOKEN" ]]; then
-  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN not found in environment or fleet-secrets" >&2
+  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN not found in the environment or the login keychain (service ${KEYCHAIN_SERVICE}, account ${KEYCHAIN_ACCOUNT}); store the item per the service-tokens skill with -T /usr/bin/security, and the keychain must be unlocked" >&2
   exit 1
 fi
 
