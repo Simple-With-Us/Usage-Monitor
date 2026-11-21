@@ -737,7 +737,11 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       const geminiDatedPriced =
         deepseekPriced == null && isGemini4DatedModel(modelName)
           ? sumGemini4DatedEvents(
-              gemini4DatedEventsFor(datedTokenRows, { appKey, model: modelName }),
+              gemini4DatedEventsFor(datedTokenRows, {
+                appKey,
+                model: modelName,
+                skipOverlappingSeatEvent,
+              }),
             )
           : null;
       const datedPriced = deepseekPriced ?? geminiDatedPriced;
@@ -983,12 +987,17 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     for (const row of datedTokenRows) {
       if (!row.keyRef || !isGemini4DatedModel(row.keyRef)) continue;
       if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+      if (skipOverlappingSeatEvent(row.sourceApp)) continue;
       geminiPlatforms.add(platformIdForSourceApp(row.sourceApp));
     }
     let geminiSeen5h = 0;
     for (const app of geminiPlatforms) {
       const gemini5h = sumGemini4DatedEvents(
-        gemini4DatedEventsFor(datedTokenRows, { appKey: app, since: window5hStart }),
+        gemini4DatedEventsFor(datedTokenRows, {
+          appKey: app,
+          since: window5hStart,
+          skipOverlappingSeatEvent,
+        }),
       );
       geminiSeen5h += gemini5h.seenQuantity;
       if (!gemini5h.complete) derivedCost5hComplete = false;
@@ -1247,12 +1256,21 @@ function deepseekPaygEventsFor(
 
 function gemini4DatedEventsFor(
   rows: readonly DatedTokenRow[],
-  opts: { appKey?: string; model?: string; since?: Date },
+  opts: {
+    appKey?: string;
+    model?: string;
+    since?: Date;
+    /** The grouped sums this pricer mirrors exclude overlapping-seat rows
+     * (cursor-agent rows when Cursor admin billing exists); the raw events
+     * must exclude the same rows or the dated sum overstates them. */
+    skipOverlappingSeatEvent?: (sourceApp: string) => boolean;
+  },
 ): Gemini4DatedEvent[] {
   const events: Gemini4DatedEvent[] = [];
   for (const row of rows) {
     if (!row.keyRef || !isGemini4DatedModel(row.keyRef)) continue;
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (opts.skipOverlappingSeatEvent?.(row.sourceApp)) continue;
     if (opts.appKey && platformIdForSourceApp(row.sourceApp) !== opts.appKey) continue;
     if (opts.model && row.keyRef !== opts.model) continue;
     if (opts.since && row.occurredAt.getTime() < opts.since.getTime()) continue;
