@@ -20,11 +20,19 @@ cat > "$tmp/cases.cjs" <<'JS'
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { generateKeyPairSync } = require("node:crypto");
+const { createPrivateKey, generateKeyPairSync } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const [root, fleet] = process.argv.slice(2);
 const key = () => generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ type: "pkcs8", format: "pem" });
 const plainPem = key(), hostedPem = key();
+// A deterministic leading PEM comment makes the outer encoding contain BEGIN.
+// No random search is needed, and the real crypto parser proves the same key
+// remains usable.  The comment bytes contain no NUL and survive shell transport.
+const commentPem = Buffer.from("IyABEGIN", "base64").toString("utf8") + " fixture comment\n" + hostedPem;
+const commentBase64 = Buffer.from(commentPem).toString("base64");
+assert.ok(commentBase64.includes("BEGIN"));
+assert.ok(!commentPem.includes("\0"));
+assert.ok(createPrivateKey(commentPem).export({ type: "pkcs8", format: "pem" }) === hostedPem);
 const plain = { ASC_KEY_ID: "PLAIN001", ASC_ISSUER_ID: "plain-issuer", ASC_KEY_P8: plainPem };
 const hosted = { APPLE_API_KEY_ID: "HOSTED001", APPLE_API_ISSUER_ID: "hosted-issuer", APPLE_API_KEY_P8_BASE64: Buffer.from(hostedPem).toString("base64") };
 const marker = path.join(root, "tool-ran");
@@ -40,6 +48,7 @@ const named = path.join(root, "named.p8");
 fs.writeFileSync(named, hostedPem, { mode: 0o600 });
 fs.writeFileSync(path.join(root, "plain.p8"), plainPem, { mode: 0o600 });
 fs.writeFileSync(path.join(root, "hosted.p8"), hostedPem, { mode: 0o600 });
+fs.writeFileSync(path.join(root, "comment.p8"), commentPem, { mode: 0o600 });
 fs.writeFileSync(path.join(root, "verify.cjs"), `
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -89,7 +98,8 @@ for (const tuple of [
 for (const [tuple, file, id] of [
   [plain, "plain.p8", "PLAIN001"], [{ ...plain, ...hosted }, "hosted.p8", "HOSTED001"],
   [{ ...plain, APPLE_API_KEY_ID: "PARTIAL" }, "plain.p8", "PLAIN001"],
-  [{ ...hosted, APPLE_API_KEY_P8_BASE64: hostedPem }, "hosted.p8", "HOSTED001"]
+  [{ ...hosted, APPLE_API_KEY_P8_BASE64: hostedPem }, "hosted.p8", "HOSTED001"],
+  [{ ...plain, ...hosted, APPLE_API_KEY_P8_BASE64: commentBase64 }, "comment.p8", "HOSTED001"]
 ]) run(tuple, `asc_credential_available
 load_secrets
 [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == ${id} ]]
@@ -103,7 +113,7 @@ run({}, `! asc_credential_available
 APP_KEY=usage; ARCHIVE_PATH="$HOME"
 upload_sentry_artifacts
 `);
-console.log("ok: 11 isolated shell credential cases");
+console.log("ok: 12 isolated shell credential cases");
 JS
 node "$tmp/cases.cjs" "$tmp" "$here"
 

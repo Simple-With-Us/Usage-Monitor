@@ -269,7 +269,7 @@ load_secrets() {
     kid="$APPLE_API_KEY_ID"
     iss="$APPLE_API_ISSUER_ID"
     case "$APPLE_API_KEY_P8_BASE64" in
-      *BEGIN*) key_pem="$APPLE_API_KEY_P8_BASE64" ;;
+      *"-----BEGIN "*) key_pem="$APPLE_API_KEY_P8_BASE64" ;;
       *) key_pem="$(printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -d 2>/dev/null)" || key_pem="" ;;
     esac
   elif [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" && -n "${ASC_KEY_P8:-}" ]]; then
