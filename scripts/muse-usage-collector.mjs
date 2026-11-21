@@ -32,7 +32,7 @@
 // SECRETS: this script reads the CLI binary's stdout but never logs it raw --
 // the resolved percentages, window labels, and ISO reset dates are the only
 // numbers that leave the process.  Tokens are loaded from the environment or
-// `fleet-secrets get` via resolveCollectorToken and only used as Bearer
+// an explicit Infisical service-token lookup via resolveCollectorToken and only used as Bearer
 // headers in outbound HTTP requests; the value is never logged.
 
 import { execFile } from "node:child_process";
