@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
 import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -768,17 +768,31 @@ syncBuiltinESMExports();\n`);
   const oldAfterRefresh = spawnSync(process.execPath, [updater, "--sha", firstSha, "--runtime-root", runtime], { env, encoding: "utf8" });
   assert(oldAfterRefresh.status !== 0 && readlinkSync(join(runtime, "current")) === thirdRelease, "refreshed overlay cannot forward-activate an old commit");
   const configuredLauncher = join(runtime, "current", "scripts", "collector-injector.mjs");
-  const invalidLauncher = spawnSync(process.execPath, [configuredLauncher, "bad"], { encoding: "utf8" });
+  const invalidLauncher = spawnSync(process.execPath, [configuredLauncher, "bad"], { encoding: "utf8", timeout: 15000 });
   assert(invalidLauncher.status !== 0, "symlinked configured launcher rejects invalid arguments");
   const custody = join(root, "custody.json");
-  const marker = join(root, "login-reached");
+  const marker = join(root, "service-token-requests");
+  const childMarker = join(root, "collector-spawned");
   const hook = join(root, "mock-fetch.mjs");
-  writeFileSync(custody, JSON.stringify({ clientId: "test-id", clientSecret: "test-sentinel-secret" }), { mode: 0o600 });
-  writeFileSync(hook, "import { writeFileSync } from 'node:fs'; globalThis.fetch = async () => { writeFileSync(process.env.TEST_MARKER, 'reached'); return new Response('{}'); };\n");
-  const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("INFISICAL_") && key !== "NODE_OPTIONS"));
-  const mocked = spawnSync(process.execPath, ["--import", hook, configuredLauncher, "muse-code", "machine-identity", custody, "--dry-run"], { encoding: "utf8", env: { ...testEnv, TEST_MARKER: marker } });
-  assert(mocked.status !== 0 && existsSync(marker), "symlinked launcher reaches mocked login after rollback");
-  assert(!(mocked.stdout + mocked.stderr).includes("test-sentinel-secret"), "symlinked launcher never prints custody values");
+  const fixtureToken = `st.${randomUUID()}`;
+  writeFileSync(custody, JSON.stringify({ token: fixtureToken }), { mode: 0o600 });
+  writeFileSync(hook, `import { writeFileSync } from 'node:fs'; import cp from 'node:child_process'; import { syncBuiltinESMExports } from 'node:module';
+const calls = [];
+cp.spawn = () => { writeFileSync(process.env.TEST_CHILD_MARKER, 'forbidden'); throw new Error('child must not start'); }; syncBuiltinESMExports();
+globalThis.fetch = async (input, options) => {
+  const url = new URL(input);
+  calls.push(url.pathname); writeFileSync(process.env.TEST_MARKER, JSON.stringify(calls));
+  if (url.origin !== 'https://app.infisical.com' || options.headers.authorization !== 'Bearer ' + process.env.TEST_SERVICE_TOKEN || options.redirect !== 'error') throw new Error('unexpected request');
+  if (calls.length === 1 && url.pathname === '/api/v2/service-token') return new Response(JSON.stringify({ workspace: '86e35e51-91bc-4dfd-a045-4484726b9c40', permissions: ['read'], scopes: [{ environment: 'prod', secretPath: '/telemetry' }], expiresAt: '2999-01-01T00:00:00Z' }));
+  if (calls.length === 2 && url.pathname === '/api/v3/secrets/raw' && url.searchParams.get('workspaceId') === '86e35e51-91bc-4dfd-a045-4484726b9c40' && url.searchParams.get('environment') === 'prod' && url.searchParams.get('secretPath') === '/telemetry') return new Response(JSON.stringify({ secrets: [] }));
+  throw new Error('unexpected request');
+};\n`);
+  const mocked = spawnSync(process.execPath, ["--import", hook, configuredLauncher, "muse-code", "service-token", custody, "--dry-run"], { encoding: "utf8", env: { PATH: process.env.PATH, TEST_MARKER: marker, TEST_CHILD_MARKER: childMarker, TEST_SERVICE_TOKEN: fixtureToken }, timeout: 15000 });
+  assert(mocked.status === 1 && existsSync(marker), "symlinked launcher reaches service-token metadata after rollback");
+  assert(JSON.stringify(JSON.parse(readFileSync(marker, "utf8"))) === JSON.stringify(["/api/v2/service-token", "/api/v3/secrets/raw"]), "valid finite metadata precedes controlled missing-secrets refusal without login");
+  assert(!existsSync(childMarker), "missing secrets refuse before launching the collector");
+  assert(mocked.stdout === "" && mocked.stderr.trim() === "Collector credential injection failed.", "missing secrets emit only the fixed diagnostic");
+  assert(!(mocked.stdout + mocked.stderr).includes(fixtureToken), "symlinked launcher never prints custody values");
 
   const invalid = spawnSync(
     process.execPath,

@@ -14,11 +14,11 @@
 # Every subcommand here is value-blind by construction:
 #   names            list secret KEY NAMES only
 #   has KEY          exit 0/1 — does KEY exist, with a non-empty value
-#   set KEY          copy KEY from `fleet-secrets get` into this project's Infisical
+#   set KEY          copy an Infisical-synced environment value into this project
 #   pull KEY         retired (OPS-818);  nothing writes or reads the flat secrets file
 #   sync-platforms   batch-copy the platform-status tokens (see MAP below)
 #
-# A value only ever travels: fleet-secrets -> shell variable -> CLI (stdin or
+# A value only ever travels: synced environment -> shell variable -> CLI (stdin or
 # captured --plain). It is never interpolated into a command line (visible in
 # `ps`), never echoed, and never written to a log.
 #
@@ -36,7 +36,6 @@
 #   INFISICAL_PATH         default /
 #   INFISICAL_UM_READ_TOKEN                read-only service token for names/has
 #   INFISICAL_UM_WRITE_TOKEN               write-only service token for set/delete
-#   INFISICAL_UM_CLIENT_ID / _CLIENT_SECRET explicit project machine identity
 #   INFISICAL_TOKEN                        legacy read token only; never used for writes
 #
 set -euo pipefail
@@ -48,25 +47,42 @@ SECRET_PATH="${INFISICAL_UM_SECRET_PATH:-${INFISICAL_PATH:-/}}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
+validate_key() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "Invalid secret key name."; }
 
+case "${1:-}" in
+  has|set|delete) for key in "${@:2}"; do validate_key "$key"; done ;;
+esac
 command -v infisical >/dev/null 2>/dev/null || die "infisical CLI not found on PATH."
 node "$ROOT/scripts/check-infisical-token.mjs" config || die "Infisical target configuration rejected."
+INFISICAL_ORIGIN="$(node -e 'process.stdout.write(new URL(process.env.INFISICAL_BASE_URL || process.env.INFISICAL_API_URL || "https://app.infisical.com").origin)')" \
+  || die "Infisical target configuration rejected."
 
-# One value from the Mac-side fleet-secrets CLI (root, then /global-api-keys).
-# Prints nothing and succeeds when the binary or the key is absent.
-fleet_value() {
+# Use the same approved origin and selected token as the metadata verifier.
+# Subshell changes never alter the caller's environment or bootstrap inputs.
+infisical_cli() (
+  unset INFISICAL_BASE_URL INFISICAL_API_URL TOKEN \
+    INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET \
+    INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN \
+    INFISICAL_AUTOMATION_CLIENT_ID INFISICAL_AUTOMATION_CLIENT_SECRET \
+    INFISICAL_UM_CLIENT_ID INFISICAL_UM_CLIENT_SECRET \
+    INFISICAL_UM_READ_TOKEN INFISICAL_UM_WRITE_TOKEN
+  export INFISICAL_DOMAIN="$INFISICAL_ORIGIN"
+  command infisical "$@"
+)
+
+# One explicitly named Infisical-synced environment value; no store discovery.
+synced_value() {
   local name="$1"
-  command -v fleet-secrets >/dev/null 2>/dev/null || return 0
-  fleet-secrets get "$name" --path / 2>/dev/null \
-    || fleet-secrets get "$name" --path /global-api-keys 2>/dev/null \
-    || true
+  validate_key "$name"
+  printf '%s' "${!name-}"
 }
 
 # ---------------------------------------------------------------------------
-# Auth — prefer permission-specific project tokens; machine identity is explicit.
+# Auth — permission-specific project service tokens only.
 # ---------------------------------------------------------------------------
 infisical_token() {
-  local permission="$1" token id secret token_name
+  local permission="$1" token token_name
   case "$permission" in
     read)
       token_name="INFISICAL_UM_READ_TOKEN"
@@ -78,24 +94,9 @@ infisical_token() {
       ;;
     *) die "Unsupported Infisical permission" ;;
   esac
-  if [ -n "$token" ]; then
-    INFISICAL_TOKEN="$token" INFISICAL_UM_PROJECT_ID="$PROJECT_ID" INFISICAL_UM_SECRET_PATH="$SECRET_PATH" \
-      node "$ROOT/scripts/check-infisical-token.mjs" "$permission" || die "Infisical credential verification failed."
-    printf '%s' "$token"; return 0
-  fi
-
-  id="${INFISICAL_UM_CLIENT_ID:-}"
-  secret="${INFISICAL_UM_CLIENT_SECRET:-}"
-  [ -n "$id" ] && [ -n "$secret" ] || die \
-    "No Infisical $permission credential; export $token_name or an explicit project machine-identity pair."
-
-  # --silent keeps the token off stdout except as the captured value.
-  token="$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$id" \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$secret" \
-    infisical login --method=universal-auth --plain --silent 2>/dev/null)" \
-    || die "Infisical login failed (explicit machine identity rejected)."
-  # This explicit project identity has no service-token metadata to attest.
-  # The target configuration was checked above; Infisical authorizes the operation.
+  [[ "$token" == st.* ]] || die "$token_name service token required for Infisical $permission access."
+  INFISICAL_TOKEN="$token" INFISICAL_UM_PROJECT_ID="$PROJECT_ID" INFISICAL_UM_SECRET_PATH="$SECRET_PATH" \
+    node "$ROOT/scripts/check-infisical-token.mjs" "$permission" || die "Infisical credential verification failed."
   printf '%s' "$token"
 }
 
@@ -110,8 +111,8 @@ ensure_write_token() { [ -n "$WRITE_TOKEN" ] || WRITE_TOKEN="$(infisical_token w
 
 # Print only KEY NAMES from the project. Never values.
 cmd_names() {
-  ensure_read_token
-  INFISICAL_TOKEN="$READ_TOKEN" infisical secrets --projectId="$PROJECT_ID" \
+  ensure_read_token || return 1
+  INFISICAL_TOKEN="$READ_TOKEN" infisical_cli secrets --projectId="$PROJECT_ID" \
     --env="$ENV_SLUG" --path="$SECRET_PATH" --silent --plain 2>/dev/null \
     | grep -oE '^[A-Za-z_][A-Za-z0-9_]*' | sort -u
 }
@@ -119,24 +120,27 @@ cmd_names() {
 # Exit 0 if KEY exists in Infisical with a non-empty value.
 cmd_has() {
   local key="${1:?usage: has KEY}"
-  cmd_names | grep -qx "$key"
+  validate_key "$key"
+  cmd_names | grep -Fxq -- "$key"
 }
 
-# Read KEY's value from fleet-secrets without printing it.
+# Read KEY's synced environment value without printing it.
 read_local_value() {
   local key="$1" value
-  value="$(fleet_value "$key")"
+  value="$(synced_value "$key")"
   [ -n "$value" ] || return 1
   printf '%s' "$value"
 }
 
-# Copy SRC_KEY from fleet-secrets into this project's Infisical as DEST_KEY.
+# Copy synced SRC_KEY into this project's Infisical as DEST_KEY.
 # The CLI reads the value from stdin using its supported @file input.
 set_secret() {
   local src="$1" dest="${2:-$1}" value
-  value="$(read_local_value "$src")" || { note "  SKIP  $dest  (source $src not available from fleet-secrets)"; return 1; }
-  ensure_write_token
-  if printf '%s' "$value" | INFISICAL_TOKEN="$WRITE_TOKEN" infisical secrets set "$dest=@/dev/stdin" \
+  validate_key "$src"
+  validate_key "$dest"
+  value="$(read_local_value "$src")" || { note "  SKIP  $dest  (source $src not available in synced environment)"; return 1; }
+  ensure_write_token || return 1
+  if printf '%s' "$value" | INFISICAL_TOKEN="$WRITE_TOKEN" infisical_cli secrets set "$dest=@/dev/stdin" \
       --projectId="$PROJECT_ID" \
       --env="$ENV_SLUG" --path="$SECRET_PATH" --silent >/dev/null 2>/dev/null; then
     note "  OK    $dest  <- $src"
@@ -152,10 +156,9 @@ cmd_set() {
 }
 
 # Retired (OPS-818): `pull` copied an Infisical value into the flat local
-# secrets file, which nothing may read or edit by hand any more.  Read a value
-# with `fleet-secrets get KEY` instead.
+# secrets file, which nothing may read or edit by hand any more.
 cmd_pull() {
-  die "pull is retired.  Use: fleet-secrets get KEY"
+  die "pull is retired.  Use an Infisical-synced environment value."
 }
 
 # Delete KEY(s) from Infisical. `infisical secrets delete` prints nothing
@@ -168,14 +171,16 @@ cmd_pull() {
 # a shared secret silently does nothing, which looks like success.
 cmd_delete() {
   [ "$#" -gt 0 ] || die "usage: delete KEY [KEY...]"
-  ensure_write_token
+  for key in "$@"; do validate_key "$key"; done
+  ensure_read_token || return 1
+  ensure_write_token || return 1
   local rc=0
   for key in "$@"; do
     if ! cmd_has "$key"; then
       note "  SKIP  $key  (not present)"
       continue
     fi
-    if INFISICAL_TOKEN="$WRITE_TOKEN" infisical secrets delete "$key" --type=shared \
+    if INFISICAL_TOKEN="$WRITE_TOKEN" infisical_cli secrets delete "$key" --type=shared \
         --projectId="$PROJECT_ID" \
         --env="$ENV_SLUG" --path="$SECRET_PATH" >/dev/null 2>/dev/null; then
       if cmd_has "$key"; then
@@ -206,20 +211,15 @@ MAP=(
   "SLACK_MCP_XOXB_TOKEN:SLACK_BOT_TOKEN"
   "PUSHOVER_USAGE_API_TOKEN:PUSHOVER_USAGE_API_TOKEN"
   "PUSHOVER_USER_KEY:PUSHOVER_USER_KEY"
-  # GITHUB_TOKEN in the fleet-secrets store is dead (GitHub 401s it directly), but
-  # GITHUB_MCP_TOKEN is live — verified 2026-08-12 against /rate_limit.
+  # Use the explicit synced source; do not substitute a generic GITHUB_TOKEN.
   "GITHUB_MCP_TOKEN:GITHUB_TOKEN"
-  # The project's stored copy went stale while the local one still logs in —
-  # verified 2026-08-12 via universal-auth against app.infisical.com.  This
-  # was the single dead identity behind the prod Infisical card incident.
-  "INFISICAL_ST_CLIENT_SECRET:INFISICAL_ST_CLIENT_SECRET"
 )
 
 # Deliberately NOT synced automatically — see the notes printed below.
 HELD_BACK=(
-  "SENTRY_READ_TOKEN                        already present and WORKING in prod; never overwrite with SENTRY_AUTH_TOKEN (wrong token type)"
-  "STRIPE_SECRET_KEY                        Stripe itself says api_key_expired for the stored key; issue a fresh restricted read key first"
-  "GITHUB_TOKEN (fleet-secrets copy)         GitHub 401s it; the sync uses GITHUB_MCP_TOKEN instead — fix the store at leisure"
+  "SENTRY_READ_TOKEN                        never overwrite with SENTRY_AUTH_TOKEN (wrong token type)"
+  "STRIPE_SECRET_KEY                        requires separately qualified restricted read credentials"
+  "GITHUB_TOKEN                            the sync uses only the explicit GITHUB_MCP_TOKEN source"
   "TWILIO_MCP_CREDS  -> TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN   one blob, needs splitting by hand"
   "ASC_KEY_PATH      -> ASC_PRIVATE_KEY     source is a FILE PATH; prod needs the .p8 PEM CONTENTS"
   "VERCEL_API_TOKEN                         intentionally absent; Vercel is not used by this fleet directly"
@@ -230,7 +230,7 @@ cmd_sync_platforms() {
   [ "${1:-}" = "--dry-run" ] && dry=1
 
   note "Infisical target: project ${PROJECT_ID}  env=${ENV_SLUG}  path=${SECRET_PATH}"
-  note "Source:          fleet-secrets"
+  note "Source:          Infisical-synced environment"
   note ""
   if [ "$dry" = 1 ]; then
     note "DRY RUN — nothing will be written.  Planned copies:"
@@ -243,6 +243,7 @@ cmd_sync_platforms() {
       fi
     done
   else
+    ensure_write_token || return 1
     note "Writing ${#MAP[@]} secrets:"
     for entry in "${MAP[@]}"; do
       set_secret "${entry%%:*}" "${entry##*:}" || true
@@ -250,7 +251,7 @@ cmd_sync_platforms() {
   fi
 
   note ""
-  note "Held back on purpose (copying these would move a broken credential):"
+  note "Held back on purpose (not copied automatically):"
   for h in "${HELD_BACK[@]}"; do note "  - $h"; done
   note ""
   note "Then redeploy so scripts/infisical-run.mjs injects them:"
@@ -272,14 +273,13 @@ infisical-secrets-safe.sh — value-blind Infisical access.
 
   names                       list secret KEY NAMES only
   has KEY                     exit 0 if KEY exists with a non-empty value
-  set KEY [DEST_KEY]          copy KEY from fleet-secrets into Infisical
-  pull KEY [DEST_KEY]         retired;  use fleet-secrets get KEY
+  set KEY [DEST_KEY]          copy a synced environment value into Infisical
+  pull KEY [DEST_KEY]         retired;  use synced environment values
   delete KEY [KEY...]         delete shared secret(s), verifying they are gone
   sync-platforms [--dry-run]  batch-copy the platform-status tokens
 
 Credentials: use INFISICAL_UM_READ_TOKEN for names/has and
-INFISICAL_UM_WRITE_TOKEN for set/delete, or configure an explicit
-INFISICAL_UM_CLIENT_ID / INFISICAL_UM_CLIENT_SECRET project identity.
+INFISICAL_UM_WRITE_TOKEN for set/delete; service tokens are required.
 USAGE
     exit 2
     ;;
