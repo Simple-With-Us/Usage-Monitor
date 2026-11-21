@@ -46,16 +46,12 @@ const ENTRY_POINTS = {
   "codex-usage-collector.mjs": "codex",
   "grok-usage-collector.mjs": "grok",
   "minimax-runtime-usage-collector.mjs": "minimax-runtime",
+  "muse-code-usage-collector.mjs": "muse-code",
   "opencode-usage-collector.mjs": "opencode",
   "subscription-quota-collector.mjs": "subscription-quota",
 };
 
-/** The collectors that keep the shared library and are not part of this change.
- *  muse-code belongs here, not with the scoped bindings:  its Meta access
- *  token rotates inside the Muse CLI's own keychain entry, so the
- *  collector reads that entry directly and resolves only its ingest token
- *  through the shared library.  A provisioned copy of the access token goes
- *  stale, so the scoped route cannot carry this provider. */
+/** The collectors that keep the generic shared resolver. */
 const SHARED_COLLECTORS = [
   "copilot-usage-collector.mjs",
   "cursor-usage-collector.mjs",
@@ -63,7 +59,6 @@ const SHARED_COLLECTORS = [
   "fleet-usage-collector.mjs",
   "fx-usage-collector.mjs",
   "minimax-usage-collector.mjs",
-  "muse-code-usage-collector.mjs",
   "muse-usage-collector.mjs",
 ];
 
@@ -427,6 +422,77 @@ for (const [stem, [account, label, grantId]] of Object.entries(SCOPED_BINDINGS))
     assert.equal(typeof binding.collectorStatePath, "function");
   });
 }
+
+test("Muse Code uses its pinned ingest binding and reuses the real resolver cache", async () => {
+  const bindingModule = await import("./lib/muse-code-run-session-token-collector.mjs");
+  const binding = bindingModule.collectorTokenBinding;
+  const collectorSource = await readFile(join(scripts, "muse-code-usage-collector.mjs"), "utf8");
+  assert.ok(collectorSource.includes('from "./lib/muse-code-run-session-token-collector.mjs"'));
+  assert.ok(collectorSource.includes('await resolveCollectorToken(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"])'));
+
+  let keychainToken = tokenFor(binding.grantId);
+  let keychainReads = 0;
+  let museIngestValue = "muse-ingest-before-change";
+  let sharedIngestValue = "shared-ingest-before-change";
+  const requests = [];
+  const metadata = {
+    workspace: binding.project,
+    name: binding.account,
+    _id: binding.grantId,
+    id: binding.grantId,
+    scopes: binding.folders.map((secretPath) => ({ environment: "prod", secretPath })),
+    permissions: ["read"],
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+  };
+  const resolve = createScopedCollectorTokenResolver(binding, {
+    readKeychain: (account) => {
+      keychainReads += 1;
+      assert.equal(account, binding.account);
+      return { token: keychainToken, status: "ok" };
+    },
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      const secretPath = url.searchParams.get("secretPath");
+      requests.push({ path: url.pathname, secretPath });
+      if (url.pathname === "/api/v2/service-token") {
+        return new Response(JSON.stringify(metadata));
+      }
+      assert.equal(url.pathname, "/api/v4/secrets");
+      assert.equal(url.searchParams.get("projectId"), binding.project);
+      assert.equal(url.searchParams.get("environment"), "prod");
+      if (secretPath === "/") {
+        return new Response(JSON.stringify({
+          secrets: [
+            { secretKey: "MUSE_CODE_INGEST_TOKEN", secretValue: "${prod.global-api-keys.MUSE_CODE_INGEST_TOKEN}" },
+            { secretKey: "USAGE_INGEST_TOKEN", secretValue: "${prod.global-api-keys.USAGE_INGEST_TOKEN}" },
+          ],
+        }));
+      }
+      assert.equal(secretPath, "/global-api-keys");
+      return new Response(JSON.stringify({
+        secrets: [
+          { secretKey: "MUSE_CODE_INGEST_TOKEN", secretValue: museIngestValue },
+          { secretKey: "USAGE_INGEST_TOKEN", secretValue: sharedIngestValue },
+        ],
+      }));
+    },
+  });
+
+  assert.equal(await resolve(["MUSE_CODE_INGEST_TOKEN", "USAGE_INGEST_TOKEN"], { env: {} }), "muse-ingest-before-change");
+  // Change both backing stores after the first read.  A second token-name
+  // lookup must use the same resolver's folder cache, not fresh credentials.
+  keychainToken = tokenFor("00000000-0000-0000-0000-000000000000");
+  museIngestValue = "muse-ingest-after-change";
+  sharedIngestValue = "shared-ingest-after-change";
+  assert.equal(await resolve(["USAGE_INGEST_TOKEN"], { env: {} }), "shared-ingest-before-change");
+  assert.equal(await resolve(["MUSE_CODE_INGEST_TOKEN"], { env: {} }), "muse-ingest-before-change");
+  assert.equal(keychainReads, 1);
+  assert.deepEqual(requests, [
+    { path: "/api/v2/service-token", secretPath: null },
+    { path: "/api/v4/secrets", secretPath: "/" },
+    { path: "/api/v4/secrets", secretPath: "/global-api-keys" },
+  ]);
+});
 
 test("the codex binding keeps the automation identity and never reads the login keychain", async () => {
   const source = await readFile(join(scripts, "lib", "codex-run-session-token-collector.mjs"), "utf8");
