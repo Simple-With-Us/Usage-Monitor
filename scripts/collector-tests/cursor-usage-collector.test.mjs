@@ -22,10 +22,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { describe, it } from "vitest";
-import { resolveCursorAdminApiKey } from "../cursor-usage-collector.mjs";
 import {
   CURSOR_ADMIN_ATTRIBUTIONS,
   CURSOR_ADMIN_DATE_RANGE_ERROR,
@@ -43,20 +42,7 @@ import {
 } from "../lib/cursor-admin-telemetry.mjs";
 
 describe("Cursor Admin synced key", () => {
-  it("uses only the synced Admin key, independently of ingest credentials", () => {
-    const unrelated = {
-      CURSOR_ADMIN_INGEST_TOKEN: "fixture",
-      USAGE_INGEST_TOKEN: "fixture",
-      INFISICAL_TOKEN: "fixture",
-      INFISICAL_FLEET_OPS_PROJECT_ID: "fixture",
-    };
-    assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: "  fixture  " }), "fixture");
-    for (const value of [undefined, "", " \t "]) {
-      assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: value }), null);
-    }
-  });
-
-  it("keeps missing-key CLI runs offline without any credential helper", () => {
+  it("keeps synced-key resolution and missing-key CLI runs offline without any credential helper", () => {
     const home = mkdtempSync(join(tmpdir(), "cursor-synced-key-"));
     try {
       const bin = join(home, ".local", "bin");
@@ -73,6 +59,28 @@ globalThis.fetch = async () => {
 };
 `);
       const script = fileURLToPath(new URL("../cursor-usage-collector.mjs", import.meta.url));
+      const helperProgram = `import assert from "node:assert/strict";
+import { resolveCursorAdminApiKey } from ${JSON.stringify(pathToFileURL(script).href)};
+const unrelated = {
+  CURSOR_ADMIN_INGEST_TOKEN: "fixture",
+  USAGE_INGEST_TOKEN: "fixture",
+  INFISICAL_TOKEN: "fixture",
+  INFISICAL_FLEET_OPS_PROJECT_ID: "fixture",
+};
+assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: "  fixture  " }), "fixture");
+for (const value of [undefined, "", " \t "]) {
+  assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: value }), null);
+}
+`;
+      const helperResult = spawnSync(process.execPath, ["--import", preload, "--input-type=module", "--eval", helperProgram], {
+        env: { HOME: home, PATH: bin, TMPDIR: home, CURSOR_TEST_MARKER: marker, NODE_ENV: "test", VITEST: "true" },
+        cwd: home, encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      });
+      assert.ifError(helperResult.error);
+      assert.equal(helperResult.signal, null);
+      assert.equal(helperResult.status, 0, helperResult.stderr);
+      assert.equal(existsSync(marker), false, "helper resolution must not read credentials or make requests");
+      assert.equal((helperResult.stdout + helperResult.stderr).includes("fixture"), false);
       for (const value of [undefined, "", " \t "]) {
         for (const dryRun of [true, false]) {
           const env = {
@@ -80,6 +88,7 @@ globalThis.fetch = async () => {
             INFISICAL_TOKEN: "fixture", INFISICAL_FLEET_OPS_PROJECT_ID: "fixture",
             CURSOR_ADMIN_INGEST_TOKEN: "fixture", USAGE_INGEST_TOKEN: "fixture",
             ...(value === undefined ? {} : { CURSOR_ADMIN_API_KEY: value }),
+            NODE_ENV: "test", VITEST: "true",
           };
           const result = spawnSync(process.execPath, ["--import", preload, script, ...(dryRun ? ["--dry-run"] : [])], {
             env, cwd: home, encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
