@@ -3,8 +3,8 @@
 Namecheap API client & CLI for AI Agents and fleet operations.
 Allows querying account balances, listing domains, checking availability, and viewing DNS records.
 
-The account username (sent as both ApiUser and UserName) is resolved from
-$NAMECHEAP_API_USER or `fleet-secrets get NAMECHEAP_API_USER`, exactly like the API key — it is
+The account username (sent as both ApiUser and UserName) is resolved from the
+Infisical-synced $NAMECHEAP_API_USER environment value, exactly like the API key — it is
 never hardcoded here (this repo is public; account details live in the private
 fleet-ops ATTACK-MAP.md).  A wrong username makes the API return error 1011102
 "API Key is invalid", even when the key itself is fine.
@@ -19,8 +19,6 @@ Usage:
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -32,21 +30,6 @@ def _read_secret(name):
     if val:
         return val.strip().strip("\"'")
 
-    # OPS-818: the retired flat key file is no longer read.  Fall back to the
-    # Mac-side fleet-secrets CLI;  stdout is captured and never logged.
-    binary = shutil.which("fleet-secrets") or os.path.expanduser("~/.local/bin/fleet-secrets")
-    for secret_path in ("/", "/global-api-keys"):
-        try:
-            result = subprocess.run(
-                [binary, "get", name, "--path", secret_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().strip("\"'")
     return None
 
 
@@ -76,12 +59,12 @@ def call_namecheap(command, params=None, api_user=None, api_key=None, client_ip=
     if not api_key:
         api_key = get_api_key()
     if not api_key:
-        raise ValueError("NAMECHEAP_API_KEY not found in environment or `fleet-secrets get`")
+        raise ValueError("NAMECHEAP_API_KEY required in the Infisical-synced environment")
 
     if not api_user:
         api_user = get_api_user()
     if not api_user:
-        raise ValueError("NAMECHEAP_API_USER not found in environment or `fleet-secrets get`")
+        raise ValueError("NAMECHEAP_API_USER required in the Infisical-synced environment")
 
     if not client_ip:
         client_ip = get_public_ip()
@@ -235,7 +218,7 @@ def cmd_dns(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Namecheap API CLI for Agents & Fleet Operations")
-    parser.add_argument("--user", default=None, help="Namecheap username (default: $NAMECHEAP_API_USER or `fleet-secrets get NAMECHEAP_API_USER`)")
+    parser.add_argument("--user", default=None, help="Namecheap username (default: Infisical-synced $NAMECHEAP_API_USER)")
     parser.add_argument("--ip", default=None, help="Whitelisted client IP (default: auto-detected public IP)")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
 

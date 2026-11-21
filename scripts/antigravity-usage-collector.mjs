@@ -616,7 +616,7 @@ async function main() {
   ]);
   if (!ingestToken && !DRY_RUN) {
     fail(
-      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN. Ensure the token is set in the environment or available through `fleet-secrets get`."
+      "Missing ANTIGRAVITY_INGEST_TOKEN or USAGE_INGEST_TOKEN.\u00A0 Check this consumer's Infisical-synced value or qualified scoped binding."
     );
   }
 
