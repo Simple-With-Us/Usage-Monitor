@@ -65,7 +65,7 @@
     "test:apple-projects": "bash scripts/verify-apple-projects.sh",
     "test:antigravity-collector": "node scripts/test-antigravity-collector.mjs",
     "test:session-token-collectors": "node scripts/test-session-token-collectors.mjs",
-    "test:collector-runtime": "node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs scripts/idle-collector-sentry.node-test.mjs scripts/collector-keychain.node-test.mjs && node scripts/__tests__/run-session-token-collector.fixture.mjs && node scripts/__tests__/retirement-sentry.fixture.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
+    "test:collector-runtime": "python3 -m unittest scripts.test_ops_synced_credentials && node scripts/test-local-collector-runtime.mjs && node --test scripts/__tests__/opencode-profiles.node-test.mjs scripts/sentry-partial-ack.node-test.mjs scripts/idle-collector-sentry.node-test.mjs scripts/collector-keychain.node-test.mjs && node scripts/__tests__/run-session-token-collector.fixture.mjs && node scripts/__tests__/retirement-sentry.fixture.mjs && vitest run --config scripts/vitest.collectors.config.mjs",
     "test:cf-token-map": "bash scripts/test-cf-token-map.sh",
     "test:replica-status-probe": "bash scripts/test-replica-status-probe.sh",
     "test:quota-wrapper": "bash scripts/test-subscription-quota-wrapper.sh",
@@ -120,7 +120,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0",
-    "wrangler": "4.160.1"
+    "wrangler": "4.162.0"
   },
   "overrides": {
     "minimatch": "^11.0.0",
@@ -129,6 +129,7 @@
     "undici": "^8.12.2",
     "js-yaml": "^5.4.1",
     "deepmerge-ts": "^8.0.0",
+    "effect": "^3.22.1",
     "brace-expansion": "^5.0.12",
     "braces": "^3.0.3",
     "source-map-js": "1.2.2",

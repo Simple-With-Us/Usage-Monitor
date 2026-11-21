@@ -18,9 +18,13 @@
 // is one level below scripts/ either way.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { describe, it } from "vitest";
-
 import {
   CURSOR_ADMIN_ATTRIBUTIONS,
   CURSOR_ADMIN_DATE_RANGE_ERROR,
@@ -36,6 +40,72 @@ import {
   normalizeWindow,
   runCursorCollector,
 } from "../lib/cursor-admin-telemetry.mjs";
+
+describe("Cursor Admin synced key", () => {
+  it("keeps synced-key resolution and missing-key CLI runs offline without any credential helper", () => {
+    const home = mkdtempSync(join(tmpdir(), "cursor-synced-key-"));
+    try {
+      const bin = join(home, ".local", "bin");
+      mkdirSync(bin, { recursive: true });
+      const marker = join(home, "unexpected-call");
+      for (const name of ["fleet-secrets", "infisical", "security"]) {
+        writeFileSync(join(bin, name), '#!/bin/sh\nprintf called >> "$CURSOR_TEST_MARKER"\nexit 91\n', { mode: 0o755 });
+      }
+      const preload = join(home, "offline.mjs");
+      writeFileSync(preload, `import { appendFileSync } from "node:fs";
+globalThis.fetch = async () => {
+  appendFileSync(process.env.CURSOR_TEST_MARKER, "fetch");
+  throw new Error("unexpected network request");
+};
+`);
+      const script = fileURLToPath(new URL("../cursor-usage-collector.mjs", import.meta.url));
+      const helperProgram = `import assert from "node:assert/strict";
+import { resolveCursorAdminApiKey } from ${JSON.stringify(pathToFileURL(script).href)};
+const unrelated = {
+  CURSOR_ADMIN_INGEST_TOKEN: "fixture",
+  USAGE_INGEST_TOKEN: "fixture",
+  INFISICAL_TOKEN: "fixture",
+  INFISICAL_FLEET_OPS_PROJECT_ID: "fixture",
+};
+assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: "  fixture  " }), "fixture");
+for (const value of [undefined, "", " \t "]) {
+  assert.equal(resolveCursorAdminApiKey({ ...unrelated, CURSOR_ADMIN_API_KEY: value }), null);
+}
+`;
+      const helperResult = spawnSync(process.execPath, ["--import", preload, "--input-type=module", "--eval", helperProgram], {
+        env: { HOME: home, PATH: bin, TMPDIR: home, CURSOR_TEST_MARKER: marker, NODE_ENV: "test", VITEST: "true" },
+        cwd: home, encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      });
+      assert.ifError(helperResult.error);
+      assert.equal(helperResult.signal, null);
+      assert.equal(helperResult.status, 0, helperResult.stderr);
+      assert.equal(existsSync(marker), false, "helper resolution must not read credentials or make requests");
+      assert.equal((helperResult.stdout + helperResult.stderr).includes("fixture"), false);
+      for (const value of [undefined, "", " \t "]) {
+        for (const dryRun of [true, false]) {
+          const env = {
+            HOME: home, PATH: bin, TMPDIR: home, CURSOR_TEST_MARKER: marker,
+            INFISICAL_TOKEN: "fixture", INFISICAL_FLEET_OPS_PROJECT_ID: "fixture",
+            CURSOR_ADMIN_INGEST_TOKEN: "fixture", USAGE_INGEST_TOKEN: "fixture",
+            ...(value === undefined ? {} : { CURSOR_ADMIN_API_KEY: value }),
+            NODE_ENV: "test", VITEST: "true",
+          };
+          const result = spawnSync(process.execPath, ["--import", preload, script, ...(dryRun ? ["--dry-run"] : [])], {
+            env, cwd: home, encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+          });
+          assert.ifError(result.error);
+          assert.equal(result.signal, null);
+          assert.equal(result.status, dryRun ? 0 : 1, result.stderr);
+          assert.match(dryRun ? result.stdout : result.stderr, dryRun ? /no CURSOR_ADMIN_API_KEY available; nothing to read/ : /CURSOR_ADMIN_API_KEY is required/);
+          assert.equal(existsSync(marker), false, "no credential helper, Cursor request or ingest request may run");
+          assert.equal((result.stdout + result.stderr).includes("fixture"), false);
+        }
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 const USER_ID = "user_9f2c41de";
 const USER_EMAIL = "jay.owner@example.com";
