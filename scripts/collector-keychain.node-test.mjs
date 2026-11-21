@@ -494,15 +494,100 @@ test("Muse Code uses its pinned ingest binding and reuses the real resolver cach
   ]);
 });
 
-test("the codex binding keeps the automation identity and never reads the login keychain", async () => {
-  const source = await readFile(join(scripts, "lib", "codex-run-session-token-collector.mjs"), "utf8");
-  assert.ok(!source.includes("infisical-service-token"));
-  assert.ok(!source.includes("keychain-service-token.mjs"));
-  const binding = await import("./lib/codex-run-session-token-collector.mjs");
-  const shared = await import("./lib/run-session-token-collector.mjs");
-  assert.notEqual(binding.resolveCollectorToken, shared.resolveCollectorToken);
-  assert.equal(binding.resolveCollectorToken(["CODEX_INGEST_TOKEN"], { env: { CODEX_INGEST_TOKEN: "tok" } }), "tok");
+// BEGIN CODEX INJECTED FIXTURES
+async function codexInjectedFixture(t, body) {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const { pathToFileURL } = await import("node:url");
+  const directory = await mkdtemp(join(tmpdir(), "codex-injected-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const traps = ["security", "infisical", "fleet-secrets"].map(name => join(directory, name));
+  for (const path of traps) await writeFile(path, '#!/bin/sh\nprintf invoked >> "$FIXTURE_AUTH_MARKER"\nexit 97\n', { mode: 0o700 });
+  const marker = join(directory, "auth-invoked");
+  const program = `
+import assert from "node:assert/strict";
+import cp from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { existsSync } from "node:fs";
+const traps = ${JSON.stringify(traps)};
+const marker = ${JSON.stringify(marker)};
+const childCalls = [], networkCalls = [];
+const realExec = cp.execFileSync;
+cp.execFileSync = (binary, args, options) => {
+  childCalls.push(binary);
+  // Refuse any destination outside the inert fixture before spawning.
+  assert.ok(traps.includes(binary), "unexpected credential executable");
+  return realExec(binary, args, { ...options, timeout: 15000, killSignal: "SIGKILL" });
+};
+syncBuiltinESMExports();
+globalThis.fetch = () => { networkCalls.push(true); throw new Error("unexpected provider request"); };
+const binding = await import(${JSON.stringify(pathToFileURL(join(scripts, "lib", "codex-run-session-token-collector.mjs")).href)});
+const shared = await import(${JSON.stringify(pathToFileURL(join(scripts, "lib", "run-session-token-collector.mjs")).href)});
+const bootstrap = {
+  INFISICAL_TOKEN: "st.synthetic-bootstrap", INFISICAL_FLEET_OPS_PROJECT_ID: "synthetic-project",
+  INFISICAL_BIN: traps[1], CODEX_SECURITY_BIN: traps[0], COLLECTOR_STRICT_INJECTED_SECRETS: "0",
+  INFISICAL_CLIENT_ID: "synthetic-client", INFISICAL_CLIENT_SECRET: "synthetic-secret",
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: "synthetic-client", INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: "synthetic-secret",
+};
+${body}
+assert.deepEqual(childCalls, [], "Codex must not spawn credential readers");
+assert.deepEqual(networkCalls, [], "Codex must not request provider data");
+assert.equal(existsSync(marker), false, "inert auth traps must remain unused");
+`;
+  const result = spawnSync(process.execPath, ["--input-type=module"], {
+    input: program, encoding: "utf8", timeout: 15000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+    env: { PATH: directory, HOME: directory, FIXTURE_AUTH_MARKER: marker },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+}
+
+test("Codex preserves shared exports and reads injected names in priority order without caching", async (t) => {
+  await codexInjectedFixture(t, `
+for (const name of Object.keys(shared)) if (name !== "resolveCollectorToken") assert.equal(binding[name], shared[name]);
+const names = Object.freeze(["CODEX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"]);
+const env = { ...bootstrap, CODEX_INGEST_TOKEN: "first-output", USAGE_INGEST_TOKEN: "shared-output" };
+assert.ok(binding.resolveCollectorToken(names, { env }) === "first-output");
+env.CODEX_INGEST_TOKEN = "changed-output";
+assert.ok(binding.resolveCollectorToken(names, { env }) === "changed-output");
+delete env.CODEX_INGEST_TOKEN;
+assert.ok(binding.resolveCollectorToken(names, { env }) === "shared-output");
+env.CODEX_INGEST_TOKEN = "  ";
+assert.ok(binding.resolveCollectorToken(names, { env }) === "shared-output");
+delete env.USAGE_INGEST_TOKEN;
+assert.equal(binding.resolveCollectorToken(names, { env }), null);
+assert.equal(binding.resolveCollectorToken(undefined, { env: { USAGE_INGEST_TOKEN: "default-output" } }), "default-output");
+process.env.CODEX_INGEST_TOKEN = "process-output";
+assert.ok(binding.resolveCollectorToken(names) === "process-output");
+delete process.env.CODEX_INGEST_TOKEN;
+`);
 });
+
+test("Codex forces injected mode without mutating options or accepting a lookup bypass", async (t) => {
+  await codexInjectedFixture(t, `
+let lookups = 0;
+const env = Object.freeze({ ...bootstrap });
+const options = Object.freeze({ env, fleetSecretsGet: () => { lookups++; throw new Error("synthetic-secret"); } });
+assert.equal(binding.resolveCollectorToken(["CODEX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"], options), null);
+assert.equal(lookups, 0);
+assert.equal(options.env, env);
+assert.equal(env.COLLECTOR_STRICT_INJECTED_SECRETS, "0");
+assert.equal(Object.keys(options).length, 2);
+`);
+});
+
+test("Codex missing or partial bootstrap stays environment-only with no auth diagnostics", async (t) => {
+  await codexInjectedFixture(t, `
+for (const env of [{}, bootstrap, { INFISICAL_TOKEN: "st.fixture" }, { INFISICAL_FLEET_OPS_PROJECT_ID: bootstrap.INFISICAL_FLEET_OPS_PROJECT_ID }, { ...bootstrap, COLLECTOR_STRICT_INJECTED_SECRETS: "1" }]) {
+  assert.equal(binding.resolveCollectorToken(["CODEX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"], { env }), null);
+}
+`);
+});
+// END CODEX INJECTED FIXTURES
 
 for (const [entry, stem] of Object.entries(ENTRY_POINTS)) {
   test(`the ${entry} entry point uses its own binding and awaits the resolver`, async () => {
