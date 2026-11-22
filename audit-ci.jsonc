@@ -1,26 +1,18 @@
 {
   "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
   // 2026-11-18 - GHSA-fc5q-39xc-vjpf (picomatch ReDoS through single-branch
-  // repeated extglobs).  No patched picomatch release on npm: latest is 4.0.7
-  // and the advisory's affected range is <=4.0.7 with first_patched_version
-  // null.  The advisory was updated 2026-11-17, which is what turned
-  // previously green main red - no repo change caused it.  Every lockfile
-  // path is build- or test-time tooling running the project's own static
-  // glob patterns, never attacker-controlled input: vitest/vite/tinyglobby
-  // (test), typescript-eslint and eslint-config-next/fast-glob (lint), and
-  // @sentry/nextjs sourcemap-upload bundler plugins (build).  Do not clear
-  // with the semver-major vitest downgrade npm suggests (3.1.4): no
-  // picomatch release fixes the advisory, so no dependency bump can.
-  //
-  // 2026-11-22 (MM) - status of the picomatch entry: GitHub withdrew
-  // GHSA-fc5q-39xc-vjpf on 2026-11-18 (advisory title "Withdrawn Advisory:
-  // picomatch vulnerable to ReDoS through single-branch repeated extglobs";
-  // withdrawn_at 2026-11-18T15:38:56Z; withdrawn because it is not a security
-  // issue).  npm no longer reports it, so the entry is currently inert: the
-  // audit passes at high severity with an empty allowlist as of this commit.
-  // The entry stays so a republished advisory under the same GHSA cannot turn
-  // main red again, and it costs nothing while it is inert.
-  // Re-review if the advisory is republished or picomatch publishes a patch.
+  // repeated extglobs) was allowlisted here while it was live and unfixable:
+  // no patched picomatch release exists (latest 4.0.7, advisory range
+  // <=4.0.7, first_patched_version null) and the advisory update on
+  // 2026-11-17 turned previously green main red.  Every lockfile path was
+  // build- or test-time tooling running the project's own static glob
+  // patterns, never attacker-controlled input: vitest/vite/tinyglobby (test),
+  // typescript-eslint and eslint-config-next/fast-glob (lint), and
+  // @sentry/nextjs sourcemap-upload bundler plugins (build).  GitHub withdrew
+  // the advisory on 2026-11-18 (withdrawn_at 2026-11-18T15:38:56Z, withdrawn
+  // because it is not a security issue), so npm no longer reports it and the
+  // entry was dropped on 2026-11-22 under the same policy as the braces entry
+  // below.
   //
   // 2026-11-18 - dropped the 2026-10-05 braces entry (GHSA-vfj7-8cjw-p6xm).
   // That advisory is withdrawn (GitHub advisory title: "Withdrawn Advisory:
@@ -29,6 +21,16 @@
   // braces 3.0.3 remains in the lockfile.  A stale allowlist entry would
   // silently suppress a future braces advisory if this GHSA were reused
   // or reopened.  Re-review if the advisory is republished.
+  //
+  // 2026-11-22 (MM) - the allowlist is empty on purpose.  Every id it held
+  // was a withdrawn advisory, and a retained withdrawn id would suppress a
+  // real republished advisory under the same GHSA, which is the failure the
+  // braces entry above cites.  npm audit reports 0 high advisories at this
+  // tree, so the gate passes at high severity with no suppression and a
+  // republished advisory turns main red instead of passing silently.
+  // Re-review if npm reports a high or critical advisory whose affected range
+  // has no patched release and whose affected paths never see
+  // attacker-controlled input.
   "high": true,
-  "allowlist": ["GHSA-fc5q-39xc-vjpf"]
+  "allowlist": []
 }

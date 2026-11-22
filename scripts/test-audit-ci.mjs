@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * Offline gate: audit-ci.jsonc must allowlist the unfixable picomatch advisory
- * (GHSA-fc5q-39xc-vjpf) and audit-ci must pass at high severity.  Mirrors
- * .github/workflows/ci.yml audit step.  Parses JSONC so a comment mention of
- * a withdrawn GHSA cannot satisfy the allowlist assertion.
+ * Offline gate: audit-ci.jsonc must be valid, must run at high severity and
+ * must hold no malformed allowlist id, and audit-ci must pass at high
+ * severity.  Mirrors .github/workflows/ci.yml audit step.  The allowlist is
+ * empty on purpose: every id it held was a withdrawn advisory, and a retained
+ * withdrawn id would suppress a real republished advisory.  Parses JSONC so a
+ * comment mention of a withdrawn GHSA cannot satisfy a check.
  */
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 
 const configPath = "audit-ci.jsonc";
-const requiredGhsa = "GHSA-fc5q-39xc-vjpf";
+const ghsaIdPattern = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/;
 
 /**
  * Strip JSONC comments while leaving comment-like text inside strings alone.
@@ -93,8 +95,9 @@ if (!snapshot.success) {
   process.exit(1);
 }
 
-if (!snapshot.data.allowlist.includes(requiredGhsa)) {
-  console.error(`${configPath} allowlist must contain ${requiredGhsa}`);
+const malformedIds = snapshot.data.allowlist.filter((entry) => !ghsaIdPattern.test(entry));
+if (malformedIds.length > 0) {
+  console.error(`${configPath} allowlist holds entries that are not GHSA ids: ${malformedIds.join(", ")}`);
   process.exit(1);
 }
 if (snapshot.data.high !== true) {
