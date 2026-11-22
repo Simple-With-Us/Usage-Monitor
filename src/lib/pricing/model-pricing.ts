@@ -35,6 +35,7 @@
 // it is not modeled.
 
 import { isDeepSeekPaygModel } from "./deepseek-payg";
+import { isGemini4DatedModel } from "./gemini4-dated";
 import snapshot from "./model-pricing.snapshot.json";
 
 export interface ModelPricingEntry {
@@ -434,6 +435,12 @@ function resolvePricingKeyUncached(model: string): string | null {
   // Returning null here keeps grouped analytics from applying that rate.
   // Agents overview prices each event from occurredAt instead.
   if (isDeepSeekPaygModel(trimmed)) return null;
+  // Gemini 4 Argon / Carbon rates are effective-dated (introductory through
+  // Nov 30, 2026, doubled from Dec 1, 2026) and priced per event in
+  // gemini4-dated.ts.  The snapshot's Argon rows hold only the introductory
+  // rates, so returning null here keeps date-less callers from applying
+  // them to December events.
+  if (isGemini4DatedModel(trimmed)) return null;
   if (catalogEntry(trimmed)) return trimmed;
 
   const lower = trimmed.toLowerCase();
