@@ -8,6 +8,13 @@ set -euo pipefail
 INGEST_URL="${INGEST_URL:-https://usage.jays.services/api/ingest/mac-heartbeat}"
 KEYCHAIN_SERVICE="infisical-service-token"
 KEYCHAIN_ACCOUNT="${HEARTBEAT_KEYCHAIN_ACCOUNT:-mac-host-heartbeat-read}"
+# The second account is a keychain account, not an environment variable:  it is
+# the unscoped ingest token, read from the same keychain item store.
+KEYCHAIN_FALLBACK_ACCOUNT="USAGE_INGEST_TOKEN"
+# launchd runs with a minimal PATH, so the security binary is absolute, and the
+# read is bounded so an unanswered Keychain prompt cannot hang the schedule.
+SECURITY_BIN="${MAC_HEARTBEAT_SECURITY_BIN:-/usr/bin/security}"
+KEYCHAIN_TIMEOUT_SECS="${MAC_HEARTBEAT_KEYCHAIN_TIMEOUT_SECS:-20}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
@@ -15,24 +22,62 @@ KEYCHAIN_ACCOUNT="${HEARTBEAT_KEYCHAIN_ACCOUNT:-mac-host-heartbeat-read}"
 #
 # OPS-818:  the retired flat key file is no longer read.
 # 2026-11-21:  the `fleet-secrets` CLI is retired and no longer on PATH, so
-# its read path is gone.  A name missing from the environment is read from
-# the owner's login keychain (service `infisical-service-token`, account
-# `mac-host-heartbeat-read`, stored per the service-tokens skill with
-# `-T /usr/bin/security` so headless reads work);  the value is captured,
-# never echoed.  The read needs the keychain unlocked — while the session is
-# locked this exits 1 with the message below and the next launchd pass heals
-# itself once the owner logs back in.
+# its read path is gone.  The token is read from the owner's login keychain
+# (service `infisical-service-token`, account `mac-host-heartbeat-read`, stored
+# per the service-tokens skill with `-T /usr/bin/security` so headless reads
+# work);  the value is captured, never echoed.  The read needs the keychain
+# unlocked — while the session is locked this exits 1 with the message below
+# and the next launchd pass heals itself once the owner logs back in.
+#
+# The keychain is the only source (owner ruling, November 22, 2026:  the
+# environment is never a source, and a copy of a secret in the environment is a
+# defect, not a fallback).  A stale copy must not shadow the authoritative
+# value, so the keychain is read first and the script fails fast when it
+# yields nothing.
 read_keychain_secret() {
-  security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null || true
+  local cred rc=0
+  if [[ ! -x "$SECURITY_BIN" ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: ${SECURITY_BIN} is not executable; the heartbeat token was not read this pass" >&2
+    return 0
+  fi
+  # 0 must not survive: perl's alarm 0 cancels the timer instead of arming it,
+  # which would leave the read unbounded on an unanswered prompt.
+  [[ "$KEYCHAIN_TIMEOUT_SECS" =~ ^[0-9]+$ && "$KEYCHAIN_TIMEOUT_SECS" -gt 0 ]] || KEYCHAIN_TIMEOUT_SECS=20
+  # The read runs in a forked child so the alarm can kill it:  an alarm set in
+  # the parent is reset by exec, so `alarm; exec` would not bound anything and
+  # an unanswered Keychain prompt would hang the schedule.  The child holds the
+  # value on the pipe, never on disk.  stderr is discarded: security prints
+  # item attributes there on some failures.
+  cred="$(/usr/bin/perl -e '
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    exit 127 unless defined $pid;
+    unless ($pid) { setpgrp(0, 0); exec @ARGV or exit 127; }
+    my $timed_out = 0;
+    $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
+    alarm $timeout;
+    waitpid($pid, 0);
+    my $status = $?;
+    alarm 0;
+    exit 142 if $timed_out || ($status & 127);
+    exit($status >> 8);
+  ' "$KEYCHAIN_TIMEOUT_SECS" \
+    "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null)" || rc=$?
+  case "$rc" in
+    # Only a clean read yields the value:  a read that timed out or failed has
+    # no usable answer, and a partial one must never become a token.
+    0) printf '%s' "$cred" ;;
+    142) echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: the keychain read for account $1 timed out after ${KEYCHAIN_TIMEOUT_SECS}s (prompt unanswered?)" >&2 ;;
+    44) : ;;
+    *) echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: the keychain read for account $1 failed (security exit $rc; click Always Allow once if prompted)" >&2 ;;
+  esac
 }
 
-TOKEN="${MAC_HEARTBEAT_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "$KEYCHAIN_ACCOUNT")"
-[[ -n "$TOKEN" ]] || TOKEN="${USAGE_INGEST_TOKEN:-}"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "USAGE_INGEST_TOKEN")"
+TOKEN="$(read_keychain_secret "$KEYCHAIN_ACCOUNT")"
+[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "$KEYCHAIN_FALLBACK_ACCOUNT")"
 
 if [[ -z "$TOKEN" ]]; then
-  echo "Error: MAC_HEARTBEAT_INGEST_TOKEN not found in the environment or the login keychain (service ${KEYCHAIN_SERVICE}, account ${KEYCHAIN_ACCOUNT}); store the item per the service-tokens skill with -T /usr/bin/security, and the keychain must be unlocked" >&2
+  echo "Error: the heartbeat token was not found in the login keychain (service ${KEYCHAIN_SERVICE}; accounts ${KEYCHAIN_ACCOUNT} and ${KEYCHAIN_FALLBACK_ACCOUNT}); store the item per the service-tokens skill with -T /usr/bin/security, and the keychain must be unlocked" >&2
   exit 1
 fi
 

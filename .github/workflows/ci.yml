@@ -339,6 +339,16 @@ jobs:
           bash -n scripts/ios-fleet/publish-ios-versions.sh
           bash -n scripts/ios-fleet/assign-external-beta.sh
 
+      # The Mac server watchdog's heartbeat token comes from the login keychain
+      # and nowhere else (the environment is not a source), and the read is
+      # bounded so an unanswered Keychain prompt cannot hang the schedule.
+      # Fully offline:  `security` is replaced by a stub.
+      - name: Test the Mac server watchdog token source
+        run: |
+          bash -n scripts/ops/mac-server-watchdog.sh
+          bash -n scripts/test-mac-server-watchdog-token.sh
+          bash scripts/test-mac-server-watchdog-token.sh
+
       # The server's storage watch (deploy/server/vps-storage-watch):  a
       # database past its growth threshold posts one alert tagging both
       # Housekeepers and Jay, the cooldown holds, and a missing database path
