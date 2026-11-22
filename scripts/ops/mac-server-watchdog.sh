@@ -14,7 +14,7 @@ KEYCHAIN_FALLBACK_ACCOUNT="USAGE_INGEST_TOKEN"
 # launchd runs with a minimal PATH, so the security binary is absolute, and the
 # read is bounded so an unanswered Keychain prompt cannot hang the schedule.
 SECURITY_BIN="${MAC_HEARTBEAT_SECURITY_BIN:-/usr/bin/security}"
-KEYCHAIN_TIMEOUT_SECS="${MAC_HEARTBEAT_KEYCHAIN_TIMEOUT_SECS:-20}"
+KEYCHAIN_TIMEOUT_SECS="${MAC_HEARTBEAT_KEYCHAIN_TIMEOUT_SECS:-5}"
 
 # Prefer the scoped heartbeat token (a `mac-host:<token>` entry in the
 # monitor's USAGE_INGEST_PRODUCER_TOKENS); the unscoped USAGE_INGEST_TOKEN is
@@ -41,8 +41,10 @@ read_keychain_secret() {
     return 0
   fi
   # 0 must not survive: perl's alarm 0 cancels the timer instead of arming it,
-  # which would leave the read unbounded on an unanswered prompt.
-  [[ "$KEYCHAIN_TIMEOUT_SECS" =~ ^[0-9]+$ && "$KEYCHAIN_TIMEOUT_SECS" -gt 0 ]] || KEYCHAIN_TIMEOUT_SECS=20
+  # which would leave the read unbounded on an unanswered prompt.  The budget is
+  # clamped:  two reads in one pass must not be able to stall the schedule.
+  [[ "$KEYCHAIN_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || KEYCHAIN_TIMEOUT_SECS=5
+  (( KEYCHAIN_TIMEOUT_SECS >= 1 && KEYCHAIN_TIMEOUT_SECS <= 5 )) || KEYCHAIN_TIMEOUT_SECS=5
   # The read runs in a forked child so the alarm can kill it:  an alarm set in
   # the parent is reset by exec, so `alarm; exec` would not bound anything and
   # an unanswered Keychain prompt would hang the schedule.  The child holds the
@@ -54,12 +56,18 @@ read_keychain_secret() {
     exit 127 unless defined $pid;
     unless ($pid) { setpgrp(0, 0); exec @ARGV or exit 127; }
     my $timed_out = 0;
-    $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
+    my $killed = 0;
+    $SIG{ALRM} = sub {
+      # TERM first,  then KILL a second later:  a child that ignores TERM must
+      # not keep waitpid waiting,  or the launchd pass loses its bound.
+      if ($timed_out) { $killed = 1; kill "KILL", -$pid; }
+      else { $timed_out = 1; kill "TERM", -$pid; alarm 1; }
+    };
     alarm $timeout;
     waitpid($pid, 0);
     my $status = $?;
     alarm 0;
-    exit 142 if $timed_out || ($status & 127);
+    exit 142 if $timed_out || $killed || ($status & 127);
     exit($status >> 8);
   ' "$KEYCHAIN_TIMEOUT_SECS" \
     "$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null)" || rc=$?
@@ -73,8 +81,13 @@ read_keychain_secret() {
   esac
 }
 
+_keychain_started=$SECONDS
 TOKEN="$(read_keychain_secret "$KEYCHAIN_ACCOUNT")"
-[[ -n "$TOKEN" ]] || TOKEN="$(read_keychain_secret "$KEYCHAIN_FALLBACK_ACCOUNT")"
+# The fallback read only runs when the first one did not spend the whole
+# budget:  two reads that each wait for the timeout would stall the pass.
+if [[ -z "$TOKEN" ]] && (( SECONDS - _keychain_started < KEYCHAIN_TIMEOUT_SECS )); then
+  TOKEN="$(read_keychain_secret "$KEYCHAIN_FALLBACK_ACCOUNT")"
+fi
 
 if [[ -z "$TOKEN" ]]; then
   echo "Error: the heartbeat token was not found in the login keychain (service ${KEYCHAIN_SERVICE}; accounts ${KEYCHAIN_ACCOUNT} and ${KEYCHAIN_FALLBACK_ACCOUNT}); store the item per the service-tokens skill with -T /usr/bin/security, and the keychain must be unlocked" >&2

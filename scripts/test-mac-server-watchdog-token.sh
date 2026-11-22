@@ -19,7 +19,7 @@ fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 bash -n "$WD" || fail "bash -n watchdog"
 
 # The environment is not a source:  neither token name may be read from it.
-if grep -nE '\$\{?(MAC_HEARTBEAT_INGEST_TOKEN|USAGE_INGEST_TOKEN)[:}]' "$WD" \
+if grep -nE '\$\{?(MAC_HEARTBEAT_INGEST_TOKEN|USAGE_INGEST_TOKEN)\b' "$WD" \
   | grep -v '^[0-9]*:[[:space:]]*#' >/dev/null; then
   fail "the watchdog reads the heartbeat token from the environment"
 fi
@@ -33,6 +33,10 @@ grep -q 'MAC_HEARTBEAT_SECURITY_BIN:-/usr/bin/security' "$WD" \
 grep -q 'alarm \$timeout' "$WD" || fail "the keychain read must arm a timeout"
 grep -q 'fork()' "$WD" || fail "the keychain read must run in a forked child"
 grep -q 'kill "TERM"' "$WD" || fail "the timeout must kill the keychain read"
+grep -q 'kill "KILL"' "$WD" || fail "the timeout must escalate to KILL"
+grep -q 'KEYCHAIN_TIMEOUT_SECS <= 5' "$WD" || fail "the timeout must be clamped"
+grep -q 'SECONDS - _keychain_started < KEYCHAIN_TIMEOUT_SECS' "$WD" \
+  || fail "the fallback read must respect the budget"
 grep -q 'KEYCHAIN_FALLBACK_ACCOUNT' "$WD" \
   || fail "the error must name the fallback keychain account"
 grep -q 'accounts ${KEYCHAIN_ACCOUNT} and ${KEYCHAIN_FALLBACK_ACCOUNT}' "$WD" \
@@ -81,5 +85,15 @@ out="$(TIMEOUT=2 run_fn mac-host-heartbeat-read)"
 elapsed=$(( $(date +%s) - start ))
 [[ -z "$out" ]] || fail "a timed-out read must yield no token"
 [[ "$elapsed" -lt 25 ]] || fail "the keychain read was not bounded (${elapsed}s)"
+
+# 4. A child that ignores TERM is still killed:  the timeout escalates to KILL,
+#    so waitpid returns and the launchd pass keeps its bound.
+printf '#!/usr/bin/env bash\ntrap "" TERM\nprintf "%%s" %q\nsleep 30\n' "$SENTINEL" > "$TMP/security"
+chmod 755 "$TMP/security"
+start="$(date +%s)"
+out="$(TIMEOUT=2 run_fn mac-host-heartbeat-read)"
+elapsed=$(( $(date +%s) - start ))
+[[ -z "$out" ]] || fail "a read that had to be killed must yield no token"
+[[ "$elapsed" -lt 25 ]] || fail "a TERM-ignoring read was not killed (${elapsed}s)"
 
 printf 'ok  mac-server-watchdog token source\n'
