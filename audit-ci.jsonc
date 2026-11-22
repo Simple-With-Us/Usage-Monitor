@@ -11,7 +11,16 @@
   // @sentry/nextjs sourcemap-upload bundler plugins (build).  Do not clear
   // with the semver-major vitest downgrade npm suggests (3.1.4): no
   // picomatch release fixes the advisory, so no dependency bump can.
-  // Re-review when picomatch publishes a patch.
+  //
+  // 2026-11-22 (MM) - status of the picomatch entry: GitHub withdrew
+  // GHSA-fc5q-39xc-vjpf on 2026-11-18 (advisory title "Withdrawn Advisory:
+  // picomatch vulnerable to ReDoS through single-branch repeated extglobs";
+  // withdrawn_at 2026-11-18T15:38:56Z; withdrawn because it is not a security
+  // issue).  npm no longer reports it, so the entry is currently inert: the
+  // audit passes at high severity with an empty allowlist as of this commit.
+  // The entry stays so a republished advisory under the same GHSA cannot turn
+  // main red again, and it costs nothing while it is inert.
+  // Re-review if the advisory is republished or picomatch publishes a patch.
   //
   // 2026-11-18 - dropped the 2026-10-05 braces entry (GHSA-vfj7-8cjw-p6xm).
   // That advisory is withdrawn (GitHub advisory title: "Withdrawn Advisory:
