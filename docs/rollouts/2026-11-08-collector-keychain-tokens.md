@@ -1,6 +1,6 @@
 # Per-Consumer Collector Tokens In The Mac Login Keychain
 
-Each collector that reads a provider secret reads it with its own scoped Infisical service token, and that token now lives in the owner's login keychain instead of a plaintext file on disk.  The nine per-consumer binding files that say so are in this repository now, tracked, with the read implemented once and the per-consumer differences held as data.
+Eight collector bindings read through their own scoped Infisical service tokens in the owner's login keychain instead of plaintext files.  The ninth, Codex, accepts only Infisical-synced values injected for its own consumer.  The nine binding files are tracked, with shared resolution and the per-consumer differences held in thin bindings.
 
 ## Why The Files Were Missing
 
@@ -26,15 +26,15 @@ The two Infisical responses are external, so neither is read field by field befo
 
 The resolver honours COLLECTOR_STRICT_INJECTED_SECRETS=1 as environment-only, the same way the shared resolver does, so a host that asked for environment-only resolution never reaches the login keychain and never makes an Infisical request.  The lookup is built once per resolver and shared, so the keychain read, the metadata request and the per-folder fetches happen once per run rather than once per name the collector asks for.
 
-`scripts/lib/automation-collector-token.mjs` holds the Codex collector's existing mechanism, unchanged.  The Codex collector reads through the System keychain automation identity, which the owner permitted, and that identity is shared rather than a per-consumer grant, so it is neither one of the scoped tokens nor something the owner's login keychain should hold.
+`scripts/lib/codex-run-session-token-collector.mjs` forces the shared resolver's injected-secrets mode on every call.  It accepts `CODEX_INGEST_TOKEN` before `USAGE_INGEST_TOKEN` from its supplied environment and returns no token when both are absent.  A caller cannot enable runtime lookups by supplying a lookup function or disabling strict mode.  The former System keychain automation reader is removed; Codex performs no keychain read, universal-auth login, CLI lookup or default-folder discovery.
 
-The nine per-consumer files under `scripts/lib/` are now thin.  Each one re-exports the shared library, states its own binding, and overrides the resolver with the scoped one.  The binding is data: the token's account name, the human label, the pinned grant id, the project and the folders.  All eight scoped consumers share one project, the root folder and the global API keys folder, and read permission only.  Because the binding is data and the read is one implementation, a change to the read can no longer drift between consumers, which is exactly what the nine forks had been doing.
+The nine per-consumer files under `scripts/lib/` are thin and re-export the shared library.  Eight override the resolver with the scoped reader; their binding data is the token's account name, the human label, the pinned grant id, the project and the folders.  All eight scoped consumers share one project, the root folder and the global API keys folder, and read permission only.  Codex overrides the shared resolver only to require injected values.  The shared implementations keep reads from drifting between consumers.
 
 ## The Entry Points
 
 Each of the nine collectors now imports its own binding instead of the shared library, and awaits the resolver.  The eight other collectors, which have no per-consumer grant, keep the shared library and are unchanged.
 
-The Codex collector's resolver stays synchronous, because the automation identity read is synchronous and has always been.  Awaiting it changes nothing.
+The Codex collector's resolver stays synchronous and preserves the shared library's public exports and option shape.  It copies the supplied environment before forcing injected mode, leaving caller options and environment unchanged.  Awaiting its result remains supported.
 
 ## The Install Order
 
@@ -42,9 +42,11 @@ The plaintext files are deleted only after the merged collectors are deployed an
 
 ## The Test
 
-`scripts/collector-keychain.node-test.mjs` runs under Node's own test runner as part of the collector runtime gate.  Every keychain read goes through an injected stand-in for `security`, so the test never touches the real keychain.  It covers the item lookup and its arguments, the three refusals and how they are told apart, the refusal to read an invalid account name, the grant id check, the malformed-token refusal, the environment taking precedence over the keychain, the metadata binding refusal, the refusal of a malformed Infisical body, the strict mode that reaches neither the keychain nor Infisical, the shared lookup that reads the keychain once, and the rule that a failed read never carries the value.  It also pins each of the nine bindings to its own account, label, grant id, project and folders, checks that each entry point imports its own binding and awaits the resolver, checks that the other collectors still import the shared library, and checks that no collector reads a plaintext token file any more.
+`scripts/collector-keychain.node-test.mjs` runs under Node's own test runner as part of the collector runtime gate.  Every keychain read goes through an injected stand-in for `security`, so the test never touches the real keychain.  It covers the item lookup and its arguments, the three refusals and how they are told apart, the refusal to read an invalid account name, the grant id check, the malformed-token refusal, the environment taking precedence over the keychain, the metadata binding refusal, the refusal of a malformed Infisical body, the strict mode that reaches neither the keychain nor Infisical, the shared lookup that reads the keychain once, and the rule that a failed read never carries the value.  It pins the eight scoped bindings to their own accounts, labels, grant ids, project and folders.  Codex fixtures exercise the actual wrapper and shared resolver in bounded isolated child processes, guard commands with inert authentication traps, and reject provider calls.  They verify injected name priority, changed values between calls, absent and partial bootstrap, immutable caller options and the inability to bypass injected mode.  The suite also checks each entry point's binding import and awaited resolver, the other collectors' shared imports, and the absence of plaintext token readers.
 
 ## What Is Not Covered Here
+
+The Codex source change does not qualify an actual grant or installed injector.  Its own service-token custody, exact project/prod/folder/read metadata, finite expiry, producer injection and installed collector acceptance remain separate gates.  No account, grant id or folder is inferred, and the generic CLI resolver's compatibility lookups do not establish that qualification.
 
 The ninth plaintext file on the Mac, `fleet-zulip-client-read`, is not a collector token and has no consumer that a search of the Mac's applications, launch agents, secrets directory and configuration found.  It is moved to the keychain on its own footing, not by this change.
 

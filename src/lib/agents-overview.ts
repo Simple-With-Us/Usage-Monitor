@@ -9,6 +9,7 @@ import { getExternalEventRawCutoff, startOfUtcDay } from "@/lib/data-retention";
 import { getLatestMacHealth } from "@/lib/mac-health";
 import { prisma } from "@/lib/prisma";
 import { isDeepSeekPaygModel, sumDeepSeekPaygEvents, type DeepSeekPaygEvent } from "@/lib/pricing/deepseek-payg";
+import { isGemini4DatedModel, sumGemini4DatedEvents, type Gemini4DatedEvent } from "@/lib/pricing/gemini4-dated";
 import { CURSOR_ADMIN_SOURCE_APP } from "@/lib/cursor-admin-poller";
 import { deriveTokenCostUsd, getModelPricing } from "@/lib/pricing/model-pricing";
 import {
@@ -392,7 +393,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     earliestEvent,
     subscriptionRows,
     observedCodexPlan,
-    deepseekTokenRows,
+    datedTokenRows,
     cursorAdminRows,
   ] = await Promise.all([
     getLatestMacHealth().catch(() => null),
@@ -485,9 +486,12 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       orderBy: { occurredAt: "desc" },
       select: { keyRef: true },
     }),
-    // DeepSeek Flash / V4 Pro rates depend on the event's UTC hour.  Grouped
-    // sums cannot price them.  These rows are the raw events inside the
-    // retention window; daily rollups have no hour and stay unpriced.
+    // DeepSeek Flash / V4 Pro rates depend on the event's UTC hour, and
+    // Gemini 4 Argon / Carbon rates depend on the event's date (introductory
+    // through Nov 30, 2026, doubled from Dec 1, 2026).  Grouped sums cannot
+    // price either.  These rows are the raw events inside the retention
+    // window; daily rollups have no hour or date split and stay unpriced
+    // for these models.
     prisma.externalUsageEvent.findMany({
       where: {
         AND: [
@@ -499,6 +503,8 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
             OR: [
               { keyRef: { contains: "deepseek-v4" } },
               { keyRef: { contains: "deepseek-flash" } },
+              { keyRef: { contains: "gemini-4-argon" } },
+              { keyRef: { contains: "gemini-4-carbon" } },
             ],
           },
         ],
@@ -720,14 +726,27 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
       platformCacheCreation += breakdown.cacheCreation;
 
       // Price the model tokens.  DeepSeek PAYG uses each raw event's UTC
-      // hour.  A grouped sum would hide the peak/off-peak split.
+      // hour and Gemini 4 Argon / Carbon use each raw event's date.  A
+      // grouped sum would hide the peak/off-peak split or the Dec 1, 2026
+      // rate doubling.
       const deepseekPriced = isDeepSeekPaygModel(modelName)
         ? sumDeepSeekPaygEvents(
-            deepseekPaygEventsFor(deepseekTokenRows, { appKey, model: modelName }),
+            deepseekPaygEventsFor(datedTokenRows, { appKey, model: modelName }),
           )
         : null;
-      const modelPricing = deepseekPriced ? null : getModelPricing(modelName);
-      const priced = deepseekPriced
+      const geminiDatedPriced =
+        deepseekPriced == null && isGemini4DatedModel(modelName)
+          ? sumGemini4DatedEvents(
+              gemini4DatedEventsFor(datedTokenRows, {
+                appKey,
+                model: modelName,
+                skipOverlappingSeatEvent,
+              }),
+            )
+          : null;
+      const datedPriced = deepseekPriced ?? geminiDatedPriced;
+      const modelPricing = datedPriced ? null : getModelPricing(modelName);
+      const priced = datedPriced
         ? null
         : modelPricing
           ? deriveTokenCostUsd(modelPricing.pricing, {
@@ -738,12 +757,12 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
             })
           : null;
 
-      const modelCost = deepseekPriced?.costUsd ?? priced?.costUsd ?? 0;
-      const deepseekCoversGrouped =
-        deepseekPriced != null && deepseekPriced.seenQuantity + 1e-6 >= breakdown.total;
-      const modelCostKnown = deepseekPriced
-        ? deepseekPriced.complete &&
-          deepseekCoversGrouped &&
+      const modelCost = datedPriced?.costUsd ?? priced?.costUsd ?? 0;
+      const datedCoversGrouped =
+        datedPriced != null && datedPriced.seenQuantity + 1e-6 >= breakdown.total;
+      const modelCostKnown = datedPriced
+        ? datedPriced.complete &&
+          datedCoversGrouped &&
           !breakdown.incompleteInput &&
           breakdown.unknown === 0
         : Boolean(priced?.complete) && !breakdown.incompleteInput && breakdown.unknown === 0;
@@ -901,6 +920,7 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
   let tokens5h = 0;
   let derivedCost5hComplete = true;
   let deepseekTokens5h = 0;
+  let gemini4Tokens5h = 0;
   const derivedCost5hByPlatform = new Map<string, number>();
   const reportedCost5hByPlatform = new Map<string, number>();
 
@@ -920,6 +940,10 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
     if (label.includes("inputunsplit") && qty > 0) derivedCost5hComplete = false;
     if (isDeepSeekPaygModel(model)) {
       deepseekTokens5h += qty;
+      continue;
+    }
+    if (isGemini4DatedModel(model)) {
+      gemini4Tokens5h += qty;
       continue;
     }
     const modelPricing = getModelPricing(model);
@@ -945,12 +969,42 @@ export async function computeAgentsOverview(windowDays: number = 30): Promise<Ag
 
   if (deepseekTokens5h > 0) {
     const deepseek5h = sumDeepSeekPaygEvents(
-      deepseekPaygEventsFor(deepseekTokenRows, { since: window5hStart }),
+      deepseekPaygEventsFor(datedTokenRows, { since: window5hStart }),
     );
     const app = "deepseek-dsh";
     const current = derivedCost5hByPlatform.get(app) || 0;
     derivedCost5hByPlatform.set(app, current + deepseek5h.costUsd);
     if (!deepseek5h.complete || deepseek5h.seenQuantity + 1e-6 < deepseekTokens5h) {
+      derivedCost5hComplete = false;
+    }
+  }
+
+  if (gemini4Tokens5h > 0) {
+    // Gemini 4 Argon / Carbon rows can come from any platform, so the
+    // per-event sums are grouped by platform rather than landing on one
+    // hardcoded app the way the DeepSeek sum does.
+    const geminiPlatforms = new Set<string>();
+    for (const row of datedTokenRows) {
+      if (!row.keyRef || !isGemini4DatedModel(row.keyRef)) continue;
+      if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+      if (skipOverlappingSeatEvent(row.sourceApp)) continue;
+      geminiPlatforms.add(platformIdForSourceApp(row.sourceApp));
+    }
+    let geminiSeen5h = 0;
+    for (const app of geminiPlatforms) {
+      const gemini5h = sumGemini4DatedEvents(
+        gemini4DatedEventsFor(datedTokenRows, {
+          appKey: app,
+          since: window5hStart,
+          skipOverlappingSeatEvent,
+        }),
+      );
+      geminiSeen5h += gemini5h.seenQuantity;
+      if (!gemini5h.complete) derivedCost5hComplete = false;
+      const current = derivedCost5hByPlatform.get(app) || 0;
+      derivedCost5hByPlatform.set(app, current + gemini5h.costUsd);
+    }
+    if (geminiSeen5h + 1e-6 < gemini4Tokens5h) {
       derivedCost5hComplete = false;
     }
   }
@@ -1171,7 +1225,7 @@ function cursorAdminRowDerivedCost(
   return { costUsd: priced.costUsd, complete };
 }
 
-type DeepSeekTokenRow = {
+type DatedTokenRow = {
   sourceApp: string;
   keyRef: string | null;
   label: string | null;
@@ -1180,13 +1234,43 @@ type DeepSeekTokenRow = {
 };
 
 function deepseekPaygEventsFor(
-  rows: readonly DeepSeekTokenRow[],
+  rows: readonly DatedTokenRow[],
   opts: { appKey?: string; model?: string; since?: Date },
 ): DeepSeekPaygEvent[] {
   const events: DeepSeekPaygEvent[] = [];
   for (const row of rows) {
     if (!row.keyRef || !isDeepSeekPaygModel(row.keyRef)) continue;
     if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (opts.appKey && platformIdForSourceApp(row.sourceApp) !== opts.appKey) continue;
+    if (opts.model && row.keyRef !== opts.model) continue;
+    if (opts.since && row.occurredAt.getTime() < opts.since.getTime()) continue;
+    events.push({
+      model: row.keyRef,
+      occurredAt: row.occurredAt,
+      label: row.label,
+      quantity: row.quantity,
+    });
+  }
+  return events;
+}
+
+function gemini4DatedEventsFor(
+  rows: readonly DatedTokenRow[],
+  opts: {
+    appKey?: string;
+    model?: string;
+    since?: Date;
+    /** The grouped sums this pricer mirrors exclude overlapping-seat rows
+     * (cursor-agent rows when Cursor admin billing exists); the raw events
+     * must exclude the same rows or the dated sum overstates them. */
+    skipOverlappingSeatEvent?: (sourceApp: string) => boolean;
+  },
+): Gemini4DatedEvent[] {
+  const events: Gemini4DatedEvent[] = [];
+  for (const row of rows) {
+    if (!row.keyRef || !isGemini4DatedModel(row.keyRef)) continue;
+    if (!isReliableTokenSourceApp(row.sourceApp)) continue;
+    if (opts.skipOverlappingSeatEvent?.(row.sourceApp)) continue;
     if (opts.appKey && platformIdForSourceApp(row.sourceApp) !== opts.appKey) continue;
     if (opts.model && row.keyRef !== opts.model) continue;
     if (opts.since && row.occurredAt.getTime() < opts.since.getTime()) continue;
