@@ -157,6 +157,18 @@ describe("resolvePricingKey", () => {
     expect(getModelPricing("deepseek-flash")).toBeNull();
   });
 
+  it("does not apply a flat Gemini 4 catalog rate without an event date", () => {
+    // The LiteLLM snapshot's Argon rows hold only the introductory rates
+    // (through Nov 30, 2026) and Carbon has no row at all.  Both models are
+    // priced per event in gemini4-dated.ts; see gemini4-dated.test.ts for
+    // the November vs December assertions.
+    expect(resolvePricingKey("gemini-4-argon")).toBeNull();
+    expect(resolvePricingKey("gemini/gemini-4-argon")).toBeNull();
+    expect(resolvePricingKey("gemini-4-carbon")).toBeNull();
+    expect(getModelPricing("gemini-4-argon")).toBeNull();
+    expect(getModelPricing("google/gemini-4-carbon")).toBeNull();
+  });
+
   it("caches lookups without changing results", () => {
     const first = resolvePricingKey("gpt-4o");
     const second = resolvePricingKey("gpt-4o");
