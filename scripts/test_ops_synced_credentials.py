@@ -120,6 +120,15 @@ class NamecheapSyncedCredentialsTests(IsolatedOpsFixture):
 
 
 class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
+    """The heartbeat token comes from the login keychain and nowhere else.
+
+    Owner ruling, November 22, 2026:  the environment is never a source, and a
+    copy of a secret in the environment is a defect, not a fallback.  The
+    keychain is this consumer's own store, so the test makes `security` a reader
+    instead of a trap, and pins that the environment cannot supply or shadow the
+    credential.
+    """
+
     def setUp(self):
         super().setUp()
         source = (SCRIPTS / "ops" / "mac-server-watchdog.sh").read_text(encoding="utf-8")
@@ -131,11 +140,26 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
         # Only the actual auth prefix is executable here; all probes and POSTs
         # are beyond the unique end marker and never enter the child program.
         self.prefix = source[source.index(start):source.index(end)]
+        self.calls = self.home / "keychain-calls"
+        # `security` is the source, so it reads instead of tripping the trap.
+        # A blank value is a missing item (security exit 44).
+        reader = self.bin / "security"
+        reader.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$*" >> "$FIXTURE_KEYCHAIN_CALLS"\n'
+            'if [ -n "$FIXTURE_KEYCHAIN_VALUE" ]; then printf "%s" "$FIXTURE_KEYCHAIN_VALUE"; exit 0; fi\n'
+            'exit 44\n',
+            encoding="utf-8",
+        )
+        reader.chmod(0o700)
 
-    def run_prefix(self, values, expected=None):
+    def run_prefix(self, values, expected=None, keychain=""):
         environment = {
             **self.environment,
             "INGEST_URL": "http://127.0.0.1:9/unused-fixture",
+            "MAC_HEARTBEAT_SECURITY_BIN": str(self.bin / "security"),
+            "FIXTURE_KEYCHAIN_CALLS": str(self.calls),
+            "FIXTURE_KEYCHAIN_VALUE": keychain,
             **values,
         }
         program = self.prefix
@@ -161,23 +185,39 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
                 self.assertNotIn(value, stderr)
         return child.returncode, stderr
 
-    def test_dedicated_value_wins_and_legacy_explicit_environment_alias_remains(self):
-        cases = (
-            ({"MAC_HEARTBEAT_INGEST_TOKEN": "fixture-dedicated"}, "fixture-dedicated"),
-            ({"USAGE_INGEST_TOKEN": "fixture-legacy"}, "fixture-legacy"),
-            ({"MAC_HEARTBEAT_INGEST_TOKEN": "fixture-dedicated", "USAGE_INGEST_TOKEN": "fixture-legacy"}, "fixture-dedicated"),
-            ({"MAC_HEARTBEAT_INGEST_TOKEN": " \t", "USAGE_INGEST_TOKEN": "fixture-legacy"}, "fixture-legacy"),
-        )
-        for values, expected in cases:
-            with self.subTest(names=tuple(values)):
-                self.assertEqual(self.run_prefix(values, expected), (0, ""))
+    def keychain_accounts(self):
+        if not self.calls.exists():
+            return []
+        return [
+            line.split(" -a ", 1)[1].split()[0]
+            for line in self.calls.read_text(encoding="utf-8").splitlines()
+            if " -a " in line
+        ]
 
-    def test_missing_or_blank_values_refuse_before_any_probe_or_lookup(self):
-        for values in ({}, {"MAC_HEARTBEAT_INGEST_TOKEN": ""}, {"MAC_HEARTBEAT_INGEST_TOKEN": " \t", "USAGE_INGEST_TOKEN": "\n "}):
+    def test_the_keychain_value_is_the_credential(self):
+        status, stderr = self.run_prefix({}, expected="fixture-keychain-token", keychain="fixture-keychain-token")
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertEqual(self.keychain_accounts()[0], "mac-host-heartbeat-read")
+
+    def test_the_environment_is_not_a_source(self):
+        # A copy of the token in the environment neither supplies the credential
+        # nor shadows the keychain value.
+        for values in (
+            {"MAC_HEARTBEAT_INGEST_TOKEN": "fixture-dedicated"},
+            {"USAGE_INGEST_TOKEN": "fixture-legacy"},
+            {"MAC_HEARTBEAT_INGEST_TOKEN": "fixture-dedicated", "USAGE_INGEST_TOKEN": "fixture-legacy"},
+        ):
             with self.subTest(names=tuple(values)):
-                status, stderr = self.run_prefix(values)
-                self.assertEqual(status, 1)
-                self.assertEqual(stderr.strip(), "Error: MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN required in the Infisical-synced environment")
+                status, stderr = self.run_prefix(values, expected="fixture-keychain-token", keychain="fixture-keychain-token")
+                self.assertEqual((status, stderr), (0, ""))
+
+    def test_a_missing_keychain_item_refuses_and_names_both_accounts(self):
+        status, stderr = self.run_prefix({})
+        self.assertEqual(status, 1)
+        self.assertIn("infisical-service-token", stderr)
+        self.assertIn("mac-host-heartbeat-read", stderr)
+        self.assertIn("USAGE_INGEST_TOKEN", stderr)
+        self.assertIn("service-tokens skill", stderr)
 
     def test_unrelated_bootstrap_never_becomes_a_heartbeat_credential(self):
         status, stderr = self.run_prefix({
@@ -185,7 +225,7 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
             "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID": "fixture-client", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET": "fixture-secret",
         })
         self.assertEqual(status, 1)
-        self.assertIn("MAC_HEARTBEAT_INGEST_TOKEN / USAGE_INGEST_TOKEN", stderr)
+        self.assertIn("the login keychain", stderr)
 
 
 if __name__ == "__main__":

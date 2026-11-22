@@ -57,7 +57,11 @@ read_keychain_secret() {
     unless ($pid) { setpgrp(0, 0); exec @ARGV or exit 127; }
     my $timed_out = 0;
     my $killed = 0;
+    my $reaped = 0;
     $SIG{ALRM} = sub {
+      # A late alarm must never signal again:  once the child is reaped its pid
+      # can be recycled,  and the group it led may belong to something else.
+      return if $reaped;
       # TERM first,  then KILL a second later:  a child that ignores TERM must
       # not keep waitpid waiting,  or the launchd pass loses its bound.
       if ($timed_out) { $killed = 1; kill "KILL", -$pid; }
@@ -66,6 +70,7 @@ read_keychain_secret() {
     alarm $timeout;
     waitpid($pid, 0);
     my $status = $?;
+    $reaped = 1;
     alarm 0;
     exit 142 if $timed_out || $killed || ($status & 127);
     exit($status >> 8);
