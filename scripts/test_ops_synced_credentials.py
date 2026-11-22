@@ -147,6 +147,9 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
         reader.write_text(
             '#!/bin/sh\n'
             'printf "%s\\n" "$*" >> "$FIXTURE_KEYCHAIN_CALLS"\n'
+            # The reader answers for this service only:  a query against another
+            # service is a missing item,  so a wrong -s cannot look green.
+            'case " $* " in *" infisical-service-token "*) ;; *) exit 44;; esac\n'
             'if [ -n "$FIXTURE_KEYCHAIN_VALUE" ]; then printf "%s" "$FIXTURE_KEYCHAIN_VALUE"; exit 0; fi\n'
             'exit 44\n',
             encoding="utf-8",
@@ -198,6 +201,7 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
         status, stderr = self.run_prefix({}, expected="fixture-keychain-token", keychain="fixture-keychain-token")
         self.assertEqual((status, stderr), (0, ""))
         self.assertEqual(self.keychain_accounts()[0], "mac-host-heartbeat-read")
+        self.assertIn("infisical-service-token", self.calls.read_text(encoding="utf-8"))
 
     def test_the_environment_is_not_a_source(self):
         # A copy of the token in the environment neither supplies the credential
@@ -214,6 +218,9 @@ class WatchdogSyncedCredentialsTests(IsolatedOpsFixture):
     def test_a_missing_keychain_item_refuses_and_names_both_accounts(self):
         status, stderr = self.run_prefix({})
         self.assertEqual(status, 1)
+        # Both accounts were really looked up:  a script that refused without
+        # reading anything would pass the message check alone.
+        self.assertEqual(self.keychain_accounts(), ["mac-host-heartbeat-read", "USAGE_INGEST_TOKEN"])
         self.assertIn("infisical-service-token", stderr)
         self.assertIn("mac-host-heartbeat-read", stderr)
         self.assertIn("USAGE_INGEST_TOKEN", stderr)
