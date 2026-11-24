@@ -10,8 +10,9 @@
   server-side connector impersonating the CLI stays out by the same ruling that
   keeps the subscription-quota-collector on the laptop (issue #1411).
 
-  Default source: the collector runs `muse usage --json` (set MUSE_CODE_BIN if
-  `muse` is not on PATH), so it never calls `security` against the keychain
+  Default source: the collector runs `muse usage --json` (MUSE_CODE_BIN defaults to
+  ~/.local/bin/muse, the installer location, because launchd gives jobs a minimal
+  PATH; set it if `muse` lives elsewhere), so it never calls `security` against the keychain
   item and never raises the macOS prompt.  The Muse app rewrites that item on
   every token refresh, which reset its access list and made "Always Allow"
   not stick.  MUSE_CODE_SOURCE=keychain restores the legacy keychain read.
