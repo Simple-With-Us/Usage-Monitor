@@ -6,7 +6,9 @@ import {
   fetchMuseCodeKey,
   quotaEventsFromMuseCode,
   quotaReadingsFromMuseCode,
+  payloadFromMuseUsage,
   readMuseCodeAccessTokenFromKeychain,
+  readMuseUsageViaCli,
 } from "../muse-code-usage-collector.mjs";
 
 const OBSERVED = new Date("2026-09-15T12:00:00.000Z");
@@ -373,6 +375,7 @@ describe("collectMuseCode wiring", () => {
       execFileImpl,
       fetchImpl,
       platform: "linux",
+      source: "keychain",
       now: OBSERVED,
     });
     expect(result.status).toBe("skipped");
@@ -396,6 +399,7 @@ describe("collectMuseCode wiring", () => {
       execFileImpl,
       fetchImpl,
       platform: "darwin",
+      source: "keychain",
     });
     expect(result.status).toBe("ok");
     expect(result.events).toHaveLength(2);
@@ -421,6 +425,7 @@ describe("collectMuseCode wiring", () => {
       execFileImpl,
       fetchImpl,
       platform: "darwin",
+      source: "keychain",
     });
     expect(result.status).toBe("skipped");
     expect(result.reason).toBe("access-token-rejected");
@@ -441,10 +446,64 @@ describe("collectMuseCode wiring", () => {
       execFileImpl,
       fetchImpl,
       platform: "darwin",
+      source: "keychain",
     });
     expect(result.status).toBe("skipped");
     expect(result.reason).toBe("no-quota-windows");
     expect(result.events).toEqual([]);
+  });
+});
+
+describe("muse CLI source (default, no keychain call)", () => {
+  const usageJson = JSON.stringify({
+    schemaVersion: 1,
+    allowance: {
+      tier: "x",
+      window: { usedPercent: 1, resetsAtMs: 1795485725000 },
+      weekly: { usedPercent: 18, resetsAtMs: 1795996800000 },
+    },
+  });
+  let logSpy;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it("emits both windows from `muse usage --json` and never calls security or fetch", async () => {
+    const execFileImpl = vi.fn(async () => ({ stdout: usageJson }));
+    const fetchImpl = vi.fn();
+    const result = await collectMuseCode({ execFileImpl, fetchImpl, now: OBSERVED });
+    expect(result.status).toBe("ok");
+    expect(result.events).toHaveLength(2);
+    expect(execFileImpl).toHaveBeenCalledTimes(1);
+    expect(execFileImpl.mock.calls[0][0]).not.toBe("security");
+    expect(execFileImpl.mock.calls[0][1]).toEqual(["usage", "--json"]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const used = result.events.map((e) => e.credits).sort((a, b) => a - b);
+    expect(used).toEqual([82, 99]);
+  });
+
+  it("skips with muse-cli-unavailable when the CLI fails or prints non-JSON", async () => {
+    const failing = vi.fn(async () => {
+      throw new Error("not logged in");
+    });
+    expect((await collectMuseCode({ execFileImpl: failing, now: OBSERVED })).reason).toBe(
+      "muse-cli-unavailable",
+    );
+    const junk = vi.fn(async () => ({ stdout: "nope" }));
+    expect((await collectMuseCode({ execFileImpl: junk, now: OBSERVED })).reason).toBe(
+      "muse-cli-unavailable",
+    );
+  });
+
+  it("payloadFromMuseUsage rejects a missing allowance and copies only numbers", async () => {
+    expect(payloadFromMuseUsage({})).toBeNull();
+    expect(payloadFromMuseUsage(null)).toBeNull();
+    const p = payloadFromMuseUsage(JSON.parse(usageJson));
+    expect(p.subs_usage.window).toEqual({ used_percent: 1, resets_at: 1795485725000 });
+    expect(await readMuseUsageViaCli({ execFileImpl: async () => ({ stdout: usageJson }) })).toEqual(p);
   });
 });
 
