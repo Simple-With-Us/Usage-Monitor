@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Mac-side quota collector for Meta's Muse Code (NOT Anthropic's Muse CLI,
 // NOT MiniMax's mcode).  This is a tiny tool that:
-//   1. Reads the Muse Code OAuth access token from the macOS keychain
-//      (service "ai.meta.dev.credentials", account "meta").
-//   2. POSTs to https://api.meta.ai/muse-code/key with that Bearer token.
+//   1. Default: runs `muse usage --json` (the Muse CLI reads its own keychain
+//      item, so no `security` call and no macOS prompt).  Legacy opt-in
+//      (MUSE_CODE_SOURCE=keychain): reads the OAuth access token from the
+//      keychain (service "ai.meta.dev.credentials", account "meta") and
+//      POSTs to https://api.meta.ai/muse-code/key with that Bearer token.
 //   3. Emits one "quota" event per remaining-percent window
 //      (5h rolling + weekly) via the existing /api/ingest/usage contract.
 //
@@ -34,6 +36,8 @@
 //   email — and we treat 3xx as an error (no redirect-following).
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
@@ -194,6 +198,63 @@ export async function readMuseCodeAccessTokenFromKeychain({
     return null;
   }
   return token.trim();
+}
+
+// ------------------------------------------------------------ muse CLI ---
+
+// launchd gives jobs a minimal PATH, so default to the installer's location.
+const MUSE_BIN = process.env.MUSE_CODE_BIN || join(homedir(), ".local", "bin", "muse");
+const MUSE_CLI_TIMEOUT_MS = 20_000;
+
+/**
+ * Map the `muse usage --json` allowance object to the payload shape the
+ * parser below reads.  Returns null when the allowance has no usable window.
+ * Only numbers and timestamps are copied; nothing else from the CLI output
+ * is kept.
+ */
+export function payloadFromMuseUsage(usage) {
+  const allowance = usage && typeof usage === "object" ? usage.allowance : null;
+  if (!allowance || typeof allowance !== "object") return null;
+  const pick = (w) =>
+    w && typeof w === "object"
+      ? { used_percent: w.usedPercent, resets_at: w.resetsAtMs }
+      : undefined;
+  const subs_usage = { window: pick(allowance.window), weekly: pick(allowance.weekly) };
+  if (!subs_usage.window && !subs_usage.weekly) return null;
+  return { subs_usage };
+}
+
+/**
+ * Read the allowance through the Muse CLI itself (`muse usage --json`).  The
+ * CLI owns the keychain item and reads it without a prompt, so this
+ * collector never calls `security` against an item the Muse app rewrites on
+ * every token refresh (each rewrite reset the access list and re-raised the
+ * macOS prompt).  Returns the payload, or null when the CLI is missing,
+ * signed out, or prints something unusable.  Never logs CLI output.
+ */
+export async function readMuseUsageViaCli({
+  execFileImpl = execFileAsync,
+  bin = MUSE_BIN,
+  timeoutMs = MUSE_CLI_TIMEOUT_MS,
+} = {}) {
+  let stdout = "";
+  try {
+    const result = await execFileImpl(bin, ["usage", "--json"], {
+      timeout: timeoutMs,
+      maxBuffer: KEYCHAIN_MAX_STDOUT_BYTES,
+      encoding: "utf8",
+    });
+    stdout = String(result?.stdout ?? "");
+  } catch {
+    log("muse usage --json failed (CLI missing, signed out, or timed out); skipping this run.");
+    return null;
+  }
+  try {
+    return payloadFromMuseUsage(JSON.parse(stdout));
+  } catch {
+    log("muse usage --json printed non-JSON; skipping this run.");
+    return null;
+  }
 }
 
 // ----------------------------------------------------------------- parse ---
@@ -372,7 +433,21 @@ export async function collectMuseCode({
   fetchImpl,
   platform = process.platform,
   now = new Date(),
+  source = process.env.MUSE_CODE_SOURCE === "keychain" ? "keychain" : "cli",
 } = {}) {
+  if (source === "cli") {
+    const cliPayload = await readMuseUsageViaCli({ execFileImpl });
+    if (!cliPayload) {
+      return { provider: PROVIDER, status: "skipped", reason: "muse-cli-unavailable", events: [] };
+    }
+    const cliEvents = quotaEventsFromMuseCode(cliPayload, now);
+    return {
+      provider: PROVIDER,
+      status: cliEvents.length === 0 ? "skipped" : "ok",
+      ...(cliEvents.length === 0 ? { reason: "no-quota-windows" } : {}),
+      events: cliEvents,
+    };
+  }
   const accessToken = await readMuseCodeAccessTokenFromKeychain({ execFileImpl, platform });
   if (!accessToken) {
     return { provider: PROVIDER, status: "skipped", reason: "access-token-missing", events: [] };
