@@ -1770,10 +1770,11 @@ async function main() {
     if (badEmails.length) {
       warn(`ASC_STANDING_TESTERS has ${badEmails.length} malformed entr${badEmails.length === 1 ? "y" : "ies"}; they are ignored`);
     }
+    emails = emails.filter((e) => EMAIL_RE.test(e));
     if (emails.length > 5) {
-      warn(`ASC_STANDING_TESTERS lists ${emails.length} emails; the standing list is three, and only the first five are added`);
+      warn(`ASC_STANDING_TESTERS lists ${emails.length} valid emails; the standing list is three, and only the first five are added`);
     }
-    emails = emails.filter((e) => EMAIL_RE.test(e)).slice(0, 5);
+    emails = emails.slice(0, 5);
 
     // 1) External beta group: reuse "Public Beta" or the first external group;
     //    create a private "Public Beta" (public link off) only when none exists.
@@ -1803,13 +1804,20 @@ async function main() {
     }
 
     // 2) Testers: add each standing email to the group, reusing tester records.
-    const inGroupRes = await api("GET", `/v1/betaGroups/${group.id}/betaTesters?limit=200&fields[betaTesters]=email`);
-    if (!inGroupRes.ok) {
-      warn(`could not list testers in group "${group.attributes?.name}" (${errText(inGroupRes)}); not re-adding anyone`);
-      process.exit(3);
+    // Only touch the group's testers when there is a list to add.  A failed
+    // tester listing is a warning, never a reason to skip the build assignment.
+    let inGroup = new Set();
+    let listable = emails.length > 0;
+    if (listable) {
+      const inGroupRes = await api("GET", `/v1/betaGroups/${group.id}/betaTesters?limit=200&fields[betaTesters]=email`);
+      if (!inGroupRes.ok) {
+        warn(`could not list testers in group "${group.attributes?.name}" (${errText(inGroupRes)}); not re-adding anyone`);
+        listable = false;
+      } else {
+        inGroup = new Set(rows(inGroupRes).map((t) => String(t.attributes?.email || "").toLowerCase()));
+      }
     }
-    const inGroup = new Set(rows(inGroupRes).map((t) => String(t.attributes?.email || "").toLowerCase()));
-    for (const email of emails) {
+    for (const email of (listable ? emails : [])) {
       if (inGroup.has(email)) {
         console.error(`${prefix}: ${mask(email)} already in group`);
         continue;
