@@ -4,6 +4,7 @@ const config = {
     include: [
       "scripts/__tests__/kimi-zcode-telemetry.test.mjs",
       "scripts/__tests__/muse-code-usage-collector.test.mjs",
+      "scripts/__tests__/resolve-collector-token.test.mjs",
       "scripts/__tests__/transfer-muse-code-access-token-to-infisical.test.mjs",
     ],
   },
