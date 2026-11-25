@@ -76,6 +76,27 @@ describe("resolveCollectorToken store-first precedence (OPS-1120)", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
+  it("names every refused candidate when no value resolves", () => {
+    expect(() =>
+      resolveCollectorToken(["CODEX_INGEST_TOKEN", "OTHER_INGEST_TOKEN"], {
+        env: { CODEX_INGEST_TOKEN: FAKE_SERVICE_TOKEN, OTHER_INGEST_TOKEN: FAKE_SERVICE_TOKEN },
+        fleetSecretsGet: fakeLookup({}),
+      }),
+    ).toThrow(/CODEX_INGEST_TOKEN, OTHER_INGEST_TOKEN/);
+  });
+
+  it("surfaces a scoped-read failure ahead of a shape refusal", () => {
+    const boom = new Error("scoped read unavailable");
+    expect(() =>
+      resolveCollectorToken(["CODEX_INGEST_TOKEN"], {
+        env: { CODEX_INGEST_TOKEN: FAKE_SERVICE_TOKEN },
+        fleetSecretsGet: () => {
+          throw boom;
+        },
+      }),
+    ).toThrow(boom);
+  });
+
   it("treats a whitespace-padded strict flag as strict", () => {
     expect(
       resolveCollectorToken(["CODEX_INGEST_TOKEN"], {

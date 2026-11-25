@@ -123,7 +123,11 @@ export function resolveCollectorToken(
   // Trimmed like the token values themselves: a padded flag must not silently
   // drop the process into the non-strict path.
   const strictInjected = String(env.COLLECTOR_STRICT_INJECTED_SECRETS ?? "").trim() === "1";
-  let deferredFailure = null;
+  // Two separate slots, so one kind of deferred failure cannot hide the other:
+  // a scoped-read failure is an infrastructure problem and outranks a shape
+  // refusal, and every refused name is reported rather than only the first.
+  let deferredLookupFailure = null;
+  const refusedNames = [];
   for (const name of tokenEnvVarNames) {
     let fromLookup = null;
     if (!strictInjected) {
@@ -136,7 +140,7 @@ export function resolveCollectorToken(
         // rethrown only when no name yields a value at all: a failure with no
         // usable token anywhere is not a silent miss (deliberate contract
         // change from the retired helper's null-on-failure).
-        deferredFailure ??= err;
+        deferredLookupFailure ??= err;
       }
     }
     if (fromLookup) return fromLookup;
@@ -147,16 +151,22 @@ export function resolveCollectorToken(
     // grant and the shape check cannot apply there.
     if (!strictInjected && SERVICE_TOKEN_VALUE_SHAPE.test(val)) {
       // A refused value is never used, but it must not poison a later
-      // candidate either: defer, so a valid USAGE_INGEST_TOKEN still resolves
-      // and the refusal is raised only when no name yields a usable value.
-      deferredFailure ??= new Error(
-        `${name} holds an Infisical service token in the environment; store it in this consumer's own Infisical binding instead (the environment cannot prove which grant it is)`,
-      );
+      // candidate either: collect, so a valid USAGE_INGEST_TOKEN still
+      // resolves and the refusal is raised only when no name yields a usable
+      // value.
+      refusedNames.push(name);
       continue;
     }
     return val;
   }
-  if (deferredFailure) throw deferredFailure;
+  // A failed scoped read is the more actionable error, so it wins; otherwise
+  // every refused name is named at once instead of one per run.
+  if (deferredLookupFailure) throw deferredLookupFailure;
+  if (refusedNames.length > 0) {
+    throw new Error(
+      `${refusedNames.join(", ")} hold${refusedNames.length === 1 ? "s" : ""} an Infisical service token in the environment; store it in this consumer's own Infisical binding instead (the environment cannot prove which grant it is)`,
+    );
+  }
   return null;
 }
 
