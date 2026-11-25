@@ -2,25 +2,20 @@
 // for the Apple tools that need a key on disk, and what a child process is
 // allowed to inherit.
 //
-// AFC-459:  the private key is a secret, and the approved secret sources are
-// the process environment, a captured `fleet-secrets get NAME` and
-// bootstrap-only Keychain credentials.  A caller-supplied file is not one of
-// them, so this module never reads a key file:  the only approved sources of
-// the key are ASC_KEY_P8 in the environment and `fleet-secrets get ASC_KEY_P8`.
-// ASC_KEY_PATH is not a credential source at all, and the tests below hold the
-// module and the client to that.
+// Only complete Infisical-synced environment tuples are credential sources.
+// ASC_KEY_PATH is staging output for Apple tools, never a client input.
 //
 // Everything here is synthetic:  the keys are generated at test time and are
 // never committed, and nothing reaches the network beyond 127.0.0.1.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import * as keyModule from "./asc-key.mjs";
 import { normalizePrivateKey, writePrivateKeyFile } from "./asc-key.mjs";
@@ -31,6 +26,7 @@ const client = join(here, "asc-api.mjs");
 const root = mkdtempSync(join(tmpdir(), "asc-key-test-"));
 //  A PATH with node and nothing else:  the fleet reader lives in the operator's
 //  own bin directory, and a test must never reach it or Infisical.
+after(() => rmSync(root, { recursive: true, force: true }));
 const safePath = [dirname(process.execPath), "/usr/bin", "/bin"].join(":");
 
 function generateKeyPair() {
@@ -64,31 +60,54 @@ function staged(name, content = keyPem, mode = 0o600) {
   return path;
 }
 
-function run(args, stdin = "", env = undefined) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [helper, ...args], {
-      ...(env ? { env } : {}),
-      stdio: ["pipe", "pipe", "pipe"]
+function boundedNode(args, env, stdin = "") {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      env, stdio: ["pipe", "pipe", "pipe"], timeout: 15_000, killSignal: "SIGKILL"
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    let oversized = false;
+    const capture = (name, chunk) => {
+      if (name === "stdout") stdout += chunk;
+      else stderr += chunk;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 65536) {
+        oversized = true;
+        child.kill("SIGKILL");
+      }
+    };
+    child.stdout.on("data", (d) => capture("stdout", d));
+    child.stderr.on("data", (d) => capture("stderr", d));
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (signal || oversized) reject(new Error("isolated ASC child exceeded its bound"));
+      else resolve({ code, stdout, stderr });
+    });
+    child.stdin.on("error", () => {});
     child.stdin.end(stdin);
   });
 }
 
-function spawnNode(args, env) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
-  });
+function run(args, stdin = "", env = undefined) {
+  return boundedNode([helper, ...args], env || { PATH: safePath, HOME: root, TMPDIR: root }, stdin);
 }
+
+function spawnNode(args, env) {
+  // Validate before spawning, even for expected authentication refusals.
+  assert.equal(args[1], "GET");
+  assert.match(args[2], /^http:\/\/127\.0\.0\.1:[0-9]+\//);
+  const target = new URL(args[2]);
+  assert.equal(target.protocol, "http:");
+  assert.equal(target.hostname, "127.0.0.1");
+  assert.equal(target.username + target.password, "");
+  return boundedNode(args, { ...env, TMPDIR: env.TMPDIR || root });
+}
+
+test("fixture GET guard rejects non-loopback targets before spawning", () => {
+  for (const target of ["/v1/apps", "https://api.appstoreconnect.apple.com/v1/apps", "http://localhost:1/v1/apps"]) {
+    assert.throws(() => spawnNode([client, "GET", target], {}));
+  }
+});
 
 // A local server that answers one request, so the client can be watched
 // signing it.  It never sees anything but the test's own synthetic key.
@@ -151,8 +170,9 @@ test("a malformed PEM is refused, because the envelope is not a key", () => {
   //  envelope and still fail to parse.  Accepting them would hand the signer
   //  something it cannot use, and the failure would come back as a stack
   //  trace instead of a credential error.
-  assert.equal(normalizePrivateKey("-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n"), null); // gitleaks:allow
-  assert.equal(normalizePrivateKey("-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n"), null); // gitleaks:allow
+  const lines = keyPem.trim().split("\n");
+  assert.equal(normalizePrivateKey([lines[0], "invalid", lines.at(-1)].join("\n")), null);
+  assert.equal(normalizePrivateKey([lines[0], lines.at(-1)].join("\n")), null);
   assert.equal(normalizePrivateKey(""), null);
   assert.equal(normalizePrivateKey(undefined), null);
   assert.equal(normalizePrivateKey("hunter2"), null);
@@ -354,4 +374,67 @@ test("the hosted base64 trio is the credential the client signs with", async () 
   } finally {
     server.close();
   }
+});
+
+test("complete synced tuples are selected without readers or mixed credentials", async () => {
+  const home = join(root, "isolated-tuples");
+  const bin = join(home, ".local", "bin");
+  const temp = join(home, "tmp");
+  const marker = join(home, "reader-ran");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(temp);
+  for (const name of ["fleet-secrets", "infisical", "security"]) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nprintf ran > "$TRAP_MARKER"\nexit 91\n', { mode: 0o700 });
+  }
+  const hostedPair = generateKeyPair();
+  const hostedPem = hostedPair.privateKey.export({ type: "pkcs8", format: "pem" });
+  const plainPair = generateKeyPair();
+  const plainPem = plainPair.privateKey.export({ type: "pkcs8", format: "pem" });
+  const plain = { ASC_KEY_ID: "PLAIN001", ASC_ISSUER_ID: "plain-issuer", ASC_KEY_P8: plainPem };
+  const hosted = { APPLE_API_KEY_ID: "HOSTED001", APPLE_API_ISSUER_ID: "hosted-issuer",
+    APPLE_API_KEY_P8_BASE64: Buffer.from(hostedPem).toString("base64") };
+  const server = await localServer();
+  try {
+    const cases = [
+      [{}, null],
+      [{ ASC_KEY_ID: "PARTIAL", APPLE_API_ISSUER_ID: "foreign", APPLE_API_KEY_P8_BASE64: hosted.APPLE_API_KEY_P8_BASE64 }, null],
+      [{ ...plain, ...hosted }, hostedPair.publicKey],
+      [{ ...plain, APPLE_API_KEY_ID: "PARTIAL" }, plainPair.publicKey],
+      [{ ...plain, ...hosted, APPLE_API_KEY_P8_BASE64: "invalid" }, null],
+      [{ ...plain, ...hosted, APPLE_API_KEY_ID: "invalid/id" }, null],
+      [{ ...plain, ASC_KEY_ID: "invalid/id" }, null],
+      [{ ...hosted, APPLE_API_KEY_P8_BASE64: hostedPem }, hostedPair.publicKey]
+    ];
+    for (const [tuple, signingKey] of cases) {
+      const before = server.seen.length;
+      const result = await spawnNode([client, "GET", `${server.base}/v1/apps`], {
+        PATH: `${bin}:${safePath}`, HOME: home, TMPDIR: temp, TRAP_MARKER: marker,
+        FLEET_SECRETS_BIN: join(bin, "fleet-secrets"), FLEET_SECRETS: join(bin, "fleet-secrets"),
+        ASC_KEY_PATH: staged("untrusted-input.p8"), ...tuple
+      });
+      assert.equal(result.code, signingKey ? 0 : 1, "credential disposition changed");
+      assert.equal(server.seen.length, before + (signingKey ? 1 : 0), "unexpected network request");
+      if (signingKey) {
+        const authorization = server.seen.at(-1).authorization;
+        assert.ok(signedWith(authorization, signingKey));
+        const [header, payload] = authorization.replace(/^Bearer /, "").split(".");
+        const selected = signingKey === hostedPair.publicKey ? "hosted" : "plain";
+        assert.equal(JSON.parse(Buffer.from(header, "base64url")).kid,
+          selected === "hosted" ? "HOSTED001" : "PLAIN001");
+        assert.equal(JSON.parse(Buffer.from(payload, "base64url")).iss, `${selected}-issuer`);
+      }
+      assert.ok(!existsSync(marker), "a retired reader or credential tool ran");
+      assert.deepEqual(readdirSync(temp), [], "API client materialized an unused key");
+      assert.ok(!result.stdout.includes(hostedPem.trim()) && !result.stderr.includes(hostedPem.trim()));
+      assert.ok(!result.stdout.includes(plainPem.trim()) && !result.stderr.includes(plainPem.trim()));
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("retired reader overrides never enter the ASC child environment", () => {
+  const env = keyModule.clientEnvironment({ FLEET_SECRETS: "fixture", FLEET_SECRETS_BIN: "fixture" });
+  assert.equal(env.FLEET_SECRETS, undefined);
+  assert.equal(env.FLEET_SECRETS_BIN, undefined);
 });

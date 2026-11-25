@@ -3,17 +3,13 @@
  * Minimal App Store Connect API client. No dependencies beyond Node's
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
- * Auth (AFC-459): the first source that is present (never prints values):
+ * Auth: complete Infisical-synced environment tuples, in order:
  *   1. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64
- *      (the base64 p8 is decoded to a 0600 temp file and removed on exit)
- *   2. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment
- *   3. Infisical Fleet-OPS /asc via `fleet-secrets get`
+ *   2. ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8
  *
- * A caller-supplied file is NOT a credential source (AFC-459):  the private key
- * is a secret, and the approved sources are the process environment, a
- * captured `fleet-secrets get NAME` and bootstrap-only Keychain credentials.
- * The shell layer that owns the credential hands the key over in ASC_KEY_P8,
- * so ASC_KEY_PATH never reaches this client as a path to read.
+ * A caller-supplied file is not a credential source.  The owning shell stages
+ * keys for Apple tools separately; this client signs with the in-memory PEM.
+ * Partial tuples never combine, and an invalid complete preferred tuple fails.
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -32,11 +28,9 @@
  * echoing anything secret-shaped from the response (ASC responses don't
  * carry credentials, only app metadata, so this is safe to print as-is).
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { normalizePrivateKey } from "./asc-key.mjs";
 import { nextSharedBuild } from "./shared-build.mjs";
@@ -53,29 +47,9 @@ function base64url(input) {
 // ---------------------------------------------------------------------------
 // CREDENTIAL RESOLUTION
 // ---------------------------------------------------------------------------
-// WHY THIS READS THE ENVIRONMENT, NOT A FILE (fixed 2026-10-02, AFC-359):
-// .github/workflows/ios-ship.yml runs on a GitHub-hosted macos-latest runner,
-// which has no home-directory secrets folder at all.  The credential reaches that
-// runner as THREE ENVIRONMENT VARIABLES -- APPLE_API_KEY_ID,
-// APPLE_API_ISSUER_ID and APPLE_API_KEY_P8_BASE64 -- exported into $GITHUB_ENV
-// by .github/actions/infisical-secrets.  Reading only the file meant the key
-// material could be present and correct while the client still refused to
-// authenticate, and because the version queries in ship-testflight.sh discard
-// this script's stderr, the resulting rc=2 was undiagnosable from the run log.
-//
-// APPLE_API_KEY_P8_BASE64 is base64, so it is decoded into a 0600 file inside a
-// 0700 temp directory and unlinked on exit.  Values are never printed; only the
-// source and the key-id LENGTH are logged.
-const TEMP_KEY_DIRS = [];
-
-function cleanupTempKeys() {
-  while (TEMP_KEY_DIRS.length) {
-    const dir = TEMP_KEY_DIRS.pop();
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
-}
-process.on("exit", cleanupTempKeys);
-
+// The owning producer syncs these values from Infisical.  This consumer never
+// discovers a reader, logs in, reads a credential file or borrows another tuple.
+// Apple tools need a staging file; this API client only needs the in-memory PEM.
 // Accepts either a raw PEM (some callers store the .p8 body verbatim) or the
 // base64 encoding GitHub Actions + Infisical use. Returns null when the input
 // cannot be turned into a PEM, so the caller can fail with a real reason.
@@ -92,83 +66,27 @@ function decodeP8(b64) {
   return pem.includes("-----BEGIN ") ? pem : null;
 }
 
-function materializeP8(pem) {
-  const dir = mkdtempSync(join(tmpdir(), "asc-key-"));
-  try { chmodSync(dir, 0o700); } catch { /* best effort */ }
-  const p = join(dir, "AuthKey.p8");
-  writeFileSync(p, pem, { mode: 0o600 });
-  TEMP_KEY_DIRS.push(dir);
-  return p;
-}
-
-// Infisical Fleet-OPS through `fleet-secrets get` (AFC-359).  "" when absent.
-// FLEET_SECRETS_BIN overrides the binary (tests).  Values stay in memory.
-function fleetSecretsGet(name, folder) {
-  const bin = process.env.FLEET_SECRETS_BIN || join(homedir(), ".local", "bin", "fleet-secrets");
-  try {
-    return execFileSync(bin, ["get", name, "--path", folder], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 30000
-    }).replace(/\n$/, "");
-  } catch {
-    return "";
-  }
-}
-
-// Returns { keyId, issuerId, privateKeyPem, source } or { error } or { error: null }.
-//
-// The order is the rule:  the environment beats the network, and a file is not
-// a source at all.  A path on disk is not an approved secret source, so
-// ASC_KEY_PATH is never read here; the shell layer that owns the credential
-// resolves it and hands the key over in ASC_KEY_P8.
+// Returns a complete credential, a fixed error, or an absent credential.
 function resolveCredential() {
-  const envKeyId = String(process.env.ASC_KEY_ID || "").trim();
-  const envIssuer = String(process.env.ASC_ISSUER_ID || "").trim();
-  const envKeyPem = String(process.env.ASC_KEY_P8 || "").trim();
-
-  // 1) The APPLE_API_* trio the ship workflow exports from Infisical.  The key
-  //    itself is in the environment, so it wins over every other source.
   const keyId = String(process.env.APPLE_API_KEY_ID || "").trim();
   const issuerId = String(process.env.APPLE_API_ISSUER_ID || "").trim();
-  if (keyId && issuerId && process.env.APPLE_API_KEY_P8_BASE64) {
-    const pem = decodeP8(process.env.APPLE_API_KEY_P8_BASE64);
+  const hostedKey = String(process.env.APPLE_API_KEY_P8_BASE64 || "").trim();
+  if (keyId && issuerId && hostedKey) {
+    if (!/^[A-Za-z0-9]+$/.test(keyId)) return { error: "APPLE_API_KEY_ID must contain only letters and digits" };
+    const pem = normalizePrivateKey(decodeP8(hostedKey));
     if (!pem) return { error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key" };
-    materializeP8(pem);
     return { keyId, issuerId, privateKeyPem: pem, source: "APPLE_API_* environment (base64 p8)" };
   }
 
-  // 2) The same secret as a plain environment variable.  This is the form
-  //    fleet-secrets hands out, and the form the shell layer uses when it hands
-  //    the resolved key to this client.
+  const envKeyId = String(process.env.ASC_KEY_ID || "").trim();
+  const envIssuer = String(process.env.ASC_ISSUER_ID || "").trim();
+  const envKeyPem = String(process.env.ASC_KEY_P8 || "").trim();
   if (envKeyId && envIssuer && envKeyPem) {
+    if (!/^[A-Za-z0-9]+$/.test(envKeyId)) return { error: "ASC_KEY_ID must contain only letters and digits" };
     const pem = normalizePrivateKey(envKeyPem);
     if (!pem) return { error: "ASC_KEY_P8 is set but is not a PEM private key" };
     return { keyId: envKeyId, issuerId: envIssuer, privateKeyPem: pem, source: "ASC_KEY_P8 environment" };
   }
-
-  // 3) No file is read here (AFC-459).  A path on disk is not an approved
-  //    secret source, so ASC_KEY_PATH is not a credential source here:  the
-  //    shell layer that owns the credential resolves it and exports it as
-  //    ASC_KEY_P8.  The step below reads Infisical directly, so a local
-  //    operator needs nothing exported at all.
-
-  // 4) Infisical Fleet-OPS /asc: key id and issuer (unless the environment already
-  //    has them) and the PEM as ASC_KEY_P8 when the key id is the /asc one;  another
-  //    key id falls back to AUTHKEY_<KEY_ID> in /authkey-<key id lower case>-p8.
-  //    Kept in memory, never written to disk.
-  const infKeyId = envKeyId || fleetSecretsGet("ASC_KEY_ID", "/asc").trim();
-  const infIssuer = envIssuer || fleetSecretsGet("ASC_ISSUER_ID", "/asc").trim();
-  if (/^[A-Za-z0-9]+$/.test(infKeyId) && infIssuer) {
-    let pem = "";
-    if (infKeyId === fleetSecretsGet("ASC_KEY_ID", "/asc").trim()) pem = fleetSecretsGet("ASC_KEY_P8", "/asc");
-    if (!pem) pem = fleetSecretsGet(`AUTHKEY_${infKeyId}`, `/authkey-${infKeyId.toLowerCase()}-p8`);
-    if (pem) {
-      if (!pem.endsWith("\n")) pem += "\n";
-      return { keyId: infKeyId, issuerId: infIssuer, privateKeyPem: pem, source: "Infisical /asc" };
-    }
-  }
-
   return { error: null };
 }
 
@@ -837,7 +755,6 @@ async function main() {
       "asc-auth: no App Store Connect credential found. Tried, in order:\n" +
       "  1) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment\n" +
       "  2) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment\n" +
-      "  3) Infisical Fleet-OPS /asc via `fleet-secrets get` (FLEET_SECRETS_BIN)\n" +
       "  A path in ASC_KEY_PATH is not a credential source:  the shell layer that owns the\n" +
       "  credential hands the key over in ASC_KEY_P8"
     );
@@ -1749,29 +1666,32 @@ async function main() {
     // Hand-written parse, not zod: see ensure-appstore-profiles above.
     const EMAIL_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/;
     const raw = String(process.env.ASC_STANDING_TESTERS || "");
-    const emails = [...new Set(raw.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean))];
+    let emails = [...new Set(raw.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean))];
     const mask = maskEmail;
     if (!/^\d+$/.test(appId)) {
       console.error(`${prefix}: usage: node asc-api.mjs ensure-standing-testers <appleId> [buildVersion]`);
-      process.exit(2);
-    }
-    if (!emails.length) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS is empty; set the repo secret to the standing tester emails`);
-      process.exit(2);
-    }
-    const bad = emails.filter((e) => !EMAIL_RE.test(e));
-    if (bad.length) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS has ${bad.length} malformed entr${bad.length === 1 ? "y" : "ies"}; nothing changed`);
-      process.exit(2);
-    }
-    if (emails.length > 5) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS lists ${emails.length} emails; the standing list is three.  Refusing to invite`);
       process.exit(2);
     }
     const rows = ascRows;
     const errText = ascErrorText;
     let warnings = 0;
     const warn = (msg) => { warnings += 1; console.error(`${prefix}: WARNING ${msg}`); };
+    // The email list is never REQUIRED: the external group already holds the
+    // standing people, so an empty list is not a failure.  The build still has
+    // to reach that group and Beta App Review.  A bad list is a warning about
+    // the list, never a reason to exit before the build is assigned.
+    if (!emails.length) {
+      console.error(`${prefix}: no tester list; the members of the external group stay as they are`);
+    }
+    const badEmails = emails.filter((e) => !EMAIL_RE.test(e));
+    if (badEmails.length) {
+      warn(`ASC_STANDING_TESTERS has ${badEmails.length} malformed entr${badEmails.length === 1 ? "y" : "ies"}; they are ignored`);
+    }
+    emails = emails.filter((e) => EMAIL_RE.test(e));
+    if (emails.length > 5) {
+      warn(`ASC_STANDING_TESTERS lists ${emails.length} valid emails; the standing list is three, and only the first five are added`);
+    }
+    emails = emails.slice(0, 5);
 
     // 1) External beta group: reuse "Public Beta" or the first external group;
     //    create a private "Public Beta" (public link off) only when none exists.
@@ -1801,13 +1721,20 @@ async function main() {
     }
 
     // 2) Testers: add each standing email to the group, reusing tester records.
-    const inGroupRes = await api("GET", `/v1/betaGroups/${group.id}/betaTesters?limit=200&fields[betaTesters]=email`);
-    if (!inGroupRes.ok) {
-      warn(`could not list testers in group "${group.attributes?.name}" (${errText(inGroupRes)}); not re-adding anyone`);
-      process.exit(3);
+    // Only touch the group's testers when there is a list to add.  A failed
+    // tester listing is a warning, never a reason to skip the build assignment.
+    let inGroup = new Set();
+    let listable = emails.length > 0;
+    if (listable) {
+      const inGroupRes = await api("GET", `/v1/betaGroups/${group.id}/betaTesters?limit=200&fields[betaTesters]=email`);
+      if (!inGroupRes.ok) {
+        warn(`could not list testers in group "${group.attributes?.name}" (${errText(inGroupRes)}); not re-adding anyone`);
+        listable = false;
+      } else {
+        inGroup = new Set(rows(inGroupRes).map((t) => String(t.attributes?.email || "").toLowerCase()));
+      }
     }
-    const inGroup = new Set(rows(inGroupRes).map((t) => String(t.attributes?.email || "").toLowerCase()));
-    for (const email of emails) {
+    for (const email of (listable ? emails : [])) {
       if (inGroup.has(email)) {
         console.error(`${prefix}: ${mask(email)} already in group`);
         continue;
@@ -1822,15 +1749,8 @@ async function main() {
       }
     }
 
-    // 2b) Internal group: App Store Connect users install every build with no
-    //     Beta App Review.  This is the path that reaches the owner's phone; a
-    //     new app record has none until this creates it (GH #1018).
-    // Its warnings go through warn(), so they count toward the exit code.
-    await ensureInternalTesterGroup({
-      api, appId, emails,
-      log: (m) => console.error(`${prefix}: ${m}`),
-      warn
-    });
+    // No internal group: iOS TestFlight uses the external group only (owner,
+    // 2026-11-24).  An internal group an app record already has is left alone.
 
     // 3) Build: the given CFBundleVersion, else the newest upload.
     const buildQuery = wantBuild

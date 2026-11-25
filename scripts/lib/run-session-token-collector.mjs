@@ -90,29 +90,47 @@ function scopedInfisicalRead(name, env) {
 }
 
 /**
- * Resolves an ingest token from the environment, then from Infisical through
- * this consumer's scoped service-token binding.
+ * Resolves an ingest token through this consumer's scoped Infisical binding
+ * first, then from the environment (OPS-1120).
  *
- * Names are tried strictly in order, each in the environment and then through
- * the scoped lookup, so a producer-scoped name kept in Infisical still beats
- * an unscoped USAGE_INGEST_TOKEN exported in the environment.  Pass
- * `fleetSecretsGet: () => null` for an environment-only lookup; the option
- * key keeps its historical name for caller/test compatibility, but the
+ * Infisical is the source; the environment only transports values synced to
+ * the host, so a reviewed grant in the store must never lose to a value that
+ * merely sits in the environment.  Names are still tried strictly in order,
+ * and for each name the scoped lookup answers before the environment is
+ * consulted.
+ *
+ * An environment value shaped like an Infisical service token
+ * (`st.<id>.<secret>`) is refused outside strict-injected mode: this
+ * synchronous resolver cannot read that token's own metadata to prove whose
+ * grant it is, so a hand-set service token never stands in for the reviewed
+ * grant.  The documented static producer tokens (`<PRODUCER>_INGEST_TOKEN` /
+ * `USAGE_INGEST_TOKEN`, which are app bearers and not Infisical grants) keep
+ * working from the host bootstrap store when the scoped store has no answer.
+ *
+ * Pass `fleetSecretsGet: () => null` for an environment-only lookup; the
+ * option key keeps its historical name for caller/test compatibility, but the
  * default no longer touches the retired fleet-secrets CLI.
  */
+const SERVICE_TOKEN_VALUE_SHAPE = /^st\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.|$)/;
+
 export function resolveCollectorToken(
   tokenEnvVarNames = ["USAGE_INGEST_TOKEN"],
   { env = process.env, fleetSecretsGet: lookup } = {},
 ) {
   const effectiveLookup = lookup ?? ((name) => scopedInfisicalRead(name, env));
-  let deferredFailure = null;
+  // Strict injected-secrets mode skips the runtime lookup entirely: the
+  // injector already read the store, so only the delivered values count.
+  // Trimmed like the token values themselves: a padded flag must not silently
+  // drop the process into the non-strict path.
+  const strictInjected = String(env.COLLECTOR_STRICT_INJECTED_SECRETS ?? "").trim() === "1";
+  // Two separate slots, so one kind of deferred failure cannot hide the other:
+  // a scoped-read failure is an infrastructure problem and outranks a shape
+  // refusal, and every refused name is reported rather than only the first.
+  let deferredLookupFailure = null;
+  const refusedNames = [];
   for (const name of tokenEnvVarNames) {
-    const val = env[name]?.trim();
-    if (val) return val;
-    // Strict injected-secrets mode skips the runtime lookup entirely:
-    // only values already injected into the environment count.
     let fromLookup = null;
-    if (env.COLLECTOR_STRICT_INJECTED_SECRETS !== "1") {
+    if (!strictInjected) {
       try {
         fromLookup = effectiveLookup(name)?.trim();
       } catch (err) {
@@ -122,12 +140,33 @@ export function resolveCollectorToken(
         // rethrown only when no name yields a value at all: a failure with no
         // usable token anywhere is not a silent miss (deliberate contract
         // change from the retired helper's null-on-failure).
-        deferredFailure ??= err;
+        deferredLookupFailure ??= err;
       }
     }
     if (fromLookup) return fromLookup;
+    const val = env[name]?.trim();
+    if (!val) continue;
+    // Strict injected-secrets mode is a delivery channel: the injector read
+    // the store, so a delivered service-token value is already the reviewed
+    // grant and the shape check cannot apply there.
+    if (!strictInjected && SERVICE_TOKEN_VALUE_SHAPE.test(val)) {
+      // A refused value is never used, but it must not poison a later
+      // candidate either: collect, so a valid USAGE_INGEST_TOKEN still
+      // resolves and the refusal is raised only when no name yields a usable
+      // value.
+      refusedNames.push(name);
+      continue;
+    }
+    return val;
   }
-  if (deferredFailure) throw deferredFailure;
+  // A failed scoped read is the more actionable error, so it wins; otherwise
+  // every refused name is named at once instead of one per run.
+  if (deferredLookupFailure) throw deferredLookupFailure;
+  if (refusedNames.length > 0) {
+    throw new Error(
+      `${refusedNames.join(", ")} hold${refusedNames.length === 1 ? "s" : ""} an Infisical service token in the environment; store it in this consumer's own Infisical binding instead (the environment cannot prove which grant it is)`,
+    );
+  }
   return null;
 }
 
