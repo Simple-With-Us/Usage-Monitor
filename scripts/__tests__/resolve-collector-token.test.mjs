@@ -47,6 +47,15 @@ describe("resolveCollectorToken store-first precedence (OPS-1120)", () => {
     ).toThrow(/own Infisical binding/);
   });
 
+  it("does not let a refused name block a valid later candidate", () => {
+    expect(
+      resolveCollectorToken(["CODEX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"], {
+        env: { CODEX_INGEST_TOKEN: FAKE_SERVICE_TOKEN, USAGE_INGEST_TOKEN: "usage-env" },
+        fleetSecretsGet: fakeLookup({}),
+      }),
+    ).toBe("usage-env");
+  });
+
   it("accepts a service-token-shaped value in strict injected-secrets mode", () => {
     expect(
       resolveCollectorToken(["CODEX_INGEST_TOKEN"], {

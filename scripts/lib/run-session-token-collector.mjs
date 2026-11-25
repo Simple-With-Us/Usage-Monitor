@@ -144,9 +144,13 @@ export function resolveCollectorToken(
     // the store, so a delivered service-token value is already the reviewed
     // grant and the shape check cannot apply there.
     if (!strictInjected && SERVICE_TOKEN_VALUE_SHAPE.test(val)) {
-      throw new Error(
+      // A refused value is never used, but it must not poison a later
+      // candidate either: defer, so a valid USAGE_INGEST_TOKEN still resolves
+      // and the refusal is raised only when no name yields a usable value.
+      deferredFailure ??= new Error(
         `${name} holds an Infisical service token in the environment; store it in this consumer's own Infisical binding instead (the environment cannot prove which grant it is)`,
       );
+      continue;
     }
     return val;
   }

@@ -77,15 +77,25 @@ function stubEnv(mode, extra = {}) {
 function resetRecord() { writeFileSync(recordFile, ""); }
 function record() { return existsSync(recordFile) ? readFileSync(recordFile, "utf8") : ""; }
 
-// 1. env value wins; lookup must not run
+// 1. store value wins (OPS-1120); env is consulted only after the store
 {
   let called = 0;
   const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], {
     env: { USAGE_INGEST_TOKEN: "  env-token  " },
     fleetSecretsGet: () => { called++; return "lookup-token"; },
   });
-  check("env value wins and is trimmed", v === "env-token");
-  check("lookup not called when env has the value", called === 0);
+  check("store value wins over env for the same name", v === "lookup-token");
+  check("store is consulted before the env value", called === 1);
+}
+{
+  // env is still trimmed and returned when the store has no answer
+  let called = 0;
+  const v = resolveCollectorToken(["USAGE_INGEST_TOKEN"], {
+    env: { USAGE_INGEST_TOKEN: "  env-token  " },
+    fleetSecretsGet: () => { called++; return null; },
+  });
+  check("env fallback value is trimmed", v === "env-token");
+  check("store consulted once before the env fallback", called === 1);
 }
 
 // 2. per-name order: name1 env-then-lookup before name2
