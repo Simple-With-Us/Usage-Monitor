@@ -1749,29 +1749,31 @@ async function main() {
     // Hand-written parse, not zod: see ensure-appstore-profiles above.
     const EMAIL_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/;
     const raw = String(process.env.ASC_STANDING_TESTERS || "");
-    const emails = [...new Set(raw.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean))];
+    let emails = [...new Set(raw.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean))];
     const mask = maskEmail;
     if (!/^\d+$/.test(appId)) {
       console.error(`${prefix}: usage: node asc-api.mjs ensure-standing-testers <appleId> [buildVersion]`);
-      process.exit(2);
-    }
-    if (!emails.length) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS is empty; set the repo secret to the standing tester emails`);
-      process.exit(2);
-    }
-    const bad = emails.filter((e) => !EMAIL_RE.test(e));
-    if (bad.length) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS has ${bad.length} malformed entr${bad.length === 1 ? "y" : "ies"}; nothing changed`);
-      process.exit(2);
-    }
-    if (emails.length > 5) {
-      console.error(`${prefix}: ASC_STANDING_TESTERS lists ${emails.length} emails; the standing list is three.  Refusing to invite`);
       process.exit(2);
     }
     const rows = ascRows;
     const errText = ascErrorText;
     let warnings = 0;
     const warn = (msg) => { warnings += 1; console.error(`${prefix}: WARNING ${msg}`); };
+    // The email list is never REQUIRED: the external group already holds the
+    // standing people, so an empty list is not a failure.  The build still has
+    // to reach that group and Beta App Review.  A bad list is a warning about
+    // the list, never a reason to exit before the build is assigned.
+    if (!emails.length) {
+      console.error(`${prefix}: no tester list; the members of the external group stay as they are`);
+    }
+    const badEmails = emails.filter((e) => !EMAIL_RE.test(e));
+    if (badEmails.length) {
+      warn(`ASC_STANDING_TESTERS has ${badEmails.length} malformed entr${badEmails.length === 1 ? "y" : "ies"}; they are ignored`);
+    }
+    if (emails.length > 5) {
+      warn(`ASC_STANDING_TESTERS lists ${emails.length} emails; the standing list is three, and only the first five are added`);
+    }
+    emails = emails.filter((e) => EMAIL_RE.test(e)).slice(0, 5);
 
     // 1) External beta group: reuse "Public Beta" or the first external group;
     //    create a private "Public Beta" (public link off) only when none exists.
@@ -1822,15 +1824,8 @@ async function main() {
       }
     }
 
-    // 2b) Internal group: App Store Connect users install every build with no
-    //     Beta App Review.  This is the path that reaches the owner's phone; a
-    //     new app record has none until this creates it (GH #1018).
-    // Its warnings go through warn(), so they count toward the exit code.
-    await ensureInternalTesterGroup({
-      api, appId, emails,
-      log: (m) => console.error(`${prefix}: ${m}`),
-      warn
-    });
+    // No internal group: iOS TestFlight uses the external group only (owner,
+    // 2026-11-24).  An internal group an app record already has is left alone.
 
     // 3) Build: the given CFBundleVersion, else the newest upload.
     const buildQuery = wantBuild
