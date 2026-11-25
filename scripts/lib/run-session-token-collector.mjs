@@ -120,7 +120,9 @@ export function resolveCollectorToken(
   const effectiveLookup = lookup ?? ((name) => scopedInfisicalRead(name, env));
   // Strict injected-secrets mode skips the runtime lookup entirely: the
   // injector already read the store, so only the delivered values count.
-  const strictInjected = env.COLLECTOR_STRICT_INJECTED_SECRETS === "1";
+  // Trimmed like the token values themselves: a padded flag must not silently
+  // drop the process into the non-strict path.
+  const strictInjected = String(env.COLLECTOR_STRICT_INJECTED_SECRETS ?? "").trim() === "1";
   let deferredFailure = null;
   for (const name of tokenEnvVarNames) {
     let fromLookup = null;

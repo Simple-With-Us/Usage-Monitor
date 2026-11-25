@@ -76,6 +76,15 @@ describe("resolveCollectorToken store-first precedence (OPS-1120)", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
+  it("treats a whitespace-padded strict flag as strict", () => {
+    expect(
+      resolveCollectorToken(["CODEX_INGEST_TOKEN"], {
+        env: { CODEX_INGEST_TOKEN: "delivered-value", COLLECTOR_STRICT_INJECTED_SECRETS: " 1 " },
+        fleetSecretsGet: fakeLookup({ CODEX_INGEST_TOKEN: "ignored" }),
+      }),
+    ).toBe("delivered-value");
+  });
+
   it("falls back in order and returns null when nothing matches", () => {
     const lookup = fakeLookup({ USAGE_INGEST_TOKEN: "unscoped-lookup" });
     expect(resolveCollectorToken(["CODEX_INGEST_TOKEN", "USAGE_INGEST_TOKEN"], { env: {}, fleetSecretsGet: lookup })).toBe(
