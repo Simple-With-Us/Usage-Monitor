@@ -93,8 +93,20 @@ IMPORT
 cat > "$tmp_dir/bin/infisical" <<'CLI'
 #!/usr/bin/env bash
 case "${1:-}" in
-  login) printf '%s\n' synthetic-session-token ;;
   secrets)
+    # UM-1676: every read must arrive under the producer's own scoped
+    # service token -- ASC names under the ASC token, certificate names
+    # under the distribution token.  There is no login case: a Universal
+    # Auth login (or any other subcommand) falls through to exit 1.
+    case "${3:-}" in
+      ASC_KEY_ID|ASC_ISSUER_ID|ASC_KEY_P8)
+        [[ "${INFISICAL_TOKEN:-}" == "${INFISICAL_UM_ASC_READ_TOKEN:-}" ]] || exit 1
+        ;;
+      IOS_DIST_P12_BASE64|IOS_DIST_P12_PASSWORD)
+        [[ "${INFISICAL_TOKEN:-}" == "${INFISICAL_UM_DIST_READ_TOKEN:-}" ]] || exit 1
+        ;;
+      *) exit 1 ;;
+    esac
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
       cat "$ASC_TEST_FIXTURE"
     elif [[ "${3:-}" == IOS_DIST_P12_BASE64 && "${ASC_TEST_MULTILINE_P12:-}" == 1 ]]; then
@@ -111,8 +123,8 @@ chmod 700 "$tmp_dir/bin/infisical"
 env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/workflow-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  INFISICAL_UM_ASC_READ_TOKEN=synthetic-asc-token \
+  INFISICAL_UM_DIST_READ_TOKEN=synthetic-dist-token \
   ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/imported" \
   bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/workflow-stdout" 2> "$tmp_dir/workflow-stderr"
 # Mask carriers are the one place a fixture line may appear: the Actions
@@ -150,8 +162,8 @@ fi
 if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/multiline-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  INFISICAL_UM_ASC_READ_TOKEN=synthetic-asc-token \
+  INFISICAL_UM_DIST_READ_TOKEN=synthetic-dist-token \
   ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/unexpected-import" \
   ASC_TEST_MULTILINE_P12=1 bash "$tmp_dir/workflow-load.sh" \
   > "$tmp_dir/multiline-stdout" 2> "$tmp_dir/multiline-stderr"; then
