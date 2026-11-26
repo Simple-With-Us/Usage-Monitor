@@ -1,3 +1,7 @@
+## 2026-11-25 ZC — Fleet-Wide PR Title Header Rule ([OPS-1122](https://linear.app/simple-with-us/issue/OPS-1122))
+
+States the owner ruling (November 26, 2026) that every PR title begins with the compact lettered fleet header for the session that opened the PR (`[<SEAT>:` + three U+200A + `<PAIR>.<GEN>.<HOST>]`), then one ASCII space, then the human title; the title header is never omitted and never stacked under a formatter prefix.  PR descriptions and comments keep carrying the header as their first line.  Rollout: `docs/rollouts/2026-11-25-ops-1122-pr-title-headers.md`.  Canonical definition: AI-Fleet-Coordinator `FLEET-PROTOCOL.md`.
+
 ## Current (2026-11-03 CODEX — Codex Workspace Hints Candidate)
 
 The held draft candidate adds only a non-authoritative configured-root workspace hint to Codex telemetry, preserving all rows and measurements without claiming launch provenance or expanding exclusion.
