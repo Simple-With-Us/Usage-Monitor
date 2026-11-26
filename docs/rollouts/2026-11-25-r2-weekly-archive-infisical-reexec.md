@@ -95,7 +95,8 @@ next run.  An operator who wants the old fail-fast behaviour inside a shell can
   `test:backup-concurrent-startup` never prints anything and hangs on this server, and
   `test:collector-runtime` fails its own assertion `Git executable mode validates under a
   restrictive checkout umask` inside a temporary repo the test builds itself.  CI on
-  `ubuntu-latest` remains the authoritative gate for both. 
+  `ubuntu-latest` remains the authoritative gate for both, and the portability gap is
+  tracked as UM-1681 so the next server lane does not rediscover it. 
 
 ## Follow-ups
 
