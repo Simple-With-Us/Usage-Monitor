@@ -1,3 +1,11 @@
+## Current (2026-11-25 MM — Weekly R2 archive recovers its credentials)
+
+The host cron runs `docker exec` into the app container, which carries only the Infisical bootstrap identity, so the weekly second-vendor archive wrote `credentials_missing` on 2026-11-21 11:00pm even though the app's own process env held every `R2_ARCHIVE_*` value.  The entrypoint now re-runs itself once through `scripts/infisical-run.mjs` when the archive keys are absent but a bootstrap identity is present, guarded against a loop and with an operator opt-out.
+
+Verification: `test:r2-archive` 36 passed, 0 failed (7 new cases); live in-container probes show three missing keys under a plain `docker exec` and none through the injector.  The next scheduled run, Saturday 2026-11-28 11:00pm, should write `ok: true`.
+
+Rollout: `docs/rollouts/2026-11-25-r2-weekly-archive-infisical-reexec.md`.
+
 ## Current (2026-11-03 CODEX — Codex Workspace Hints Candidate)
 
 The held draft candidate adds only a non-authoritative configured-root workspace hint to Codex telemetry, preserving all rows and measurements without claiming launch provenance or expanding exclusion.

@@ -13,13 +13,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { awsUriEncode, signS3Request, s3Request } from "./lib/s3-sigv4.mjs";
 import {
   archiveKeyFor,
   archiveKeyTimeMs,
+  buildInfisicalReexec,
   classifyFailure,
+  INFISICAL_REEXEC_GUARD,
+  infisicalBootstrapPresent,
   isManagedArchiveKey,
+  needsInfisicalReexec,
   resolveArchiveConfig,
   runArchive,
   selectPruneTargets,
@@ -490,6 +496,118 @@ await test("resolveArchiveConfig normalizes prefix and detects the kill switch",
   assert.equal(config.killSwitchEngaged, true);
   assert.equal(config.ignoreKillSwitch, false);
   assert.equal(config.keepGenerations, 2);
+});
+
+// -------------------------------------------------- credential bootstrap ----
+// A `docker exec` into the app container gets the container-config env, not the
+// Infisical-injected app env, so the weekly job saw no R2_ARCHIVE_* while the
+// app was correctly configured (2026-11-20: receipt `credentials_missing`).
+
+const ARCHIVE_CREDS = {
+  R2_ARCHIVE_ENDPOINT: "https://acct.r2.cloudflarestorage.com",
+  R2_ARCHIVE_ACCESS_KEY_ID: "k",
+  R2_ARCHIVE_SECRET_ACCESS_KEY: "s",
+};
+
+await test("needsInfisicalReexec is false when the archive keys are present", () => {
+  assert.equal(
+    needsInfisicalReexec({ ...ARCHIVE_CREDS, INFISICAL_CLIENT_ID: "id", INFISICAL_CLIENT_SECRET: "sec" }),
+    false
+  );
+});
+
+await test("needsInfisicalReexec is true when only the Infisical identity is present", () => {
+  assert.equal(
+    needsInfisicalReexec({ INFISICAL_CLIENT_ID: "id", INFISICAL_CLIENT_SECRET: "sec" }),
+    true,
+    "this is the exact docker-exec shape that broke the weekly archive"
+  );
+  assert.equal(needsInfisicalReexec({ INFISICAL_UM_CLIENT_ID: "id", INFISICAL_UM_CLIENT_SECRET: "sec" }), true);
+  assert.equal(needsInfisicalReexec({ INFISICAL_TOKEN: "token" }), true);
+  assert.equal(needsInfisicalReexec({ INFISICAL_UM_READ_TOKEN: "token" }), true);
+});
+
+await test("needsInfisicalReexec is false without any bootstrap identity", () => {
+  assert.equal(needsInfisicalReexec({}), false, "a cron with no identity must fail honestly");
+  assert.equal(needsInfisicalReexec({ INFISICAL_CLIENT_ID: "id" }), false, "half a pair is not auth");
+  assert.equal(infisicalBootstrapPresent({ INFISICAL_CLIENT_ID: "id" }), false);
+});
+
+await test("the re-exec guard prevents a hand-off loop", () => {
+  assert.equal(
+    needsInfisicalReexec({
+      INFISICAL_CLIENT_ID: "id",
+      INFISICAL_CLIENT_SECRET: "sec",
+      [INFISICAL_REEXEC_GUARD]: "1",
+    }),
+    false
+  );
+});
+
+await test("the re-exec can be disabled explicitly for an operator run", () => {
+  assert.equal(
+    needsInfisicalReexec({
+      INFISICAL_CLIENT_ID: "id",
+      INFISICAL_CLIENT_SECRET: "sec",
+      R2_ARCHIVE_INFISICAL_REEXEC_DISABLE: "1",
+    }),
+    false
+  );
+});
+
+await test("buildInfisicalReexec forwards the injector, this script and its argv", () => {
+  const plan = buildInfisicalReexec({
+    env: { INFISICAL_CLIENT_ID: "id", INFISICAL_CLIENT_SECRET: "sec" },
+    argv: ["--keep", "3"],
+    scriptPath: "/app/scripts/ops/r2-weekly-archive.mjs",
+    execPath: "/usr/bin/node",
+  });
+  assert.equal(plan.command, "/usr/bin/node");
+  assert.deepEqual(plan.args, [
+    "/app/scripts/infisical-run.mjs",
+    "--",
+    "/usr/bin/node",
+    "/app/scripts/ops/r2-weekly-archive.mjs",
+    "--keep",
+    "3",
+  ]);
+  assert.equal(plan.env[INFISICAL_REEXEC_GUARD], "1");
+});
+
+await test("a docker-exec-shaped run re-execs through the injector exactly once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "r2-archive-reexec-"));
+  try {
+    const recordPath = join(dir, "reexec.json");
+    const stubRunner = join(dir, "stub-infisical-run.mjs");
+    writeFileSync(
+      stubRunner,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "const argv = process.argv.slice(2);",
+        'writeFileSync(process.env.REEXEC_RECORD, JSON.stringify({ argv }));',
+        "process.exitCode = 0;",
+      ].join("\n")
+    );
+    const env = {
+      PATH: process.env.PATH,
+      INFISICAL_CLIENT_ID: "id",
+      INFISICAL_CLIENT_SECRET: "sec",
+      R2_ARCHIVE_INFISICAL_RUNNER: stubRunner,
+      R2_ARCHIVE_STATUS_PATH: join(dir, "status.json"),
+      REEXEC_RECORD: recordPath,
+    };
+    const scriptPath = fileURLToPath(new URL("./ops/r2-weekly-archive.mjs", import.meta.url));
+    const child = spawnSync(process.execPath, [scriptPath, "--dry-run"], { env, encoding: "utf8" });
+    assert.equal(child.status, 0, `expected the stub injector to exit 0, got ${child.status}`);
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    assert.deepEqual(record.argv, ["--", process.execPath, scriptPath, "--dry-run"]);
+    assert.ok(
+      !existsSync(join(dir, "status.json")),
+      "a handled hand-off must not write a credential-failure receipt"
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ------------------------------------------------------------ end to end ----

@@ -51,7 +51,8 @@ import {
 } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createGunzip, createGzip } from "node:zlib";
 import { Readable, Transform } from "node:stream";
@@ -157,6 +158,69 @@ export function resolveArchiveConfig(env = process.env, overrides = {}) {
     killSwitchEngaged:
       env.R2_WRITES_DISABLED === "true" || env.LITESTREAM_EMERGENCY_DISABLE === "true",
     ignoreKillSwitch: env.R2_ARCHIVE_IGNORE_KILL_SWITCH === "true",
+  };
+}
+
+/**
+ * Credential bootstrap for processes that did NOT come through the container
+ * entrypoint (2026-11-25).
+ *
+ * `scripts/start-with-infisical.sh` injects the project's secrets into the app's
+ * own process tree.  A `docker exec` into the same container does not inherit
+ * them: it gets only the container-config env, i.e. the Infisical bootstrap
+ * identity, never `R2_ARCHIVE_*`.  The host cron therefore ran this job with no
+ * archive credentials while the app itself was perfectly configured, and the
+ * weekly second-vendor DR copy silently stopped (receipt: `credentials_missing`
+ * written by the 2026-11-20 run).
+ *
+ * So when the archive credentials are absent but a bootstrap identity IS
+ * present, re-run this same command through `scripts/infisical-run.mjs` — the
+ * exact injector the entrypoint uses.  One re-exec only, guarded by an env flag,
+ * so a genuinely missing grant still fails honestly instead of looping.
+ */
+export const INFISICAL_REEXEC_GUARD = "R2_ARCHIVE_INFISICAL_REEXEC";
+
+/** True when this process can reach Infisical on its own. Mirrors start-with-infisical.sh. */
+export function infisicalBootstrapPresent(env = process.env) {
+  const single = (env.INFISICAL_UM_READ_TOKEN || env.INFISICAL_TOKEN || "").trim();
+  if (single) return true;
+  const id = (env.INFISICAL_CLIENT_ID || env.INFISICAL_UM_CLIENT_ID || "").trim();
+  const secret = (env.INFISICAL_CLIENT_SECRET || env.INFISICAL_UM_CLIENT_SECRET || "").trim();
+  return Boolean(id && secret);
+}
+
+/**
+ * Whether the entrypoint should hand off to the Infisical injector before
+ * classifying this run as a credential failure.  Pure and exported so the
+ * decision is unit-tested rather than inferred from a morning's cron log.
+ */
+export function needsInfisicalReexec(env = process.env) {
+  if ((env[INFISICAL_REEXEC_GUARD] || "").trim() === "1") return false;
+  if ((env.R2_ARCHIVE_INFISICAL_REEXEC_DISABLE || "").trim() === "1") return false;
+  if (resolveArchiveConfig(env).missing.length === 0) return false;
+  return infisicalBootstrapPresent(env);
+}
+
+/**
+ * The exact re-exec command, kept separate from the spawn so a test can assert
+ * the argv and environment without running Infisical.
+ */
+export function buildInfisicalReexec({
+  env = process.env,
+  argv = [],
+  scriptPath,
+  execPath = process.execPath,
+  runnerPath,
+} = {}) {
+  const runner =
+    (env.R2_ARCHIVE_INFISICAL_RUNNER || "").trim() ||
+    runnerPath ||
+    join(dirname(dirname(scriptPath)), "infisical-run.mjs");
+  return {
+    command: execPath,
+    args: [runner, "--", execPath, scriptPath, ...argv],
+    env: { ...env, [INFISICAL_REEXEC_GUARD]: "1" },
+    runner,
   };
 }
 
@@ -688,16 +752,46 @@ export function classifyFailure(error) {
 const isMain =
   Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  try {
-    await runArchive({ argv: process.argv.slice(2) });
-  } catch (error) {
-    log(`FAILED: ${error.message}`);
-    const config = resolveArchiveConfig();
-    writeStatus(config.statusPath, {
-      ok: false,
-      reason: classifyFailure(error),
-      checkedAt: new Date().toISOString(),
+  const argv = process.argv.slice(2);
+  if (needsInfisicalReexec(process.env)) {
+    // Re-run through the same injector the container entrypoint uses.  The
+    // guard in the child's env stops a second hand-off, so a grant that truly
+    // lacks the keys still ends in credentials_missing rather than a fork loop.
+    const plan = buildInfisicalReexec({
+      env: process.env,
+      argv,
+      scriptPath: fileURLToPath(import.meta.url),
     });
-    process.exitCode = 1;
+    log(
+      `archive credentials absent from this process; re-running through the Infisical injector (${plan.runner})`
+    );
+    const child = spawnSync(plan.command, plan.args, {
+      stdio: "inherit",
+      env: plan.env,
+    });
+    if (child.error) {
+      log(`FAILED: could not start the Infisical injector: ${child.error.code || child.error.message}`);
+      writeStatus(resolveArchiveConfig().statusPath, {
+        ok: false,
+        reason: "credentials_missing",
+        checkedAt: new Date().toISOString(),
+      });
+      process.exitCode = 1;
+    } else {
+      process.exitCode = child.status ?? 1;
+    }
+  } else {
+    try {
+      await runArchive({ argv });
+    } catch (error) {
+      log(`FAILED: ${error.message}`);
+      const config = resolveArchiveConfig();
+      writeStatus(config.statusPath, {
+        ok: false,
+        reason: classifyFailure(error),
+        checkedAt: new Date().toISOString(),
+      });
+      process.exitCode = 1;
+    }
   }
 }
