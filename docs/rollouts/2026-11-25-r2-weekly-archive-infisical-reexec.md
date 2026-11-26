@@ -82,9 +82,20 @@ next run.  An operator who wants the old fail-fast behaviour inside a shell can
   `{"phase":"plain","bootstrapPresent":true,"missingCount":3,"needsReexec":true}` and
   `{"phase":"injected","missingCount":0,"needsReexec":false}`, where the injector the
   entrypoint calls reported `Injecting 179 Infisical secrets`. 
-- `npm run verify` on the lane under the pinned runtime.  This host's default `node` is
-  v22.22.1 while `.node-version` pins 24.22.3, so the gate ran with the Node 24.22.0 build
-  on the volume; CI's own Node 24 remains the authoritative run. 
+- `npm run verify` on the lane under the pinned runtime, run as separate steps because this
+  host cannot complete the aggregate command.  Passed: `test:node-runtime`,
+  `test:xcode-write-hook`, `test:sentry-ci-report`, `test:security-ancestry`, `lint`,
+  `typecheck`, `test` (vitest, 308 files / 3,764 tests passed, 1 skipped),
+  `test:receipt-inbox-worker`, `test:expenses-worker`, `test:migrate-safe`,
+  `test:sqlite-backup`, `test:r2-archive`, `test:startup-config`, `test:oracle-deploy`,
+  `test:apple-projects`, `test:antigravity-collector`, `test:session-token-collectors`,
+  `test:cf-token-map`, `test:replica-status-probe`, `test:quota-wrapper`, `test:audit-ci`
+  and `build` (compiled in 18.1s). 
+  Two steps are host-environment failures unrelated to this change and both predate it:
+  `test:backup-concurrent-startup` never prints anything and hangs on this server, and
+  `test:collector-runtime` fails its own assertion `Git executable mode validates under a
+  restrictive checkout umask` inside a temporary repo the test builds itself.  CI on
+  `ubuntu-latest` remains the authoritative gate for both. 
 
 ## Follow-ups
 

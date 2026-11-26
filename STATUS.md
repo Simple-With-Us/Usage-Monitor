@@ -2,7 +2,7 @@
 
 The host cron runs `docker exec` into the app container, which carries only the Infisical bootstrap identity, so the weekly second-vendor archive wrote `credentials_missing` on 2026-11-21 11:00pm even though the app's own process env held every `R2_ARCHIVE_*` value.  The entrypoint now re-runs itself once through `scripts/infisical-run.mjs` when the archive keys are absent but a bootstrap identity is present, guarded against a loop and with an operator opt-out.
 
-Verification: `test:r2-archive` 36 passed, 0 failed (7 new cases); live in-container probes show three missing keys under a plain `docker exec` and none through the injector.  The next scheduled run, Saturday 2026-11-28 11:00pm, should write `ok: true`.
+Verification: `test:r2-archive` 36 passed, 0 failed (7 new cases); live in-container probes show three missing keys under a plain `docker exec` and none through the injector.  Every other verify step passes under the pinned runtime except `test:backup-concurrent-startup`, which hangs on this server, and `test:collector-runtime`, which fails its own git file-mode assertion here; both are host-environment conditions that predate this change, so CI is the authoritative gate for them.  The next scheduled run, Saturday 2026-11-28 11:00pm, should write `ok: true`.
 
 Rollout: `docs/rollouts/2026-11-25-r2-weekly-archive-infisical-reexec.md`.
 
