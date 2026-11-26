@@ -187,10 +187,15 @@ jobs:
         if: steps.gate.outputs.should_ship == '1'
         env:
           INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          # UM-1676: the ship producer's own qualified finite read-only
+          # service tokens replace the shared Universal Auth machine
+          # identity.  INFISICAL_UM_ASC_READ_TOKEN reads Fleet-OPS prod
+          # /asc only; INFISICAL_UM_DIST_READ_TOKEN reads this app's
+          # prod / only.  Values are staged in AI Fleet Coordinator prod
+          # /service-tokens (UM_IOS_SHIP_ASC_READ_SERVICE_TOKEN and
+          # UM_IOS_SHIP_DIST_READ_SERVICE_TOKEN).
+          INFISICAL_UM_ASC_READ_TOKEN: ${{ secrets.INFISICAL_UM_ASC_READ_TOKEN }}
+          INFISICAL_UM_DIST_READ_TOKEN: ${{ secrets.INFISICAL_UM_DIST_READ_TOKEN }}
         run: |
           set +o xtrace
           set -euo pipefail
@@ -208,28 +213,20 @@ jobs:
             echo "::error::Missing INFISICAL_PROJECT_ID GitHub secret."
             exit 1
           fi
-          CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-${INFISICAL_CLIENT_ID:-}}"
-          CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-${INFISICAL_CLIENT_SECRET:-}}"
-          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::error::Missing Infisical machine identity.  Set INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET (fallback INFISICAL_CLIENT_ID/SECRET) on the repo."
+          ASC_TOKEN="${INFISICAL_UM_ASC_READ_TOKEN:-}"
+          DIST_TOKEN="${INFISICAL_UM_DIST_READ_TOKEN:-}"
+          if [ -z "$ASC_TOKEN" ] || [ -z "$DIST_TOKEN" ]; then
+            echo "::error::Missing Infisical service-token binding.  Set INFISICAL_UM_ASC_READ_TOKEN and INFISICAL_UM_DIST_READ_TOKEN on the repo (UM-1676)."
             exit 1
           fi
-
-          TOKEN="$(
-            env -u INFISICAL_CLIENT_ID -u INFISICAL_CLIENT_SECRET -u INFISICAL_TOKEN \
-              INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$CLIENT_ID" \
-              INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$CLIENT_SECRET" \
-              infisical login --method=universal-auth --silent --plain --telemetry=false 2>/dev/null || true
-          )"
-          if [ -z "$TOKEN" ]; then
-            echo "::error::Infisical universal-auth login failed."
-            exit 1
-          fi
-          if [[ "$TOKEN" == *$'\n'* || "$TOKEN" == *$'\r'* ]]; then
-            echo '::error::Infisical returned a multiline token.' >&2
-            exit 1
-          fi
-          printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
+          for tok in "$ASC_TOKEN" "$DIST_TOKEN"; do
+            if [[ "$tok" == *$'\n'* || "$tok" == *$'\r'* ]]; then
+              echo '::error::Infisical service token must be single-line.' >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${tok//'%'/'%25'}"
+          done
+          unset tok
 
           # ASC API credentials live in the Fleet-OPS Infisical project under /asc
           # (owner ruling 2026-10-11).  The distribution certificate stays in
@@ -239,7 +236,7 @@ jobs:
 
           for name in ASC_KEY_ID ASC_ISSUER_ID; do
             val="$(
-              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+              INFISICAL_TOKEN="$ASC_TOKEN" infisical secrets get "$name" \
                 --plain --silent --telemetry=false --expand=false \
                 --projectId="$FLEET_ASC_PROJECT_ID" --env=prod --path="$FLEET_ASC_PATH" \
                 2>/dev/null || true
@@ -260,7 +257,7 @@ jobs:
 
           for name in IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
             val="$(
-              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
+              INFISICAL_TOKEN="$DIST_TOKEN" infisical secrets get "$name" \
                 --plain --silent --telemetry=false --expand=false \
                 --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
                 2>/dev/null || true
@@ -291,7 +288,7 @@ jobs:
           # -authenticationKeyPath) can only read a key from disk, and that
           # file is written from the credential rather than read back as one.
           key_material="$(
-            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
+            INFISICAL_TOKEN="$ASC_TOKEN" infisical secrets get ASC_KEY_P8 \
               --plain --silent --telemetry=false --expand=false \
               --projectId="$FLEET_ASC_PROJECT_ID" --env=prod --path="$FLEET_ASC_PATH" \
               2>/dev/null || true
@@ -321,7 +318,7 @@ jobs:
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
-          unset key_material key_b64 line TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
+          unset key_material key_b64 line ASC_TOKEN DIST_TOKEN val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
       # Plan-build: compute each app's release build ONCE here and hand it to
       # the ship steps as --build, so the two ships of one release can never
