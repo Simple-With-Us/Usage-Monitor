@@ -1,3 +1,5 @@
+<p><img src="public/brand/icon-512.png" alt="Usage Monitor logo" width="96" height="96"></p>
+
 # Usage Monitor
 
 Usage Monitor brings usage, cost, and subscription information into one dashboard.  It combines supported provider snapshots, telemetry sent by other apps, and OTLP metrics, with project attribution where that information is available.
