@@ -62,11 +62,12 @@ requireText(sentryDeployWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"
 requireText(read("scripts/sentry-report-deploy.mjs"), /PRODUCTION_ORIGIN_IPV4/, "Sentry deploy reporter must read production health through the pinned origin when configured");
 function requireExactSecrets(body, expected, label) {
   forbidText(body, /secrets\s*\[/, `${label} must not use bracket secret access`);
-  const names = [...body.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]).sort();
-  assert.deepEqual(names, [...expected].sort(), `${label} must hold only its exact approved credentials`);
+  const names = [...new Set([...body.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]))].sort();
+  assert.deepEqual(names, [...new Set(expected)].sort(), `${label} must hold only its exact approved credentials`);
 }
 const policyReaderSecret = 'INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN';
 requireExactSecrets(workflow, [policyReaderSecret], 'observer');
+requireExactSecrets(`${workflow}\n${'${{ secrets.INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN }}'}`, [policyReaderSecret, policyReaderSecret], 'observer duplicate');
 // Keep the reporter's pre-existing Sentry credential, without giving it any
 // hosting mutation credential. The reporter needs its existing Sentry token.
 requireExactSecrets(sentryDeployWorkflow, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'Sentry workflow');
