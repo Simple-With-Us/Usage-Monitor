@@ -104,10 +104,12 @@ class Checks(unittest.TestCase):
   with patch.object(m.sys,"argv",["deploy",name]),\
    patch.object(m.subprocess,"check_output",return_value="sha1\n"),\
    patch.object(m,"current_main",return_value="sha1"),\
-   patch.object(m,"guard_tripped",side_effect=list(tripped)),\
+   patch.object(m,"guard_tripped",side_effect=[*tripped,False]),\
    patch.object(m,"deployed_tag",side_effect=tags),\
    patch.object(m,"worker_changed",return_value=changed),\
    patch.object(m,"last_deployed_from",return_value=source),\
+   patch.object(m,"tagged_versions",side_effect=[set(),{"v-new"}]),\
+   patch.object(m,"live_version",side_effect=["v-old","v-old","v-new"]),\
    patch.object(m,"probe") as probe,\
    patch.object(m.subprocess,"run") as run:
    try:m.main()
@@ -123,17 +125,62 @@ class Checks(unittest.TestCase):
   run.assert_not_called()
  def test_deploy_uses_strict_and_tag_when_last_change_was_wrangler(self):
   probe,run=self.run_main()
-  argv=run.call_args.args[0]
+  argv=run.call_args_list[0].args[0]
   self.assertIn("--strict",argv);self.assertIn("--keep-vars",argv)
   self.assertEqual(argv[argv.index("--tag")+1],"sha1")
   self.assertEqual(probe.call_args_list[0].kwargs,{"before_upload":True})
   self.assertEqual(probe.call_args.kwargs,{"after_upload":True})
  def test_deploy_drops_strict_only_after_a_script_api_change(self):
   probe,run=self.run_main(source="api")
-  self.assertNotIn("--strict",run.call_args.args[0])
+  self.assertNotIn("--strict",run.call_args_list[0].args[0])
+ def publish_run(self,before,after,live=("v-old","v-old","v-new"),main="sha1",tripped=False):
+  t=m.TARGETS["expenses-jays-services"]
+  with patch.object(m,"tagged_versions",side_effect=[before,after]),\
+   patch.object(m,"live_version",side_effect=list(live)),\
+   patch.object(m,"current_main",return_value=main),\
+   patch.object(m,"guard_tripped",return_value=tripped),\
+   patch.object(m.subprocess,"run") as run:
+   try:result=m.publish(t,"expenses-jays-services","sha1",["--tag","sha1"])
+   finally:self.run=run
+  return result
+ def test_upload_then_deploys_the_exact_new_version_at_full_traffic(self):
+  self.assertTrue(self.publish_run(set(),{"v-new"}))
+  up,dep=self.run.call_args_list[0].args[0],self.run.call_args_list[1].args[0]
+  self.assertEqual(up[up.index("versions"):up.index("versions")+2],["versions","upload"])
+  self.assertEqual(dep[dep.index("versions"):dep.index("versions")+2],["versions","deploy"])
+  self.assertIn("v-new@100",dep);self.assertIn("--yes",dep)
+  self.assertEqual(up[up.index("--config")+1],dep[dep.index("--config")+1])
+ def test_no_target_uses_plain_wrangler_deploy(self):
+  for n,t in m.TARGETS.items():
+   i=t["command"].index("versions");self.assertEqual(t["command"][i:i+2],["versions","upload"],n)
+ def test_an_old_version_with_the_same_tag_is_not_selected(self):
+  self.assertTrue(self.publish_run({"v-old-same"},{"v-old-same","v-new"}))
+  self.assertIn("v-new@100",self.run.call_args_list[1].args[0])
+ def test_ambiguous_or_missing_new_version_fails_closed_without_promoting(self):
+  for after in (set(),{"a","b"}):
+   with self.assertRaisesRegex(RuntimeError,"exactly one new version"):self.publish_run(set(),after)
+   self.assertEqual(self.run.call_count,1)
+ def test_main_moving_during_upload_skips_promotion(self):
+  self.assertFalse(self.publish_run(set(),{"v-new"},main="sha2"))
+  self.assertEqual(self.run.call_count,1)
+ def test_guard_trip_during_upload_refuses_promotion(self):
+  with self.assertRaisesRegex(SystemExit,"usage guard"):self.publish_run(set(),{"v-new"},tripped=True)
+  self.assertEqual(self.run.call_count,1)
+ def test_live_deployment_changed_during_upload_refuses_promotion(self):
+  with self.assertRaisesRegex(RuntimeError,"changed during the upload"):self.publish_run(set(),{"v-new"},live=("v-old","v-other"))
+  self.assertEqual(self.run.call_count,1)
+ def test_live_not_the_uploaded_version_after_deploy_fails(self):
+  with self.assertRaisesRegex(RuntimeError,"not the uploaded version"):self.publish_run(set(),{"v-new"},live=("v-old","v-old","v-other"))
+ def test_tagged_versions_lists_only_matching_tags(self):
+  items={"items":[{"id":"a","annotations":{"workers/tag":"s"}},{"id":"b","annotations":{"workers/tag":"s"}},{"id":"c","annotations":{"workers/tag":"x"}},{"id":"d"}]}
+  with patch.object(m,"api",return_value=items):self.assertEqual(m.tagged_versions("w","s"),{"a","b"})
+ def test_mapping_ceilings_match_live_limits(self):
+  want={"usage-monitor-receipt-lifecycle-auditor":(50,20),"expenses-jays-services":(100,60),"usage-monitor-receipt-inbox":(500,30)}
+  for n,(c,sub) in want.items():
+   gd=m.TARGETS[n]["guard"];self.assertEqual((gd["max_cpu_ms"],gd["max_subrequests"]),(c,sub));self.assertNotIn("limits_pending",gd)
  def test_dashboard_edit_keeps_strict(self):
   probe,run=self.run_main(source="dash")
-  self.assertIn("--strict",run.call_args.args[0])
+  self.assertIn("--strict",run.call_args_list[0].args[0])
  def test_inbox_refuses_when_auditor_is_behind(self):
   with self.assertRaisesRegex(SystemExit,"ahead of it"):
    self.run_main(name="usage-monitor-receipt-inbox",tag=["old","old"],changed=True)
@@ -141,7 +188,7 @@ class Checks(unittest.TestCase):
   probe.assert_not_called();run.assert_not_called()
  def test_inbox_deploys_when_auditor_is_current(self):
   probe,run=self.run_main(name="usage-monitor-receipt-inbox",tag=["old","sha1","sha1"],changed=True)
-  self.assertEqual(run.call_count,2)
+  self.assertEqual(run.call_count,3)
   self.assertIn("workers/receipt-inbox/wrangler.jsonc",run.call_args.args[0])
  def rows(self,*rows):
   return patch.object(m,"telemetry_rows",return_value=[{"sum":{"requests":n},"dimensions":{"status":s,"scriptVersion":v}} for s,v,n in rows])

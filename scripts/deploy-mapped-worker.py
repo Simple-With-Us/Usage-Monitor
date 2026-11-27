@@ -178,6 +178,41 @@ def probe(target, name="unnamed target", after_upload=False, before_upload=False
         data=json.load(response)
     if target.get("ok") and data.get("ok") is not True:raise RuntimeError("Health response not ready")
     if target.get("sections") and not isinstance(data.get("sections"),list):raise RuntimeError("Invalid sections response")
+def tagged_versions(name,sha):
+    """Ids of every uploaded version carrying this commit's tag."""
+    items=api("/workers/scripts/"+name+"/versions?per_page=50")["items"]
+    return {v["id"] for v in items if (v.get("annotations") or {}).get("workers/tag")==sha}
+def publish(target,name,sha,flags):
+    """Upload a tagged version, then deploy exactly that version at 100%.  False when superseded.
+
+    A plain `wrangler deploy` also rewrites custom-domain routes, which the scoped CI token may
+    not do (Cloudflare error 10084).  `versions upload` plus `versions deploy` touches only the
+    code version and the deployment.  The registry command is `wrangler versions upload --config X`;
+    the deploy command is derived from it so both use the same config.
+
+    Races: the workflow serializes runs, but main can move and the watchdog can trip a Worker
+    during the upload, and an upload is not a deployment.  So after the upload this re-checks
+    main and the guard before promoting, requires exactly one new version tagged with this
+    commit (never "the newest"), and refuses to promote if the live deployment changed since
+    the upload began.  A check-then-deploy gap of one API call remains; the versions deploy
+    itself is a single atomic Cloudflare deployment and the exact-version receipt follows it."""
+    command=target["command"]
+    i=command.index("versions")
+    if command[i:i+2]!=["versions","upload"]:raise RuntimeError("Registry command for "+name+" must be wrangler versions upload")
+    env={**os.environ,"CLOUDFLARE_ACCOUNT_ID":ACCOUNT,"WRANGLER_SEND_METRICS":"false"}
+    before=tagged_versions(name,sha)
+    live_before=live_version(name)
+    subprocess.run([*command,*flags],check=True,env=env)
+    new=tagged_versions(name,sha)-before
+    if len(new)!=1:raise RuntimeError("Expected exactly one new version tagged "+sha[:12]+" for "+name+", found "+str(len(new)))
+    version=next(iter(new))
+    # The upload is inert until promoted, so stopping here changes nothing live.
+    if current_main()!=sha:print("Superseded after upload; not promoting "+version);return False
+    refuse_if_tripped(name)
+    if live_version(name)!=live_before:raise RuntimeError("Live deployment of "+name+" changed during the upload; not promoting")
+    subprocess.run([*command[:i],"versions","deploy",version+"@100","--yes","--message","main "+sha,*command[i+2:]],check=True,env=env)
+    if live_version(name)!=version:raise RuntimeError("Live deployment is not the uploaded version for "+name)
+    return True
 def main():
     name=sys.argv[1]
     if name not in TARGETS:raise SystemExit("Unknown mapped Worker")
@@ -209,8 +244,7 @@ def main():
     # limits PATCH counts as that.  Git is the source of truth for those, and the limits check
     # keeps them in the config.  Dashboard edits (and anything else) still abort under --strict.
     if last_deployed_from(name)!="api":flags.insert(1,"--strict")
-    subprocess.run([*target["command"],*flags],check=True,
-                   env={**os.environ,"CLOUDFLARE_ACCOUNT_ID":ACCOUNT,"WRANGLER_SEND_METRICS":"false"})
+    if not publish(target,name,sha,flags):return
     if deployed_tag(name)!=sha:raise RuntimeError("Exact version receipt does not match")
     probe(target,name,after_upload=True)
     print("Exact Worker version and functional probe verified: "+name+" "+sha)
