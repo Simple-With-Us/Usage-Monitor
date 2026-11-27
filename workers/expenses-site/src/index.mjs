@@ -29,7 +29,8 @@ const SIDE_SQL = "CASE WHEN category = 'personal' THEN 'personal' ELSE 'tech' EN
 // per-caller variation: the Worker does no identity checks, so nothing in the cache depends
 // on who asked.  Isolates share no memory, so this bounds each isolate, not the account.
 // /api/expenses accepts only a known filter (see isKnownFilter), so the cache holds at most
-// 11 entries and a query string cannot choose a new one.  A failed read is not kept.
+// 10 entries (one snapshot per known filter) and a query string cannot choose a new one.
+// A failed read is not kept.
 // /health is not cached: it reads no table rows, and a monitor should see D1 fail at once.
 export const READ_CACHE_TTL_MS = 15_000;
 const readCache = new Map();
@@ -57,12 +58,16 @@ export function isKnownFilter(filter) {
   return filter === "all" || filter === "personal" || filter === "tech" || Object.hasOwn(CATEGORIES, filter);
 }
 
+// One entry per filter holds rows, footer time and total together, read in one go and
+// expiring as one.  Separate entries expired on their own clocks, so a page could pair
+// rows from one read with the footer or count of another (and could be built from a
+// mix of reads on either side of a sync).  Entries still cost 3 D1 statements per window
+// and filter.  Reads inside one load are three statements, not one transaction, so the
+// parts can differ if a sync commits between them, exactly as before the cache.
 function dashboardData(db, filter) {
-  return Promise.all([
-    cachedRead("rows:" + filter, () => readDashboardRows(db, filter)),
-    cachedRead("asOf", () => readSyncState(db)),
-    cachedRead("count", () => readTotalCount(db)),
-  ]);
+  return cachedRead("snapshot:" + filter, () =>
+    Promise.all([readDashboardRows(db, filter), readSyncState(db), readTotalCount(db)])
+  );
 }
 
 async function readDashboardRows(db, filter) {

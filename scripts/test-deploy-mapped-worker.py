@@ -101,19 +101,19 @@ class Checks(unittest.TestCase):
  def run_main(self,name="expenses-jays-services",tag=None,tripped=(False,False),changed=True,source="wrangler",final_tag="sha1"):
   """Run main() with every external call mocked; returns the mocks that matter."""
   tags=[tag,final_tag] if isinstance(tag,(str,type(None))) else list(tag)
-  with patch.object(m.sys,"argv",["deploy",name]),\
+  with patch.object(m,"deployment_head",return_value="old"),patch.object(m,"verify_deployment_continuity"),patch.object(m.sys,"argv",["deploy",name]),\
    patch.object(m.subprocess,"check_output",return_value="sha1\n"),\
    patch.object(m,"current_main",return_value="sha1"),\
    patch.object(m,"guard_tripped",side_effect=[*tripped,False]),\
    patch.object(m,"deployed_tag",side_effect=tags),\
    patch.object(m,"worker_changed",return_value=changed),\
    patch.object(m,"last_deployed_from",return_value=source),\
-   patch.object(m,"tagged_versions",side_effect=[set(),{"v-new"}]),\
+   patch.object(m,"uploaded_version",return_value="v-new")as uploaded,\
    patch.object(m,"live_version",side_effect=["v-old","v-old","v-new"]),\
    patch.object(m,"probe") as probe,\
    patch.object(m.subprocess,"run") as run:
    try:m.main()
-   finally:self.calls=(probe,run)
+   finally:self.calls=(probe,run);self.uploaded=uploaded
   return self.calls
  def test_tripped_worker_is_refused_before_probe_or_upload(self):
   with self.assertRaisesRegex(SystemExit,"usage guard"):self.run_main(tripped=(True,))
@@ -125,27 +125,28 @@ class Checks(unittest.TestCase):
   run.assert_not_called()
  def test_deploy_uses_strict_and_tag_when_last_change_was_wrangler(self):
   probe,run=self.run_main()
-  argv=run.call_args_list[0].args[0]
+  argv=self.uploaded.call_args.args[1]
   self.assertIn("--strict",argv);self.assertIn("--keep-vars",argv)
   self.assertEqual(argv[argv.index("--tag")+1],"sha1")
   self.assertEqual(probe.call_args_list[0].kwargs,{"before_upload":True})
   self.assertEqual(probe.call_args.kwargs,{"after_upload":True})
  def test_deploy_drops_strict_only_after_a_script_api_change(self):
   probe,run=self.run_main(source="api")
-  self.assertNotIn("--strict",run.call_args_list[0].args[0])
+  self.assertNotIn("--strict",self.uploaded.call_args.args[1])
  def publish_run(self,before,after,live=("v-old","v-old","v-new"),main="sha1",tripped=False):
   t=m.TARGETS["expenses-jays-services"]
-  with patch.object(m,"tagged_versions",side_effect=[before,after]),\
+  with patch.object(m,"deployment_head",return_value="old"),patch.object(m,"verify_deployment_continuity"),patch.object(m,"uploaded_version",return_value=next(iter(after-before)) if len(after-before)==1 else None)as upload,\
    patch.object(m,"live_version",side_effect=list(live)),\
    patch.object(m,"current_main",return_value=main),\
    patch.object(m,"guard_tripped",return_value=tripped),\
    patch.object(m.subprocess,"run") as run:
+   if len(after-before)!=1:upload.side_effect=RuntimeError("exactly one new version")
    try:result=m.publish(t,"expenses-jays-services","sha1",["--tag","sha1"])
    finally:self.run=run
   return result
  def test_upload_then_deploys_the_exact_new_version_at_full_traffic(self):
   self.assertTrue(self.publish_run(set(),{"v-new"}))
-  up,dep=self.run.call_args_list[0].args[0],self.run.call_args_list[1].args[0]
+  up,dep=m.TARGETS["expenses-jays-services"]["command"],self.run.call_args_list[0].args[0]
   self.assertEqual(up[up.index("versions"):up.index("versions")+2],["versions","upload"])
   self.assertEqual(dep[dep.index("versions"):dep.index("versions")+2],["versions","deploy"])
   self.assertIn("v-new@100",dep);self.assertIn("--yes",dep)
@@ -155,32 +156,29 @@ class Checks(unittest.TestCase):
    i=t["command"].index("versions");self.assertEqual(t["command"][i:i+2],["versions","upload"],n)
  def test_an_old_version_with_the_same_tag_is_not_selected(self):
   self.assertTrue(self.publish_run({"v-old-same"},{"v-old-same","v-new"}))
-  self.assertIn("v-new@100",self.run.call_args_list[1].args[0])
+  self.assertIn("v-new@100",self.run.call_args_list[0].args[0])
  def test_ambiguous_or_missing_new_version_fails_closed_without_promoting(self):
   for after in (set(),{"a","b"}):
    with self.assertRaisesRegex(RuntimeError,"exactly one new version"):self.publish_run(set(),after)
-   self.assertEqual(self.run.call_count,1)
+   self.assertEqual(self.run.call_count,0)
  def test_main_moving_during_upload_skips_promotion(self):
   self.assertFalse(self.publish_run(set(),{"v-new"},main="sha2"))
-  self.assertEqual(self.run.call_count,1)
+  self.assertEqual(self.run.call_count,0)
  def test_guard_trip_during_upload_refuses_promotion(self):
   with self.assertRaisesRegex(SystemExit,"usage guard"):self.publish_run(set(),{"v-new"},tripped=True)
-  self.assertEqual(self.run.call_count,1)
+  self.assertEqual(self.run.call_count,0)
  def test_live_deployment_changed_during_upload_refuses_promotion(self):
   with self.assertRaisesRegex(RuntimeError,"changed during the upload"):self.publish_run(set(),{"v-new"},live=("v-old","v-other"))
-  self.assertEqual(self.run.call_count,1)
+  self.assertEqual(self.run.call_count,0)
  def test_live_not_the_uploaded_version_after_deploy_fails(self):
   with self.assertRaisesRegex(RuntimeError,"not the uploaded version"):self.publish_run(set(),{"v-new"},live=("v-old","v-old","v-other"))
- def test_tagged_versions_lists_only_matching_tags(self):
-  items={"items":[{"id":"a","annotations":{"workers/tag":"s"}},{"id":"b","annotations":{"workers/tag":"s"}},{"id":"c","annotations":{"workers/tag":"x"}},{"id":"d"}]}
-  with patch.object(m,"api",return_value=items):self.assertEqual(m.tagged_versions("w","s"),{"a","b"})
  def test_mapping_ceilings_match_live_limits(self):
   want={"usage-monitor-receipt-lifecycle-auditor":(50,20),"expenses-jays-services":(100,60),"usage-monitor-receipt-inbox":(500,30)}
   for n,(c,sub) in want.items():
    gd=m.TARGETS[n]["guard"];self.assertEqual((gd["max_cpu_ms"],gd["max_subrequests"]),(c,sub));self.assertNotIn("limits_pending",gd)
  def test_dashboard_edit_keeps_strict(self):
   probe,run=self.run_main(source="dash")
-  self.assertIn("--strict",run.call_args_list[0].args[0])
+  self.assertIn("--strict",self.uploaded.call_args.args[1])
  def test_inbox_refuses_when_auditor_is_behind(self):
   with self.assertRaisesRegex(SystemExit,"ahead of it"):
    self.run_main(name="usage-monitor-receipt-inbox",tag=["old","old"],changed=True)
@@ -188,7 +186,7 @@ class Checks(unittest.TestCase):
   probe.assert_not_called();run.assert_not_called()
  def test_inbox_deploys_when_auditor_is_current(self):
   probe,run=self.run_main(name="usage-monitor-receipt-inbox",tag=["old","sha1","sha1"],changed=True)
-  self.assertEqual(run.call_count,3)
+  self.assertEqual(run.call_count,2)
   self.assertIn("workers/receipt-inbox/wrangler.jsonc",run.call_args.args[0])
  def rows(self,*rows):
   return patch.object(m,"telemetry_rows",return_value=[{"sum":{"requests":n},"dimensions":{"status":s,"scriptVersion":v}} for s,v,n in rows])
@@ -324,7 +322,7 @@ class Checks(unittest.TestCase):
   self.assertNotIn("INFISICAL_AUTOMATION_CLIENT_ID",workflow)
   self.assertNotIn("INFISICAL_AUTOMATION_CLIENT_SECRET",workflow)
  def test_superseded_main_skips_before_any_mutation(self):
-  with patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
+  with patch.object(m,"deployment_head",return_value="old"),patch.object(m,"verify_deployment_continuity"),patch.object(m.sys,"argv",["deploy","expenses-jays-services"]),\
    patch.object(m.subprocess,"check_output",return_value="old\n"),\
    patch.object(m,"current_main",return_value="new"),\
    patch.object(m,"deployed_tag") as deployed_tag,\
@@ -408,4 +406,39 @@ class GuardChecks(unittest.TestCase):
  def test_unparseable_config_fails(self):
   errors,_=self.errors(raw="{nope")
   self.assertTrue(any("cannot parse" in e for e in errors))
+
+class UploadReceiptChecks(unittest.TestCase):
+ def invoke(self, receipt, details=None, error=None):
+  version="12345678-1234-1234-1234-123456789abc"
+  def write(command, **kwargs):
+   if error: raise error
+   if receipt is not None: m.pathlib.Path(kwargs["env"]["WRANGLER_OUTPUT_FILE_PATH"]).write_text(receipt)
+  with patch.object(m.subprocess,"run",side_effect=write) as run, patch.object(m,"api",return_value=details if details is not None else {"id":version,"annotations":{"workers/tag":"commit"}}) as api:
+   result=m.uploaded_version(["wrangler","versions","upload"],["--tag","commit"],{},"worker","commit")
+   self.assertEqual(run.call_args.kwargs["timeout"],600)
+   self.assertEqual(api.call_args.args[0],"/workers/scripts/worker/versions/"+version)
+   return result
+ def receipt(self, **change):
+  return json.dumps({"type":"version-upload","worker_name":"worker","version_id":"12345678-1234-1234-1234-123456789abc",**change})+"\n"
+ def test_receipt_uses_exact_direct_api_identity_not_version_listing(self):
+  self.assertEqual(self.invoke(self.receipt()),"12345678-1234-1234-1234-123456789abc")
+ def test_receipt_missing_malformed_wrong_worker_or_version_refuses(self):
+  for receipt in (None,"broken",self.receipt()*2,self.receipt(worker_name="other"),self.receipt(version_id="bad"),"x"*65537):
+   with self.subTest(receipt=str(receipt)[:20]), self.assertRaises(RuntimeError):self.invoke(receipt)
+ def test_direct_api_wrong_commit_or_identity_refuses(self):
+  for details in ({},{"id":"other","annotations":{"workers/tag":"commit"}},{"id":"12345678-1234-1234-1234-123456789abc","annotations":{"workers/tag":"old"}}):
+   with self.assertRaises(RuntimeError):self.invoke(self.receipt(),details)
+ def test_hung_upload_raises_timeout_without_promotion(self):
+  with self.assertRaises(m.subprocess.TimeoutExpired):self.invoke(None,error=m.subprocess.TimeoutExpired("wrangler",600))
+
+
+class DeploymentContinuityChecks(unittest.TestCase):
+ def test_clean_serial_promotion(self):
+  with patch.object(m,"api",return_value={"deployments":[{"id":"new","versions":[{"version_id":"version","percentage":100}]},{"id":"old"}]}):
+   m.verify_deployment_continuity("w","old","version")
+ def test_interleaved_promotion_and_changed_traffic_fail(self):
+  for entries in ([{"id":"new","versions":[{"version_id":"version","percentage":100}]},{"id":"other"}], [{"id":"other","versions":[{"version_id":"other","percentage":100}]},{"id":"new"}], []):
+   with patch.object(m,"api",return_value={"deployments":entries}), self.assertRaisesRegex(RuntimeError,"Concurrent deployment"):
+    m.verify_deployment_continuity("w","old","version")
+
 if __name__=="__main__":unittest.main()

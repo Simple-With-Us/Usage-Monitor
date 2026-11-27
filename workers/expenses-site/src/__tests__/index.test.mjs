@@ -251,6 +251,73 @@ describe("expenses dashboard read cache", () => {
     expect(response.status).toBe(503);
   });
 
+  // A D1 stand-in whose answers can change between reads, to tell snapshots apart.
+  function movingDb() {
+    const state = { asOf: "T0", count: 1, rows: [{ ...ROWS[0], vendor: "old" }], failCount: false };
+    const prepare = vi.fn((sql) => {
+      const first = async () => {
+        if (sql.includes("COUNT(*)")) {
+          if (state.failCount) throw new Error("D1 count down");
+          return { n: state.count };
+        }
+        if (sql.includes("sync_state")) return { value: state.asOf };
+        return null;
+      };
+      return { first, bind: () => ({ all: async () => ({ results: state.rows }) }), all: async () => ({ results: state.rows }) };
+    });
+    return { db: { prepare }, prepare, state };
+  }
+
+  it("holds rows, footer time and count of one filter together, whatever other filters read", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, state } = movingDb();
+      const a = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a.asOf, a.totalCount, a.expenses[0].vendor]).toEqual(["T0", 1, "old"]);
+      // The ledger moves, then a different filter is read inside the first one's window.
+      vi.advanceTimersByTime(10_000);
+      state.asOf = "T1";
+      state.count = 2;
+      state.rows = [{ ...ROWS[0], vendor: "new" }];
+      const b = await (await get("/api/expenses?category=personal", { EXPENSES_DB: db })).json();
+      expect([b.asOf, b.totalCount, b.expenses[0].vendor]).toEqual(["T1", 2, "new"]);
+      // The first filter still answers from its own snapshot, all three parts old, never a mix.
+      const a2 = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a2.asOf, a2.totalCount, a2.expenses[0].vendor]).toEqual(["T0", 1, "old"]);
+      // After its window the first filter is re-read as a whole.
+      vi.advanceTimersByTime(READ_CACHE_TTL_MS - 10_000 + 1);
+      const a3 = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a3.asOf, a3.totalCount, a3.expenses[0].vendor]).toEqual(["T1", 2, "new"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not keep a snapshot when any one of its three reads fails, and re-reads all three next time", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { db, prepare, state } = movingDb();
+    state.failCount = true;
+    await expect(get("/api/expenses", { EXPENSES_DB: db })).rejects.toThrow("D1 count down");
+    const afterFailure = prepare.mock.calls.length;
+    state.failCount = false;
+    state.asOf = "T2";
+    const ok = await (await get("/api/expenses", { EXPENSES_DB: db })).json();
+    expect(ok.asOf).toBe("T2"); // no half-cached footer from the failed attempt
+    expect(prepare.mock.calls.length - afterFailure).toBe(3);
+    consoleError.mockRestore();
+  });
+
+  it("shares one load between the dashboard page and the JSON for the all filter", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { db, prepare } = fakeDb({ gate });
+    const pending = [get("/", { EXPENSES_DB: db }), get("/api/expenses", { EXPENSES_DB: db }), get("/api/expenses?category=all", { EXPENSES_DB: db })];
+    release();
+    const responses = await Promise.all(pending);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(prepare).toHaveBeenCalledTimes(3);
+  });
+
   it("/health always asks D1, never the cache", async () => {
     const { db, prepare } = fakeDb();
     await get("/health", { EXPENSES_DB: db });
