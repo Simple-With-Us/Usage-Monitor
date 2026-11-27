@@ -65,13 +65,24 @@ public struct AgentModelUsed: Codable, Hashable, Sendable, Identifiable {
     public var tokens: Int
     public var percentOfPlatform: Double
     public var apiEquivalentCostUsd: Double
+    public var apiEquivalentCostKnown: Bool?
 
-    public init(model: String, tokens: Int, percentOfPlatform: Double, apiEquivalentCostUsd: Double) {
+    public init(
+        model: String,
+        tokens: Int,
+        percentOfPlatform: Double,
+        apiEquivalentCostUsd: Double,
+        apiEquivalentCostKnown: Bool? = nil
+    ) {
         self.model = model
         self.tokens = tokens
         self.percentOfPlatform = percentOfPlatform
         self.apiEquivalentCostUsd = apiEquivalentCostUsd
+        self.apiEquivalentCostKnown = apiEquivalentCostKnown
     }
+
+    /// An unpriced model is "Unknown", never a $0.00 saving.  Older payloads omit the flag.
+    public var isCostKnown: Bool { apiEquivalentCostKnown ?? true }
 }
 
 public struct AgentPlatformStatus: Codable, Hashable, Sendable, Identifiable {
@@ -193,14 +204,26 @@ public struct ModelDistributionItem: Codable, Hashable, Sendable, Identifiable {
     public var tokens: Int
     public var percent: Double
     public var apiEquivalentCostUsd: Double
+    public var apiEquivalentCostKnown: Bool?
 
-    public init(model: String, provider: String, tokens: Int, percent: Double, apiEquivalentCostUsd: Double) {
+    public init(
+        model: String,
+        provider: String,
+        tokens: Int,
+        percent: Double,
+        apiEquivalentCostUsd: Double,
+        apiEquivalentCostKnown: Bool? = nil
+    ) {
         self.model = model
         self.provider = provider
         self.tokens = tokens
         self.percent = percent
         self.apiEquivalentCostUsd = apiEquivalentCostUsd
+        self.apiEquivalentCostKnown = apiEquivalentCostKnown
     }
+
+    /// An unpriced model is "Unknown", never a $0.00 saving.  Older payloads omit the flag.
+    public var isCostKnown: Bool { apiEquivalentCostKnown ?? true }
 }
 
 public struct AgentsOverviewResponse: Codable, Hashable, Sendable {

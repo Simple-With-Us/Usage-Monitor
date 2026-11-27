@@ -256,16 +256,16 @@ public struct AgentsRootView: View {
                                         Text("\(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%)")
                                             .font(Theme.Typography.caption)
                                             .foregroundStyle(Theme.Colors.secondaryText)
-                                        Text(formatCurrency(model.apiEquivalentCostUsd))
+                                        Text(model.isCostKnown ? formatCurrency(model.apiEquivalentCostUsd) : "Unknown")
                                             .font(Theme.Typography.caption)
-                                            .foregroundStyle(Theme.Colors.success)
+                                            .foregroundStyle(model.isCostKnown ? Theme.Colors.success : Theme.Colors.secondaryText)
                                     }
                                 }
                                 ProgressView(value: max(0.02, model.percentOfPlatform / 100))
                                     .tint(Theme.Colors.accent)
                             }
                             .padding(.vertical, 2)
-                            .copyableValue("\(model.model): \(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%), \(formatCurrency(model.apiEquivalentCostUsd)) list price", label: model.model)
+                            .copyableValue("\(model.model): \(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%), \(model.isCostKnown ? formatCurrency(model.apiEquivalentCostUsd) : "Unknown list price")", label: model.model)
                         }
                     }
                 } header: {
@@ -291,12 +291,12 @@ public struct AgentsRootView: View {
                     VStack(alignment: .trailing, spacing: 2) {
                         Text("\(formatTokens(item.tokens)) (\(String(format: "%.1f", item.percent))%)")
                             .font(Theme.Typography.caption)
-                        Text(formatCurrency(item.apiEquivalentCostUsd))
+                        Text(item.isCostKnown ? formatCurrency(item.apiEquivalentCostUsd) : "Unknown")
                             .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.Colors.success)
+                            .foregroundStyle(item.isCostKnown ? Theme.Colors.success : Theme.Colors.secondaryText)
                     }
                 }
-                .copyableValue("\(item.model): \(formatTokens(item.tokens)) (\(String(format: "%.1f", item.percent))%), \(formatCurrency(item.apiEquivalentCostUsd))", label: item.model)
+                .copyableValue("\(item.model): \(formatTokens(item.tokens)) (\(String(format: "%.1f", item.percent))%), \(item.isCostKnown ? formatCurrency(item.apiEquivalentCostUsd) : "Unknown list price")", label: item.model)
             }
         } header: {
             Text("Model Distribution")
