@@ -107,6 +107,20 @@ describe("receipt inbox Durable Object in workerd", () => {
     expect((await request("/summary")).status).toBe(503);
   });
 
+  it("isolates deployment health bearer using real Workers crypto and bindings", async () => {
+    const token = "dph_" + "w".repeat(40);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))), b => b.toString(16).padStart(2, "0")).join("");
+    const scoped = { ...env, RECEIPT_INBOX_DEPLOY_HEALTH_SHA256: digest };
+    const headers = { Authorization: `Bearer ${token}` };
+    const ready = await handleFetch(new Request("https://receipt-inbox.jays.services/health", { headers }), scoped);
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toEqual({ ok: true, status: "ready" });
+    for (const path of ["/v1/receipts/summary", `/v1/receipts/${"a".repeat(64)}/evidence`]) {
+      expect((await handleFetch(new Request("https://receipt-inbox.jays.services" + path, { headers }), scoped)).status).toBe(401);
+    }
+    expect((await handleFetch(new Request("https://receipt-inbox.jays.services/health", { headers }), { ...scoped, RECEIPT_INBOX_DEPLOY_HEALTH_SHA256: "0".repeat(64) })).status).toBe(401);
+  });
+
   it("heads a missing fixed key on /health against real R2", async () => {
     const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", {
       headers: { Authorization: `Bearer ${env.RECEIPT_INBOX_READ_TOKEN}` },
