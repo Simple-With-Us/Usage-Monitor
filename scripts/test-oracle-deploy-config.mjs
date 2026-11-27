@@ -60,6 +60,7 @@ requireText(workflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGI
 requireText(sentryDeployWorkflow, /cancel-in-progress:\s*true/, "stale Sentry deploy reporters should be cancelled");
 requireText(sentryDeployWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "Sentry deploy reporter must pin the Hetzner Coolify origin");
 requireText(read("scripts/sentry-report-deploy.mjs"), /PRODUCTION_ORIGIN_IPV4/, "Sentry deploy reporter must read production health through the pinned origin when configured");
+forbidText(workflow, /secrets\s*\[/, 'observer must not use bracket secret access');
 const observerSecretNames = [...workflow.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
 assert.deepEqual(observerSecretNames, ['INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN'], 'observer may hold only the approved single-app policy reader');
 requireText(workflow, /INFISICAL_SECRET_PATH: \/um-observer-policy/, 'reader must remain in its dedicated metadata-only folder');

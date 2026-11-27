@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appRelevant, classifyDelta, APP_WATCH_PATHS, qualifyAppPolicy } from './production-observer-eligibility.mjs';
+import { appRelevant, classifyDelta, APP_WATCH_PATHS, qualifyAppPolicy, readPolicyResponse } from './production-observer-eligibility.mjs';
 const old = '1'.repeat(40), expected = '2'.repeat(40);
 const classify = (paths, extras = {}) => classifyDelta({ observed: old, expected, qualifiedPatterns: true,
   isAncestor: (a, b) => b === 'refs/remotes/origin/main' || a === old && b === expected,
@@ -65,4 +65,14 @@ test('both workflows use eligibility without changing strict release verificatio
 
 test('malformed external app policy fails schema validation without accepting drift', () => {
   for (const app of [null, {}, {uuid:123}, {uuid:'x',settings: {is_auto_deploy_enabled:'true'}}]) assert.throws(() => qualifyAppPolicy(app));
+});
+
+test('policy response validates type and bounds streamed bytes before parsing', async () => {
+  assert.deepEqual(await readPolicyResponse(new Response('{"ok":true}', {headers:{'content-type':'application/json'}})), {ok:true});
+  for (const response of [new Response('{}'), new Response('{}',{headers:{'content-type':'text/html'}}), new Response('{}',{headers:{'content-type':'application/json','content-length':'65537'}}),new Response('x'.repeat(65537),{headers:{'content-type':'application/json'}}),new Response('',{headers:{'content-type':'application/json'}})]) await assert.rejects(readPolicyResponse(response));
+});
+test('record job installs dependencies before zod-backed fixture tests', async () => {
+  const {readFileSync} = await import('node:fs');
+  const job = readFileSync(new URL('../.github/workflows/sentry-deploy.yml',import.meta.url),'utf8').split('  record-production-deploy:')[1];
+  assert.ok(job.indexOf('run: npm ci --ignore-scripts') < job.indexOf('run: node --test'));
 });

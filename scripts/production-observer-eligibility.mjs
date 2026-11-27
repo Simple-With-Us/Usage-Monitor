@@ -44,6 +44,30 @@ export function qualifyAppPolicy(input) {
   return true;
 }
 
+export async function readPolicyResponse(response) {
+  const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  const length = response.headers.get('content-length');
+  if (!response.ok || !type || (type !== 'application/json' && !type.endsWith('+json')) || (length !== null && (!/^\d+$/.test(length) || Number(length) > 65536))) throw new Error('App policy response unavailable');
+  if (!response.body) throw new Error('App policy response unavailable');
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 65536) throw new Error('App policy response too large');
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); reader.releaseLock(); }
+  if (size === 0) throw new Error('App policy response unavailable');
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+}
+
 export async function classifyProduction({ expected = process.env.EXPECTED_SHA || process.env.TARGET_SHA, exec = execFileSync, fetchImpl = fetch } = {}) {
   const token = process.env.COOLIFY_UM_OBSERVER_READ_TOKEN;
   if (!token?.trim()) throw new Error('Missing COOLIFY_UM_OBSERVER_READ_TOKEN');
@@ -51,7 +75,7 @@ export async function classifyProduction({ expected = process.env.EXPECTED_SHA |
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) throw new Error('COOLIFY_UM_OBSERVER_READ_TOKEN app policy read failed');
-  const qualifiedPatterns = qualifyAppPolicy(await response.json());
+  const qualifiedPatterns = qualifyAppPolicy(await readPolicyResponse(response));
   const origin = process.env.PRODUCTION_ORIGIN_IPV4;
   if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(origin || '')) throw new Error('Production origin is required');
   const url = new URL(CONFIG.health);
