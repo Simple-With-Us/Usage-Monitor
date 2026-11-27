@@ -44,8 +44,6 @@ jobs:
       github.event.workflow_run.head_repository.id == github.repository_id
     runs-on: ubuntu-latest
     timeout-minutes: 65
-    env:
-      PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
     steps:
       - name: Skip when a newer main revision superseded this CI run
         id: superseded
@@ -78,6 +76,7 @@ jobs:
       - name: Verify live revision and record Sentry deployment
         if: steps.superseded.outputs.superseded != 'true'
         env:
+          PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
           GH_TOKEN: ${{ github.token }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}

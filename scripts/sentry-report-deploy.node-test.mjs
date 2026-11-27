@@ -266,3 +266,16 @@ test('a null JSON release is invalid data, not a retryable 404',async()=>{
  await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/identity\/project conflicts/);
  assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
 });
+
+test('production origin override is scoped to live reporting, never fixture tests', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/sentry-deploy.yml', import.meta.url)), 'utf8');
+  const observer = workflow.split('  record-production-deploy:')[1];
+  assert.ok(observer);
+  const live = observer.indexOf('      - name: Verify live revision and record Sentry deployment');
+  assert.ok(live > 0);
+  assert.equal(observer.slice(0, live).includes('PRODUCTION_ORIGIN_IPV4:'), false);
+  assert.match(observer.slice(live), /PRODUCTION_ORIGIN_IPV4: "167\.233\.254\.55"/);
+  assert.equal((workflow.match(/PRODUCTION_ORIGIN_IPV4:/g) || []).length, 1);
+});
