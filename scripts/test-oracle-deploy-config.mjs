@@ -66,7 +66,7 @@ function requireExactSecrets(body, expected, label) {
   function visit(value) {
     if (typeof value === 'string') expressions.push(...(value.match(/\$\{\{[\s\S]*?\}\}/g) || []));
     else if (Array.isArray(value)) value.forEach(visit);
-    else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+    else if (value && typeof value === 'object') { Object.keys(value).forEach(visit); Object.values(value).forEach(visit); }
   }
   // Parse YAML so comments are not mistaken for credential references. Quoted
   // scalar expressions still count because Actions evaluates those as well.
@@ -77,6 +77,7 @@ function requireExactSecrets(body, expected, label) {
   assert.deepEqual(names, [...new Set(expected)].sort(), `${label} must reference only its exact approved stored secrets`);
 }
 const policyReaderSecret = 'INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN';
+assert.throws(() => requireExactSecrets(`${workflow}\n'${'${{ secrets.COOLIFY_API_TOKEN }}'}': value`, [policyReaderSecret], 'mapping key injection'));
 requireExactSecrets(`${workflow}\n# Never use secrets.COOLIFY_API_TOKEN\nx-documentation: secrets.NOT_A_REFERENCE`, [policyReaderSecret], 'comments and plain documentation');
 // github.token is Actions' existing permission-scoped runtime token, not a
 // stored repository secret. The checks below retain read-only workflow permissions.
