@@ -191,6 +191,8 @@ def deployment_head(name):
 def verify_deployment_continuity(name, before_id, version):
     """Detect, never silently bless, an external promotion in the final API-call gap."""
     deployments = api("/workers/scripts/" + name + "/deployments")["deployments"]
+    if not isinstance(deployments, list) or not deployments or any(not isinstance(d, dict) for d in deployments[:2]):
+        raise RuntimeError("Concurrent deployment unverifiable: malformed deployment history")
     expected = [{"version_id": version, "percentage": 100}]
     versions = deployments[0].get("versions") if deployments else []
     if not isinstance(versions, list) or any(not isinstance(v, dict) for v in versions):
