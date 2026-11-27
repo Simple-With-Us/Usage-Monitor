@@ -4,7 +4,7 @@ vi.mock("../sync.mjs", () => ({
   syncExpenses: vi.fn(),
 }));
 
-import worker from "../index.mjs";
+import worker, { READ_CACHE_TTL_MS, resetReadCache } from "../index.mjs";
 import { syncExpenses } from "../sync.mjs";
 
 const TOKEN = "t".repeat(64);
@@ -16,6 +16,7 @@ const syncRequest = () =>
 
 beforeEach(() => {
   syncExpenses.mockReset();
+  resetReadCache();
 });
 
 describe("expenses worker scheduled", () => {
@@ -129,5 +130,198 @@ describe("expenses worker fetch", () => {
     );
     expect(response.status).toBe(401);
     expect(syncExpenses).not.toHaveBeenCalled();
+  });
+});
+
+describe("expenses dashboard read cache", () => {
+  const ROWS = [
+    { idempotency_key: "k1", vendor: "V", amount_usd: 5, occurred_at: "2026-11-01T00:00:00Z", kind: "usage", label: "L", category: "software" },
+  ];
+  // A D1 stand-in that counts statements and lets a test hold a read open.
+  function fakeDb({ gate } = {}) {
+    const statements = [];
+    const prepare = vi.fn((sql) => {
+      statements.push(sql);
+      const answer = async () => {
+        if (gate) await gate;
+        if (sql.includes("COUNT(*)")) return { n: 7 };
+        if (sql.includes("sync_state")) return { value: "2026-11-27T00:00:00Z" };
+        return null;
+      };
+      return {
+        first: answer,
+        bind: () => ({ all: async () => ({ results: ROWS }) }),
+        all: async () => ({ results: ROWS }),
+      };
+    });
+    return { db: { prepare }, prepare, statements };
+  }
+  const get = (path, env) => worker.fetch(new Request("https://expenses.jays.services" + path), env);
+
+  it("serves repeated reads inside the window from one D1 read", async () => {
+    const { db, prepare } = fakeDb();
+    const first = await (await get("/api/expenses", { EXPENSES_DB: db })).json();
+    const callsAfterFirst = prepare.mock.calls.length;
+    for (let i = 0; i < 20; i++) await get("/api/expenses", { EXPENSES_DB: db });
+    expect(prepare.mock.calls.length).toBe(callsAfterFirst);
+    expect(first.totalCount).toBe(7);
+    expect(first.expenses).toHaveLength(1);
+  });
+
+  it("coalesces concurrent requests into one read each", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { db, prepare } = fakeDb({ gate });
+    const pending = Array.from({ length: 10 }, () => get("/api/expenses", { EXPENSES_DB: db }));
+    release();
+    const responses = await Promise.all(pending);
+    expect(responses.every((r) => r.status === 200)).toBe(true);
+    expect(prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps filters apart, so one filter never answers for another", async () => {
+    const { db, statements } = fakeDb();
+    await get("/api/expenses?category=personal", { EXPENSES_DB: db });
+    await get("/api/expenses?category=software", { EXPENSES_DB: db });
+    const selects = statements.filter((sql) => sql.includes("FROM expenses") && !sql.includes("COUNT"));
+    expect(selects).toHaveLength(2);
+  });
+
+  it("refuses an unknown filter with 400 and never reads D1, so query strings cannot bypass the cache", async () => {
+    const { db, prepare } = fakeDb();
+    for (const bad of ["nope", "Personal", "__proto__", "toString", "x".repeat(500), "software%20"]) {
+      const response = await get("/api/expenses?category=" + bad, { EXPENSES_DB: db });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Unknown category");
+    }
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("still answers every real filter, and an empty one means all", async () => {
+    const { db } = fakeDb();
+    for (const ok of ["", "all", "personal", "tech", "tech-ai", "cloud-hosting", "domains", "software", "services", "other"]) {
+      const response = await get("/api/expenses?category=" + ok, { EXPENSES_DB: db });
+      expect(response.status).toBe(200);
+    }
+  });
+
+  it("does not keep a failed read", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let fail = true;
+    const prepare = vi.fn(() => ({
+      first: async () => { if (fail) throw new Error("D1 down"); return { n: 1, value: "x" }; },
+      all: async () => ({ results: [] }),
+    }));
+    await expect(get("/api/expenses", { EXPENSES_DB: { prepare } })).rejects.toThrow("D1 down");
+    fail = false;
+    const response = await get("/api/expenses", { EXPENSES_DB: { prepare } });
+    expect(response.status).toBe(200);
+    consoleError.mockRestore();
+  });
+
+  it("re-reads after the window", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prepare } = fakeDb();
+      await get("/api/expenses", { EXPENSES_DB: db });
+      const n = prepare.mock.calls.length;
+      vi.advanceTimersByTime(READ_CACHE_TTL_MS + 1);
+      await get("/api/expenses", { EXPENSES_DB: db });
+      expect(prepare.mock.calls.length).toBe(n * 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops the cache after a completed sync, so the footer and rows are not stale", async () => {
+    const { db, prepare } = fakeDb();
+    await get("/api/expenses", { EXPENSES_DB: db });
+    const n = prepare.mock.calls.length;
+    syncExpenses.mockResolvedValueOnce({ upserted: 1 });
+    const sync = await worker.fetch(syncRequest(), { USAGE_READ_TOKEN: TOKEN, EXPENSES_DB: db });
+    expect(sync.status).toBe(200);
+    await get("/api/expenses", { EXPENSES_DB: db });
+    expect(prepare.mock.calls.length).toBe(n * 2);
+  });
+
+  it("keeps the guard-off 503 ahead of any cached read", async () => {
+    const { db } = fakeDb();
+    await get("/api/expenses", { EXPENSES_DB: db });
+    const response = await get("/api/expenses", { EXPENSES_DB: db, GUARD_MODE: "off" });
+    expect(response.status).toBe(503);
+  });
+
+  // A D1 stand-in whose answers can change between reads, to tell snapshots apart.
+  function movingDb() {
+    const state = { asOf: "T0", count: 1, rows: [{ ...ROWS[0], vendor: "old" }], failCount: false };
+    const prepare = vi.fn((sql) => {
+      const first = async () => {
+        if (sql.includes("COUNT(*)")) {
+          if (state.failCount) throw new Error("D1 count down");
+          return { n: state.count };
+        }
+        if (sql.includes("sync_state")) return { value: state.asOf };
+        return null;
+      };
+      return { first, bind: () => ({ all: async () => ({ results: state.rows }) }), all: async () => ({ results: state.rows }) };
+    });
+    return { db: { prepare }, prepare, state };
+  }
+
+  it("holds rows, footer time and count of one filter together, whatever other filters read", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, state } = movingDb();
+      const a = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a.asOf, a.totalCount, a.expenses[0].vendor]).toEqual(["T0", 1, "old"]);
+      // The ledger moves, then a different filter is read inside the first one's window.
+      vi.advanceTimersByTime(10_000);
+      state.asOf = "T1";
+      state.count = 2;
+      state.rows = [{ ...ROWS[0], vendor: "new" }];
+      const b = await (await get("/api/expenses?category=personal", { EXPENSES_DB: db })).json();
+      expect([b.asOf, b.totalCount, b.expenses[0].vendor]).toEqual(["T1", 2, "new"]);
+      // The first filter still answers from its own snapshot, all three parts old, never a mix.
+      const a2 = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a2.asOf, a2.totalCount, a2.expenses[0].vendor]).toEqual(["T0", 1, "old"]);
+      // After its window the first filter is re-read as a whole.
+      vi.advanceTimersByTime(READ_CACHE_TTL_MS - 10_000 + 1);
+      const a3 = await (await get("/api/expenses?category=software", { EXPENSES_DB: db })).json();
+      expect([a3.asOf, a3.totalCount, a3.expenses[0].vendor]).toEqual(["T1", 2, "new"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not keep a snapshot when any one of its three reads fails, and re-reads all three next time", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { db, prepare, state } = movingDb();
+    state.failCount = true;
+    await expect(get("/api/expenses", { EXPENSES_DB: db })).rejects.toThrow("D1 count down");
+    const afterFailure = prepare.mock.calls.length;
+    state.failCount = false;
+    state.asOf = "T2";
+    const ok = await (await get("/api/expenses", { EXPENSES_DB: db })).json();
+    expect(ok.asOf).toBe("T2"); // no half-cached footer from the failed attempt
+    expect(prepare.mock.calls.length - afterFailure).toBe(3);
+    consoleError.mockRestore();
+  });
+
+  it("shares one load between the dashboard page and the JSON for the all filter", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { db, prepare } = fakeDb({ gate });
+    const pending = [get("/", { EXPENSES_DB: db }), get("/api/expenses", { EXPENSES_DB: db }), get("/api/expenses?category=all", { EXPENSES_DB: db })];
+    release();
+    const responses = await Promise.all(pending);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("/health always asks D1, never the cache", async () => {
+    const { db, prepare } = fakeDb();
+    await get("/health", { EXPENSES_DB: db });
+    await get("/health", { EXPENSES_DB: db });
+    expect(prepare.mock.calls.filter(([sql]) => sql === "SELECT 1")).toHaveLength(2);
   });
 });

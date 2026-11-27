@@ -4,7 +4,8 @@
       "npx",
       "--no-install",
       "wrangler",
-      "deploy",
+      "versions",
+      "upload",
       "--config",
       "workers/receipt-lifecycle-auditor/wrangler.jsonc"
     ],
@@ -12,8 +13,7 @@
     "guard": {
       "status": "gated",
       "max_cpu_ms": 50,
-      "max_subrequests": 20,
-      "limits_pending": true
+      "max_subrequests": 20
     }
   },
   "expenses-jays-services": {
@@ -21,7 +21,8 @@
       "npx",
       "--no-install",
       "wrangler",
-      "deploy",
+      "versions",
+      "upload",
       "--config",
       "workers/expenses-site/wrangler.jsonc"
     ],
@@ -30,8 +31,7 @@
     "guard": {
       "status": "gated",
       "max_cpu_ms": 100,
-      "max_subrequests": 200,
-      "limits_pending": true
+      "max_subrequests": 60
     }
   },
   "usage-monitor-receipt-inbox": {
@@ -39,19 +39,19 @@
       "npx",
       "--no-install",
       "wrangler",
-      "deploy",
+      "versions",
+      "upload",
       "--config",
       "workers/receipt-inbox/wrangler.jsonc"
     ],
     "health": "https://receipt-inbox.jays.services/health",
-    "bearer": "RECEIPT_INBOX_READ_TOKEN",
+    "bearer": "RECEIPT_INBOX_DEPLOY_HEALTH_TOKEN",
     "ok": true,
     "deploy_after": "usage-monitor-receipt-lifecycle-auditor",
     "guard": {
       "status": "gated",
       "max_cpu_ms": 500,
-      "max_subrequests": 30,
-      "limits_pending": true
+      "max_subrequests": 30
     }
   }
 }

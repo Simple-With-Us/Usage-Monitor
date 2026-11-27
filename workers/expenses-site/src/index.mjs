@@ -9,19 +9,66 @@
  *   GET  /              — dashboard HTML (last 6 months, rolling)
  *   GET  /api/expenses  — JSON: { expenses, asOf, totalCount }
  *   GET  /health        — deploy probe: { ok }, no financial data
- *   POST /api/sync      — manual sync trigger, Bearer USAGE_READ_TOKEN, one per
+ *   POST /api/sync      — manual sync trigger, the configured usage-read bearer, one per
  *                         minute (429 otherwise)
  *   scheduled (cron)    — syncExpenses every hour
  */
 import { guardOff, guardOffResponse } from "./budget-guard.mjs";
 import { syncExpenses } from "./sync.mjs";
 import { formatAmount, formatDate, renderDashboard } from "./render.mjs";
-import { sideForCategory } from "./categories.mjs";
+import { CATEGORIES, sideForCategory } from "./categories.mjs";
 
 const SIX_MONTHS_SQL = "date('now', '-6 months')";
 // Side is derived from category (personal -> Personal, everything else ->
 // Tech), so the SQL mirrors sideForCategory without a schema change.
 const SIDE_SQL = "CASE WHEN category = 'personal' THEN 'personal' ELSE 'tech' END";
+
+// Dashboard reads (up to 1000 rows per filter, plus a COUNT over the whole ledger) are
+// shared by every caller for a short time, so a client that reloads in a loop costs one D1
+// read per window per isolate instead of one per request.  The data is one ledger with no
+// per-caller variation: the Worker does no identity checks, so nothing in the cache depends
+// on who asked.  Isolates share no memory, so this bounds each isolate, not the account.
+// /api/expenses accepts only a known filter (see isKnownFilter), so the cache holds at most
+// 10 entries (one snapshot per known filter) and a query string cannot choose a new one.
+// A failed read is not kept.
+// /health is not cached: it reads no table rows, and a monitor should see D1 fail at once.
+export const READ_CACHE_TTL_MS = 15_000;
+const readCache = new Map();
+
+export function resetReadCache() {
+  readCache.clear();
+}
+
+function cachedRead(key, load, now = Date.now()) {
+  const hit = readCache.get(key);
+  if (hit && now - hit.at < READ_CACHE_TTL_MS) return hit.promise;
+  const entry = { at: now, promise: load() };
+  readCache.set(key, entry);
+  // Concurrent callers share the in-flight promise; a rejection leaves no entry behind.
+  entry.promise.catch(() => {
+    if (readCache.get(key) === entry) readCache.delete(key);
+  });
+  return entry.promise;
+}
+
+// Every stored category comes from categorizeExpense, which returns a CATEGORIES slug
+// (the column also defaults to 'other'), and the side filters are personal and tech.  Any
+// other value matches no row, so it is refused instead of being sent to D1 as a full scan.
+export function isKnownFilter(filter) {
+  return filter === "all" || filter === "personal" || filter === "tech" || Object.hasOwn(CATEGORIES, filter);
+}
+
+// One entry per filter holds rows, footer time and total together, read in one go and
+// expiring as one.  Separate entries expired on their own clocks, so a page could pair
+// rows from one read with the footer or count of another (and could be built from a
+// mix of reads on either side of a sync).  Entries still cost 3 D1 statements per window
+// and filter.  Reads inside one load are three statements, not one transaction, so the
+// parts can differ if a sync commits between them, exactly as before the cache.
+function dashboardData(db, filter) {
+  return cachedRead("snapshot:" + filter, () =>
+    Promise.all([readDashboardRows(db, filter), readSyncState(db), readTotalCount(db)])
+  );
+}
 
 async function readDashboardRows(db, filter) {
   let where = "WHERE occurred_at >= " + SIX_MONTHS_SQL;
@@ -110,6 +157,7 @@ export default {
       }
       try {
         const result = await syncExpenses(env, { manual: true });
+        if (!result.cooldown) resetReadCache();
         if (result.cooldown) {
           const response = json({ ok: false, error: "Sync cooldown" }, 429);
           response.headers.set("retry-after", String(result.retryAfterSeconds));
@@ -125,11 +173,10 @@ export default {
 
     if (url.pathname === "/api/expenses") {
       const category = url.searchParams.get("category") || "all";
-      const [expenses, asOf, totalCount] = await Promise.all([
-        readDashboardRows(env.EXPENSES_DB, category),
-        readSyncState(env.EXPENSES_DB),
-        readTotalCount(env.EXPENSES_DB),
-      ]);
+      if (!isKnownFilter(category)) {
+        return json({ error: "Unknown category", categories: ["all", "personal", "tech", ...Object.keys(CATEGORIES)] }, 400);
+      }
+      const [expenses, asOf, totalCount] = await dashboardData(env.EXPENSES_DB, category);
       return json({
         expenses: expenses.map((e) => ({
           id: e.idempotency_key,
@@ -149,11 +196,7 @@ export default {
     }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      const [expenses, asOf, totalCount] = await Promise.all([
-        readDashboardRows(env.EXPENSES_DB, "all"),
-        readSyncState(env.EXPENSES_DB),
-        readTotalCount(env.EXPENSES_DB),
-      ]);
+      const [expenses, asOf, totalCount] = await dashboardData(env.EXPENSES_DB, "all");
       return new Response(renderDashboard(expenses, asOf, totalCount), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
@@ -168,6 +211,7 @@ export default {
     controller.noRetry?.();
     try {
       await syncExpenses(env);
+      resetReadCache();
     } catch (error) {
       // Re-thrown so the invocation counts as failed: a swallowed error hid the
       // sync failures and the empty-ledger gap of Oct 26 to Nov 3 from analytics.

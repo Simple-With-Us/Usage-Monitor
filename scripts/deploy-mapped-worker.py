@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Serialized exact-main code deployment. Activation and credentials are external."""
-import datetime, fnmatch, json, os, re, subprocess, sys, urllib.request
+import datetime, fnmatch, json, os, re, subprocess, sys, tempfile, pathlib, urllib.request
 ACCOUNT = "3a9368057468d0909cafaa85df12d1b7"
 TARGETS = json.load(open("scripts/worker-targets.json"))
 # Cloudflare answers error 1010 (HTTP 403) to Python's default urllib User-Agent on
@@ -178,6 +178,86 @@ def probe(target, name="unnamed target", after_upload=False, before_upload=False
         data=json.load(response)
     if target.get("ok") and data.get("ok") is not True:raise RuntimeError("Health response not ready")
     if target.get("sections") and not isinstance(data.get("sections"),list):raise RuntimeError("Invalid sections response")
+DEPLOY_TIMEOUT_SECONDS = 600
+def deployment_head(name):
+    deployments = api("/workers/scripts/" + name + "/deployments")["deployments"]
+    if not deployments:
+        return None
+    identity = deployments[0].get("id")
+    if not identity:
+        raise RuntimeError("Live deployment identity missing")
+    return identity
+
+def verify_deployment_continuity(name, before_id, version):
+    """Detect, never silently bless, an external promotion in the final API-call gap."""
+    response = api("/workers/scripts/" + name + "/deployments")
+    deployments = response.get("deployments") if isinstance(response, dict) else None
+    if not isinstance(deployments, list) or not deployments or any(not isinstance(d, dict) for d in deployments[:2]):
+        raise RuntimeError("Concurrent deployment unverifiable: malformed deployment history")
+    expected = [{"version_id": version, "percentage": 100}]
+    versions = deployments[0].get("versions") if deployments else []
+    if not isinstance(versions, list) or any(not isinstance(v, dict) for v in versions):
+        raise RuntimeError("Concurrent deployment unverifiable: malformed versions list")
+    if [{"version_id": v.get("version_id"), "percentage": v.get("percentage")} for v in versions] != expected:
+        raise RuntimeError("Concurrent deployment detected: current traffic differs")
+    previous = deployments[1].get("id") if len(deployments) > 1 else None
+    if previous != before_id:
+        raise RuntimeError("Concurrent deployment detected in promotion window; inspect history, no blind rollback")
+
+def uploaded_version(command, flags, env, name, sha):
+    """Use Wrangler's private JSONL receipt, never a paginated newest-version guess."""
+    with tempfile.TemporaryDirectory(prefix="worker-upload-") as directory:
+        output = pathlib.Path(directory) / "receipt.jsonl"
+        subprocess.run([*command, *flags], check=True, timeout=DEPLOY_TIMEOUT_SECONDS,
+                       env={**env, "WRANGLER_OUTPUT_FILE_PATH": str(output)})
+        try:
+            if output.stat().st_size > 65536:
+                raise ValueError("oversized receipt")
+            entries = [json.loads(line) for line in output.read_text().splitlines() if line.strip()]
+            uploads = [entry for entry in entries if entry.get("type") == "version-upload"]
+            if len(uploads) != 1:
+                raise ValueError("ambiguous receipt")
+            upload = uploads[0]
+            version = upload.get("version_id", "")
+            if upload.get("worker_name") != name or not re.fullmatch(
+                r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", version
+            ):
+                raise ValueError("wrong Worker or version")
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            raise RuntimeError("Uploaded version receipt is not exact") from error
+    details = api("/workers/scripts/" + name + "/versions/" + version)
+    if details.get("id") != version or (details.get("annotations") or {}).get("workers/tag") != sha:
+        raise RuntimeError("Uploaded version does not match the expected commit")
+    return version
+def publish(target,name,sha,flags):
+    """Upload a tagged version, then deploy exactly that version at 100%.  False when superseded.
+
+    A plain `wrangler deploy` also rewrites custom-domain routes, which the scoped CI token may
+    not do (Cloudflare error 10084).  `versions upload` plus `versions deploy` touches only the
+    code version and the deployment.  The registry command is `wrangler versions upload --config X`;
+    the deploy command is derived from it so both use the same config.
+
+    Races: the workflow serializes runs, but main can move and the watchdog can trip a Worker
+    during the upload, and an upload is not a deployment.  So after the upload this re-checks
+    main and the guard before promoting, requires the exact structured upload receipt and its commit tag
+    (never "the newest"), and refuses to promote if the live deployment changed since
+    the upload began.  A check-then-deploy gap of one API call remains; the versions deploy
+    itself is a single atomic Cloudflare deployment and the exact-version receipt follows it."""
+    command=target["command"]
+    i=command.index("versions")
+    if command[i:i+2]!=["versions","upload"]:raise RuntimeError("Registry command for "+name+" must be wrangler versions upload")
+    env={**os.environ,"CLOUDFLARE_ACCOUNT_ID":ACCOUNT,"WRANGLER_SEND_METRICS":"false"}
+    live_before=live_version(name)
+    before_id=deployment_head(name)
+    version=uploaded_version(command,flags,env,name,sha)
+    # The upload is inert until promoted, so stopping here changes nothing live.
+    if current_main()!=sha:print("Superseded after upload; not promoting "+version);return False
+    refuse_if_tripped(name)
+    if live_version(name)!=live_before:raise RuntimeError("Live deployment of "+name+" changed during the upload; not promoting")
+    subprocess.run([*command[:i],"versions","deploy",version+"@100","--yes","--message","main "+sha,*command[i+2:]],check=True,timeout=DEPLOY_TIMEOUT_SECONDS,env=env)
+    if live_version(name)!=version:raise RuntimeError("Live deployment is not the uploaded version for "+name)
+    verify_deployment_continuity(name,before_id,version)
+    return True
 def main():
     name=sys.argv[1]
     if name not in TARGETS:raise SystemExit("Unknown mapped Worker")
@@ -209,8 +289,7 @@ def main():
     # limits PATCH counts as that.  Git is the source of truth for those, and the limits check
     # keeps them in the config.  Dashboard edits (and anything else) still abort under --strict.
     if last_deployed_from(name)!="api":flags.insert(1,"--strict")
-    subprocess.run([*target["command"],*flags],check=True,
-                   env={**os.environ,"CLOUDFLARE_ACCOUNT_ID":ACCOUNT,"WRANGLER_SEND_METRICS":"false"})
+    if not publish(target,name,sha,flags):return
     if deployed_tag(name)!=sha:raise RuntimeError("Exact version receipt does not match")
     probe(target,name,after_upload=True)
     print("Exact Worker version and functional probe verified: "+name+" "+sha)
