@@ -4,7 +4,7 @@
   "compatibility_date": "2026-07-18",
   "preview_urls": false,
   "vars": {
-    "RECEIPT_INBOX_DEPLOY_HEALTH_SHA256": "63b14e140f22be9b760269a1b1464cc1d5a0605e0ea7675fd128dddca48d91b3"
+    "RECEIPT_INBOX_DEPLOY_HEALTH_SHA256": "72cabf9e592af060dc7665bb63f5e4acb5a8a1df88b518870e915721b2e7c875"
   },
   "limits": {
     "cpu_ms": 500,
