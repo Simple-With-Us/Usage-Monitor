@@ -68,15 +68,15 @@ function requireExactSecrets(body, expected, label) {
 const policyReaderSecret = 'INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN';
 requireExactSecrets(workflow, [policyReaderSecret], 'observer');
 // Keep the reporter's pre-existing Sentry credential, without giving it any
-// hosting mutation credential. The record-only job must hold just the reader.
+// hosting mutation credential. The reporter needs its existing Sentry token.
 requireExactSecrets(sentryDeployWorkflow, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'Sentry workflow');
-const recordJob = sentryDeployWorkflow.split('  record-production-deploy:')[1];
+const recordJob = sentryDeployWorkflow.split('  record-production-deploy:')[1]?.split(/\n  [a-z][a-z0-9-]*:/)[0];
 assert.ok(recordJob, 'record job must be present');
-requireExactSecrets(recordJob, [policyReaderSecret], 'record observer');
+requireExactSecrets(recordJob, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'record reporter');
 for (const injected of ["${{ secrets['COOLIFY_API_TOKEN'] }}", '${{ secrets [ "OTHER_TOKEN" ] }}', '${{ secrets.COOLIFY_API_TOKEN }}']) {
   assert.throws(() => requireExactSecrets(`${workflow}\n${injected}`, [policyReaderSecret], 'observer mutation'));
   assert.throws(() => requireExactSecrets(`${sentryDeployWorkflow}\n${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'reporter mutation'));
-  assert.throws(() => requireExactSecrets(`${recordJob}\n${injected}`, [policyReaderSecret], 'record mutation'));
+  assert.throws(() => requireExactSecrets(`${recordJob}\n${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'record mutation'));
 }
 requireText(workflow, /INFISICAL_SECRET_PATH: \/um-observer-policy/, 'reader must remain in its dedicated metadata-only folder');
 requireText(workflow, /INFISICAL_NAMES: COOLIFY_UM_OBSERVER_READ_TOKEN/, 'reader must select only the single-app non-sensitive token');
