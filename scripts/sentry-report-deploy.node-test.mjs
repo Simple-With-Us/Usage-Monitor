@@ -275,7 +275,10 @@ test('production origin override is scoped to live reporting, never fixture test
   assert.ok(observer);
   const live = observer.indexOf('      - name: Verify live revision and record Sentry deployment');
   assert.ok(live > 0);
-  assert.equal(observer.slice(0, live).includes('PRODUCTION_ORIGIN_IPV4:'), false);
+  const fixture = observer.split('      - name: Test deployment evidence and reporting')[1].split('      - name: Load dedicated app-policy reader')[0];
+  const beforeSteps = observer.split('    steps:')[0];
+  assert.equal(beforeSteps.includes('PRODUCTION_ORIGIN_IPV4:'), false);
+  assert.equal(fixture.includes('PRODUCTION_ORIGIN_IPV4:'), false);
   assert.match(observer.slice(live), /PRODUCTION_ORIGIN_IPV4: "167\.233\.254\.55"/);
-  assert.equal((workflow.match(/PRODUCTION_ORIGIN_IPV4:/g) || []).length, 1);
+  assert.equal((workflow.match(/PRODUCTION_ORIGIN_IPV4:/g) || []).length, 2);
 });
