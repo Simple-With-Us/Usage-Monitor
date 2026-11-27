@@ -417,6 +417,34 @@ describe("receipt inbox email worker", () => {
     expect(after.items).toEqual([]);
   });
 
+  it("deployment bearer proves identical readiness but cannot read or change receipts", async () => {
+    const { env } = createEnvironment();
+    const token = "dph_" + "x".repeat(40);
+    env.RECEIPT_INBOX_DEPLOY_HEALTH_SHA256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))), b => b.toString(16).padStart(2, "0")).join("");
+    const headers = { Authorization: `Bearer ${token}` };
+    const request = path => new Request("https://receipt-inbox.jays.services" + path, { headers });
+    const response = await handleFetch(request("/health"), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, status: "ready" });
+    for (const path of ["/v1/receipts/summary", `/v1/receipts/${"a".repeat(64)}/evidence`]) {
+      expect((await handleFetch(request(path), env)).status).toBe(401);
+    }
+    expect((await handleFetch(new Request(`https://receipt-inbox.jays.services/v1/receipts/${"a".repeat(64)}/status`, { method: "PATCH", headers, body: JSON.stringify({ status: "reviewed" }) }), env)).status).toBe(401);
+    env.RECEIPTS_BUCKET.head = async () => { throw new Error("storage unavailable"); };
+    expect((await handleFetch(request("/health"), env)).status).toBe(503);
+    env.GUARD_MODE = "off";
+    expect((await handleFetch(request("/health"), env)).status).toBe(503);
+  });
+
+  it("deployment bearer fails closed when unset malformed or mismatched", async () => {
+    const { env } = createEnvironment();
+    for (const digest of [undefined, "bad", "a".repeat(64)]) {
+      env.RECEIPT_INBOX_DEPLOY_HEALTH_SHA256 = digest;
+      const response = await handleFetch(new Request("https://receipt-inbox.jays.services/health", { headers: { Authorization: `Bearer ${"dph_" + "x".repeat(40)}` } }), env);
+      expect(response.status).toBe(401);
+    }
+  });
+
   it("requires the read token before probing storage readiness", async () => {
     const { env } = createEnvironment();
     const unauthorized = await handleFetch(new Request("https://receipt-inbox.jays.services/health"), env);

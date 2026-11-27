@@ -228,6 +228,15 @@ async function safeTokenEqual(left, right) {
   return crypto.subtle.timingSafeEqual(leftHash, rightHash);
 }
 
+// Deployment proof can read readiness only. The digest never grants receipt access.
+async function deployHealthAuthorized(token, env) {
+  const expected = env.RECEIPT_INBOX_DEPLOY_HEALTH_SHA256;
+  if (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)
+      || typeof token !== "string" || !/^dph_[A-Za-z0-9_-]{32,128}$/.test(token)) return false;
+  const actual = hex(await crypto.subtle.digest("SHA-256", utf8(token)));
+  return safeTokenEqual(actual, expected);
+}
+
 function bearerToken(request) {
   const authorization = request.headers.get("authorization") || "";
   return authorization.toLowerCase().startsWith("bearer ") ? authorization.slice(7).trim() : "";
@@ -685,11 +694,11 @@ export async function handleFetch(request, env) {
 async function routeFetch(request, env, run) {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
-    if (
-      typeof env.RECEIPT_INBOX_READ_TOKEN !== "string"
-      || env.RECEIPT_INBOX_READ_TOKEN.length < 32
-      || !await safeTokenEqual(bearerToken(request), env.RECEIPT_INBOX_READ_TOKEN)
-    ) return json({ error: "Unauthorized" }, 401);
+    const token = bearerToken(request);
+    const reader = typeof env.RECEIPT_INBOX_READ_TOKEN === "string"
+      && env.RECEIPT_INBOX_READ_TOKEN.length >= 32
+      && await safeTokenEqual(token, env.RECEIPT_INBOX_READ_TOKEN);
+    if (!reader && !await deployHealthAuthorized(token, env)) return json({ error: "Unauthorized" }, 401);
     const result = await readiness(env, { probe: run });
     return json({ ok: result.ready, status: result.ready ? "ready" : "unavailable", ...(result.reason ? { reason: result.reason } : {}) }, result.ready ? 200 : 503);
   }
