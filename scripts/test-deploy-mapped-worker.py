@@ -433,6 +433,11 @@ class UploadReceiptChecks(unittest.TestCase):
 
 
 class DeploymentContinuityChecks(unittest.TestCase):
+ def test_null_and_malformed_versions_refuse_cleanly(self):
+  for versions in (None, {}, "bad", [None], ["bad"]):
+   with patch.object(m,"api",return_value={"deployments":[{"id":"new","versions":versions},{"id":"old"}]}), self.assertRaisesRegex(RuntimeError,"malformed versions"):
+    m.verify_deployment_continuity("w","old","version")
+
  def test_clean_serial_promotion(self):
   with patch.object(m,"api",return_value={"deployments":[{"id":"new","versions":[{"version_id":"version","percentage":100}]},{"id":"old"}]}):
    m.verify_deployment_continuity("w","old","version")
