@@ -433,6 +433,11 @@ class UploadReceiptChecks(unittest.TestCase):
 
 
 class DeploymentContinuityChecks(unittest.TestCase):
+ def test_malformed_history_envelope_refuses_cleanly(self):
+  for response in (None, [], "bad", {}, {"other": []}):
+   with patch.object(m,"api",return_value=response), self.assertRaisesRegex(RuntimeError,"malformed deployment history"):
+    m.verify_deployment_continuity("w","old","version")
+
  def test_malformed_history_refuses_cleanly(self):
   for history in (None, {}, "bad", [None], ["bad"], [{"id":"new"},None], [{"id":"new"},"bad"]):
    with patch.object(m,"api",return_value={"deployments":history}), self.assertRaisesRegex(RuntimeError,"malformed deployment history"):
