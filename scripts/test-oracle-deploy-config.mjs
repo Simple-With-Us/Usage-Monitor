@@ -1,3 +1,4 @@
+import { load as parseYaml } from 'js-yaml';
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -61,23 +62,38 @@ requireText(sentryDeployWorkflow, /cancel-in-progress:\s*true/, "stale Sentry de
 requireText(sentryDeployWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "Sentry deploy reporter must pin the Hetzner Coolify origin");
 requireText(read("scripts/sentry-report-deploy.mjs"), /PRODUCTION_ORIGIN_IPV4/, "Sentry deploy reporter must read production health through the pinned origin when configured");
 function requireExactSecrets(body, expected, label) {
-  forbidText(body, /secrets\s*\[/, `${label} must not use bracket secret access`);
-  const names = [...new Set([...body.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]))].sort();
-  assert.deepEqual(names, [...new Set(expected)].sort(), `${label} must hold only its exact approved credentials`);
+  const expressions = [];
+  function visit(value) {
+    if (typeof value === 'string') expressions.push(...(value.match(/\$\{\{[\s\S]*?\}\}/g) || []));
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+  }
+  // Parse YAML so comments are not mistaken for credential references. Quoted
+  // scalar expressions still count because Actions evaluates those as well.
+  visit(parseYaml(body));
+  const code = expressions.join('\n');
+  forbidText(code, /secrets\s*\[/, `${label} must not use bracket secret access`);
+  const names = [...new Set([...code.matchAll(/\bsecrets\s*\.\s*([A-Z0-9_]+)/gi)].map((match) => match[1]))].sort();
+  assert.deepEqual(names, [...new Set(expected)].sort(), `${label} must reference only its exact approved stored secrets`);
 }
 const policyReaderSecret = 'INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN';
+requireExactSecrets(`${workflow}\n# Never use secrets.COOLIFY_API_TOKEN\nx-documentation: secrets.NOT_A_REFERENCE`, [policyReaderSecret], 'comments and plain documentation');
+// github.token is Actions' existing permission-scoped runtime token, not a
+// stored repository secret. The checks below retain read-only workflow permissions.
+requireText(workflow, /contents: read/, 'observer runtime token must retain read-only contents');
+requireText(sentryDeployWorkflow, /contents: read/, 'reporter runtime token must retain read-only contents');
 requireExactSecrets(workflow, [policyReaderSecret], 'observer');
-requireExactSecrets(`${workflow}\n${'${{ secrets.INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN }}'}`, [policyReaderSecret, policyReaderSecret], 'observer duplicate');
+requireExactSecrets(`${workflow}\nx-oracle-reuse: ${'${{ secrets.INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN }}'}`, [policyReaderSecret, policyReaderSecret], 'observer duplicate');
 // Keep the reporter's pre-existing Sentry credential, without giving it any
 // hosting mutation credential. The reporter needs its existing Sentry token.
 requireExactSecrets(sentryDeployWorkflow, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'Sentry workflow');
 const recordJob = sentryDeployWorkflow.split('  record-production-deploy:')[1]?.split(/\n  [a-z][a-z0-9-]*:/)[0];
 assert.ok(recordJob, 'record job must be present');
 requireExactSecrets(recordJob, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'record reporter');
-for (const injected of ["${{ secrets['COOLIFY_API_TOKEN'] }}", '${{ secrets [ "OTHER_TOKEN" ] }}', '${{ secrets.COOLIFY_API_TOKEN }}']) {
-  assert.throws(() => requireExactSecrets(`${workflow}\n${injected}`, [policyReaderSecret], 'observer mutation'));
-  assert.throws(() => requireExactSecrets(`${sentryDeployWorkflow}\n${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'reporter mutation'));
-  assert.throws(() => requireExactSecrets(`${recordJob}\n${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'record mutation'));
+for (const injected of ["${{ secrets['COOLIFY_API_TOKEN'] }}", '${{ secrets [ "OTHER_TOKEN" ] }}', '${{ secrets.COOLIFY_API_TOKEN }}', '${{ secrets . COOLIFY_API_TOKEN }}']) {
+  assert.throws(() => requireExactSecrets(`${workflow}\nx-oracle-injected: ${injected}`, [policyReaderSecret], 'observer mutation'));
+  assert.throws(() => requireExactSecrets(`${sentryDeployWorkflow}\nx-oracle-injected: ${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'reporter mutation'));
+  assert.throws(() => requireExactSecrets(`${recordJob}\nx-oracle-injected: ${injected}`, [policyReaderSecret, 'SENTRY_AUTH_TOKEN'], 'record mutation'));
 }
 requireText(workflow, /INFISICAL_SECRET_PATH: \/um-observer-policy/, 'reader must remain in its dedicated metadata-only folder');
 requireText(workflow, /INFISICAL_NAMES: COOLIFY_UM_OBSERVER_READ_TOKEN/, 'reader must select only the single-app non-sensitive token');
