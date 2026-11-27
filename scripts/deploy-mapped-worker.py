@@ -192,7 +192,8 @@ def verify_deployment_continuity(name, before_id, version):
     """Detect, never silently bless, an external promotion in the final API-call gap."""
     deployments = api("/workers/scripts/" + name + "/deployments")["deployments"]
     expected = [{"version_id": version, "percentage": 100}]
-    if not deployments or deployments[0].get("versions") != expected:
+    versions = deployments[0].get("versions", []) if deployments else []
+    if [{"version_id": v.get("version_id"), "percentage": v.get("percentage")} for v in versions] != expected:
         raise RuntimeError("Concurrent deployment detected: current traffic differs")
     previous = deployments[1].get("id") if len(deployments) > 1 else None
     if previous != before_id:

@@ -436,6 +436,10 @@ class DeploymentContinuityChecks(unittest.TestCase):
  def test_clean_serial_promotion(self):
   with patch.object(m,"api",return_value={"deployments":[{"id":"new","versions":[{"version_id":"version","percentage":100}]},{"id":"old"}]}):
    m.verify_deployment_continuity("w","old","version")
+ def test_response_extension_fields_are_ignored(self):
+  with patch.object(m,"api",return_value={"deployments":[{"id":"new","versions":[{"version_id":"version","percentage":100,"extra":"future"}]},{"id":"old"}]}):
+   m.verify_deployment_continuity("w","old","version")
+
  def test_interleaved_promotion_and_changed_traffic_fail(self):
   for entries in ([{"id":"new","versions":[{"version_id":"version","percentage":100}]},{"id":"other"}], [{"id":"other","versions":[{"version_id":"other","percentage":100}]},{"id":"new"}], []):
    with patch.object(m,"api",return_value={"deployments":entries}), self.assertRaisesRegex(RuntimeError,"Concurrent deployment"):
