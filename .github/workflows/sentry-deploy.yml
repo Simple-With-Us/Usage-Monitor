@@ -50,6 +50,7 @@ jobs:
       - name: Skip when a newer main revision superseded this CI run
         id: superseded
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
