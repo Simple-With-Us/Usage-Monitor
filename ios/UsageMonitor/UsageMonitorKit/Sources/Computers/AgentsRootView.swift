@@ -252,15 +252,20 @@ public struct AgentsRootView: View {
                                     Text(model.model)
                                         .font(Theme.Typography.captionEmphasis)
                                     Spacer()
-                                    Text("\(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%)")
-                                        .font(Theme.Typography.caption)
-                                        .foregroundStyle(Theme.Colors.secondaryText)
+                                    VStack(alignment: .trailing, spacing: 1) {
+                                        Text("\(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%)")
+                                            .font(Theme.Typography.caption)
+                                            .foregroundStyle(Theme.Colors.secondaryText)
+                                        Text(formatCurrency(model.apiEquivalentCostUsd))
+                                            .font(Theme.Typography.caption)
+                                            .foregroundStyle(Theme.Colors.success)
+                                    }
                                 }
                                 ProgressView(value: max(0.02, model.percentOfPlatform / 100))
                                     .tint(Theme.Colors.accent)
                             }
                             .padding(.vertical, 2)
-                            .copyableValue("\(model.model): \(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%)", label: model.model)
+                            .copyableValue("\(model.model): \(formatTokens(model.tokens)) (\(Int(model.percentOfPlatform))%), \(formatCurrency(model.apiEquivalentCostUsd)) list price", label: model.model)
                         }
                     }
                 } header: {
