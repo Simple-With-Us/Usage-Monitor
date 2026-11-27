@@ -62,3 +62,7 @@ test('both workflows use eligibility without changing strict release verificatio
   assert.match(production,/\.revision == \$revision/);
   assert.match(production,/\.checks.scheduler.lastTickSucceeded == true/);
 });
+
+test('malformed external app policy fails schema validation without accepting drift', () => {
+  for (const app of [null, {}, {uuid:123}, {uuid:'x',settings: {is_auto_deploy_enabled:'true'}}]) assert.throws(() => qualifyAppPolicy(app));
+});

@@ -34,6 +34,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26'
+      - run: npm ci --ignore-scripts
       - run: node --test scripts/sentry-report-deploy.node-test.mjs scripts/production-observer-eligibility.node-test.mjs
 
   record-production-deploy:

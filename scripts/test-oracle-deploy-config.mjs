@@ -46,7 +46,7 @@ function forbidLiteral(body, text, message) {
 }
 
 // GitHub observes an exact, already-green main CI run. It holds no production
-// credential because Oracle pulls the public protected revision itself.
+// deployment credential. Its only stored credential is the dedicated policy reader.
 requireText(workflow, /workflow_run:/, "deploy receipt must follow CI");
 requireText(workflow, /workflows:\s*\[CI\]/, "deploy receipt must follow the CI workflow");
 requireText(workflow, /head_branch == 'main'/, "workflow must reject non-main runs");
@@ -60,7 +60,11 @@ requireText(workflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGI
 requireText(sentryDeployWorkflow, /cancel-in-progress:\s*true/, "stale Sentry deploy reporters should be cancelled");
 requireText(sentryDeployWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "Sentry deploy reporter must pin the Hetzner Coolify origin");
 requireText(read("scripts/sentry-report-deploy.mjs"), /PRODUCTION_ORIGIN_IPV4/, "Sentry deploy reporter must read production health through the pinned origin when configured");
-forbidText(workflow, /secrets\./, "the observer workflow must not hold a production secret");
+const observerSecretNames = [...workflow.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
+assert.deepEqual(observerSecretNames, ['INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN'], 'observer may hold only the approved single-app policy reader');
+requireText(workflow, /INFISICAL_SECRET_PATH: \/um-observer-policy/, 'reader must remain in its dedicated metadata-only folder');
+requireText(workflow, /INFISICAL_NAMES: COOLIFY_UM_OBSERVER_READ_TOKEN/, 'reader must select only the single-app non-sensitive token');
+forbidText(workflow, /COOLIFY_API_TOKEN|SSH_PRIVATE_KEY|CLOUDFLARE_FLEET_API_TOKEN/, 'observer must never hold mutation credentials');
 forbidText(workflow, /ssh-keyscan|StrictHostKeyChecking=no/, "unsafe SSH bootstrap is forbidden");
 requireText(uptimeWorkflow, /PRODUCTION_ORIGIN_IPV4:\s*"167\.233\.254\.55"/, "GitHub uptime must pin the Hetzner Coolify origin");
 requireText(uptimeWorkflow, /--resolve "usage\.jays\.services:443:\$\{PRODUCTION_ORIGIN_IPV4\}"/, "GitHub uptime must avoid Cloudflare false failures while retaining TLS validation");

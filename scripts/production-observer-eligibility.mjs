@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import { CONFIG, readIdentity } from './sentry-report-deploy.mjs';
 
 export const APP_WATCH_PATHS = Object.freeze(JSON.parse(readFileSync(new URL('./production-app-watch-paths.json', import.meta.url), 'utf8')));
 const SHA = /^[0-9a-f]{40}$/;
+const AppPolicySchema = z.object({ uuid: z.string(), git_branch: z.string(), git_commit_sha: z.string(), git_repository: z.string(), watch_paths: z.string(), settings: z.object({ is_auto_deploy_enabled: z.boolean() }) });
 
 // Coolify's configured patterns here are exact paths and recursive directory
 // prefixes only. Unknown pattern shapes cannot authorize a non-deployment skip.
@@ -33,7 +35,8 @@ export function classifyDelta({ observed, expected, isAncestor, changedPaths, pa
   return { observe: false, reason: 'non-app-delta', observed, expected, paths };
 }
 
-export function qualifyAppPolicy(app) {
+export function qualifyAppPolicy(input) {
+  const app = AppPolicySchema.parse(input);
   const expected = APP_WATCH_PATHS;
   if (app?.uuid !== 'yagelvqux9e8l1kztif7bf2o' || app.git_branch !== 'main' || app.git_commit_sha !== 'HEAD' || app.git_repository !== 'git@github.com:Simple-With-Us/Usage-Monitor.git' || app.settings?.is_auto_deploy_enabled !== true || typeof app.watch_paths !== 'string') throw new Error('App policy identity mismatch');
   const actual = app.watch_paths.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
@@ -43,11 +46,11 @@ export function qualifyAppPolicy(app) {
 
 export async function classifyProduction({ expected = process.env.EXPECTED_SHA || process.env.TARGET_SHA, exec = execFileSync, fetchImpl = fetch } = {}) {
   const token = process.env.COOLIFY_UM_OBSERVER_READ_TOKEN;
-  if (!token?.trim()) throw new Error('App policy source unavailable');
+  if (!token?.trim()) throw new Error('Missing COOLIFY_UM_OBSERVER_READ_TOKEN');
   const response = await fetchImpl('https://host.jays.services/api/v1/applications/yagelvqux9e8l1kztif7bf2o', {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000),
   });
-  if (!response.ok) throw new Error('App policy source unavailable');
+  if (!response.ok) throw new Error('COOLIFY_UM_OBSERVER_READ_TOKEN app policy read failed');
   const qualifiedPatterns = qualifyAppPolicy(await response.json());
   const origin = process.env.PRODUCTION_ORIGIN_IPV4;
   if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(origin || '')) throw new Error('Production origin is required');
