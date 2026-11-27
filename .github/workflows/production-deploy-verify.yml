@@ -91,8 +91,34 @@ jobs:
           echo "::error::Self-cancellation did not take effect within 120s."
           exit 1
 
-      - name: Wait for exact production revision
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: env.superseded != 'true'
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: env.superseded != 'true'
+        with:
+          node-version: '26'
+      - name: Install policy-reader dependency
+        if: env.superseded != 'true'
+        run: npm ci --ignore-scripts
+      - name: Load dedicated app-policy reader
+        if: env.superseded != 'true'
+        env:
+          INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
+          INFISICAL_ENVIRONMENT: prod
+          INFISICAL_SECRET_PATH: /um-observer-policy
+          INFISICAL_NAMES: COOLIFY_UM_OBSERVER_READ_TOKEN
+          INFISICAL_REQUIRED: COOLIFY_UM_OBSERVER_READ_TOKEN
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN }}
+        run: node scripts/infisical-fetch.mjs
+      - name: Classify app deployment eligibility
+        id: app-policy
+        if: env.superseded != 'true'
+        run: node scripts/production-observer-eligibility.mjs
+      - name: Wait for exact production revision
+        if: env.superseded != 'true' && steps.app-policy.outputs.observe != 'false'
         shell: bash
         run: |
           set -euo pipefail

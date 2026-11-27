@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/sentry-deploy.yml
       - scripts/sentry-report-deploy*
+      - scripts/production-observer-eligibility*
+      - scripts/production-app-watch-paths.json
       - scripts/sentry-build-release.cjs
       - next.config.*
       - Dockerfile
@@ -32,7 +34,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26'
-      - run: node --test scripts/sentry-report-deploy.node-test.mjs
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/sentry-report-deploy.node-test.mjs scripts/production-observer-eligibility.node-test.mjs
 
   record-production-deploy:
     needs: test-reporter
@@ -70,11 +73,31 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26'
+      - name: Install policy-reader dependency
+        if: steps.superseded.outputs.superseded != 'true'
+        run: npm ci --ignore-scripts
       - name: Test deployment evidence and reporting
         if: steps.superseded.outputs.superseded != 'true'
-        run: node --test scripts/sentry-report-deploy.node-test.mjs
-      - name: Verify live revision and record Sentry deployment
+        run: node --test scripts/sentry-report-deploy.node-test.mjs scripts/production-observer-eligibility.node-test.mjs
+      - name: Load dedicated app-policy reader
         if: steps.superseded.outputs.superseded != 'true'
+        env:
+          INFISICAL_PROJECT_ID: 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
+          INFISICAL_ENVIRONMENT: prod
+          INFISICAL_SECRET_PATH: /um-observer-policy
+          INFISICAL_NAMES: COOLIFY_UM_OBSERVER_READ_TOKEN
+          INFISICAL_REQUIRED: COOLIFY_UM_OBSERVER_READ_TOKEN
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_UM_OBSERVER_POLICY_READ_TOKEN }}
+        run: node scripts/infisical-fetch.mjs
+      - name: Classify app deployment eligibility
+        id: app-policy
+        if: steps.superseded.outputs.superseded != 'true'
+        env:
+          PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/production-observer-eligibility.mjs
+      - name: Verify live revision and record Sentry deployment
+        if: steps.superseded.outputs.superseded != 'true' && steps.app-policy.outputs.observe != 'false'
         env:
           PRODUCTION_ORIGIN_IPV4: "167.233.254.55"
           GH_TOKEN: ${{ github.token }}
