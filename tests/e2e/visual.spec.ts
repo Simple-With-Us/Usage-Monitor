@@ -198,7 +198,9 @@ test.describe('visual: login page', () => {
     await pinFonts(page);
     await page.getByLabel(/password/i).fill('definitely-wrong-password');
     await page.getByRole('button', { name: 'Log In', exact: true }).click();
-    await expect(page.getByRole('alert')).toBeVisible();
+    // getByRole('alert') also matches Next's empty __next-route-announcer__ once the
+    // login submit triggers a client transition, so anchor on the error's stable id.
+    await expect(page.locator('#login-error')).toBeVisible();
     await expect(page).toHaveScreenshot('login-error.png', { ...stableShot, fullPage: true });
   });
 });
